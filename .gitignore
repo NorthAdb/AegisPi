@@ -1,0 +1,7 @@
+node_modules/
+workspace-state/
+*.log
+.env
+.env.*
+evals/contracts/fixtures/**/*.labels.json
+evals/contracts/fixtures/**/*.labels.local.json
