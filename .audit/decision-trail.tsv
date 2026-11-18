@@ -1,3 +1,10 @@
 date	id	decision	rationale	evidence	result
 2026-11-18	D-01	v1.4.1 规范包不随库分发，仓库只记版本+路径+入口证据	仓库公开；包是完整设计源；规范自身禁止多副本 schema 漂移；审计 agent 在本机可直接读包	validate_pack.py 14/14 PASS CONNECTIONS_LEFT=0（输出存 docs/phase1/evidence/00-pack-validation.txt）	可逆：后续经 ADR 可改为随库分发
 2026-11-18	D-02	Node 锁定维持 22.23.5，无需追补丁	nodejs.org/dist/index.json 2026-11-18 复核：v22.x 最新即 v22.23.5（2026-11-11 安全版）	dist/index.json 拉取记录；本机 node --version = v22.23.5，SQLite 3.54.1	锁定不变
+2026-11-18	D-03	基础镜像选 node:22.23.5-bookworm-slim	slim 变体体积小且 glibc 兼容；三个应用镜像共用同一基础便于统一复测	docker pull + image inspect RepoDigest sha256:e9f565d3…（docs/phase1/reports/image-digest.md）	已锁定 digest
+2026-11-18	D-04	hono 加入 daemon 依赖 exact 4.13.19	00 §4 HTTP/UI 行选 Hono 为宿主框架且"影响我"锚点要求 lockfile 含其 exact 版本	package-lock.json hono 4.13.19 integrity sha512-KmXvQ…	已锁定
+2026-11-18	D-05	oracle 命题锚定 GHSA-46wx（csrf text/ping）而非检查单描述的"CORS 凭据反射/GHSA-88fw"	实测 advisory API 无 GHSA-88fw High 条目；csrf 绕过直接命中本项目控制台 CSRF 依赖面（02 §7）	gh api repos/honojs/hono/security-advisories 实测 20 条；PI-contract-report 与夹具 README 记录差异	hono-triage oracle 以实测条目为准
+2026-11-18	D-06	宿主适配层自实现 dialog deadline 与字节 LF 分帧	Pi RPC 模式 dialog timeout 实测不生效；readline 在锁定 Node 虽安全但版本无关性不足	PI-07/FRAMING 探针 findings（contracts-report.json）	宿主职责确认，非 Pi 契约偏离
+2026-11-18	D-07	宿主配置显式 cacheWarming=off	Pi 1.5.2 默认"idle"与规范"保温默认关闭"冲突	settings-defaults.js 实测 cacheWarming:"idle"；apps/daemon/config/defaults.json 已写 off	冲突已消解
+2026-11-18	D-08	SQLite 驱动选 node:sqlite（不用 better-sqlite3）	全部门禁实测通过（3.54.1、FTS5+trigram、参考 DDL 27 表）；规范"满足则优先用内置"	sqlite-node 探针 + docs/phase1/reports/sqlite-driver.md	已定案
+

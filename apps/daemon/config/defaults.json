@@ -1,0 +1,33 @@
+{
+  "$comment": "AegisPi 规范默认预算与资源上限（唯一来源：设计包 06 §4/§8；场景示例不得覆盖）。Phase 1 只落配置值，运行时预算门禁在 Phase 2/3 实现。金额单位 microUSD（整数，1 美元 = 1,000,000）。",
+  "schemaVersion": 1,
+  "budget": {
+    "taskMicroUsd": 800000,
+    "taskMaxSteps": 25,
+    "taskMaxWallClockSeconds": 900,
+    "dayMicroUsd": 5000000,
+    "cacheWarming": "off",
+    "purposes": ["router", "worker", "summary", "classify", "rsi", "replay", "warming", "watchdog"]
+  },
+  "leases": {
+    "heartbeatSeconds": 10,
+    "leaseSeconds": 45,
+    "offlineJobDeadlineSeconds": 90,
+    "maxConcurrentAgentsPerScope": 1,
+    "maxOfflineJobsMachineWide": 2
+  },
+  "containerPlaceholders": {
+    "$comment": "占位上限，Phase 3 用真实构建压测校准（06 §4）。",
+    "agent": { "cpus": 1, "memoryGiB": 1, "pids": 256, "writableDiskGiB": 2 },
+    "execution": { "cpus": 1, "memoryGiB": 2, "pids": 256, "writableDiskGiB": 4 }
+  },
+  "model": {
+    "display": "DeepSeek Flash High",
+    "provider": "deepseek",
+    "modelId": "deepseek-flash",
+    "thinkingLevel": "high",
+    "$evidence": "Pi 1.5.2 内置目录 node_modules/@earendil-works/pi-ai/dist/providers/data/deepseek.json：deepseek-flash（显示名 DeepSeek V4.1 Flash，reasoning，thinkingLevelMap 含 high）。最小推理契约待 DeepSeek API key 安全录入后执行（Phase 1 收口项）。"
+  },
+  "time": { "timezoneIANA": "Asia/Hong_Kong", "epochUnit": "unixMilliseconds" },
+  "sqlite": { "driver": "node:sqlite", "bundledSqlite": "3.54.1", "journalMode": "WAL", "synchronous": "FULL" }
+}

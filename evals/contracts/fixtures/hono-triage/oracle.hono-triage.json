@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "oracleId": "oracles/hono-csrf-textping-bypass-v1",
+  "proposition": "For AegisPi's own dependency surface (hono exact 4.13.19 in apps/daemon; the authenticated same-origin console at 127.0.0.1:4310 requires CSRF protection per spec 02 §7): the csrf() text/ping hyperlink-auditing bypass (GHSA-46wx-v44x-9hh2, affects hono < 4.13.16) must be absent on the baseline snapshot (v4.13.19), and is expected to reproduce on a target snapshot inside the affected range (v4.12.24). Against our locked 4.13.19 the triage verdict for this advisory is 'unaffected' (version above every affected range); the repro pair exists to prove the oracle can separate affected snapshots from our baseline.",
+  "fixtureHash": "4e89f269de2b3fd073373ec9ffad66d2ea7fc164bdbb7a7dcc01206283440d74",
+  "assertions": [
+    {
+      "id": "A1",
+      "kind": "baseline_passes",
+      "description": "On baseline v4.13.19 the check holds: csrf() rejects a state-changing POST sent as hyperlink auditing (Content-Type: text/ping, Sec-Fetch-Dest: ping) with 403. Exit code 0 expected. Measured 2026-11-18 on locked Node 22.23.5 with hono 4.13.19: status 403, rejected=true, exit 0.",
+      "commandIndex": 0,
+      "expectedExitCode": 0,
+      "requiredOutputHash": null
+    },
+    {
+      "id": "A2",
+      "kind": "target_affected",
+      "description": "On target v4.12.24 (inside the affected range < 4.13.16) the same check is expected to fail: the text/ping request bypasses csrf() and reaches the handler (exploit convention: exit code 1). NOT executed in Phase 1; recorded as the convention for the Phase 4 security_repro run, valid only when A1 passes on the baseline.",
+      "commandIndex": 1,
+      "expectedExitCode": 1,
+      "requiredOutputHash": null
+    }
+  ],
+  "resultClassRules": {
+    "affected": "Baseline A1 holds and target A2 holds with bound hashes — the text/ping bypass reproduces in the vulnerable snapshot.",
+    "unaffected": "Baseline A1 holds and the reviewed dependency-range comparison shows the locked hono version (4.13.19) lies above every affected range of the advisory. Scope: this advisory against this dependency only.",
+    "unknown": "The range comparison overlaps the locked version ambiguously, the check could not exercise csrf(), or fixture hashes do not match the recorded ones.",
+    "infra_error": "Download, toolchain, timeout, or environment failure prevented a trustworthy run; a failing baseline (A1 exit != 0) is infra_error, never 'affected'."
+  }
+}

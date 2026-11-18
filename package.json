@@ -1,0 +1,13 @@
+{
+  "name": "aegis-pi",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.19.0 <23.0.0"
+  },
+  "scripts": {
+    "test:contracts": "node evals/contracts/run-contracts.mjs"
+  }
+}
