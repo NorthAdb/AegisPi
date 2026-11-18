@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | Node.js | 22.23.5 LTS（Jod），显式路径 `D:\AegisPi\tools\node-v22.23.5\node.exe` | nodejs.org/dist/index.json 2026-11-18 复核，v22.x 最新无补丁；安装 zip SHA256 4a191082e9706866830379d577d2cc8a50c776fcd9436a8d061b063ed0d9a0e3 |
 | Pi 底座 | `@earendil-works/pi-coding-agent` exact 1.5.2 | package-lock.json 完整性字段 |
+| Hono | `hono` exact 4.13.19（daemon HTTP 宿主，"影响我"锚点） | package-lock.json 完整性字段 + docs/phase1/reports/model-binding.md 同级的夹具 README |
 | SQLite | Phase 1 先测 `node:sqlite`（内置 3.54.1）是否满足 FTS5+trigram；不满足才改 better-sqlite3 实测版本 | evals/contracts 驱动选择报告 |
 | 主推理模型 | 显示名「DeepSeek Flash High」，绑定 Pi 1.5.2 实际模型列表中的真实 ID，不编造标识符 | Phase 1 模型绑定记录 |
 
