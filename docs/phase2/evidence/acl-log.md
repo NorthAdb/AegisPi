@@ -1,6 +1,6 @@
 # Phase 2 test:acl — 召回顺序、FTS 三触发器与 45 条无权候选门（01 §3/§5）
 
-生成：2026-11-19T09:49:40.016Z；Node v22.23.5；suite `acl`。
+生成：2026-11-19T09:55:04.637Z；Node v22.23.5；suite `acl`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -8,6 +8,7 @@
 | PASS | insert-trigger-populates-both-fts-indexes | after insert: lex=1 tri=1 |
 | PASS | update-trigger-reindexes-both-indexes | old term gone (advisory hits=0), new term indexed (different hits=1) |
 | PASS | delete-trigger-clears-both-indexes | after delete: lex=0 tri=0 |
+| PASS | fixture-really-holds-45-unauthorized-and-12-legal | db counts: foreign-scope=25, ungranted-closure=20, legal=12 of 12 inserted |
 | PASS | 45-unauthorized-candidates-cannot-crowd-out-legal-results | recalled 12 rows, all legal (12/12 present), 0 leaked from 25 foreign-scope + 20 ungranted-closure candidates |
 | PASS | ancestor-and-current-session-and-degraded-objects-excluded | current session, its ancestor, missing own-closure, deleted and expired objects never recalled |
 | PASS | revocation-closes-recall-and-bumps-revisions-in-one-transaction | recall empty after revoke; authorization_revision 1->2, acl_version 1->2 |
@@ -19,6 +20,6 @@
 | PASS | short-cjk-fallback-bounded-over-authorized-set | 2-char term served by the bounded LIKE fallback (2 rows), ranking explicitly not claimed RRF-equivalent |
 | PASS | short-fallback-escapes-like-metacharacters | a bare % term matches nothing literal — LIKE metacharacters escaped |
 
-合计：14 PASS / 0 FAIL。
+合计：15 PASS / 0 FAIL。
 
 数据源：本地 SQLite 与设计包 recall.sql（无真实外部连接）（fake 远端与录制数据，无真实外部连接）。

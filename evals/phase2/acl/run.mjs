@@ -198,18 +198,20 @@ const suite = makeSuite("acl");
   db.prepare(
     "INSERT OR IGNORE INTO sessions(id, scope_id, principal_id, parent_session_id, context_object_id, authorization_revision, skill_set_hash, transcript_ref, created_at) VALUES ('ses:b',?,?,NULL,NULL,1,'ss:1','ref:b',?)",
   ).run(scopeB, reader, now);
+  const foreignScopeIds = [];
   for (let i = 1; i <= 25; i += 1) {
-    addMessage({
+    foreignScopeIds.push(addMessage({
       scopeId: scopeB, sessionId: "ses:b", content: `security advisory finding ${i} hono csrf bypass secret private`,
       requiredScopeIds: [],
-    });
+    }));
   }
   // 20 unauthorized: in scopeA but demanding scopeC, which the reader lacks.
+  const ungrantedClosureIds = [];
   for (let i = 1; i <= 20; i += 1) {
-    addMessage({
+    ungrantedClosureIds.push(addMessage({
       scopeId: scopeA, sessionId: sessionLegal, content: `security advisory finding ${100 + i} hono csrf bypass confidential annex`,
       requiredScopeIds: [scopeC],
-    });
+    }));
   }
   // An authorized message that lives in the CURRENT session's ANCESTOR: the
   // lineage exclusion must drop it even though every other check passes.
@@ -224,6 +226,35 @@ const suite = makeSuite("acl");
   const currentSessionMessage = addMessage({ scopeId: scopeA, sessionId: sessionMain, content: "security advisory hono csrf bypass in current session", requiredScopeIds: [] });
 
   grantPermission(db, { scopeId: scopeA, principalId: reader, permission: "read", now });
+
+  // Fixture accounting BEFORE any recall claim: the DB must actually hold 45
+  // unauthorized candidates (25 foreign-scope + 20 ungranted-closure) and 12
+  // legal candidates. Shrinking either loop turns this red even if the
+  // recall result would still look clean.
+  const dbForeignCount = db
+    .prepare(
+      "SELECT count(*) c FROM session_messages_index m JOIN objects o ON o.id=m.object_id WHERE o.scope_id=?",
+    )
+    .get(scopeB).c;
+  const dbUngrantedCount = db
+    .prepare(
+      `SELECT count(*) c FROM session_messages_index m
+       JOIN objects o ON o.id=m.object_id
+       JOIN object_required_scopes r ON r.object_id=o.id AND r.scope_id=?
+       WHERE o.scope_id=?`,
+    )
+    .get(scopeC, scopeA).c;
+  const legalInDb = legalIds.length
+    ? db.prepare(`SELECT count(*) c FROM objects WHERE id IN (${legalIds.map(() => "?").join(",")})`).get(...legalIds).c
+    : 0;
+  suite.check(
+    "fixture-really-holds-45-unauthorized-and-12-legal",
+    foreignScopeIds.length === 25 && ungrantedClosureIds.length === 20 &&
+      dbForeignCount === 25 && dbUngrantedCount === 20 &&
+      legalIds.length === 12 && legalInDb === 12,
+    `db counts: foreign-scope=${dbForeignCount}, ungranted-closure=${dbUngrantedCount}, legal=${legalInDb} of ${legalIds.length} inserted`,
+  );
+
   const result = recall(db, {
     scopeId: scopeA,
     principalId: reader,

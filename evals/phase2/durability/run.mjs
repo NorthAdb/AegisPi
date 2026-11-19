@@ -2777,6 +2777,107 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   }
 }
 
+// ------------------------------------------------ case: typed-column regression
+{
+  const canonical = loadCanonicalSchema();
+  const ws = makeWorkspace("durability-typed-columns");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, canonical);
+
+  // The production write path must land epoch as an INTEGER 1 and
+  // policy_version as the pv string — the audit's measurement showed the old
+  // 8-placeholder INSERT silently stored TEXT 'pv1' into epoch on every
+  // platform. typeof pins the storage type; the arithmetic line pins the
+  // numeric semantics. A column-binding regression turns both red anywhere.
+  receiveEvent(db, ws.stateDir, {
+    now: 1798400000000,
+    source: "telegram",
+    sourceEventId: "evt-typed-1",
+    principal: { platform: "telegram", subject: "80" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:80", channel: "telegram", conversationId: "80" },
+    threadKey: "t80",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "typed columns fixture",
+    verdict: "ADMIT",
+  });
+  const scopeTyped = db
+    .prepare("SELECT epoch, typeof(epoch) AS epoch_t, policy_version, typeof(policy_version) AS pv_t FROM scopes LIMIT 1")
+    .get();
+  const epochArithmetic = db
+    .prepare("SELECT epoch+0 AS n, typeof(epoch+0) AS n_t FROM scopes LIMIT 1")
+    .get();
+  suite.check(
+    "scope-epoch-stored-integer-with-numeric-semantics",
+    scopeTyped.epoch === 1 && scopeTyped.epoch_t === "integer" &&
+      scopeTyped.policy_version === "pv1" && scopeTyped.pv_t === "text" &&
+      epochArithmetic.n === 1 && epochArithmetic.n_t === "integer",
+    `epoch=${scopeTyped.epoch}/${scopeTyped.epoch_t}, policy_version=${scopeTyped.policy_version}/${scopeTyped.pv_t}, epoch+0=${epochArithmetic.n}/${epochArithmetic.n_t}`,
+  );
+  // Self-evidencing half: the OLD misbound INSERT really produces the text
+  // shape this gate exists to catch, so the predicate is falsifiable by
+  // construction.
+  db.exec("CREATE TABLE old_shape_probe(epoch INTEGER, acl_version INTEGER, policy_version TEXT, paused INTEGER)");
+  db.prepare("INSERT INTO old_shape_probe VALUES (?,1,?,0)").run("pv1", "pv1");
+  const probe = db.prepare("SELECT typeof(epoch) AS t, epoch AS v FROM old_shape_probe").get();
+  suite.check(
+    "misbound-insert-shape-is-exactly-what-the-gate-catches",
+    probe.t === "text" && probe.v === "pv1",
+    `the old 8-placeholder binding stores typeof=${probe.t} value=${probe.v} — the gate above goes red the day that shape returns`,
+  );
+
+  // Backslash storage_ref: the writer refuses it (forward-slash contract),
+  // and a legacy backslash row in the database must not let the GC trash the
+  // live file. The guard is platform-independent: the comparison normalizes
+  // separators instead of trusting them.
+  const stored = putObjectContent(ws.stateDir, "typed-columns-backslash-guard");
+  const filePath = join(ws.stateDir, ...stored.storageRef.split("/"));
+  db.prepare("INSERT OR IGNORE INTO principals(id, platform, platform_subject) VALUES ('prn:web:2','web','2')").run();
+  db.prepare(
+    "INSERT OR IGNORE INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused) VALUES ('scp:dm:web:2','prn:web:2','owner_dm','dm:web:2','web','2',NULL,1,1,'pv1',0)",
+  ).run();
+  let backslashRefused = false;
+  try {
+    insertObjectRow(db, {
+      scopeId: "scp:dm:web:2",
+      kind: "task_result",
+      sourceUri: "test",
+      sourceActor: "host",
+      content: "typed-columns-backslash-guard",
+      contentHash: stored.contentHash,
+      storageRef: stored.storageRef.replace(/\//g, "\\"),
+      observedAt: 1798400000000,
+      requiredScopeIds: ["scp:dm:web:2"],
+    });
+  } catch (e) {
+    backslashRefused = /forward slashes/.test(e.message);
+  }
+  suite.check(
+    "writer-refuses-backslash-storage-ref",
+    backslashRefused === true,
+    "insertObjectRow rejects a Windows-separator ref at the boundary",
+  );
+  // The legacy row itself (written behind the writer's back, like data from
+  // an old or foreign tool): GC must leave the file alone.
+  const legacyRef = stored.storageRef.replace(/\//g, "\\");
+  db.prepare(
+    `INSERT INTO objects(id, scope_id, kind, source_uri, source_actor, content_hash, storage_ref,
+      status, version, supersedes_id, confidence, observed_at, expires_at, deleted_at, metadata_json)
+     VALUES ('obj:legacy:backslash','scp:dm:web:2','task_result','test','host',?,?,'active',1,NULL,NULL,1798400000000,NULL,NULL,'{}')`,
+  ).run(stored.contentHash, legacyRef);
+  const gcProbe = gcUnreferencedContent(db, ws.stateDir, { dryRun: true, now: 1798400001000 });
+  const fileStillThere = existsSync(filePath);
+  const gcRun = gcUnreferencedContent(db, ws.stateDir, { now: 1798400002000 });
+  const fileAfterGc = existsSync(filePath);
+  suite.check(
+    "gc-keeps-file-referenced-by-legacy-backslash-row",
+    fileStillThere === true && gcProbe.trashed === 0 && gcRun.trashed === 0 && fileAfterGc === true,
+    `dry-run trashed=${gcProbe.trashed} (legacy backslash ref counts as referenced after normalization); real sweep trashed=${gcRun.trashed}, file still on disk`,
+  );
+  db.close();
+}
+
 // -------------------------------------------------------------------- summary
 const exit = suiteExit(suite, { label: "test:durability (foundation)" });
 const { reportPath, logPath } = writeReport({

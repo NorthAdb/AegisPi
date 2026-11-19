@@ -108,6 +108,12 @@ export function insertObjectRow(db, {
   if (existing) {
     return { id, alreadyPresent: true, status: existing.status };
   }
+  if (storageRef !== null && storageRef.includes("\\")) {
+    // Storage refs are POSIX-shaped on every OS (see objectRelPath). A
+    // backslash ref is a legacy/corrupt row at best; the writer refuses it
+    // so the referenced-set comparison can never be surprised by one.
+    throw new Error(`storage_ref must use forward slashes (got ${JSON.stringify(storageRef)})`);
+  }
   if (!requiredScopeIds.includes(scopeId)) {
     throw new Error(`object ${id} is missing its own scope ${scopeId} in the required closure`);
   }
@@ -152,9 +158,14 @@ export function objectRowId(scopeId, contentHash) {
 export function gcUnreferencedContent(db, stateDir, { now = Date.now(), dryRun = false } = {}) {
   const objectsRoot = join(stateDir, "objects");
   if (!existsSync(objectsRoot)) return { scanned: 0, trashed: 0, tmpRemoved: 0 };
-  const referenced = new Set(
-    db.prepare("SELECT storage_ref FROM objects WHERE storage_ref IS NOT NULL").all().map((r) => r.storage_ref),
-  );
+  const referenced = new Set();
+  for (const row of db.prepare("SELECT storage_ref FROM objects WHERE storage_ref IS NOT NULL").all()) {
+    // Both the raw ref and its backslash-normalized twin count as
+    // referenced: a legacy row written with Windows separators must never
+    // let the GC treat the live file as an orphan.
+    referenced.add(row.storage_ref);
+    referenced.add(row.storage_ref.replace(/\\/g, "/"));
+  }
   const trashRoot = join(objectsRoot, "trash", String(now));
   let scanned = 0;
   let trashed = 0;

@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T09:49:03.672Z",
+  "generatedAt": "2026-11-19T09:54:26.180Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 153,
+    "pass": 157,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795081698110}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795082017291}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 10700 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 16692 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=10700"
+      "detail": "second acquire refused, heldBy=16692"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 10700"
+      "detail": "stolen, new pid 16692"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:10700:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:16692:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -641,12 +641,12 @@
     {
       "name": "job-orphan-outlived-killed-daemon",
       "status": "PASS",
-      "detail": "fake job pid 27508 alive after daemon kill"
+      "detail": "fake job pid 26720 alive after daemon kill"
     },
     {
       "name": "recovery-kills-orphan-and-losts-job",
       "status": "PASS",
-      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 27508 killed)"
+      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 26720 killed)"
     },
     {
       "name": "outbox-crash-child-died-before-send",
@@ -701,12 +701,12 @@
     {
       "name": "daemon-first-instance-opens",
       "status": "PASS",
-      "detail": "first daemon reached open (pid line: daemon: open (pid 6872) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
+      "detail": "first daemon reached open (pid line: daemon: open (pid 26908) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
     },
     {
       "name": "daemon-second-instance-refuses-lock-exits",
       "status": "PASS",
-      "detail": "second exit=1: another daemon (pid 6872) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
+      "detail": "second exit=1: another daemon (pid 26908) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
     },
     {
       "name": "daemon-once-smoke-timer-to-settled-task",
@@ -772,6 +772,26 @@
       "name": "at-most-once-exits-only-through-recorded-human-reconciliation",
       "status": "PASS",
       "detail": "reconciliation without an actor refused; with actor+evidence the row lands SUCCEEDED ext-0001"
+    },
+    {
+      "name": "scope-epoch-stored-integer-with-numeric-semantics",
+      "status": "PASS",
+      "detail": "epoch=1/integer, policy_version=pv1/text, epoch+0=1/integer"
+    },
+    {
+      "name": "misbound-insert-shape-is-exactly-what-the-gate-catches",
+      "status": "PASS",
+      "detail": "the old 8-placeholder binding stores typeof=text value=pv1 — the gate above goes red the day that shape returns"
+    },
+    {
+      "name": "writer-refuses-backslash-storage-ref",
+      "status": "PASS",
+      "detail": "insertObjectRow rejects a Windows-separator ref at the boundary"
+    },
+    {
+      "name": "gc-keeps-file-referenced-by-legacy-backslash-row",
+      "status": "PASS",
+      "detail": "dry-run trashed=0 (legacy backslash ref counts as referenced after normalization); real sweep trashed=0, file still on disk"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"

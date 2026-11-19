@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T09:49:40.016Z",
+  "generatedAt": "2026-11-19T09:55:04.637Z",
   "nodeVersion": "v22.23.5",
   "suite": "acl",
   "label": "Phase 2 test:acl — 召回顺序、FTS 三触发器与 45 条无权候选门（01 §3/§5）",
   "counts": {
-    "pass": 14,
+    "pass": 15,
     "fail": 0
   },
   "results": [
@@ -27,6 +27,11 @@
       "name": "delete-trigger-clears-both-indexes",
       "status": "PASS",
       "detail": "after delete: lex=0 tri=0"
+    },
+    {
+      "name": "fixture-really-holds-45-unauthorized-and-12-legal",
+      "status": "PASS",
+      "detail": "db counts: foreign-scope=25, ungranted-closure=20, legal=12 of 12 inserted"
     },
     {
       "name": "45-unauthorized-candidates-cannot-crowd-out-legal-results",
