@@ -1,6 +1,6 @@
 # Phase 2 test:budget — HELD 账本、八种 purpose、并发预留与结算（06 §8）
 
-生成：2026-11-19T08:59:05.904Z；Node v22.23.5；suite `budget`。
+生成：2026-11-19T09:00:57.778Z；Node v22.23.5；suite `budget`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |

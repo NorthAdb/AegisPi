@@ -1,0 +1,26 @@
+PASS  spec-defaults-not-overridden 鈥?task=800000 steps=25 wall=900s day=5000000 warming=off
+PASS  eight-purposes-declared 鈥?purposes=router,worker,summary,classify,rsi,replay,warming,watchdog
+PASS  accounts-created-with-spec-defaults 鈥?task account limit=800000, day limit=5000000
+PASS  day-key-uses-hong-kong-midnight 鈥?account acct:day:2026-11-21 for dayKey 2026-11-21
+PASS  account-ensure-idempotent 鈥?second ensure reuses the row
+PASS  reserve-holds-on-every-account 鈥?HELD task+1000 day+1000, reservation_accounts=2
+PASS  request-key-prevents-double-hold 鈥?duplicate=true, held still 1000
+PASS  any-account-failure-rolls-back-everything 鈥?reservation rows for req:b2=0, task held=1000, day held=1000
+PASS  missing-usage-cannot-settle-as-zero 鈥?settle without usage refused, reservation stays HELD
+PASS  settle-releases-held-adds-actual-spent 鈥?task spent=704 day spent=703 held both 0
+PASS  release-only-when-definitely-not-sent 鈥?RELEASED on held-only reservation; SETTLED reservation refuses release
+PASS  charged-bound-conservative-then-trusted-bill-corrects 鈥?CHARGED_BOUND upper->spent, correction refused without evidence, corrected to 300
+PASS  overcharge-records-honestly-freezes-stops-new 鈥?actual 250 over bound 100 recorded, day account frozen, new reserve refused
+PASS  limit-lower-free-raise-needs-approval 鈥?lower ok; raise refused without approval, accepted with
+PASS  seven-purposes-reserve-and-settle 鈥?router=settled, worker=settled, summary=settled, classify=settled, rsi=settled, replay=settled, watchdog=settled
+PASS  warming-off-no-account-no-reserve 鈥?warming reserve refused, account refused, rows=0
+PASS  warming-enabled-creates-account-and-reserves 鈥?warming account acct:warming-day:2026-11-21 created, reservation HELD
+PASS  chargeable-step-refuses-without-live-reservation 鈥?workerStep without a reservation: BudgetError
+PASS  step-runs-with-reservation-and-refuses-foreign-purpose 鈥?step ok with worker reservation; router reservation refused for a worker step
+(node:21996) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS  concurrent-reservations-exactly-one-wins-no-residue 鈥?slots exit 0/4, HELD winners=1, task held=60000, day held=60000 (loser left nothing)
+
+=== test:budget: 20 pass, 0 fail, 20 judged ===
+report: D:\AegisPi\aegis-pi\docs\phase2\evidence\budget-report.json
+log: D:\AegisPi\aegis-pi\docs\phase2\evidence\budget-log.md
