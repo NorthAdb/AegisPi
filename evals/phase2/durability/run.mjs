@@ -29,6 +29,14 @@ import {
   DispatcherRefused,
 } from "../../../apps/daemon/src/effects.mjs";
 import { createFakeRemote } from "../../../apps/daemon/src/testing/fake-remote.mjs";
+import { createTimer, processDueTimers, markTimerSatisfied, cancelSatisfiedFollowUpReminders, timerRow } from "../../../apps/daemon/src/timers.mjs";
+import {
+  enqueueNotification,
+  finalizeTaskWithNotification,
+  supersedeNotification,
+  dueNotifications,
+  expireStaleNotifications,
+} from "../../../apps/daemon/src/outbox.mjs";
 import {
   claimNextTask,
   heartbeat,
@@ -1508,6 +1516,531 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       auto.action === "recorded_success" && final.state === "SUCCEEDED" &&
         final.external_id === appliedRemote.externalId && remote.appliedCount(effectRow.business_key) === 1,
       `recovery recorded SUCCEEDED ${final.external_id} from the lookup; remote still holds exactly one delivery`,
+    );
+  }
+}
+
+// --------------------------------------------------------- case: timers/outbox
+{
+  const canonical = loadCanonicalSchema();
+  const ws = makeWorkspace("durability-timers");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, canonical);
+  const now = 1795800000000;
+  let scopeSeq = 0;
+  const seedScope = ({ scopeN }) => {
+    scopeSeq += 1;
+    const ing = receiveEvent(db, ws.stateDir, {
+      now,
+      source: "telegram",
+      sourceEventId: `evt-tmr-${scopeN}-${scopeSeq}`,
+      principal: { platform: "telegram", subject: String(scopeN) },
+      scope: { kind: "owner_dm", domainKey: `dm:telegram:${scopeN}`, channel: "telegram", conversationId: String(scopeN) },
+      threadKey: `t-${scopeN}`,
+      priority: 5,
+      policyVersion: "pv1",
+      payload: "timer fixture",
+      verdict: "ADMIT",
+    });
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    return { scopeId: inbox.scope_id, principalId: inbox.principal_id, payloadObjectId: inbox.payload_object_id, ing };
+  };
+
+  // One-shot fire: unique inbox event, FIRED, idempotent re-run.
+  const base1 = seedScope({ scopeN: 81 });
+  createTimer(db, {
+    id: "tmr:one-1",
+    scopeId: base1.scopeId,
+    principalId: base1.principalId,
+    scopeEpoch: 1,
+    threadKey: "t-81",
+    condition: { type: "none" },
+    dueAt: now,
+    recurrence: null,
+    payloadObjectId: base1.payloadObjectId,
+    now,
+  });
+  const fired1 = processDueTimers(db, { now: now + 1 });
+  const timerRow1 = timerRow(db, "tmr:one-1");
+  const eventRow1 = db
+    .prepare("SELECT * FROM inbox WHERE source='timer' AND source_event_id='tmr:one-1:1'")
+    .get();
+  const again1 = processDueTimers(db, { now: now + 2 });
+  const timerEvents1 = db
+    .prepare("SELECT count(*) c FROM inbox WHERE source='timer' AND source_event_id LIKE 'tmr:one-1:%'")
+    .get().c;
+  suite.check(
+    "one-shot-timer-fires-once-idempotent",
+    fired1.fired.length === 1 && timerRow1.state === "FIRED" && timerRow1.occurrence_no === 1 &&
+      eventRow1 !== undefined && eventRow1.state === "PENDING" && eventRow1.verdict === "ADMIT" &&
+      again1.fired.length === 0 && timerEvents1 === 1,
+    `FIRED occurrence=1, inbox event tmr:one-1:1 PENDING, re-run fired 0`,
+  );
+
+  // Condition already satisfied: SATISFIED, nothing generated.
+  const base2 = seedScope({ scopeN: 82 });
+  receiveEvent(db, ws.stateDir, {
+    now: now + 100,
+    source: "telegram",
+    sourceEventId: "evt-reply-82",
+    principal: { platform: "telegram", subject: "82" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:82", channel: "telegram", conversationId: "82" },
+    threadKey: "t-82",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "already handled, no reminder needed",
+    verdict: "ADMIT",
+  });
+  createTimer(db, {
+    id: "tmr:sat-1",
+    scopeId: base2.scopeId,
+    principalId: base2.principalId,
+    scopeEpoch: 1,
+    threadKey: "t-82",
+    condition: { type: "event_seen", source: "telegram", source_event_id: "evt-reply-82" },
+    dueAt: now,
+    recurrence: null,
+    payloadObjectId: base2.payloadObjectId,
+    now,
+  });
+  const fired2 = processDueTimers(db, { now: now + 200 });
+  const timerRow2 = timerRow(db, "tmr:sat-1");
+  const satEvents = db
+    .prepare("SELECT count(*) c FROM inbox WHERE source='timer' AND source_event_id LIKE 'tmr:sat-1:%'")
+    .get().c;
+  suite.check(
+    "satisfied-condition-produces-no-event",
+    fired2.satisfied.length === 1 && timerRow2.state === "SATISFIED" && satEvents === 0,
+    `due scan saw the committed reply: SATISFIED, 0 timer events`,
+  );
+
+  // Reply-first race: the SATISFIED transaction wins, the due scan no-ops.
+  const base3 = seedScope({ scopeN: 83 });
+  createTimer(db, {
+    id: "tmr:race-reply-first",
+    scopeId: base3.scopeId,
+    principalId: base3.principalId,
+    scopeEpoch: 1,
+    threadKey: "t-83",
+    condition: { type: "event_seen", source: "telegram", source_event_id: "evt-reply-83" },
+    dueAt: now + 1000,
+    recurrence: null,
+    payloadObjectId: base3.payloadObjectId,
+    now,
+  });
+  receiveEvent(db, ws.stateDir, {
+    now: now + 500,
+    source: "telegram",
+    sourceEventId: "evt-reply-83",
+    principal: { platform: "telegram", subject: "83" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:83", channel: "telegram", conversationId: "83" },
+    threadKey: "t-83",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "reply landed before the due scan",
+    verdict: "ADMIT",
+  });
+  const replyWin = markTimerSatisfied(db, { timerId: "tmr:race-reply-first", evidenceEventId: "evt-reply-83", now: now + 600 });
+  const dueAfterReply = processDueTimers(db, { now: now + 2000 });
+  const raceEvents = db
+    .prepare("SELECT count(*) c FROM inbox WHERE source='timer' AND source_event_id LIKE 'tmr:race-reply-first:%'")
+    .get().c;
+  suite.check(
+    "reply-first-wins-no-fire",
+    replyWin.changed === true && dueAfterReply.fired.length === 0 && raceEvents === 0,
+    `reply committed first: timer SATISFIED, due scan fired 0`,
+  );
+
+  // Due-first race: the fire wins; the reply cannot un-fire it, but the
+  // stale READY follow-up reminder is cancelled before submission.
+  const base4 = seedScope({ scopeN: 84 });
+  const ing4 = receiveEvent(db, ws.stateDir, {
+    now,
+    source: "telegram",
+    sourceEventId: "evt-84-claim",
+    principal: { platform: "telegram", subject: "84" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:84", channel: "telegram", conversationId: "84" },
+    threadKey: "t-84-x",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "task for the reminder effect",
+    verdict: "ADMIT",
+  });
+  const inbox4 = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing4.inboxId);
+  const d4 = dispatchEventToTask(db, {
+    inboxId: ing4.inboxId, dispatchKey: dispatchKeyForInbox(inbox4),
+    now, priority: 5, maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "skillset-v1",
+  });
+  const claim4 = claimNextTask(db, { now, leaseMs: 45000 });
+  createTimer(db, {
+    id: "tmr:race-due-first",
+    scopeId: base4.scopeId,
+    principalId: base4.principalId,
+    scopeEpoch: 1,
+    threadKey: "t-84",
+    condition: { type: "event_seen", source: "telegram", source_event_id: "evt-reply-84" },
+    dueAt: now + 1000,
+    recurrence: null,
+    payloadObjectId: base4.payloadObjectId,
+    now,
+  });
+  const dueWin = processDueTimers(db, { now: now + 1500 });
+  const reminderProposal = proposeEffect(db, ws.stateDir, {
+    now: now + 1600,
+    taskId: d4.taskId,
+    attemptId: claim4.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:84",
+    naturalKey: "followup-v1",
+    operationIntent: { targetResource: "telegram-dm:84", operation: "send_message", contentHash: "aa84", evidenceManifestHash: "bb84" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: false,
+    expiresAt: now + 3600000,
+  });
+  draftToReady(db, { effectId: reminderProposal.effectId, routineRef: "followup-reminder", approvedRoutines: ["followup-reminder"], now: now + 1600 });
+  enqueueNotification(db, {
+    effectId: reminderProposal.effectId,
+    channel: "telegram",
+    destination: "dm:84",
+    notBefore: now + 1700,
+    notifyReason: "followup:tmr:race-due-first",
+    now: now + 1600,
+  });
+  // The reply lands AFTER the fire: the reminder is now stale.
+  receiveEvent(db, ws.stateDir, {
+    now: now + 1800,
+    source: "telegram",
+    sourceEventId: "evt-reply-84",
+    principal: { platform: "telegram", subject: "84" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:84", channel: "telegram", conversationId: "84" },
+    threadKey: "t-84",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "reply landed after the fire",
+    verdict: "ADMIT",
+  });
+  const lateSatisfy = markTimerSatisfied(db, { timerId: "tmr:race-due-first", evidenceEventId: "evt-reply-84", now: now + 1900 });
+  const cancelledReminders = cancelSatisfiedFollowUpReminders(db, { now: now + 2000 });
+  const reminderEffect = db.prepare("SELECT state FROM effects WHERE id=?").get(reminderProposal.effectId);
+  const dueWinEvents = db
+    .prepare("SELECT count(*) c FROM inbox WHERE source='timer' AND source_event_id LIKE 'tmr:race-due-first:%'")
+    .get().c;
+  suite.check(
+    "due-first-wins-stale-reminder-cancelled",
+    dueWin.fired.length === 1 && lateSatisfy.changed === false &&
+      dueWinEvents === 1 && cancelledReminders.includes(reminderProposal.effectId) &&
+      reminderEffect.state === "CANCELLED",
+    `fire won (1 event, timer FIRED); late reply cannot un-fire; the READY follow-up reminder was cancelled before submission`,
+  );
+
+  // Periodic timer: occurrences advance, stays SCHEDULED.
+  const base5 = seedScope({ scopeN: 85 });
+  createTimer(db, {
+    id: "tmr:periodic-1",
+    scopeId: base5.scopeId,
+    principalId: base5.principalId,
+    scopeEpoch: 1,
+    threadKey: "t-85",
+    condition: { type: "none" },
+    dueAt: now,
+    recurrence: { everyMs: 60000 },
+    payloadObjectId: base5.payloadObjectId,
+    now,
+  });
+  processDueTimers(db, { now: now + 1 });
+  processDueTimers(db, { now: now + 61000 });
+  const timerRow5 = timerRow(db, "tmr:periodic-1");
+  const periodicEvents = db
+    .prepare("SELECT count(*) c FROM inbox WHERE source='timer' AND source_event_id LIKE 'tmr:periodic-1:%'")
+    .get().c;
+  suite.check(
+    "periodic-timer-advances-occurrences",
+    timerRow5.state === "SCHEDULED" && timerRow5.occurrence_no === 2 && periodicEvents === 2,
+    `2 occurrences, still SCHEDULED, next due ${timerRow5.due_at}`,
+  );
+
+  // Missed periods merge into ONE catch-up with missed_count recorded; no
+  // boot-time infinite chase.
+  const base6 = seedScope({ scopeN: 86 });
+  createTimer(db, {
+    id: "tmr:missed-1",
+    scopeId: base6.scopeId,
+    principalId: base6.principalId,
+    scopeEpoch: 1,
+    threadKey: "t-86",
+    condition: { type: "none" },
+    dueAt: now - 5 * 60000,
+    recurrence: { everyMs: 60000 },
+    payloadObjectId: base6.payloadObjectId,
+    now,
+  });
+  const missedRun = processDueTimers(db, { now: now + 1 });
+  const missedTimer = timerRow(db, "tmr:missed-1");
+  const missedEvents = db
+    .prepare("SELECT count(*) c FROM inbox WHERE source='timer' AND source_event_id LIKE 'tmr:missed-1:%'")
+    .get().c;
+  const missedAudit = db
+    .prepare("SELECT details_json FROM audit_log WHERE code='timer_fired' ORDER BY seq DESC LIMIT 1")
+    .get();
+  suite.check(
+    "missed-periods-merge-into-one-catchup",
+    missedRun.fired.length === 1 && missedEvents === 1 &&
+      JSON.parse(missedAudit.details_json).missed_count === 4 &&
+      missedTimer.due_at === now + 1 + 60000,
+    `5 late periods -> 1 catch-up event, missed_count=4 recorded, next due starts fresh`,
+  );
+
+  // Task conclusion + notification outbox in ONE transaction; a failing part
+  // rolls back the whole composition.
+  const base7 = seedScope({ scopeN: 87 });
+  const ing7 = receiveEvent(db, ws.stateDir, {
+    now,
+    source: "telegram",
+    sourceEventId: "evt-87-notify",
+    principal: { platform: "telegram", subject: "87" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:87", channel: "telegram", conversationId: "87" },
+    threadKey: "t-87-x",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "task whose completion notifies",
+    verdict: "ADMIT",
+  });
+  const inbox7 = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing7.inboxId);
+  const d7 = dispatchEventToTask(db, {
+    inboxId: ing7.inboxId, dispatchKey: dispatchKeyForInbox(inbox7),
+    now, priority: 5, maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "skillset-v1",
+  });
+  const claim7 = claimNextTask(db, { now, leaseMs: 45000 });
+  const noteProposal = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: d7.taskId,
+    attemptId: claim7.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:87",
+    naturalKey: "result-note-v1",
+    operationIntent: { targetResource: "telegram-dm:87", operation: "send_message", contentHash: "aa87", evidenceManifestHash: "bb87" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: false,
+    expiresAt: now + 3600000,
+  });
+  draftToReady(db, { effectId: noteProposal.effectId, routineRef: "result-notification", approvedRoutines: ["result-notification"], now });
+  const evidence7 = insertObjectRow(db, {
+    scopeId: inbox7.scope_id,
+    kind: "task_result",
+    sourceUri: `task:${d7.taskId}`,
+    sourceActor: "host",
+    content: "task finished; here is the summary",
+    observedAt: now,
+    requiredScopeIds: [inbox7.scope_id],
+  });
+  const final7 = finalizeTaskWithNotification(db, {
+    now: now + 100,
+    taskId: d7.taskId,
+    attemptNo: claim7.attemptNo,
+    leaseOwner: claim7.leaseOwner,
+    fence: claim7.fence,
+    resultClass: "not_applicable",
+    resultObjectId: evidence7.id,
+    notification: {
+      effectId: noteProposal.effectId,
+      channel: "telegram",
+      destination: "dm:87",
+      notBefore: now + 100,
+      notifyReason: "task-result",
+    },
+  });
+  const t7 = db.prepare("SELECT state FROM tasks WHERE id=?").get(d7.taskId);
+  const box7 = db.prepare("SELECT * FROM outbox WHERE effect_id=?").get(noteProposal.effectId);
+  suite.check(
+    "task-conclusion-notification-outbox-one-transaction",
+    final7.taskState === "SUCCEEDED" && t7.state === "SUCCEEDED" && box7 !== undefined &&
+      box7.notify_reason === "task-result",
+    `task SUCCEEDED, effect READY, outbox row enqueued atomically`,
+  );
+  // Composition rollback: a finalize whose notification effect does not
+  // exist fails on the foreign key and rolls the WHOLE composition back —
+  // the task may not conclude without its notification.
+  const ing7b = receiveEvent(db, ws.stateDir, {
+    now,
+    source: "telegram",
+    sourceEventId: "evt-87-notify-2",
+    principal: { platform: "telegram", subject: "87" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:87", channel: "telegram", conversationId: "87" },
+    threadKey: "t-87-y",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "second task whose finalize must roll back",
+    verdict: "ADMIT",
+  });
+  const inbox7b = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing7b.inboxId);
+  const d7b = dispatchEventToTask(db, {
+    inboxId: ing7b.inboxId, dispatchKey: dispatchKeyForInbox(inbox7b),
+    now, priority: 5, maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "skillset-v1",
+  });
+  const claim7b = claimNextTask(db, { now: now + 200, leaseMs: 45000 });
+  const evidence7b = insertObjectRow(db, {
+    scopeId: inbox7b.scope_id,
+    kind: "task_result",
+    sourceUri: `task:${d7b.taskId}`,
+    sourceActor: "host",
+    content: "second result",
+    observedAt: now + 200,
+    requiredScopeIds: [inbox7b.scope_id],
+  });
+  let finalizeRolledBack = false;
+  try {
+    finalizeTaskWithNotification(db, {
+      now: now + 300,
+      taskId: d7b.taskId,
+      attemptNo: claim7b.attemptNo,
+      leaseOwner: claim7b.leaseOwner,
+      fence: claim7b.fence,
+      resultClass: "not_applicable",
+      resultObjectId: evidence7b.id,
+      notification: { effectId: "efx:no-such-effect", channel: "x", destination: "x", notBefore: now, notifyReason: "broken" },
+    });
+  } catch {
+    finalizeRolledBack = true;
+  }
+  const t7b = db.prepare("SELECT state FROM tasks WHERE id=?").get(d7b.taskId);
+  const a7b = db.prepare("SELECT state FROM attempts WHERE task_id=? AND attempt_no=?").get(d7b.taskId, claim7b.attemptNo);
+  suite.check(
+    "finalize-composition-atomic-rollback",
+    finalizeRolledBack === true && t7b.state === "RUNNING" && a7b.state === "ACTIVE",
+    `missing notification effect FK rolled the whole finalize back: task still RUNNING, attempt still ACTIVE, no half-conclusion`,
+  );
+
+  // Digest merge supersedes: old READY effect cancelled, new row links back.
+  const noteDigest = proposeEffect(db, ws.stateDir, {
+    now: now + 350,
+    taskId: d7.taskId,
+    attemptId: claim7.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:87",
+    naturalKey: "digest-merge-v2",
+    operationIntent: { targetResource: "telegram-dm:87", operation: "send_message", contentHash: "aa90", evidenceManifestHash: "bb91" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: false,
+    expiresAt: now + 3600000,
+  });
+  draftToReady(db, { effectId: noteDigest.effectId, routineRef: "result-notification", approvedRoutines: ["result-notification"], now: now + 350 });
+  const sup = supersedeNotification(db, {
+    oldOutboxId: box7.id,
+    newEffectId: noteDigest.effectId,
+    channel: "telegram",
+    destination: "dm:87",
+    notBefore: now + 2000,
+    notifyReason: "digest-merge",
+    now: now + 400,
+  });
+  const oldEffect7 = db.prepare("SELECT state FROM effects WHERE id=?").get(noteProposal.effectId);
+  const newBox = db.prepare("SELECT * FROM outbox WHERE id=?").get(sup.outboxId);
+  suite.check(
+    "digest-merge-cancels-old-ready-and-links",
+    sup.oldEffectCancelled === true && oldEffect7.state === "CANCELLED" &&
+      newBox.supersedes_outbox_id === box7.id && newBox.notify_reason === "digest-merge",
+    `old READY effect CANCELLED (body never edited), new outbox row supersedes`,
+  );
+
+  // Quiet window: not_before delays without dropping.
+  const dueNow = dueNotifications(db, { now: now + 500 });
+  const dueLater = dueNotifications(db, { now: now + 100000 });
+  const notBeforeRow = dueLater.find((r) => r.id === newBox.id);
+  suite.check(
+    "quiet-window-delays-not-drops",
+    !dueNow.some((r) => r.id === newBox.id) && notBeforeRow !== undefined,
+    `digest row queued behind not_before=${newBox.not_before}, delivered only after`,
+  );
+
+  // Expired notifications: visible reason, never silent.
+  const base8 = seedScope({ scopeN: 88 });
+  const ing8 = receiveEvent(db, ws.stateDir, {
+    now,
+    source: "telegram",
+    sourceEventId: "evt-88-notify",
+    principal: { platform: "telegram", subject: "88" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:88", channel: "telegram", conversationId: "88" },
+    threadKey: "t-88-x",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "task with an expiring notification",
+    verdict: "ADMIT",
+  });
+  const inbox8 = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing8.inboxId);
+  const d8 = dispatchEventToTask(db, {
+    inboxId: ing8.inboxId, dispatchKey: dispatchKeyForInbox(inbox8),
+    now, priority: 5, maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "skillset-v1",
+  });
+  const claim8 = claimNextTask(db, { now, leaseMs: 45000 });
+  const note8 = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: d8.taskId,
+    attemptId: claim8.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:88",
+    naturalKey: "stale-note-v1",
+    operationIntent: { targetResource: "telegram-dm:88", operation: "send_message", contentHash: "aa88", evidenceManifestHash: "bb89" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: false,
+    expiresAt: now + 1000,
+  });
+  draftToReady(db, { effectId: note8.effectId, routineRef: "result-notification", approvedRoutines: ["result-notification"], now });
+  enqueueNotification(db, {
+    effectId: note8.effectId, channel: "telegram", destination: "dm:88",
+    notBefore: now + 5000, notifyReason: "quiet-forever", now,
+  });
+  const expired = expireStaleNotifications(db, { now: now + 2000 });
+  const expiredEffect = db.prepare("SELECT state, last_error FROM effects WHERE id=?").get(note8.effectId);
+  const expiredAudit = db.prepare("SELECT count(*) c FROM audit_log WHERE code='notification_expired'").get().c;
+  suite.check(
+    "expired-notification-cancelled-with-visible-reason",
+    expired.includes(note8.effectId) && expiredEffect.state === "CANCELLED" &&
+      /quiet window/.test(expiredEffect.last_error) && expiredAudit >= 1,
+    `notification expired inside its quiet window: CANCELLED with reason "${expiredEffect.last_error}"`,
+  );
+}
+
+// ---------------------------------------------------- case: timer crash windows
+{
+  const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "timer-crash.mjs");
+  const windows = [
+    { name: "timer-inside-fire-txn", point: "timers:inside-fire-txn", expectInbox: 0, expectTimer: "SCHEDULED" },
+    { name: "timer-after-fire-commit", point: "timers:after-fire-commit", expectInbox: 1, expectTimer: "FIRED" },
+  ];
+  for (const w of windows) {
+    const ws = makeWorkspace(`durability-crash-${w.name}`);
+    const proc = spawnNode(scenario, [], {
+      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: w.point, AEGISPI_NOW: "1795900000000" },
+    });
+    const done = await proc.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const timerEvents = db.prepare("SELECT count(*) c FROM inbox WHERE source='timer'").get().c;
+    const timerState = db.prepare("SELECT state FROM timers").get().state;
+    db.close();
+    suite.check(
+      `crash-${w.name}-durable-state`,
+      done.code !== 0 && timerEvents === w.expectInbox && timerState === w.expectTimer,
+      `exit=${done.code} timer events=${timerEvents} timer=${timerState}`,
+    );
+    // Recovery: the due scan is idempotent on committed or rolled-back state.
+    const db2 = openDatabase(ws.dbPath);
+    const rerun = processDueTimers(db2, { now: 1795900000001 });
+    const finalEvents = db2.prepare("SELECT count(*) c FROM inbox WHERE source='timer'").get().c;
+    const finalTimer = db2.prepare("SELECT state, occurrence_no FROM timers").get();
+    db2.close();
+    suite.check(
+      `crash-${w.name}-recovery-single-event`,
+      rerun.fired.length + rerun.skipped.length <= 1 && finalEvents === 1 && finalTimer.state === "FIRED" && finalTimer.occurrence_no === 1,
+      `reprocess fired=${rerun.fired.length}; final timer events=1, FIRED occurrence=1`,
     );
   }
 }

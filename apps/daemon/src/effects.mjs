@@ -189,8 +189,10 @@ export function proposeEffect(db, stateDir, {
       });
     }
     // RUNNING -> WAITING_APPROVAL parks the attempt WITHOUT bumping the
-    // fence, clears the lease, and saves the checkpoint (06 section 4).
-    if (task.state === "RUNNING") {
+    // fence, clears the lease, and saves the checkpoint (06 section 4). This
+    // happens only for approval-requiring proposals: a pre-approved routine
+    // DRAFT does not park the worker.
+    if (requiresApproval && task.state === "RUNNING") {
       let checkpointObjectId = null;
       if (checkpointContent !== null) {
         const ck = insertObjectRow(db, {

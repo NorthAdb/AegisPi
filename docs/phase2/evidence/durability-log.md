@@ -1,11 +1,11 @@
 # Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）
 
-生成：2026-11-19T08:26:48.411Z；Node v22.23.5；suite `durability`。
+生成：2026-11-19T08:36:25.609Z；Node v22.23.5；suite `durability`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
 | PASS | canonical-schema-checksum-matches-pinned | checksum ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995 from D:\AegisPi\aegis-pi-design-pack-v1.4.1\docs\reference\schema.sql |
-| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795076788662}] |
+| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795077359772}] |
 | PASS | reference-ddl-shape-27-user-2-fts-8-shadow | sqlite_master: 37 tables (27 user + 10 fts incl. 8 shadow per PI SQLITE probe), 3 trg_msg_* triggers |
 | PASS | system-state-seeds-present | system_state rows: [{"key":"schema_version","value":"140"},{"key":"authorization_revision","value":"1"}] |
 | PASS | migrate-is-idempotent | second run applied 0 migration(s) |
@@ -17,10 +17,10 @@
 | PASS | checksum-gate-fails-closed-on-tampered-sql | SchemaSourceError raised on mismatch |
 | PASS | partial-schema-refused-fail-closed | SchemaDriftError raised (no guessing on stray tables) |
 | PASS | torn-ddl-rolls-back-to-empty | apply threw=true, leftover tables=0 |
-| PASS | lock-first-acquire-ok | pid 24828 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
-| PASS | lock-second-acquire-refused | second acquire refused, heldBy=24828 |
+| PASS | lock-first-acquire-ok | pid 16924 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
+| PASS | lock-second-acquire-refused | second acquire refused, heldBy=16924 |
 | PASS | dead-pid-probe-says-dead | isPidAlive(400000000)=false |
-| PASS | lock-stolen-after-crash-holder | stolen, new pid 24828 |
+| PASS | lock-stolen-after-crash-holder | stolen, new pid 16924 |
 | PASS | lock-released-and-reacquired | released=true, reacquired=true |
 | PASS | canonical-json-key-order-stable | {"a":{"y":[3,2],"z":"x"},"b":1} |
 | PASS | canonical-json-rejects-nan | NaN throws |
@@ -47,7 +47,7 @@
 | PASS | crash-ingress-after-commit-redelivery-single-durable-row | redelivery exit=0, stdout="ACK inb:telegram:evt-0001 duplicate=true state=PENDING", inbox=1 |
 | PASS | dispatch-creates-task-delivery-subscription-routes-inbox | task tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 state=QUEUED, delivery=PENDING, inbox=ROUTED |
 | PASS | recomputed-plan-reuses-same-task | second dispatch created=false, tasks for event=1 |
-| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:24828:1795100010000 |
+| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:16924:1795100010000 |
 | PASS | attempt-row-active-with-lease-window | attempt att:tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1:1 state=ACTIVE |
 | PASS | one-running-agent-per-scope | claim while scope-1 RUNNING picked other-scope task tsk:inb%3Atelegram%3Aevt-life-2-3:telegram%3Aevt-life-2-3, not tsk:inb%3Atelegram%3Aevt-life-1-2:telegram%3Aevt-life-1-2 |
 | PASS | scope-epoch-fence-blocks-claim | task with stale scope_epoch is not claimed |
@@ -113,7 +113,22 @@
 | PASS | crash-remote-success-unrecorded-durable-state | exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT |
 | PASS | crash-remote-success-applied-before-record | remote really holds the action (ext-0001) while the effect row is SUBMITTING |
 | PASS | crash-remote-success-recovery-records-no-resend | recovery recorded SUCCEEDED ext-0001 from the lookup; remote still holds exactly one delivery |
+| PASS | one-shot-timer-fires-once-idempotent | FIRED occurrence=1, inbox event tmr:one-1:1 PENDING, re-run fired 0 |
+| PASS | satisfied-condition-produces-no-event | due scan saw the committed reply: SATISFIED, 0 timer events |
+| PASS | reply-first-wins-no-fire | reply committed first: timer SATISFIED, due scan fired 0 |
+| PASS | due-first-wins-stale-reminder-cancelled | fire won (1 event, timer FIRED); late reply cannot un-fire; the READY follow-up reminder was cancelled before submission |
+| PASS | periodic-timer-advances-occurrences | 2 occurrences, still SCHEDULED, next due 1795800121000 |
+| PASS | missed-periods-merge-into-one-catchup | 5 late periods -> 1 catch-up event, missed_count=4 recorded, next due starts fresh |
+| PASS | task-conclusion-notification-outbox-one-transaction | task SUCCEEDED, effect READY, outbox row enqueued atomically |
+| PASS | finalize-composition-atomic-rollback | missing notification effect FK rolled the whole finalize back: task still RUNNING, attempt still ACTIVE, no half-conclusion |
+| PASS | digest-merge-cancels-old-ready-and-links | old READY effect CANCELLED (body never edited), new outbox row supersedes |
+| PASS | quiet-window-delays-not-drops | digest row queued behind not_before=1795800002000, delivered only after |
+| PASS | expired-notification-cancelled-with-visible-reason | notification expired inside its quiet window: CANCELLED with reason "notification expired before its quiet window opened" |
+| PASS | crash-timer-inside-fire-txn-durable-state | exit=1 timer events=0 timer=SCHEDULED |
+| PASS | crash-timer-inside-fire-txn-recovery-single-event | reprocess fired=1; final timer events=1, FIRED occurrence=1 |
+| PASS | crash-timer-after-fire-commit-durable-state | exit=1 timer events=1 timer=FIRED |
+| PASS | crash-timer-after-fire-commit-recovery-single-event | reprocess fired=0; final timer events=1, FIRED occurrence=1 |
 
-合计：109 PASS / 0 FAIL。
+合计：124 PASS / 0 FAIL。
 
 数据源：fake 远端与本地 SQLite（无真实外部连接）（fake 远端与录制数据，无真实外部连接）。

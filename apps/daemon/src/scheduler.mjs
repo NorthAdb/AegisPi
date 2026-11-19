@@ -178,43 +178,63 @@ export function completeTask(db, {
   resultObjectId = null,
   errorCode = null,
 }) {
+  return withTx(db, () =>
+    completeTaskInTx(db, {
+      taskId, attemptNo, leaseOwner, fence, now, resultClass, resultObjectId, errorCode,
+    }),
+  );
+}
+
+// Same lease/fence conditions and writes as completeTask, but inside the
+// caller's open transaction — the composition point where a task conclusion,
+// its result object, the notification effect and the outbox row must land
+// together (06 section 7: "Task结论、result对象、通知effect和outbox行在同一
+// 事务保存").
+export function completeTaskInTx(db, {
+  taskId,
+  attemptNo,
+  leaseOwner,
+  fence,
+  now,
+  resultClass,
+  resultObjectId = null,
+  errorCode = null,
+}) {
   if (!RESULT_CLASSES.has(resultClass)) {
     throw new Error(`result_class ${resultClass} is not in the 06 section 2.1 enum`);
   }
-  return withTx(db, () => {
-    fencedTaskUpdate(db, { taskId, attemptNo, leaseOwner, fence, now });
-    const finalState = resultClass === "infra_error" ? "FAILED" : "SUCCEEDED";
-    if (finalState === "SUCCEEDED" && !resultObjectId) {
-      // "宿主检查证据及验收项" — a SUCCEEDED task must point at its evidence
-      // object; success without evidence is not a state this host records.
-      throw new Error("SUCCEEDED requires a result_object_id (evidence)");
-    }
-    const changed = db
-      .prepare(
-        `UPDATE tasks SET state=?, result_class=?, result_object_id=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-         WHERE id=? AND attempt_no=? AND lease_owner=? AND fence=? AND state='RUNNING'`,
-      )
-      .run(finalState, resultClass, resultObjectId, now, taskId, attemptNo, leaseOwner, fence).changes;
-    if (changed !== 1) throw new StaleWorker("complete row count != 1");
-    db.prepare(
-      "UPDATE attempts SET state=?, ended_at=?, error_code=? WHERE task_id=? AND attempt_no=? AND fence=?",
-    ).run(finalState === "SUCCEEDED" ? "SUCCEEDED" : "FAILED", now, errorCode, taskId, attemptNo, fence);
-    writeAudit(db, {
-      code: finalState === "SUCCEEDED" ? "task_succeeded" : "task_failed",
-      taskId,
-      details: { result_class: resultClass, attempt_no: attemptNo, fence, error_code: errorCode },
-      now,
-    });
-    writeStreamEvent(db, {
-      scopeId: db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(taskId).scope_id,
-      eventType: "task_changed",
-      entityId: `task:${taskId}`,
-      entityVersion: 3,
-      payload: { state: finalState, result_class: resultClass },
-      now,
-    });
-    return { state: finalState };
+  fencedTaskUpdate(db, { taskId, attemptNo, leaseOwner, fence, now });
+  const finalState = resultClass === "infra_error" ? "FAILED" : "SUCCEEDED";
+  if (finalState === "SUCCEEDED" && !resultObjectId) {
+    // "宿主检查证据及验收项" — a SUCCEEDED task must point at its evidence
+    // object; success without evidence is not a state this host records.
+    throw new Error("SUCCEEDED requires a result_object_id (evidence)");
+  }
+  const changed = db
+    .prepare(
+      `UPDATE tasks SET state=?, result_class=?, result_object_id=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+       WHERE id=? AND attempt_no=? AND lease_owner=? AND fence=? AND state='RUNNING'`,
+    )
+    .run(finalState, resultClass, resultObjectId, now, taskId, attemptNo, leaseOwner, fence).changes;
+  if (changed !== 1) throw new StaleWorker("complete row count != 1");
+  db.prepare(
+    "UPDATE attempts SET state=?, ended_at=?, error_code=? WHERE task_id=? AND attempt_no=? AND fence=?",
+  ).run(finalState === "SUCCEEDED" ? "SUCCEEDED" : "FAILED", now, errorCode, taskId, attemptNo, fence);
+  writeAudit(db, {
+    code: finalState === "SUCCEEDED" ? "task_succeeded" : "task_failed",
+    taskId,
+    details: { result_class: resultClass, attempt_no: attemptNo, fence, error_code: errorCode },
+    now,
   });
+  writeStreamEvent(db, {
+    scopeId: db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(taskId).scope_id,
+    eventType: "task_changed",
+    entityId: `task:${taskId}`,
+    entityVersion: 3,
+    payload: { state: finalState, result_class: resultClass },
+    now,
+  });
+  return { state: finalState };
 }
 
 export function retryTask(db, {

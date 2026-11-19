@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T08:26:48.411Z",
+  "generatedAt": "2026-11-19T08:36:25.609Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 109,
+    "pass": 124,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795076788662}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795077359772}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 24828 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 16924 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=24828"
+      "detail": "second acquire refused, heldBy=16924"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 24828"
+      "detail": "stolen, new pid 16924"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:24828:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:16924:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -552,6 +552,81 @@
       "name": "crash-remote-success-recovery-records-no-resend",
       "status": "PASS",
       "detail": "recovery recorded SUCCEEDED ext-0001 from the lookup; remote still holds exactly one delivery"
+    },
+    {
+      "name": "one-shot-timer-fires-once-idempotent",
+      "status": "PASS",
+      "detail": "FIRED occurrence=1, inbox event tmr:one-1:1 PENDING, re-run fired 0"
+    },
+    {
+      "name": "satisfied-condition-produces-no-event",
+      "status": "PASS",
+      "detail": "due scan saw the committed reply: SATISFIED, 0 timer events"
+    },
+    {
+      "name": "reply-first-wins-no-fire",
+      "status": "PASS",
+      "detail": "reply committed first: timer SATISFIED, due scan fired 0"
+    },
+    {
+      "name": "due-first-wins-stale-reminder-cancelled",
+      "status": "PASS",
+      "detail": "fire won (1 event, timer FIRED); late reply cannot un-fire; the READY follow-up reminder was cancelled before submission"
+    },
+    {
+      "name": "periodic-timer-advances-occurrences",
+      "status": "PASS",
+      "detail": "2 occurrences, still SCHEDULED, next due 1795800121000"
+    },
+    {
+      "name": "missed-periods-merge-into-one-catchup",
+      "status": "PASS",
+      "detail": "5 late periods -> 1 catch-up event, missed_count=4 recorded, next due starts fresh"
+    },
+    {
+      "name": "task-conclusion-notification-outbox-one-transaction",
+      "status": "PASS",
+      "detail": "task SUCCEEDED, effect READY, outbox row enqueued atomically"
+    },
+    {
+      "name": "finalize-composition-atomic-rollback",
+      "status": "PASS",
+      "detail": "missing notification effect FK rolled the whole finalize back: task still RUNNING, attempt still ACTIVE, no half-conclusion"
+    },
+    {
+      "name": "digest-merge-cancels-old-ready-and-links",
+      "status": "PASS",
+      "detail": "old READY effect CANCELLED (body never edited), new outbox row supersedes"
+    },
+    {
+      "name": "quiet-window-delays-not-drops",
+      "status": "PASS",
+      "detail": "digest row queued behind not_before=1795800002000, delivered only after"
+    },
+    {
+      "name": "expired-notification-cancelled-with-visible-reason",
+      "status": "PASS",
+      "detail": "notification expired inside its quiet window: CANCELLED with reason \"notification expired before its quiet window opened\""
+    },
+    {
+      "name": "crash-timer-inside-fire-txn-durable-state",
+      "status": "PASS",
+      "detail": "exit=1 timer events=0 timer=SCHEDULED"
+    },
+    {
+      "name": "crash-timer-inside-fire-txn-recovery-single-event",
+      "status": "PASS",
+      "detail": "reprocess fired=1; final timer events=1, FIRED occurrence=1"
+    },
+    {
+      "name": "crash-timer-after-fire-commit-durable-state",
+      "status": "PASS",
+      "detail": "exit=1 timer events=1 timer=FIRED"
+    },
+    {
+      "name": "crash-timer-after-fire-commit-recovery-single-event",
+      "status": "PASS",
+      "detail": "reprocess fired=0; final timer events=1, FIRED occurrence=1"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"

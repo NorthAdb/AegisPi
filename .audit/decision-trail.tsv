@@ -23,7 +23,9 @@ date	id	decision	rationale	evidence	result
 2026-11-19	D-19	收费路径门禁落在 scheduler.workerStep：步进必须持本任务本 purpose 的 HELD 预留 id，断言失败即拒绝执行	04 Phase 2「预留接口先覆盖所有 purpose，不允许收费路径绕过」要求真实执行点持门，不是旁路统计	红证：无预留/预留属他任务/异 purpose 的 workerStep 全部拒绝；绿证：持预留步进成功（budget run 20/20）	后续 dispatcher 提交外部动作同样接 assertLiveReservation（步骤 6）
 2026-11-19	D-20	结算分摊按预留账户份额整数化（余数归最后一个账户）；「日切不释放旧预留」由 period_key 固定在预留创建时的日键实现	06 §8「多账户分摊不是重复收费」「日期切换不释放旧请求预留」需要确定性规则；浮点与按当前日重算都会破坏对账	settle 实测 task 704+day 703=1407 与上界/实际闭环；CHARGED_BOUND 修正仅凭可信账单+actor	预算账本可审计：每笔 HELD→SETTLED/CHARGED_BOUND/RELEASED 都有 audit 行
 2026-11-19	D-21	effect 失败本地重发以结构化 `local_error:` 前缀标记（零字节才可回 READY），UNKNOWN 恢复按 retry_mode 各自策略；取消先于提交则 CAS 拒、先于取消提交则保留 SUBMITTING/UNKNOWN 并如实报告	06 §6「明确未发出任何请求字节的本地错误可FAILED→READY」「UNKNOWN不盲重试」「取消先提交则dispatcher失败；dispatcher先提交则不能保证撤回」；字符串嗅探任意远端错误文本不可靠，需自有约定前缀	红绿实测：local_error 重发成功、reject 不重发、四种 retry_mode 各自语义、两顺序取消线性化、四个崩溃窗口（含 SUBMITTING→UNKNOWN 旗舰与远端已成功未记账）	对账工具与人工晋升为后续阶段扩展点
-2026-11-19	D-22	修复 ingress ensureScope 列值错位（epoch 被写成 'pv1'、policy_version 写成 1）——由 effects 纪元测试暴露的「epoch 算术归零」追踪到根	SQLite 动态类型使 TEXT 'pv1' 入 INTEGER 列静默通过，此前所有 epoch 断言在字符串相等下假通过；教训：整数列的写入必须显式字面量对位并在测试里断言数值类型	最小复现脚本定位（evals/phase2 临时，已删）；修复后 109/109 与 budget 20/20 全绿，claim/dispatcher 的 epoch 栅栏以数值比较生效	后续 schema 变更照 06「迁移前备份」走 ADR
+2026-11-19	D-22	修复 ingress ensureScope 列值错位（epoch 被写成 'pv1'、policy_version 写成 1）——由 effects 纪元测试暴露的「epoch 算术归零」追踪到根	SQLite 动态类型使 TEXT 'pv1' 入 INTEGER 列静默通过，此前所有 epoch 断言在字符串相等下假通过；教训：整数列的写入必须显式字面量对位并在测试里断言数值类型	最小复现脚本定位（evals/phase2 临时，已删）；修复后 124/124 与 budget 20/20 全绿，claim/dispatcher 的 epoch 栅栏以数值比较生效	后续 schema 变更照 06「迁移前备份」走 ADR
+2026-11-19	D-23	跟进提醒的撤销锚定 outbox.notify_reason=`followup:<timerId>`（不是解析 action_json）：到期先赢后回信到达时，重验扫描取消过时 READY 提醒 effect	06 §7「即使触发先赢，消息提交前还要重验跟进条件，撤销已过时READY提醒」需要可查询的 effect↔timer 关联；SQL LIKE 解析 JSON 脆弱，outbox 列即为此存在	supersede/quiet/expired/竞争两顺序全部实测；missed_count 入审计而非改 timers 表（无该列，不另造字段）	Timer 条件求值器 Phase 2 仅 event_seen/none 两型，扩展走 timers.mjs 显式注册
+
 
 
 
