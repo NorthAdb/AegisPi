@@ -3,7 +3,7 @@
 // daemon modules against real SQLite files under workspace-state/phase2/.
 // Crash-window cases (06 section 9) kill real child processes and recover.
 
-import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport, repoRoot, spawnNode } from "../lib/harness.mjs";
 import { loadCanonicalSchema, migrate, verifySchema, SchemaSourceError, SchemaDriftError } from "../../../apps/daemon/src/db/migrate.mjs";
@@ -14,6 +14,7 @@ import { receiveEvent, dispatchKeyForInbox, ensurePrincipal } from "../../../app
 import { putObjectContent, gcUnreferencedContent, insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
 import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
 import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
+import { preMigrationBackup } from "../../../apps/daemon/src/db/backup.mjs";
 import { decideApproval, invalidateApproval } from "../../../apps/daemon/src/approvals.mjs";
 import {
   proposeEffect,
@@ -2550,6 +2551,122 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       ready && recoveryApi.status === 200 && recoveryBody.failedStep === "object-references" &&
         snapshot.status === 503 && snapshotBody.code === "read_only_maintenance" && loopNeverRan,
       `recovery 200 (failedStep=${recoveryBody.failedStep}); snapshot ${snapshot.status} ${snapshotBody.code}; execution loop never started`,
+    );
+  }
+}
+
+// ------------------------------------------------ case: pre-migration backup
+{
+  const canonical = loadCanonicalSchema();
+
+  // Fresh data dir: the pre-migration snapshot must hold the PRE-apply state
+  // (no schema_migrations row) — otherwise it cannot roll a failed migration
+  // back. Today's code snapshots after migrate(), so this opens red.
+  {
+    const ws = makeWorkspace("backup-fresh-daemon");
+    const proc = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), ["--check", `--data-dir=${ws.stateDir}`]);
+    const done = await proc.done;
+    const backups = existsSync(join(ws.stateDir, "backups"))
+      ? readdirSync(join(ws.stateDir, "backups")).filter((f) => f.startsWith("pre-migration-"))
+      : [];
+    let backupState = "no-backup-file";
+    let integrity = { ok: false, detail: "not-opened" };
+    if (backups.length === 1) {
+      const bdb = openDatabase(join(ws.stateDir, "backups", backups[0]), { readOnly: true });
+      const migrationsTable = bdb
+        .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+        .get().c;
+      integrity = checkDatabaseIntegrity(bdb);
+      backupState = migrationsTable === 0 ? "pre-apply (no schema_migrations)" : `post-apply (schema_migrations rows present)`;
+      bdb.close();
+    }
+    suite.check(
+      "pre-migration-backup-holds-pre-apply-state",
+      done.code === 0 && backups.length === 1 && backupState.startsWith("pre-apply") && integrity.ok,
+      `backups=${backups.length}, snapshot state=${backupState}, integrity=${integrity.ok}`,
+    );
+
+    // Existing, already-current database: no migration is pending, so a
+    // restart must not mint a new snapshot.
+    const before = readdirSync(join(ws.stateDir, "backups")).length;
+    const again = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), ["--check", `--data-dir=${ws.stateDir}`]);
+    const againDone = await again.done;
+    const after = readdirSync(join(ws.stateDir, "backups")).length;
+    suite.check(
+      "no-backup-when-no-migration-pending",
+      againDone.code === 0 && after === before,
+      `restart on a current schema: backups ${before}->${after}`,
+    );
+  }
+
+  // Apply-failure at module level: a torn canonical DDL must leave the live
+  // database rolled back AND the pre-migration snapshot usable as the
+  // pre-state.
+  {
+    const ws = makeWorkspace("backup-torn-migration");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    let torn = null;
+    try {
+      preMigrationBackup(db, { backupsDir: join(ws.stateDir, "backups"), now: 1798000000000 });
+      migrate(db, {
+        ...canonical,
+        ddlText: canonical.ddlText + "\nCREATE TABLE broken_ender(\n",
+      });
+    } catch (e) {
+      torn = e;
+    }
+    const backups = readdirSync(join(ws.stateDir, "backups")).filter((f) => f.startsWith("pre-migration-"));
+    let snapshot = { ok: false, userTables: -1 };
+    if (backups.length === 1) {
+      const bdb = openDatabase(join(ws.stateDir, "backups", backups[0]), { readOnly: true });
+      snapshot = {
+        ok: checkDatabaseIntegrity(bdb).ok,
+        userTables: bdb
+          .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+          .get().c,
+      };
+      bdb.close();
+    }
+    const liveTables = db
+      .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .get().c;
+    db.close();
+    suite.check(
+      "torn-migration-leaves-usable-pre-state-snapshot",
+      torn !== null && backups.length === 1 && snapshot.ok === true && snapshot.userTables === 0 && liveTables === 0,
+      `apply threw=${torn !== null}; snapshot usable=${snapshot.ok} with ${snapshot.userTables} user tables; live db rolled back to ${liveTables} tables`,
+    );
+  }
+
+  // Apply-success at module level: after a good migration the snapshot still
+  // shows the pre-apply state — that is what makes it a rollback point.
+  {
+    const ws = makeWorkspace("backup-good-migration");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    preMigrationBackup(db, { backupsDir: join(ws.stateDir, "backups"), now: 1798000001000 });
+    migrate(db, canonical);
+    const backups = readdirSync(join(ws.stateDir, "backups")).filter((f) => f.startsWith("pre-migration-"));
+    const bdb = openDatabase(join(ws.stateDir, "backups", backups[0]), { readOnly: true });
+    const snapshotUserTables = bdb
+      .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .get().c;
+    const snapshotHasMigrationsTable = bdb
+      .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+      .get().c;
+    const snapshotMigrations = snapshotHasMigrationsTable === 0
+      ? 0
+      : bdb.prepare("SELECT count(*) c FROM schema_migrations").get().c;
+    bdb.close();
+    const liveTables = db
+      .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'fts_messages_%'")
+      .get().c;
+    db.close();
+    suite.check(
+      "snapshot-stays-pre-apply-after-successful-migration",
+      snapshotUserTables === 0 && snapshotMigrations === 0 && liveTables === 27,
+      `snapshot holds 0 user tables, schema_migrations rows=${snapshotMigrations}; live db has ${liveTables} user tables (plus FTS)`,
     );
   }
 }

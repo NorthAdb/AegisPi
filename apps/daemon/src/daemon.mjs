@@ -13,6 +13,7 @@ import { loadDaemonConfig } from "./config.mjs";
 import { acquireDaemonLock } from "./db/lock.mjs";
 import { openDatabase, checkDatabaseIntegrity } from "./db/connect.mjs";
 import { loadCanonicalSchema, migrate } from "./db/migrate.mjs";
+import { migrationPending, preMigrationBackup } from "./db/backup.mjs";
 import { startupRecovery } from "./recovery.mjs";
 import { createBudgetLedger } from "./budget.mjs";
 import { dispatchEventToTask } from "./router.mjs";
@@ -60,24 +61,20 @@ export async function main(argv = process.argv.slice(2)) {
   const db = openDatabase(dbPath);
   const canonical = loadCanonicalSchema();
 
-  // Integrity before anything else; migration backup only when a migration
-  // is actually about to run (a fresh file backs up its empty state — honest,
-  // cheap, and the restore path stays uniform).
+  // Integrity before anything else. The PRE-migration snapshot comes strictly
+  // BEFORE migrate() — it must hold the pre-apply state so a failed apply can
+  // be rolled back (06 section 9 startup order). No snapshot is minted when
+  // the schema is already current, because nothing will be applied.
   const integrity = checkDatabaseIntegrity(db);
   if (!integrity.ok) {
     console.error(`integrity check failed: ${integrity.detail}; opening read-only diagnostics only`);
     process.exit(2);
   }
-  const preMigration = db
-    .prepare("SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
-    .get().c;
-  const migration = migrate(db, canonical);
-  if (migration.applied.length > 0 || preMigration === 0) {
-    mkdirSync(join(dataDir, "backups"), { recursive: true });
-    db.prepare("VACUUM INTO ?").run(
-      join(dataDir, "backups", `pre-migration-${Date.now()}.db`).replace(/\\/g, "/"),
-    );
+  if (migrationPending(db)) {
+    const backup = preMigrationBackup(db, { backupsDir: join(dataDir, "backups"), now: Date.now() });
+    console.log(`backup: pre-migration snapshot ${backup.path} (${backup.bytes} bytes, integrity ${backup.integrity})`);
   }
+  migrate(db, canonical);
 
   const recovery = startupRecovery(db, {
     stateDir: dataDir,

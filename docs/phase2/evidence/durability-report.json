@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T09:00:50.105Z",
+  "generatedAt": "2026-11-19T09:46:44.400Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 145,
+    "pass": 149,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795078807920}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795081562722}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 7232 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 17612 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=7232"
+      "detail": "second acquire refused, heldBy=17612"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 7232"
+      "detail": "stolen, new pid 17612"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:7232:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:17612:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -641,12 +641,12 @@
     {
       "name": "job-orphan-outlived-killed-daemon",
       "status": "PASS",
-      "detail": "fake job pid 24852 alive after daemon kill"
+      "detail": "fake job pid 25056 alive after daemon kill"
     },
     {
       "name": "recovery-kills-orphan-and-losts-job",
       "status": "PASS",
-      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 24852 killed)"
+      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 25056 killed)"
     },
     {
       "name": "outbox-crash-child-died-before-send",
@@ -701,12 +701,12 @@
     {
       "name": "daemon-first-instance-opens",
       "status": "PASS",
-      "detail": "first daemon reached open (pid line: daemon: open (pid 27504) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
+      "detail": "first daemon reached open (pid line: daemon: open (pid 27380) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
     },
     {
       "name": "daemon-second-instance-refuses-lock-exits",
       "status": "PASS",
-      "detail": "second exit=1: another daemon (pid 27504) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
+      "detail": "second exit=1: another daemon (pid 27380) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
     },
     {
       "name": "daemon-once-smoke-timer-to-settled-task",
@@ -732,6 +732,26 @@
       "name": "readonly-mode-serves-diagnostics-only",
       "status": "PASS",
       "detail": "recovery 200 (failedStep=object-references); snapshot 503 read_only_maintenance; execution loop never started"
+    },
+    {
+      "name": "pre-migration-backup-holds-pre-apply-state",
+      "status": "PASS",
+      "detail": "backups=1, snapshot state=pre-apply (no schema_migrations), integrity=true"
+    },
+    {
+      "name": "no-backup-when-no-migration-pending",
+      "status": "PASS",
+      "detail": "restart on a current schema: backups 1->1"
+    },
+    {
+      "name": "torn-migration-leaves-usable-pre-state-snapshot",
+      "status": "PASS",
+      "detail": "apply threw=true; snapshot usable=true with 0 user tables; live db rolled back to 0 tables"
+    },
+    {
+      "name": "snapshot-stays-pre-apply-after-successful-migration",
+      "status": "PASS",
+      "detail": "snapshot holds 0 user tables, schema_migrations rows=0; live db has 27 user tables (plus FTS)"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"
