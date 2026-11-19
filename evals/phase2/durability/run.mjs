@@ -2710,6 +2710,14 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       /reconcile: .*-> requeued/.test(daemonDone.stdout),
       `the daemon log records the reconciliation it performed itself`,
     );
+    const dbClear = openDatabase(ws.dbPath, { readOnly: true });
+    const unknownLeft = dbClear.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c;
+    dbClear.close();
+    suite.check(
+      "daemon-restart-idempotency-clears-unknown-exit-zero",
+      daemonDone.code === 0 && unknownLeft === 0,
+      `daemon --once exit=${daemonDone.code} with ${unknownLeft} UNKNOWN row(s) left in the database`,
+    );
   }
 
   // LOOKUP_THEN_RETRY at the DAEMON level, flagship-grade: the remote truly
@@ -2780,10 +2788,10 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const strongLookup = remote.lookup({ businessKey: effect.business_key, consistency: "strong" });
     suite.check(
       "daemon-restart-at-most-once-stays-unknown",
-      crashDone.code !== 0 && daemonDone.code === 0 &&
+      crashDone.code !== 0 && daemonDone.code === 4 &&
         strongLookup.found === true && effect.state === "UNKNOWN" &&
         remote.appliedCount(effect.business_key) === 1,
-      `remote really holds the action (${strongLookup.externalId}) yet the daemon leaves UNKNOWN — the mode forbids automatic resend; delivered 1x, no second application`,
+      `remote really holds the action (${strongLookup.externalId}) yet the daemon keeps UNKNOWN and exits ${daemonDone.code} — the mode forbids automatic resend; delivered 1x, no second application`,
     );
     // The manual reconciliation (with actor + evidence) remains the way out,
     // and it is refused without either.
@@ -2815,6 +2823,38 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       "at-most-once-exits-only-through-recorded-human-reconciliation",
       reconWithoutActor === true && recon.state === "SUCCEEDED" && after.external_id === strongLookup.externalId,
       `reconciliation without an actor refused; with actor+evidence the row lands SUCCEEDED ${after.external_id}`,
+    );
+  }
+
+  // --once WITHOUT an upstream adapter: UNKNOWN stays UNKNOWN (conservative
+  // semantics) and the exit code must still say so — the durable row waits
+  // for a human; no adapter is pretended, success is not reported.
+  {
+    const ws = makeWorkspace("daemon-once-no-upstream-unknown");
+    const crash = spawnNode(scenario, [], {
+      env: {
+        AEGISPI_WS: ws.stateDir,
+        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        AEGISPI_NOW: "1798600000000",
+        AEGISPI_RETRY_MODE: "AT_MOST_ONCE",
+        AEGISPI_FAKE_MODE: "apply_then_die",
+      },
+    });
+    const crashDone = await crash.done;
+    const daemon = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      "--once", `--data-dir=${ws.stateDir}`,
+    ]);
+    const daemonDone = await daemon.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, external_id, business_key FROM effects").get();
+    db.close();
+    const remote = createFakeRemote(ws.stateDir);
+    suite.check(
+      "daemon-once-no-upstream-unknown-exit-reflects-state",
+      crashDone.code !== 0 && daemonDone.code === 4 && effect.state === "UNKNOWN" &&
+        remote.appliedCount(effect.business_key) === 1 &&
+        /no upstream adapter is wired/.test(daemonDone.stderr),
+      `daemon --once exit=${daemonDone.code}; effect UNKNOWN in the database, remote delivered 1x, log says UNKNOWN stays UNKNOWN without an upstream`,
     );
   }
 }

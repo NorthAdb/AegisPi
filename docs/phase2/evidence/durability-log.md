@@ -1,11 +1,11 @@
 # Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）
 
-生成：2026-11-19T10:48:12.378Z；Node v22.23.5；suite `durability`。
+生成：2026-11-19T10:50:11.027Z；Node v22.23.5；suite `durability`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
 | PASS | canonical-schema-checksum-matches-pinned | checksum ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995 from D:\AegisPi\aegis-pi-design-pack-v1.4.1\docs\reference\schema.sql |
-| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795085244909}] |
+| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795085363133}] |
 | PASS | reference-ddl-shape-27-user-2-fts-8-shadow | sqlite_master: 37 tables (27 user + 10 fts incl. 8 shadow per PI SQLITE probe), 3 trg_msg_* triggers |
 | PASS | system-state-seeds-present | system_state rows: [{"key":"schema_version","value":"140"},{"key":"authorization_revision","value":"1"}] |
 | PASS | migrate-is-idempotent | second run applied 0 migration(s) |
@@ -17,10 +17,10 @@
 | PASS | checksum-gate-fails-closed-on-tampered-sql | SchemaSourceError raised on mismatch |
 | PASS | partial-schema-refused-fail-closed | SchemaDriftError raised (no guessing on stray tables) |
 | PASS | torn-ddl-rolls-back-to-empty | apply threw=true, leftover tables=0 |
-| PASS | lock-first-acquire-ok | pid 9560 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
-| PASS | lock-second-acquire-refused | second acquire refused, heldBy=9560 |
+| PASS | lock-first-acquire-ok | pid 25160 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
+| PASS | lock-second-acquire-refused | second acquire refused, heldBy=25160 |
 | PASS | dead-pid-probe-says-dead | isPidAlive(400000000)=false |
-| PASS | lock-stolen-after-crash-holder | stolen, new pid 9560 |
+| PASS | lock-stolen-after-crash-holder | stolen, new pid 25160 |
 | PASS | lock-released-and-reacquired | released=true, reacquired=true |
 | PASS | canonical-json-key-order-stable | {"a":{"y":[3,2],"z":"x"},"b":1} |
 | PASS | canonical-json-rejects-nan | NaN throws |
@@ -47,7 +47,7 @@
 | PASS | crash-ingress-after-commit-redelivery-single-durable-row | redelivery exit=0, stdout="ACK inb:telegram:evt-0001 duplicate=true state=PENDING", inbox=1 |
 | PASS | dispatch-creates-task-delivery-subscription-routes-inbox | task tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 state=QUEUED, delivery=PENDING, inbox=ROUTED |
 | PASS | recomputed-plan-reuses-same-task | second dispatch created=false, tasks for event=1 |
-| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:9560:1795100010000 |
+| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:25160:1795100010000 |
 | PASS | attempt-row-active-with-lease-window | attempt att:tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1:1 state=ACTIVE |
 | PASS | one-running-agent-per-scope | claim while scope-1 RUNNING picked other-scope task tsk:inb%3Atelegram%3Aevt-life-2-3:telegram%3Aevt-life-2-3, not tsk:inb%3Atelegram%3Aevt-life-1-2:telegram%3Aevt-life-1-2 |
 | PASS | scope-epoch-fence-blocks-claim | task with stale scope_epoch is not claimed |
@@ -130,8 +130,8 @@
 | PASS | crash-timer-after-fire-commit-recovery-single-event | reprocess fired=0; final timer events=1, FIRED occurrence=1 |
 | PASS | recovery-flagship-submitting-unknown-and-budget-calibrated | mode=open; efx:notify%3Adm%253atelegram%253a5001%3Av1 -> UNKNOWN (per retry_mode or human); res:recovery:stale-held -> CHARGED_BOUND; stale reservation=CHARGED_BOUND |
 | PASS | recovery-idempotent-on-rerun | second recovery run open; unknown-marking audited once (1) |
-| PASS | job-orphan-outlived-killed-daemon | fake job pid 22368 alive after daemon kill |
-| PASS | recovery-kills-orphan-and-losts-job | job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 22368 killed) |
+| PASS | job-orphan-outlived-killed-daemon | fake job pid 27368 alive after daemon kill |
+| PASS | recovery-kills-orphan-and-losts-job | job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 27368 killed) |
 | PASS | outbox-crash-child-died-before-send | exit=1; finalize committed, send never ran |
 | PASS | recovery-resumes-pending-notification | recovery reported due_timers=0 ready_outbox=1 inbox pending/routed=0/1 held_reservations=0; dispatcher completed the notification |
 | PASS | recovery-reports-pending-inbox-router-resumes | recovery reported due_timers=0 ready_outbox=0 inbox pending/routed=1/0 held_reservations=0; router created the task from the durable row |
@@ -142,8 +142,8 @@
 | PASS | loader-is-what-makes-off-survive | bypass shape={} (Pi would default to idle); loader shape={"cacheWarming":"off"} |
 | PASS | daemon-entry-uses-config-module-not-raw-file | config.mjs imports the loader; daemon.mjs imports loadDaemonConfig and never touches defaults.json |
 | PASS | daemon-check-boot-green | exit=0; check: mode=open steps=10 GREEN |
-| PASS | daemon-first-instance-opens | first daemon reached open (pid line: daemon: open (pid 8888) on D:\AegisPi\aegis-pi\workspace-state\phase2\daemon-double-start\db\aegis.db; fake upstream=false; loop every 10000ms) |
-| PASS | daemon-second-instance-refuses-lock-exits | second exit=1: another daemon (pid 8888) holds D:\AegisPi\aegis-pi\workspace-state\phase2\daemon-double-start\daemon.lock; refusing to start |
+| PASS | daemon-first-instance-opens | first daemon reached open (pid line: daemon: open (pid 10040) on D:\AegisPi\aegis-pi\workspace-state\phase2\daemon-double-start\db\aegis.db; fake upstream=false; loop every 10000ms) |
+| PASS | daemon-second-instance-refuses-lock-exits | second exit=1: another daemon (pid 10040) holds D:\AegisPi\aegis-pi\workspace-state\phase2\daemon-double-start\daemon.lock; refusing to start |
 | PASS | daemon-once-smoke-timer-to-settled-task | exit=0; timer=FIRED task=SUCCEEDED/not_applicable delivery=DONE reservation=SETTLED |
 | PASS | console-serves-authenticated-local-surface | health=200 snapshot tasks SUCCEEDED=1, task detail attempts=1, recovery mode=open |
 | PASS | console-refuses-unauthenticated-and-cross-origin | no token=401, wrong token=401, cross origin=403 |
@@ -155,15 +155,17 @@
 | PASS | snapshot-stays-pre-apply-after-successful-migration | snapshot holds 0 user tables, schema_migrations rows=0; live db has 27 user tables (plus FTS) |
 | PASS | daemon-restart-reconciles-idempotency-to-succeeded | crash exit=1; daemon --once exit=0; effect=SUCCEEDED external=ext-0001; remote applied exactly once |
 | PASS | daemon-restart-stdout-shows-reconcile-action | the daemon log records the reconciliation it performed itself |
+| PASS | daemon-restart-idempotency-clears-unknown-exit-zero | daemon --once exit=0 with 0 UNKNOWN row(s) left in the database |
 | PASS | daemon-restart-lookup-then-retry-records-hit-no-resend | crash exit=1; daemon --once exit=0; effect=SUCCEEDED external=ext-0001 (lookup holds ext-0001); remote applied exactly once, no resend |
 | PASS | daemon-restart-lookup-reconcile-in-daemon-log | the daemon's own log carries the lookup reconciliation it performed |
-| PASS | daemon-restart-at-most-once-stays-unknown | remote really holds the action (ext-0001) yet the daemon leaves UNKNOWN — the mode forbids automatic resend; delivered 1x, no second application |
+| PASS | daemon-restart-at-most-once-stays-unknown | remote really holds the action (ext-0001) yet the daemon keeps UNKNOWN and exits 4 — the mode forbids automatic resend; delivered 1x, no second application |
 | PASS | at-most-once-exits-only-through-recorded-human-reconciliation | reconciliation without an actor refused; with actor+evidence the row lands SUCCEEDED ext-0001 |
+| PASS | daemon-once-no-upstream-unknown-exit-reflects-state | daemon --once exit=4; effect UNKNOWN in the database, remote delivered 1x, log says UNKNOWN stays UNKNOWN without an upstream |
 | PASS | scope-epoch-stored-integer-with-numeric-semantics | epoch=1/integer, policy_version=pv1/text, epoch+0=1/integer |
 | PASS | misbound-insert-shape-is-exactly-what-the-gate-catches | the old 8-placeholder binding stores typeof=text value=pv1 — the gate above goes red the day that shape returns |
 | PASS | writer-refuses-backslash-storage-ref | insertObjectRow rejects a Windows-separator ref at the boundary |
 | PASS | gc-keeps-file-referenced-by-legacy-backslash-row | dry-run trashed=0 (legacy backslash ref counts as referenced after normalization); real sweep trashed=0, file still on disk |
 
-合计：159 PASS / 0 FAIL。
+合计：161 PASS / 0 FAIL。
 
 数据源：fake 远端与本地 SQLite（无真实外部连接）（fake 远端与录制数据，无真实外部连接）。

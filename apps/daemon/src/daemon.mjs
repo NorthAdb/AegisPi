@@ -268,7 +268,17 @@ export async function main(argv = process.argv.slice(2)) {
       rounds += 1;
     }
     console.log(`once: ${rounds + 1} tick(s) to drain the durable backlog`);
+    // An honest exit code: UNKNOWN effects are committed-but-unresolved
+    // actions. Exiting 0 while any remain would hide them from every script
+    // that trusts the exit code. Only reconciliation (a wired upstream's
+    // per-mode policy inside the tick, or a recorded human decision) clears
+    // them — the code distinguishes the states, the logs say why.
+    const unknownLeft = db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c;
     lock.release();
+    if (unknownLeft > 0) {
+      console.error(`once: ${unknownLeft} UNKNOWN effect(s) unresolved at drain end; exit 4`);
+      process.exit(4);
+    }
     process.exit(0);
   }
 
