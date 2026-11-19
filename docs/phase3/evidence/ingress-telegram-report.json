@@ -1,0 +1,53 @@
+{
+  "generatedAt": "2026-11-19T13:25:05.001Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "ingress-telegram",
+  "label": "test:ingress-telegram — 只读真实源接入与凭据生命周期（失败关闭默认）",
+  "counts": {
+    "pass": 8,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "pull-adapter-refuses-without-token",
+      "status": "PASS",
+      "detail": "-> no Telegram bot token configured; the pull adapter refuses i"
+    },
+    {
+      "name": "revoked-credential-slot-refuses-pull-adapter",
+      "status": "PASS",
+      "detail": "resolve before=true after revoke=false (slot im.telegram was revoked at 17950946)"
+    },
+    {
+      "name": "drill-token-never-reaches-audit",
+      "status": "PASS",
+      "detail": "audit rows carry slot names only"
+    },
+    {
+      "name": "telegram-update-maps-and-dedups-by-update-id",
+      "status": "PASS",
+      "detail": "mappable=true first=false second=true rows=1"
+    },
+    {
+      "name": "non-message-update-refused-honestly",
+      "status": "PASS",
+      "detail": "-> update 88002 carries no mappable message"
+    },
+    {
+      "name": "authorized-telegram-identity-readable",
+      "status": "PASS",
+      "detail": "bot @aegispibot (id masked)"
+    },
+    {
+      "name": "authorized-telegram-updates-readable-readonly",
+      "status": "PASS",
+      "detail": "queue read returned 1 update(s), nothing consumed"
+    },
+    {
+      "name": "real-update-maps-into-durable-ingress-observe-only",
+      "status": "PASS",
+      "detail": "update 500045892 mapped; verdict OBSERVE (no automatic action)"
+    }
+  ],
+  "dataSources": "确定性用例为本地 SQLite；真实用例经主人授权的 bot token 只读调用 api.telegram.org（getMe/getUpdates，无 sendMessage，无 offset 确认），输出全程脱敏；无付费模型调用"
+}

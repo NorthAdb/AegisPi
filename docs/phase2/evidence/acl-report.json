@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-19T10:55:58.508Z",
+  "generatedAt": "2026-11-19T13:16:02.369Z",
   "nodeVersion": "v22.23.5",
   "suite": "acl",
   "label": "Phase 2 test:acl — 召回顺序、FTS 三触发器与 45 条无权候选门（01 §3/§5）",

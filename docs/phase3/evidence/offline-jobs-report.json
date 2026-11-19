@@ -1,0 +1,70 @@
+{
+  "generatedAt": "2026-11-19T13:23:16.379Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "offline-jobs",
+  "label": "test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）",
+  "counts": {
+    "pass": 10,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "real-no-network-job-executes",
+      "status": "PASS",
+      "detail": "event=SUCCEEDED row=SUCCEEDED/0 result.exit=0 stdout=\"offline ok\""
+    },
+    {
+      "name": "failing-job-records-exit-code-as-evidence",
+      "status": "PASS",
+      "detail": "row=FAILED/7 evidence.exit=7"
+    },
+    {
+      "name": "job-namespace-has-no-network-dns-and-http-blocked",
+      "status": "PASS",
+      "detail": "stdout=\"DNS_BLOCKED HTTP_BLOCKED\""
+    },
+    {
+      "name": "host-enforced-deadline-times-out-and-reaps-container",
+      "status": "PASS",
+      "detail": "event=TIMED_OUT row=TIMED_OUT containers-left=\"\""
+    },
+    {
+      "name": "running-job-cancels-and-container-dies",
+      "status": "PASS",
+      "detail": "cancel=CANCELLED row=CANCELLED containers-left=\"\""
+    },
+    {
+      "name": "agent-and-offline-job-carry-different-real-cgroup-limits",
+      "status": "PASS",
+      "detail": "agent memory.max=1073741824 execution memory.max=2147483648 pids.max=256"
+    },
+    {
+      "name": "memory-and-disk-quotas-are-enforced-not-advisory",
+      "status": "PASS",
+      "detail": "oom=FAILED(FAILED) disk=FAILED/9 stdout=\"DISK_ENOSPC:ENOSPC\""
+    },
+    {
+      "name": "startup-recovery-kills-orphan-container-and-marks-lost",
+      "status": "PASS",
+      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"261843471df3d1bdd302daa99f9ca435e19f573168d48eeb4c074390e9e1e50b\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
+    },
+    {
+      "name": "invalid-manifest-refused-nothing-executed",
+      "status": "PASS",
+      "detail": "row=FAILED/126 refused=true reason=\"deadlineMs must be a positive integer of at most one hour\""
+    },
+    {
+      "name": "daemon-tick-launches-and-reaps-queued-container-job",
+      "status": "PASS",
+      "detail": "daemon exit=0 job=SUCCEEDED/0 containers=\"\" job-stdout-seen=true daemon-event-seen=true"
+    },
+    {
+      "name": "residual-risk-recorded",
+      "status": "NOTE",
+      "detail": "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）；Task 结论始终由可信 oracle 判定，job 的自述不作授权或成功标记。宿主墙钟 deadline 与容器回收不受影响。"
+    }
+  ],
+  "dataSources": "真实 docker 容器（execution/agent 镜像按记录 digest 运行，--network none，cgroup 限额）+ 本地 SQLite；无模型调用、无外部写、无凭据入容器",
+  "executionImage": "127.0.0.1:5000/aegispi/execution@sha256:59f9a3577e2fdb7fb5c2c1e029251605ed093feb30d40a6cc0157cd1fa223cf8",
+  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:5355348ad93e1e9be4380531ab78265fac8a77fed89a2dc6181de98062bc1bf5"
+}

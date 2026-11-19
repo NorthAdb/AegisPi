@@ -1,0 +1,128 @@
+{
+  "generatedAt": "2026-11-19T13:24:48.112Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "security-unit",
+  "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
+  "counts": {
+    "pass": 23,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "cp1-valid-signature-passes",
+      "status": "PASS",
+      "detail": "HMAC-SHA256 over canonical LF bytes"
+    },
+    {
+      "name": "cp1-tampered-payload-rejected",
+      "status": "PASS",
+      "detail": "tampering -> SignatureInvalid"
+    },
+    {
+      "name": "cp1-missing-secret-fails-closed",
+      "status": "PASS",
+      "detail": "unconfigured source -> SecretNotConfigured (refuse, never skip)"
+    },
+    {
+      "name": "cp1-stale-timestamp-rejected",
+      "status": "PASS",
+      "detail": "1h-old event -> TimeWindowExceeded"
+    },
+    {
+      "name": "cp1-duplicate-provider-event-collapses",
+      "status": "PASS",
+      "detail": "first=false second=true inbox_rows=1"
+    },
+    {
+      "name": "credential-register-and-resolve",
+      "status": "PASS",
+      "detail": "slot resolves from the host env store"
+    },
+    {
+      "name": "credential-unknown-slot-refuses",
+      "status": "PASS",
+      "detail": "-> slot no.such.slot is not registered"
+    },
+    {
+      "name": "credential-rotation-points-at-new-value",
+      "status": "PASS",
+      "detail": "rotated slot reads the new env name"
+    },
+    {
+      "name": "credential-revocation-fails-closed-at-adapter",
+      "status": "PASS",
+      "detail": "resolve.ok=false submit=failed_local (adapter refused: real external write for im.notify has no wi)"
+    },
+    {
+      "name": "credential-values-never-in-audit",
+      "status": "PASS",
+      "detail": "leakA=false leakB=false"
+    },
+    {
+      "name": "roles-read-does-not-imply-approve",
+      "status": "PASS",
+      "detail": "a read grant never approves anything"
+    },
+    {
+      "name": "console-grant-changes-require-admin-not-approve",
+      "status": "PASS",
+      "detail": "approve-only session -> 403 forbidden"
+    },
+    {
+      "name": "console-admin-revocation-takes-effect-immediately",
+      "status": "PASS",
+      "detail": "admin revoke -> 200; reader read grant gone=true"
+    },
+    {
+      "name": "stale-fence-worker-write-refused",
+      "status": "PASS",
+      "detail": "fence-1 heartbeat -> fenced write rejected: task tsk:inb%3Atelegram%3Aevt-su-fenc"
+    },
+    {
+      "name": "unknown-usage-never-settles-never-zero",
+      "status": "PASS",
+      "detail": "no usage -> MissingUsage; negative -> MissingUsage; still HELD"
+    },
+    {
+      "name": "charged-bound-conservative-not-release",
+      "status": "PASS",
+      "detail": "state=CHARGED_BOUND actual=500"
+    },
+    {
+      "name": "correction-requires-bill-and-actor",
+      "status": "PASS",
+      "detail": "without evidence -> correction requires trusted bill evidence and a re; with bill+actor actual=300"
+    },
+    {
+      "name": "budget-race-leaves-exactly-one-winner",
+      "status": "PASS",
+      "detail": "second reserve -> BudgetExceeded; held=400 spent=0"
+    },
+    {
+      "name": "frozen-refuses-and-raise-requires-approval",
+      "status": "PASS",
+      "detail": "frozen -> account acct:tight is frozen; raise -> raising account acct:day:2026-11-19 limit 1000->10"
+    },
+    {
+      "name": "missing-scope-closure-filters-before-limit",
+      "status": "PASS",
+      "detail": "reader leaked=false; owner sees=true"
+    },
+    {
+      "name": "approval-consume-requires-exact-action-hash",
+      "status": "PASS",
+      "detail": "wrong hash -> action hash mismatch; right hash accepted=true; effect=READY"
+    },
+    {
+      "name": "cancel-before-dispatch-refuses-dispatch",
+      "status": "PASS",
+      "detail": "dispatch after cancel -> refused"
+    },
+    {
+      "name": "sse-replays-with-cursor-and-resets-on-generation-change",
+      "status": "PASS",
+      "detail": "replay ids=2 events=inbox_changed,inbox_changed stale-reset=true unauth=401"
+    }
+  ],
+  "dataSources": "本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS）；无容器、无网络、无模型调用"
+}

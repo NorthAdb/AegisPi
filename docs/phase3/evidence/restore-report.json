@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-11-19T13:24:51.236Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "restore",
+  "label": "test:restore — 一致性备份维护窗口 + 加密 manifest + 删除清单 + 恢复演练",
+  "counts": {
+    "pass": 9,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "consistency-backup-seals-manifest-with-ledger",
+      "status": "PASS",
+      "detail": "image=workspace-state\\phase3\\restore-drill\\backups\\consistency-1795094688694.db entries=1"
+    },
+    {
+      "name": "manifest-is-encrypted-at-rest",
+      "status": "PASS",
+      "detail": "alg=aes-256-gcm; plaintext fields absent=true"
+    },
+    {
+      "name": "backup-outside-window-refused",
+      "status": "PASS",
+      "detail": "-> OutsideMaintenanceWindow"
+    },
+    {
+      "name": "backup-without-manifest-key-refused",
+      "status": "PASS",
+      "detail": "-> ManifestKeyMissing"
+    },
+    {
+      "name": "manifest-rejects-wrong-key",
+      "status": "PASS",
+      "detail": "-> Unsupported state or unable to authenticate data"
+    },
+    {
+      "name": "restore-reports-pending-ready-timer-work",
+      "status": "PASS",
+      "detail": "approvals=1 ready=1 timers=1"
+    },
+    {
+      "name": "restore-applies-deletion-ledger-forgotten-stays-forgotten",
+      "status": "PASS",
+      "detail": "applied deletions=[\"obj:scp:dm%3Atelegram%3A6101:089bf8e6a9b4be200625fa24a023dc6f5a09cdb4910f9b9b0b65b45cea835202\"]"
+    },
+    {
+      "name": "restored-work-is-actionable-again",
+      "status": "PASS",
+      "detail": "decide=true effect=READY dispatch=SUCCEEDED/SUCCEEDED timers fired=1 inbox_events=1"
+    },
+    {
+      "name": "restored-db-migration-idempotent",
+      "status": "PASS",
+      "detail": "schema_migrations rows=1 (a restored database is not re-applied)"
+    }
+  ],
+  "dataSources": "本地 SQLite 与真实备份/恢复路径（VACUUM INTO + AES-256-GCM manifest）；无外部连接"
+}

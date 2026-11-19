@@ -1,0 +1,123 @@
+{
+  "generatedAt": "2026-11-19T13:23:16.390Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "security-integration",
+  "label": "test:security:integration — 真实容器隔离与逃逸矩阵（02 §8 第二组）",
+  "counts": {
+    "pass": 21,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "escape-battery-direct-http-and-env-manipulation-blocked",
+      "status": "PASS",
+      "detail": "direct_http=BLOCKED:ENETUNREACH env_manipulation=BLOCKED:ENETUNREACH"
+    },
+    {
+      "name": "escape-battery-no-egress-dns-blocked",
+      "status": "PASS",
+      "detail": "dns_ipv6=BLOCKED:EAI_AGAIN"
+    },
+    {
+      "name": "escape-battery-host-paths-and-socket-absent",
+      "status": "PASS",
+      "detail": "absolute_paths=/etc/shadow:BLOCKED:EACCES|/var/run/docker.sock:BLOCKED:ENOENT|/proc/1/cmdline:42|/host:BLOCKED:ENOENT|/workspace:BLOCKE socket=BLOCKED:absent"
+    },
+    {
+      "name": "escape-battery-no-secret-env-in-sandbox",
+      "status": "PASS",
+      "detail": "env_secrets=CLEAN"
+    },
+    {
+      "name": "escape-battery-symlink-stays-container-local",
+      "status": "PASS",
+      "detail": "symlink_escape=CONTAINER_LOCAL(.dockerenv,app,bin,boot,dev,etc,home,job,lib,lib64,media,mnt,opt"
+    },
+    {
+      "name": "escape-battery-host-canary-and-acceptance-unreachable",
+      "status": "PASS",
+      "detail": "host_canary=BLOCKED:ENOENT acceptance_file=BLOCKED:EROFS"
+    },
+    {
+      "name": "escape-battery-pids-limit-bounds-the-fork-storm",
+      "status": "PASS",
+      "detail": "pids_exhaust=spawned=241"
+    },
+    {
+      "name": "escape-battery-git-c-executes-only-in-sandbox",
+      "status": "PASS",
+      "detail": "git_c_execution=IN_SANDBOX=false"
+    },
+    {
+      "name": "escape-battery-completed-with-evidence",
+      "status": "PASS",
+      "detail": "battery exit=0 run-exit=0"
+    },
+    {
+      "name": "host-canary-and-oracle-untouched-after-battery",
+      "status": "PASS",
+      "detail": "canary intact=true; oracle intact=true"
+    },
+    {
+      "name": "agent-container-rootfs-readonly-proposals-only-no-network",
+      "status": "PASS",
+      "detail": "rootfs=BLOCKED:EROFS proposals=OK dns=BLOCKED:EAI_AGAIN socket=absent"
+    },
+    {
+      "name": "acquisition-good-archive-extracts",
+      "status": "PASS",
+      "detail": "exit=0 failures=0 extracted=true"
+    },
+    {
+      "name": "acquisition-refuses-path-traversal-members",
+      "status": "PASS",
+      "detail": "exit=1 reason=tar extract failed (exit 2): tar: Archive contains escape-file-present=false"
+    },
+    {
+      "name": "acquisition-refuses-escaping-symlinks",
+      "status": "PASS",
+      "detail": "exit=1 reason=extracted tree rejected: symlink /downloads/s.tar.gz/link-ou"
+    },
+    {
+      "name": "acquisition-refuses-device-members",
+      "status": "PASS",
+      "detail": "exit=1 reason=tar extract failed (exit 2): tar: dev-kmem: Cannot mknod: Op dev-node-present=false"
+    },
+    {
+      "name": "acquisition-bounds-gzip-bombs-at-decompressed-size",
+      "status": "PASS",
+      "detail": "exit=1 reason=decompressed size cap exceeded: >8388608 bytes"
+    },
+    {
+      "name": "acquisition-enforces-download-size-cap",
+      "status": "PASS",
+      "detail": "exit=1 reason=size cap exceeded: >1048576 bytes"
+    },
+    {
+      "name": "acquisition-refuses-scheme-changing-redirects",
+      "status": "PASS",
+      "detail": "exit=1 reason=redirect changed scheme to file:"
+    },
+    {
+      "name": "acquisition-refuses-redirect-loops",
+      "status": "PASS",
+      "detail": "exit=1 reason=more than 5 redirects"
+    },
+    {
+      "name": "acquisition-follows-same-scheme-http-redirects",
+      "status": "PASS",
+      "detail": "exit=0 failures=0"
+    },
+    {
+      "name": "offline-jobs-suite-green-under-integration-gate",
+      "status": "PASS",
+      "detail": "exit=0 (node:28948) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
+    }
+  ],
+  "dataSources": "真实 docker 容器（execution/agent/acquisition 按记录 digest 运行）+ 本机一次性 HTTP 源（host.docker.internal，仅本机回环网关）；无模型调用、无真实外部写、无凭据入容器",
+  "images": {
+    "execution": "127.0.0.1:5000/aegispi/execution@sha256:59f9a3577e2fdb7fb5c2c1e029251605ed093feb30d40a6cc0157cd1fa223cf8",
+    "agent": "127.0.0.1:5000/aegispi/agent@sha256:5355348ad93e1e9be4380531ab78265fac8a77fed89a2dc6181de98062bc1bf5",
+    "acquisition": "127.0.0.1:5000/aegispi/acquisition@sha256:e045e9670a804e9f3ab97b48e69e9c09047b1c05f0877bdaf72b39588f756c97"
+  }
+}

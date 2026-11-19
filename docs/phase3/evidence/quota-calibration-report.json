@@ -1,0 +1,77 @@
+{
+  "generatedAt": "2026-11-19T13:24:13.167Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "quota-calibration",
+  "label": "容器配额校准（06 §4 占位值实测，不宣称最优）",
+  "counts": {
+    "pass": 5,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "cpu-quota-has-measurable-effect",
+      "status": "PASS",
+      "detail": "2 worker threads: --cpus 1 实测 1440ms vs --cpus 2 实测 682ms (ratio 2.11)"
+    },
+    {
+      "name": "memory-2gib-placeholder-enforced-with-dirty-pages",
+      "status": "PASS",
+      "detail": "1.5GiB dirty -> exit 0 OK; 3GiB dirty -> exit 137 killed"
+    },
+    {
+      "name": "pids-256-placeholder-bounds-spawn-storm",
+      "status": "PASS",
+      "detail": "spawn storm topped out at 249 (limit 256)"
+    },
+    {
+      "name": "tmpfs-work-volume-bounds-disk-writes",
+      "status": "PASS",
+      "detail": "512MiB bound: 8x64MiB ok (exit 0); 12x64MiB -> ENOSPC (exit 9)"
+    },
+    {
+      "name": "agent-1cpu-1gib-placeholder-runs-self-check",
+      "status": "PASS",
+      "detail": "agent self-check under 1 CPU / 1 GiB / pids 256 -> exit 0"
+    }
+  ],
+  "dataSources": "真实 docker 容器（execution/agent 按记录 digest 运行）；测量值见 measurements 字段",
+  "measurements": {
+    "cpu": {
+      "innerLoopMs": {
+        "cpus1": 1440,
+        "cpus2": 682,
+        "ratio": 2.11
+      }
+    },
+    "memory": {
+      "underBound": {
+        "code": 0,
+        "out": "mem-1.5g-ok chunks=6"
+      },
+      "overBound": {
+        "code": 137,
+        "out": ""
+      }
+    },
+    "pids": {
+      "limit": 256,
+      "maxSpawned": 249
+    },
+    "disk": {
+      "bound": "512m",
+      "under": {
+        "code": 0,
+        "out": "disk-512m-ok chunks=8"
+      },
+      "over": {
+        "code": 9,
+        "out": "disk-enospc:ENOSPC"
+      },
+      "note": "spec placeholder is 4g; mechanism identical, full-scale write deferred to Phase 4 real-job calibration to avoid dev-VM RAM pressure"
+    },
+    "agent": {
+      "code": 0,
+      "out": "self-check: green (pi 1.5.2)"
+    }
+  }
+}

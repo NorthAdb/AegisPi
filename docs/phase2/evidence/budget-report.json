@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-19T10:55:40.904Z",
+  "generatedAt": "2026-11-19T13:15:34.980Z",
   "nodeVersion": "v22.23.5",
   "suite": "budget",
   "label": "Phase 2 test:budget — HELD 账本、八种 purpose、并发预留与结算（06 §8）",
@@ -106,7 +106,7 @@
     {
       "name": "concurrent-reservations-exactly-one-wins-no-residue",
       "status": "PASS",
-      "detail": "slots exit 0/4, HELD winners=1, task held=60000, day held=60000 (loser left nothing)"
+      "detail": "slots exit 4/0, HELD winners=1, task held=60000, day held=60000 (loser left nothing)"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"

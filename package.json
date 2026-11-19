@@ -11,6 +11,12 @@
     "test:contracts": "node evals/contracts/run-contracts.mjs",
     "test:durability": "node evals/phase2/durability/run.mjs",
     "test:acl": "node evals/phase2/acl/run.mjs",
-    "test:budget": "node evals/phase2/budget/run.mjs"
+    "test:budget": "node evals/phase2/budget/run.mjs",
+    "test:cancel-approval": "node evals/phase3/cancel-approval/run.mjs",
+    "test:offline-jobs": "node evals/phase3/offline-jobs/run.mjs",
+    "test:security:unit": "node evals/phase3/security-unit/run.mjs",
+    "test:restore": "node evals/phase3/restore/run.mjs",
+    "test:security:integration": "node evals/phase3/security-integration/run.mjs",
+    "test:ingress-telegram": "node evals/phase3/ingress-telegram/run.mjs"
   }
 }
