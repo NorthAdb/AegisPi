@@ -10,6 +10,7 @@
   "scripts": {
     "test:contracts": "node evals/contracts/run-contracts.mjs",
     "test:durability": "node evals/phase2/durability/run.mjs",
+    "test:acl": "node evals/phase2/acl/run.mjs",
     "test:budget": "node evals/phase2/budget/run.mjs"
   }
 }

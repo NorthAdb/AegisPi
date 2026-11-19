@@ -26,6 +26,8 @@ date	id	decision	rationale	evidence	result
 2026-11-19	D-22	修复 ingress ensureScope 列值错位（epoch 被写成 'pv1'、policy_version 写成 1）——由 effects 纪元测试暴露的「epoch 算术归零」追踪到根	SQLite 动态类型使 TEXT 'pv1' 入 INTEGER 列静默通过，此前所有 epoch 断言在字符串相等下假通过；教训：整数列的写入必须显式字面量对位并在测试里断言数值类型	最小复现脚本定位（evals/phase2 临时，已删）；修复后 124/124 与 budget 20/20 全绿，claim/dispatcher 的 epoch 栅栏以数值比较生效	后续 schema 变更照 06「迁移前备份」走 ADR
 2026-11-19	D-23	跟进提醒的撤销锚定 outbox.notify_reason=`followup:<timerId>`（不是解析 action_json）：到期先赢后回信到达时，重验扫描取消过时 READY 提醒 effect	06 §7「即使触发先赢，消息提交前还要重验跟进条件，撤销已过时READY提醒」需要可查询的 effect↔timer 关联；SQL LIKE 解析 JSON 脆弱，outbox 列即为此存在	supersede/quiet/expired/竞争两顺序全部实测；missed_count 入审计而非改 timers 表（无该列，不另造字段）	Timer 条件求值器 Phase 2 仅 event_seen/none 两型，扩展走 timers.mjs 显式注册
 2026-11-19	D-24	启动恢复做成带 action log 的固定十步序列（06 §9 顺序），任何硬失败停在出错步并转只读；孤儿 job 的 pid sidecar 文件名做平台净化（Windows 禁冒号）	job/对象/审批各窗口的恢复动作需要单一入口可审计；job id 含 ':' 直接当 Windows 文件名 ENOENT（实测抓出），sanitize 后 start/reap 共用同一派生	旗舰窗恢复实测 SUBMITTING→UNKNOWN+预算 CHARGED_BOUND 校准+二次运行幂等；孤儿进程真实存活后被杀；对象文件缺失 → 只读、执行不开放	daemon 入口（步骤 10）按同序列接线：锁→完整性→迁移前备份→迁移→恢复→循环
+2026-11-19	D-25	recall.sql 内嵌为唯一实现并加「与包文件结构一致」门（逐行空白归一比较）；查询编译器逐词引号限 8 词；<3 字符走同一 allowed 集上的有界 LIKE 回退	01 §5「唯一召回查询见 recall.sql，不再复制不同版本」但运行时必须有实现；字节级比较会被行首缩进差误伤，结构一致才是安全属性；LIKE 回退按 01 §5 单独验收、不冒称 RRF	45 条无权候选零泄漏、12 条合法全保留；三触发器增删改实测；撤权单事务升 acl_version+authorization_revision；包缺失或漂移即红	acl suite 14/14；真实监控范围仍只盯 NorthAdb/AegisPi（基线第 1 句）
+
 
 
 

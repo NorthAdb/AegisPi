@@ -1,0 +1,24 @@
+# Phase 2 test:acl — 召回顺序、FTS 三触发器与 45 条无权候选门（01 §3/§5）
+
+生成：2026-11-19T08:49:00.572Z；Node v22.23.5；suite `acl`。
+
+| 状态 | 检查 | 证据 |
+| --- | --- | --- |
+| PASS | recall-sql-matches-pack-structure | embedded recall.sql === pack file (D:\AegisPi\aegis-pi-design-pack-v1.4.1\docs\reference\recall.sql) |
+| PASS | insert-trigger-populates-both-fts-indexes | after insert: lex=1 tri=1 |
+| PASS | update-trigger-reindexes-both-indexes | old term gone (advisory hits=0), new term indexed (different hits=1) |
+| PASS | delete-trigger-clears-both-indexes | after delete: lex=0 tri=0 |
+| PASS | 45-unauthorized-candidates-cannot-crowd-out-legal-results | recalled 12 rows, all legal (12/12 present), 0 leaked from 25 foreign-scope + 20 ungranted-closure candidates |
+| PASS | ancestor-and-current-session-and-degraded-objects-excluded | current session, its ancestor, missing own-closure, deleted and expired objects never recalled |
+| PASS | revocation-closes-recall-and-bumps-revisions-in-one-transaction | recall empty after revoke; authorization_revision 1->2, acl_version 1->2 |
+| PASS | cross-scope-isolation-holds | scopeB recall with only a scopeA grant: 0 rows |
+| PASS | expired-grant-recalls-nothing | expires_at in the past excludes the grant |
+| PASS | union-closure-intersects-grants | object requiring A+C visible only with both grants (annex found: true) |
+| PASS | query-compiler-bounds-and-quotes | 14 tokens in -> first 8 kept, every token quoted so FTS operators are inert: "csrf" "column:filter" "OR" "bogus" "term0" "term1" "term2" "term3" |
+| PASS | empty-query-compiles-to-nothing | blank input -> empty query -> no recall |
+| PASS | short-cjk-fallback-bounded-over-authorized-set | 2-char term served by the bounded LIKE fallback (2 rows), ranking explicitly not claimed RRF-equivalent |
+| PASS | short-fallback-escapes-like-metacharacters | a bare % term matches nothing literal — LIKE metacharacters escaped |
+
+合计：14 PASS / 0 FAIL。
+
+数据源：本地 SQLite 与设计包 recall.sql（无真实外部连接）（fake 远端与录制数据，无真实外部连接）。
