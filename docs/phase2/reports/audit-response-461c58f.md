@@ -92,3 +92,28 @@ UNKNOWN 的保守语义未被「追求自动成功」破坏：策略函数 `auto
 - 六条停止条件（静默丢事件、越权召回、预算旁路、UNKNOWN 盲重试、无鉴权控制台、真实外部写）在整改后树上均未触发，且有专门红门。
 - 复审两项升格条件（daemon 重启自身完成旗舰重发、06 §9 迁移前备份逐字落地）已由整改 B、C 满足。
 - 结论：**Phase 2 出口维持 MET WITH RESIDUAL RISKS 且残留清单已收窄**；等待独立复审复核本整改回应，不自行进入 Phase 3。
+
+## 8. 第二轮追加整改（同日，复审复核后的三缺口）
+
+复审复核结论：Phase 2 出口 MET WITH RESIDUAL RISKS 维持，第一轮四项目标与两条升格条件（daemon 重启自身完成旗舰重发、06 §9 迁移前备份逐字落地）确认成立，另指出三缺口。三缺口已全部补齐，逐项红证先行，提交各自成单元：
+
+| 缺口 | 提交 | 处理决定与红绿证据 |
+| --- | --- | --- |
+| 1. LOOKUP_THEN_RETRY 缺旗舰同级验收 | `a56414b` | 直跑即绿（整改 C 的对账循环为四模式共享路径），故红证取变异式：临时禁用 daemon tick 的 reconcile 循环，同一场景 effect 停 UNKNOWN（脚本退 1），恢复后绿。新增 `daemon-restart-lookup-then-retry-records-hit-no-resend`（崩溃后真实 `daemon --once` 重启自身完成强一致命中补记，SUCCEEDED、external_id 取自 lookup、远端恰好一次零重发，测试进程不代跑）与 `daemon-restart-lookup-reconcile-in-daemon-log`（daemon 自身日志含 `-> recorded_success`） |
+| 2. `--once` 对未结清 UNKNOWN 固定退 0 | `0c257f1` | 红证：AT_MOST_ONCE 崩溃后 `daemon --once` 退 0（脚本退 1）。修：收尾点数 `effects WHERE state='UNKNOWN'`，清零退 0、未清退 4（0/1/2/3 已被 ok/锁/完整性/`--check` 占用）并打 stderr 行。验收改退出码+数据库状态：`daemon-restart-at-most-once-stays-unknown` 原位强化为 `exit=4` 断言；新增 `daemon-restart-idempotency-clears-unknown-exit-zero`（清零后退 0）与 `daemon-once-no-upstream-unknown-exit-reflects-state`（无上游同样退 4、UNKNOWN 保留、日志如实） |
+| 3. 崩溃窗谓词 `code !== 0` 偏宽 | `862b7f0` | 红证为本平台实测：武装 crashpoint 自毁与未捕获异常死同为 `exit=1 signal=null`，宽松谓词无法分辨（脚本退 1）。修：`crashpoint()` 自毁前同步写 `AEGISPI_CRASH_MARKER`（writeFileSync 先于 SIGKILL，任何平台先落盘）；套件 `armCrash` 每次先清 marker（所读 marker 只可能来自本子进程），谓词 `wasCrashpointKill` = 新鲜 marker（内容=点名）+ 击杀形状（POSIX `signal=SIGKILL`；win32 `exit=1 signal=null`，marker 是与异常死的唯一判别）。15 处崩溃子谓词全扫，PASS 详情列 exit/signal/marker；新增三条死亡形状门：`crash-predicate-accepts-armed-crashpoint-kill`（阳性对照并记录平台击杀形状）、`crash-predicate-rejects-uncaught-exception-death`（同形状无 marker、拒收）、`crash-predicate-rejects-clean-exit`。父进程 `killHard` 的孤儿 case 保持孤儿实况断言不变 |
+
+**对本文第 5 节的勘误**：第一轮回应曾写「崩溃窗谓词实测值均为 `exit=null`，未收紧」。本轮实测证明该测量不实：win32 上 SIGKILL 自毁呈现为 `exit=1 signal=null`，与未捕获异常死完全同形——这正是谓词必须收紧、且 marker 成为唯一判别者的原因。该行所述「未列入 owner 四项目标」在当时属实，本轮已按 owner 指示完成收紧。
+
+**第二轮后全量计数**（锁定 Node 22.23.5，2026-11-19；转录 `docs/phase2/evidence/remediation2-*.txt`；计数较第一轮只增不减）：
+
+```
+node evals/phase2/durability/run.mjs  → 164/164 PASS, EXIT=0（第一轮整改后 157）
+node evals/phase2/budget/run.mjs      → 20/20  PASS, EXIT=0
+node evals/phase2/acl/run.mjs         → 15/15  PASS, EXIT=0
+node evals/contracts/run-contracts.mjs           → 15/15 PASS, EXIT=0
+node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0
+```
+
+**剩余风险更新**：第 6 节六项不变，仍全部为 Phase 3+ 既定边界（真实账单修正流、真实 ingress/上游/审批回调、备份演练 test:restore、PID 复用窗口 D-18、配额校准与磁盘告警、无上游时 UNKNOWN 等人工）。第 5 节中崩溃谓词一项已由本节缺口 3 关闭；短中文 LIKE 排序验收与 PI-13 两项维持复审时判定。UNKNOWN 保守语义在本轮未被破坏：`autoRecoverUnknown` 无新增分支，AT_MOST_ONCE 与弱一致未找到仍停 UNKNOWN，`--once` 的退出码只如实报告，不改变任何状态。
+

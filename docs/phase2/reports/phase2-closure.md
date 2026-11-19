@@ -18,19 +18,19 @@
 锁定 Node 显式路径执行，全部实测退出码 0：
 
 ```
-node evals/phase2/durability/run.mjs  → 157/157 PASS, EXIT=0   （含崩溃矩阵与整改门禁，2026-11-19 整改后）
+node evals/phase2/durability/run.mjs  → 164/164 PASS, EXIT=0   （含崩溃矩阵与两轮整改门禁，2026-11-19 第二轮缺口整改后）
 node evals/phase2/budget/run.mjs      → 20/20  PASS, EXIT=0
 node evals/phase2/acl/run.mjs         → 15/15  PASS, EXIT=0
 node evals/contracts/run-contracts.mjs          → 15/15 PASS, EXIT=0（Phase 1 回归）
 node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装快照 exit 2 两行）
 ```
 
-- 机器报告：`docs/phase2/evidence/{durability,budget,acl}-report.json`；人读日志：同名 `-log.md`；收口时点完整控制台转录：`docs/phase2/evidence/final-{durability,budget,acl}-console.txt`。
+- 机器报告：`docs/phase2/evidence/{durability,budget,acl}-report.json`；人读日志：同名 `-log.md`；收口时点完整控制台转录：`docs/phase2/evidence/final-{durability,budget,acl}-console.txt`；两轮整改转录：`remediation-*-console.txt` 与 `remediation2-*-console.txt`。
 - **数据源全部为 fake/录制**：fake 远端状态持久化于 `workspace-state/<case>/fake-remote.json`（进程崩溃后恢复仍见同一远端状态）；无任何真实外部调用（DeepSeek 单发授权已用尽不重放，Telegram 只读复测不重发）。`--once --fake-upstream` 冒烟的 worker 是 phase2-fake，结果对象如实标注。
 
 ### 2.1 崩溃窗口矩阵（验证方式逐项区分，不再统称「全部真实 SIGKILL」）
 
-**杀进程窗口（真实 SIGKILL 子进程 + 重启恢复，共 12 个场景）**：ingress 三窗、dispatch 两窗、审批两窗、`READY→SUBMITTING` 旗舰、远端已成功未记账、Timer 两窗、Task完成Outbox未发。这些由 `AEGISPI_CRASH_POINT` 自毁或父进程 `killHard` 实现，验收谓词含退出码与 stdout 契约行（如 ACK 行只在提交后打印）。
+**杀进程窗口（真实 SIGKILL 子进程 + 重启恢复，共 12 个场景）**：ingress 三窗、dispatch 两窗、审批两窗、`READY→SUBMITTING` 旗舰、远端已成功未记账、Timer 两窗、Task完成Outbox未发。这些由 `AEGISPI_CRASH_POINT` 自毁或父进程 `killHard` 实现。自毁类谓词已收紧为双证（2026-11-19 第二轮整改）：子进程在自毁前同步写 `crash-point.marker`，验收同时要求新鲜 marker 与击杀形状（win32 上 SIGKILL 自毁与未捕获异常同呈 `exit=1 signal=null`，marker 是唯一判别者；POSIX 上 signal=SIGKILL）；三条死亡形状门证明谓词能红。
 
 **非杀进程窗口（按其实际验证方式如实记录，共 3 个）**：delivery/RPC 行验证的是宿主检查点幂等与异检查点拒绝（同进程状态测试，Phase 2 无真实 Pi RPC）；budget 中断行验证的是超时 HELD 的恢复校准（种子状态 + CHARGED_BOUND 校准）；文件落盘与 DB 激活之间验证的是 GC 孤儿识别与恢复期对象引用扫描。
 
@@ -44,13 +44,15 @@ node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装
 | Task 完成、Outbox 发送前 | 恢复报告 ready_outbox；dispatcher 从持久对续跑送达 | SIGKILL + 恢复续跑 |
 | 审批消费前（事务中） | CAS 回滚干净，审批人手中卡片（nonce）重决成功 | SIGKILL |
 | 审批消费后（提交后） | 重复回调返回 already CONSUMED，无二次消费 | SIGKILL |
-| **READY→SUBMITTING 后（旗舰）** | 提交后未调用：恢复置 UNKNOWN；**daemon 重启自身**（非测试进程）按 retry_mode 对账——IDEMPOTENCY_KEY 同键重发落 SUCCEEDED、远端恰好一次 | SIGKILL + daemon `--once` 重启级验收 |
-| 远端已成功、本地未记账 | LOOKUP 强一致补记 external_id，零重发 | SIGKILL |
+| **READY→SUBMITTING 后（旗舰）** | 提交后未调用：恢复置 UNKNOWN；**daemon 重启自身**（非测试进程）按 retry_mode 对账——IDEMPOTENCY_KEY 同键重发落 SUCCEEDED、远端恰好一次；`--once` 清零 UNKNOWN 后退 0 | SIGKILL（marker 双证）+ daemon `--once` 重启级验收 |
+| 远端已成功、本地未记账 | LOOKUP 强一致补记 external_id，零重发；**daemon 重启级验收同样存在**（daemon 自身完成补记、退 0，测试进程不代跑） | SIGKILL（marker 双证）+ daemon 重启级验收 |
 | Timer 触发事务中 / 提交后 | 事务中回滚重跑单事件；提交后 occurrence 唯一约束幂等 | SIGKILL ×2 |
 | budget 请求中断 | 保守 HELD 不释放；恢复校准超时置 CHARGED_BOUND（可信账单+actor 才可修正） | 状态测试（超时校准） |
 | 文件落盘与 DB 激活之间 | 未引用文件 GC 只搬孤儿；恢复校验对象引用，缺失即只读 | 状态测试（GC + 引用扫描） |
 
 整改补充：AT_MOST_ONCE 的 daemon 重启级验收同样存在——远端确已持有动作时，daemon 保守停在 UNKNOWN、不重发，仅人工对账（actor+证据）可结清。
+
+第二轮缺口整改补充（同日，复审维持 MET WITH RESIDUAL RISKS 后的三缺口）：`daemon --once` 的退出码反映未结清 UNKNOWN——清零退 0（含无上游时对账完成的情形），仍有 UNKNOWN 退 4（有上游时 AT_MOST_ONCE 保守停留与无上游停留都覆盖），验收看退出码与数据库状态；LOOKUP_THEN_RETRY 的 daemon 重启级验收落地（变异红证：禁用对账循环时该验收变红）；崩溃窗谓词收紧为 marker+击杀形状双证并配三条死亡形状门。
 
 ### 2.2 停止条件相关的不变量（实测）
 
@@ -95,7 +97,7 @@ node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装
 1. 重跑本报告第 2 节五条命令，全绿再继续；开工者持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包。
 2. 三个应用镜像均已记录真实 digest（04 Phase 3 入口硬条件）。
 3. 涉及安全边界、数据模型或阶段依赖的偏离先按包内 ADR 模板报批。
-4. 审计史：Phase 2 独立复审（对象 461c58f）判定 **MET WITH RESIDUAL RISKS**，无 Phase 3 硬阻塞；原稿归档 `docs/phase2/audits/AUDIT-PHASE2-REREVIEW-461c58f968fd96ef9ee3ed752b14f6e879559592.md`（文首含协调更正：origin/main 观察不成立，GitHub main 已核实为被审提交）。四项整改（迁移前备份顺序、daemon 侧 UNKNOWN 对账、三张跨平台回归网、证据与文档校正）于同日完成，逐项红证先行；整改回应 `docs/phase2/reports/audit-response-461c58f.md`。残留项见该回应第 6 节与复审第 15 节。
+4. 审计史：Phase 2 独立复审（对象 461c58f）判定 **MET WITH RESIDUAL RISKS**，无 Phase 3 硬阻塞；原稿归档 `docs/phase2/audits/AUDIT-PHASE2-REREVIEW-461c58f968fd96ef9ee3ed752b14f6e879559592.md`（文首含协调更正：origin/main 观察不成立，GitHub main 已核实为被审提交）。第一轮四项整改（迁移前备份顺序、daemon 侧 UNKNOWN 对账、三张跨平台回归网、证据与文档校正）逐项红证先行；复审复核确认四项目标与两条升格条件成立，同时指出三缺口（LOOKUP 重启级验收、`--once` 退出码、崩溃谓词收紧），已于同日补齐（回应第 8 节，提交 `a56414b`/`0c257f1`/`862b7f0`）；最终门禁计数见第 2 节（durability 164/164）。残留项见回应第 6/8 节与复审第 15 节。
 
 ## 7. 2026-11-19 审计整改增补
 
@@ -106,5 +108,10 @@ node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装
 | pre-migration 快照发生在 migrate() 后 | 快照先于 migrate()，仅待迁移时创建 | `pre-migration-backup-holds-pre-apply-state`、`no-backup-when-no-migration-pending`、`torn-migration-leaves-usable-pre-state-snapshot`、`snapshot-stays-pre-apply-after-successful-migration` |
 | daemon 不做 retry_mode 对账 | tick 内按 06 §6 表对账（仅在有上游适配器时） | `daemon-restart-reconciles-idempotency-to-succeeded`、`daemon-restart-stdout-shows-reconcile-action`、`daemon-restart-at-most-once-stays-unknown`、`at-most-once-exits-only-through-recorded-human-reconciliation` |
 | epoch typeof / 反斜杠 GC / 45 条计数三网在 Linux 不够红 | 存储类型断言 + 边界拒绝 + GC 归一化 + DB 实点夹具 | `scope-epoch-stored-integer-with-numeric-semantics`、`misbound-insert-shape-is-exactly-what-the-gate-catches`、`writer-refuses-backslash-storage-ref`、`gc-keeps-file-referenced-by-legacy-backslash-row`、`fixture-really-holds-45-unauthorized-and-12-legal` |
+| 第二轮缺口：LOOKUP_THEN_RETRY 无重启级验收 | daemon 自身完成强一致命中补记（测试进程不代跑；变异红证：禁用对账循环时该验收变红） | `daemon-restart-lookup-then-retry-records-hit-no-resend`、`daemon-restart-lookup-reconcile-in-daemon-log` |
+| 第二轮缺口：`--once` 对未结清 UNKNOWN 固定退 0 | 收尾点数 UNKNOWN：清零退 0、未清退 4；验收看退出码与数据库状态 | `daemon-restart-idempotency-clears-unknown-exit-zero`、`daemon-once-no-upstream-unknown-exit-reflects-state`；`daemon-restart-at-most-once-stays-unknown` 原位强化为退 4 断言 |
+| 第二轮缺口：崩溃窗谓词偏宽（任何非零退出都算杀） | `crashpoint()` 自毁前同步写 marker，谓词 = 新鲜 marker + 击杀形状，15 处全扫 | `crash-predicate-accepts-armed-crashpoint-kill`、`crash-predicate-rejects-uncaught-exception-death`、`crash-predicate-rejects-clean-exit` |
 
 证据同步：崩溃矩阵按杀进程/状态测试逐项区分（见第 2.1 节）；`package-lock.json` 根 engines 与仓库锁定同步为 `22.23.5`；`defaults.json` 顶部注释更新为当前事实（预算账本已在本树实现、最小推理契约已实测）；`AUDIT-HANDOFF.md` 第 0/7 节的「Phase 2 未开工」过时表述改为当前阶段状态（审计原稿未动）；decision-trail 对 D-22/D-26/D-28 的失实描述按勘误体例追加更正。
+
+第二轮（复审复核后指出的三缺口）整改提交：`a56414b` / `0c257f1` / `862b7f0`，逐项红证先行，durability 计数 157→164。详见回应报告第 8 节。
