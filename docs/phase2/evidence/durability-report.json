@@ -1,0 +1,128 @@
+{
+  "generatedAt": "2026-11-19T07:41:43.199Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "durability",
+  "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
+  "counts": {
+    "pass": 23,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "canonical-schema-checksum-matches-pinned",
+      "status": "PASS",
+      "detail": "checksum ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995 from D:\\AegisPi\\aegis-pi-design-pack-v1.4.1\\docs\\reference\\schema.sql"
+    },
+    {
+      "name": "fresh-migrate-applies-version-1",
+      "status": "PASS",
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795074102675}]"
+    },
+    {
+      "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
+      "status": "PASS",
+      "detail": "sqlite_master: 37 tables (27 user + 10 fts incl. 8 shadow per PI SQLITE probe), 3 trg_msg_* triggers"
+    },
+    {
+      "name": "system-state-seeds-present",
+      "status": "PASS",
+      "detail": "system_state rows: [{\"key\":\"schema_version\",\"value\":\"140\"},{\"key\":\"authorization_revision\",\"value\":\"1\"}]"
+    },
+    {
+      "name": "migrate-is-idempotent",
+      "status": "PASS",
+      "detail": "second run applied 0 migration(s)"
+    },
+    {
+      "name": "verify-schema-ok-after-migrate",
+      "status": "PASS",
+      "detail": "schema_migrations version 1 matches canonical checksum"
+    },
+    {
+      "name": "integrity-ok-on-fresh-db",
+      "status": "PASS",
+      "detail": "integrity_check ok, foreign_key_check empty"
+    },
+    {
+      "name": "sqlite-library-floor",
+      "status": "PASS",
+      "detail": "sqlite_version()=3.54.1"
+    },
+    {
+      "name": "connection-pragmas-wal-full-fk",
+      "status": "PASS",
+      "detail": "journal=wal synchronous=2 foreign_keys=1"
+    },
+    {
+      "name": "readonly-connection-refuses-writes",
+      "status": "PASS",
+      "detail": "readOnly connection write attempt threw"
+    },
+    {
+      "name": "checksum-gate-fails-closed-on-tampered-sql",
+      "status": "PASS",
+      "detail": "SchemaSourceError raised on mismatch"
+    },
+    {
+      "name": "partial-schema-refused-fail-closed",
+      "status": "PASS",
+      "detail": "SchemaDriftError raised (no guessing on stray tables)"
+    },
+    {
+      "name": "torn-ddl-rolls-back-to-empty",
+      "status": "PASS",
+      "detail": "apply threw=true, leftover tables=0"
+    },
+    {
+      "name": "lock-first-acquire-ok",
+      "status": "PASS",
+      "detail": "pid 26500 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+    },
+    {
+      "name": "lock-second-acquire-refused",
+      "status": "PASS",
+      "detail": "second acquire refused, heldBy=26500"
+    },
+    {
+      "name": "dead-pid-probe-says-dead",
+      "status": "PASS",
+      "detail": "isPidAlive(400000000)=false"
+    },
+    {
+      "name": "lock-stolen-after-crash-holder",
+      "status": "PASS",
+      "detail": "stolen, new pid 26500"
+    },
+    {
+      "name": "lock-released-and-reacquired",
+      "status": "PASS",
+      "detail": "released=true, reacquired=true"
+    },
+    {
+      "name": "canonical-json-key-order-stable",
+      "status": "PASS",
+      "detail": "{\"a\":{\"y\":[3,2],\"z\":\"x\"},\"b\":1}"
+    },
+    {
+      "name": "canonical-json-rejects-nan",
+      "status": "PASS",
+      "detail": "NaN throws"
+    },
+    {
+      "name": "business-key-escaping-separates-objects",
+      "status": "PASS",
+      "detail": "notify:user%3a123:k1 != notify:user%3a1%3a23:k1"
+    },
+    {
+      "name": "dispatch-key-shape-and-lowercase",
+      "status": "PASS",
+      "detail": "dispatch_key=telegram:e1"
+    },
+    {
+      "name": "sha256-lf-normalization",
+      "status": "PASS",
+      "detail": "digest 015abd7f5cc57a2d…"
+    }
+  ],
+  "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"
+}

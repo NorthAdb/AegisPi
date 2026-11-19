@@ -18,3 +18,6 @@ date	id	decision	rationale	evidence	result
 
 2026-11-19	D-16	Phase 2 开工：先重跑两条最小验收与 schema 校验和，全绿后才动产品代码；同时把 AUDIT-HANDOFF.md 第 4、5 节残留的收口前措辞按 evidence/07 与 phase1-closure.md 改为收口后事实（不改审计原稿）	移交文档第 1 节的开工前置；第 4、5 节与第 0、7 节自相矛盾会误导下一个审计者	契约套件 15/15 退出码 0、配对自检退出码 0（本会话实测，contracts-report.json generatedAt 刷新）；schema.sql LF 校验和实测 ede73eca…a2995 与要求一致；AUDIT-HANDOFF 三处改写	Phase 2 基线确立，后续步骤逐步落地
 
+2026-11-19	D-17	规范 DDL 不入库复制：迁移器经 config/schema-source.json 指针 + pinned LF SHA-256 加载本机设计包 schema.sql，AEGISPI_SCHEMA_SQL 只允许覆盖路径、永远不豁免校验和门	包不随库分发（D-01），重打 SQL 会破坏字节一致与校验和；首轮实现曾让 env 覆盖旁路 pin（篡改副本直通，红测抓出），修复为「pin 永远生效、只可覆盖路径」	红证：篡改副本→SchemaSourceError；残表无迁移记录→SchemaDriftError；撕裂 DDL→回滚至空库；绿证：27 用户表+10 FTS+3 触发器与 PI 探针一致，migrate 幂等（evals/phase2/durability/run.mjs 23/23 退出码 0）	迁移器自此与包字节绑定；包换版必须先更新 pin 并走 ADR
+2026-11-19	D-18	排他锁采用 lockfile+PID 存活探测（原子写、只删自己的锁），不用 SQLite 自身防双启动	Node 核心无跨平台 flock；WAL 允许多连接；PID 复用是残余风险，单人单机部署接受并记录	第二持锁被拒（heldBy=首个 pid）；伪造崩溃持有者后可夺回；释放后可重取（durability run 实测）	06「持锁失败直接退出」在 daemon 入口落地（步骤 10 接线）
+
