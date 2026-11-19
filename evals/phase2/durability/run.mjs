@@ -60,6 +60,31 @@ lockedNodeGuard();
 const suite = makeSuite("durability");
 const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995";
 
+// Crash-child arming and the tightened death predicate. Every crash spawn
+// goes through armCrash, which clears the marker file first — so the marker
+// a predicate reads afterwards can only have been written by THIS child, at
+// the armed production point, synchronously before its own SIGKILL.
+// wasCrashpointKill then demands both witnesses: the fresh marker AND the
+// death shape of a real kill (POSIX reports signal=SIGKILL; win32 emulates a
+// SIGKILL as exit code 1 with signal null, the same shape an uncaught
+// exception has — which is exactly why the marker is load-bearing there).
+function armCrash(ws, point) {
+  const marker = join(ws.stateDir, "crash-point.marker");
+  rmSync(marker, { force: true });
+  return { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: point, AEGISPI_CRASH_MARKER: marker };
+}
+function wasCrashpointKill(done, ws, point) {
+  const marker = join(ws.stateDir, "crash-point.marker");
+  const wroteMarker = existsSync(marker) && readFileSync(marker, "utf8") === point;
+  const killShape = done.signal === "SIGKILL" || (done.signal === null && done.code === 1);
+  return wroteMarker && killShape;
+}
+function crashDetail(done, ws) {
+  const marker = join(ws.stateDir, "crash-point.marker");
+  const wrote = existsSync(marker) ? readFileSync(marker, "utf8") : "none";
+  return `exit=${done.code} signal=${done.signal} marker=${wrote}`;
+}
+
 // ---------------------------------------------------------------- case: schema
 {
   const canonical = loadCanonicalSchema();
@@ -382,14 +407,14 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   for (const w of windows) {
     const ws = makeWorkspace(`durability-crash-${w.name}`);
     const proc = spawnNode(scenario, [], {
-      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: w.point, AEGISPI_NOW: "1795000000000" },
+      env: { ...armCrash(ws, w.point), AEGISPI_NOW: "1795000000000" },
     });
     const done = await proc.done;
-    const diedWithoutAck = !done.stdout.includes("ACK") && (done.signal === "SIGKILL" || done.code !== 0);
+    const diedWithoutAck = !done.stdout.includes("ACK") && wasCrashpointKill(done, ws, w.point);
     suite.check(
       `crash-${w.name}-child-died-before-ack`,
       diedWithoutAck,
-      `exit=${done.code} signal=${done.signal} ack-line=${done.stdout.includes("ACK")}`,
+      `${crashDetail(done, ws)} ack-line=${done.stdout.includes("ACK")}`,
     );
     const db = openDatabase(ws.dbPath, { readOnly: true });
     const inboxCount = db.prepare("SELECT count(*) c FROM inbox").get().c;
@@ -767,17 +792,17 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   for (const w of windows) {
     const ws = makeWorkspace(`durability-crash-${w.name}`);
     const proc = spawnNode(scenario, [], {
-      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: w.point, AEGISPI_NOW: "1795110000000" },
+      env: { ...armCrash(ws, w.point), AEGISPI_NOW: "1795110000000" },
     });
     const done = await proc.done;
-    const diedBeforeDispatch = !done.stdout.includes("DISPATCHED") && done.code !== 0;
+    const diedBeforeDispatch = !done.stdout.includes("DISPATCHED") && wasCrashpointKill(done, ws, w.point);
     const db = openDatabase(ws.dbPath, { readOnly: true });
     const tasks = db.prepare("SELECT count(*) c FROM tasks").get().c;
     db.close();
     suite.check(
       `crash-${w.name}-died-before-dispatch-commit`,
       diedBeforeDispatch && tasks === w.expectTasks,
-      `exit=${done.code} signal=${done.signal} tasks=${tasks}`,
+      `${crashDetail(done, ws)} tasks=${tasks}`,
     );
     const re = spawnNode(scenario, [], { env: { AEGISPI_WS: ws.stateDir, AEGISPI_NOW: "1795110001000" } });
     const reDone = await re.done;
@@ -1369,7 +1394,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
 
   const runWindow = async ({ name, env, expect }) => {
     const ws = makeWorkspace(`durability-crash-${name}`);
-    const proc = spawnNode(scenario, [], { env: { AEGISPI_WS: ws.stateDir, ...env } });
+    const proc = spawnNode(scenario, [], { env: { ...armCrash(ws, env.AEGISPI_CRASH_POINT), ...env } });
     const done = await proc.done;
     const db = openDatabase(ws.dbPath, { readOnly: true });
     const effect = db.prepare("SELECT state, external_id FROM effects").get();
@@ -1379,8 +1404,8 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const nonce = (done.stdout.match(/NONCE ([0-9a-f]+)/) ?? [])[1] ?? null;
     suite.check(
       `crash-${name}-durable-state`,
-      done.code !== 0 && effect.state === expect.effect && approval.state === expect.approval && task.state === expect.task,
-      `exit=${done.code} effect=${effect?.state} approval=${approval?.state} task=${task?.state}`,
+      wasCrashpointKill(done, ws, env.AEGISPI_CRASH_POINT) && effect.state === expect.effect && approval.state === expect.approval && task.state === expect.task,
+      `${crashDetail(done, ws)} effect=${effect?.state} approval=${approval?.state} task=${task?.state}`,
     );
     return { ws, stdout: done.stdout, nonce };
   };
@@ -2022,7 +2047,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   for (const w of windows) {
     const ws = makeWorkspace(`durability-crash-${w.name}`);
     const proc = spawnNode(scenario, [], {
-      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: w.point, AEGISPI_NOW: "1795900000000" },
+      env: { ...armCrash(ws, w.point), AEGISPI_NOW: "1795900000000" },
     });
     const done = await proc.done;
     const db = openDatabase(ws.dbPath, { readOnly: true });
@@ -2031,8 +2056,8 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     db.close();
     suite.check(
       `crash-${w.name}-durable-state`,
-      done.code !== 0 && timerEvents === w.expectInbox && timerState === w.expectTimer,
-      `exit=${done.code} timer events=${timerEvents} timer=${timerState}`,
+      wasCrashpointKill(done, ws, w.point) && timerEvents === w.expectInbox && timerState === w.expectTimer,
+      `${crashDetail(done, ws)} timer events=${timerEvents} timer=${timerState}`,
     );
     // Recovery: the due scan is idempotent on committed or rolled-back state.
     const db2 = openDatabase(ws.dbPath);
@@ -2060,8 +2085,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const crashNow = 1796000000000;
     const proc = spawnNode(scenario, [], {
       env: {
-        AEGISPI_WS: ws.stateDir,
-        AEGISPI_CRASH_POINT: "effects:after-cas-before-call",
+        ...armCrash(ws, "effects:after-cas-before-call"),
         AEGISPI_NOW: String(crashNow),
         AEGISPI_RETRY_MODE: "IDEMPOTENCY_KEY",
         AEGISPI_FAKE_MODE: "ok",
@@ -2103,10 +2127,10 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const effectAfter = db.prepare("SELECT state FROM effects").get().state;
     suite.check(
       "recovery-flagship-submitting-unknown-and-budget-calibrated",
-      done.code !== 0 && rec.mode === "open" && unknownStep.ok && /UNKNOWN/.test(unknownStep.detail) &&
+      wasCrashpointKill(done, ws, "effects:after-cas-before-call") && rec.mode === "open" && unknownStep.ok && /UNKNOWN/.test(unknownStep.detail) &&
         budgetStep.ok && /CHARGED_BOUND/.test(budgetStep.detail) &&
         effectAfter === "UNKNOWN" && heldAfter === "CHARGED_BOUND",
-      `mode=${rec.mode}; ${unknownStep.detail}; ${budgetStep.detail}; stale reservation=${heldAfter}`,
+      `${crashDetail(done, ws)}; mode=${rec.mode}; ${unknownStep.detail}; ${budgetStep.detail}; stale reservation=${heldAfter}`,
     );
     // Same recovery run twice: idempotent, no double marking.
     const rec2 = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: crashNow + 120 * 1000, maxAttempts: 3 });
@@ -2161,13 +2185,13 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const ws = makeWorkspace("durability-recovery-outbox");
     const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "outbox-crash.mjs");
     const proc = spawnNode(scenario, [], {
-      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: "scenario:outbox-before-send", AEGISPI_NOW: "1796200000000" },
+      env: { ...armCrash(ws, "scenario:outbox-before-send"), AEGISPI_NOW: "1796200000000" },
     });
     const done = await proc.done;
     suite.check(
       "outbox-crash-child-died-before-send",
-      done.code !== 0 && done.stdout.includes("FINALIZED") && !done.stdout.includes("UNREACHABLE"),
-      `exit=${done.code}; finalize committed, send never ran`,
+      wasCrashpointKill(done, ws, "scenario:outbox-before-send") && done.stdout.includes("FINALIZED") && !done.stdout.includes("UNREACHABLE"),
+      `${crashDetail(done, ws)}; finalize committed, send never ran`,
     );
     const db = openDatabase(ws.dbPath);
     const rec = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: 1796200001000, maxAttempts: 3 });
@@ -2683,8 +2707,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const ws = makeWorkspace("daemon-restart-idempotency");
     const crash = spawnNode(scenario, [], {
       env: {
-        AEGISPI_WS: ws.stateDir,
-        AEGISPI_CRASH_POINT: "effects:after-cas-before-call",
+        ...armCrash(ws, "effects:after-cas-before-call"),
         AEGISPI_NOW: "1798200000000",
         AEGISPI_RETRY_MODE: "IDEMPOTENCY_KEY",
         AEGISPI_FAKE_MODE: "ok",
@@ -2701,9 +2724,9 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const remote = createFakeRemote(ws.stateDir);
     suite.check(
       "daemon-restart-reconciles-idempotency-to-succeeded",
-      crashDone.code !== 0 && daemonDone.code === 0 && effect.state === "SUCCEEDED" &&
+      wasCrashpointKill(crashDone, ws, "effects:after-cas-before-call") && daemonDone.code === 0 && effect.state === "SUCCEEDED" &&
         remote.appliedCount(effect.business_key) === 1 && effect.external_id !== null,
-      `crash exit=${crashDone.code}; daemon --once exit=${daemonDone.code}; effect=${effect.state} external=${effect.external_id}; remote applied exactly once`,
+      `${crashDetail(crashDone, ws)}; daemon --once exit=${daemonDone.code}; effect=${effect.state} external=${effect.external_id}; remote applied exactly once`,
     );
     suite.check(
       "daemon-restart-stdout-shows-reconcile-action",
@@ -2731,8 +2754,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const ws = makeWorkspace("daemon-restart-lookup-then-retry");
     const crash = spawnNode(scenario, [], {
       env: {
-        AEGISPI_WS: ws.stateDir,
-        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        ...armCrash(ws, "effects:after-call-before-record"),
         AEGISPI_NOW: "1798410000000",
         AEGISPI_RETRY_MODE: "LOOKUP_THEN_RETRY",
         AEGISPI_FAKE_MODE: "ok",
@@ -2750,10 +2772,10 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const strongLookup = remote.lookup({ businessKey: effect.business_key, consistency: "strong" });
     suite.check(
       "daemon-restart-lookup-then-retry-records-hit-no-resend",
-      crashDone.code !== 0 && daemonDone.code === 0 && effect.state === "SUCCEEDED" &&
+      wasCrashpointKill(crashDone, ws, "effects:after-call-before-record") && daemonDone.code === 0 && effect.state === "SUCCEEDED" &&
         strongLookup.found === true && effect.external_id === strongLookup.externalId &&
         remote.appliedCount(effect.business_key) === 1,
-      `crash exit=${crashDone.code}; daemon --once exit=${daemonDone.code}; effect=${effect.state} external=${effect.external_id} (lookup holds ${strongLookup.externalId}); remote applied exactly once, no resend`,
+      `${crashDetail(crashDone, ws)}; daemon --once exit=${daemonDone.code}; effect=${effect.state} external=${effect.external_id} (lookup holds ${strongLookup.externalId}); remote applied exactly once, no resend`,
     );
     suite.check(
       "daemon-restart-lookup-reconcile-in-daemon-log",
@@ -2769,8 +2791,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const ws = makeWorkspace("daemon-restart-at-most-once");
     const crash = spawnNode(scenario, [], {
       env: {
-        AEGISPI_WS: ws.stateDir,
-        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        ...armCrash(ws, "effects:after-call-before-record"),
         AEGISPI_NOW: "1798300000000",
         AEGISPI_RETRY_MODE: "AT_MOST_ONCE",
         AEGISPI_FAKE_MODE: "apply_then_die",
@@ -2788,10 +2809,10 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const strongLookup = remote.lookup({ businessKey: effect.business_key, consistency: "strong" });
     suite.check(
       "daemon-restart-at-most-once-stays-unknown",
-      crashDone.code !== 0 && daemonDone.code === 4 &&
+      wasCrashpointKill(crashDone, ws, "effects:after-call-before-record") && daemonDone.code === 4 &&
         strongLookup.found === true && effect.state === "UNKNOWN" &&
         remote.appliedCount(effect.business_key) === 1,
-      `remote really holds the action (${strongLookup.externalId}) yet the daemon keeps UNKNOWN and exits ${daemonDone.code} — the mode forbids automatic resend; delivered 1x, no second application`,
+      `${crashDetail(crashDone, ws)}; daemon --once exit=${daemonDone.code}; remote really holds the action (${strongLookup.externalId}) yet the daemon keeps UNKNOWN — the mode forbids automatic resend; delivered 1x, no second application`,
     );
     // The manual reconciliation (with actor + evidence) remains the way out,
     // and it is refused without either.
@@ -2833,8 +2854,7 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const ws = makeWorkspace("daemon-once-no-upstream-unknown");
     const crash = spawnNode(scenario, [], {
       env: {
-        AEGISPI_WS: ws.stateDir,
-        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        ...armCrash(ws, "effects:after-call-before-record"),
         AEGISPI_NOW: "1798600000000",
         AEGISPI_RETRY_MODE: "AT_MOST_ONCE",
         AEGISPI_FAKE_MODE: "apply_then_die",
@@ -2851,10 +2871,10 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     const remote = createFakeRemote(ws.stateDir);
     suite.check(
       "daemon-once-no-upstream-unknown-exit-reflects-state",
-      crashDone.code !== 0 && daemonDone.code === 4 && effect.state === "UNKNOWN" &&
+      wasCrashpointKill(crashDone, ws, "effects:after-call-before-record") && daemonDone.code === 4 && effect.state === "UNKNOWN" &&
         remote.appliedCount(effect.business_key) === 1 &&
         /no upstream adapter is wired/.test(daemonDone.stderr),
-      `daemon --once exit=${daemonDone.code}; effect UNKNOWN in the database, remote delivered 1x, log says UNKNOWN stays UNKNOWN without an upstream`,
+      `${crashDetail(crashDone, ws)}; daemon --once exit=${daemonDone.code}; effect UNKNOWN in the database, remote delivered 1x, log says UNKNOWN stays UNKNOWN without an upstream`,
     );
   }
 }
@@ -2958,6 +2978,48 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     `dry-run trashed=${gcProbe.trashed} (legacy backslash ref counts as referenced after normalization); real sweep trashed=${gcRun.trashed}, file still on disk`,
   );
   db.close();
+}
+
+// ------------------------------------------------ case: crash death-shape gates
+{
+  // The tightened crash-window predicate must ACCEPT a real armed
+  // crashpoint kill and REJECT every other death shape. Measured on this
+  // platform (win32): a SIGKILL self-kill and an uncaught exception both
+  // surface as exit code 1 with signal null — the fresh crashpoint marker
+  // is the only discriminator, so these gates go red the day the predicate
+  // loosens back to a bare exit-code check.
+  const probe = join(repoRoot, "evals", "phase2", "durability", "scenarios", "death-shape-probe.mjs");
+  const ws = makeWorkspace("durability-crash-death-shapes");
+
+  const armed = spawnNode(probe, [], {
+    env: { ...armCrash(ws, "probe:crashpoint"), AEGISPI_PROBE_DEATH: "crashpoint" },
+  });
+  const armedDone = await armed.done;
+  suite.check(
+    "crash-predicate-accepts-armed-crashpoint-kill",
+    wasCrashpointKill(armedDone, ws, "probe:crashpoint"),
+    `${crashDetail(armedDone, ws)} — this platform's real SIGKILL self-kill shape`,
+  );
+
+  const ex = spawnNode(probe, [], {
+    env: { ...armCrash(ws, "probe:crashpoint"), AEGISPI_PROBE_DEATH: "exception" },
+  });
+  const exDone = await ex.done;
+  suite.check(
+    "crash-predicate-rejects-uncaught-exception-death",
+    exDone.code === 1 && exDone.signal === null && !wasCrashpointKill(exDone, ws, "probe:crashpoint"),
+    `${crashDetail(exDone, ws)} — same exit shape as the kill, no marker, rejected`,
+  );
+
+  const clean = spawnNode(probe, [], {
+    env: { ...armCrash(ws, "probe:crashpoint"), AEGISPI_PROBE_DEATH: "clean" },
+  });
+  const cleanDone = await clean.done;
+  suite.check(
+    "crash-predicate-rejects-clean-exit",
+    cleanDone.code === 0 && !wasCrashpointKill(cleanDone, ws, "probe:crashpoint"),
+    `clean exit ${cleanDone.code} while armed is not a crash`,
+  );
 }
 
 // -------------------------------------------------------------------- summary

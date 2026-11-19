@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T10:50:11.027Z",
+  "generatedAt": "2026-11-19T10:54:15.091Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 161,
+    "pass": 164,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795085363133}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795085605766}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 25160 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 26140 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=25160"
+      "detail": "second acquire refused, heldBy=26140"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 25160"
+      "detail": "stolen, new pid 26140"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -166,7 +166,7 @@
     {
       "name": "crash-ingress-before-file-child-died-before-ack",
       "status": "PASS",
-      "detail": "exit=1 signal=null ack-line=false"
+      "detail": "exit=1 signal=null marker=ingress:before-file ack-line=false"
     },
     {
       "name": "crash-ingress-before-file-durable-state-matches-window",
@@ -181,7 +181,7 @@
     {
       "name": "crash-ingress-inside-txn-child-died-before-ack",
       "status": "PASS",
-      "detail": "exit=1 signal=null ack-line=false"
+      "detail": "exit=1 signal=null marker=ingress:inside-txn ack-line=false"
     },
     {
       "name": "crash-ingress-inside-txn-durable-state-matches-window",
@@ -201,7 +201,7 @@
     {
       "name": "crash-ingress-after-commit-child-died-before-ack",
       "status": "PASS",
-      "detail": "exit=1 signal=null ack-line=false"
+      "detail": "exit=1 signal=null marker=ingress:after-commit ack-line=false"
     },
     {
       "name": "crash-ingress-after-commit-durable-state-matches-window",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:25160:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:26140:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -331,7 +331,7 @@
     {
       "name": "crash-dispatch-pre-txn-died-before-dispatch-commit",
       "status": "PASS",
-      "detail": "exit=1 signal=null tasks=0"
+      "detail": "exit=1 signal=null marker=router:pre-txn tasks=0"
     },
     {
       "name": "crash-dispatch-pre-txn-recomputed-plan-single-task",
@@ -341,7 +341,7 @@
     {
       "name": "crash-dispatch-inside-txn-died-before-dispatch-commit",
       "status": "PASS",
-      "detail": "exit=1 signal=null tasks=0"
+      "detail": "exit=1 signal=null marker=router:inside-txn tasks=0"
     },
     {
       "name": "crash-dispatch-inside-txn-recomputed-plan-single-task",
@@ -501,7 +501,7 @@
     {
       "name": "crash-approval-inside-txn-durable-state",
       "status": "PASS",
-      "detail": "exit=1 effect=WAITING_APPROVAL approval=WAITING task=WAITING_APPROVAL"
+      "detail": "exit=1 signal=null marker=approvals:inside-txn effect=WAITING_APPROVAL approval=WAITING task=WAITING_APPROVAL"
     },
     {
       "name": "crash-approval-inside-txn-cas-rolled-back-clean-retry",
@@ -511,7 +511,7 @@
     {
       "name": "crash-approval-after-commit-durable-state",
       "status": "PASS",
-      "detail": "exit=1 effect=READY approval=CONSUMED task=WAITING_EFFECT"
+      "detail": "exit=1 signal=null marker=approvals:after-commit effect=READY approval=CONSUMED task=WAITING_EFFECT"
     },
     {
       "name": "crash-approval-after-commit-retry-idempotent",
@@ -521,7 +521,7 @@
     {
       "name": "crash-submitting-before-call-durable-state",
       "status": "PASS",
-      "detail": "exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT"
+      "detail": "exit=1 signal=null marker=effects:after-cas-before-call effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT"
     },
     {
       "name": "crash-submitting-no-remote-bytes",
@@ -541,7 +541,7 @@
     {
       "name": "crash-remote-success-unrecorded-durable-state",
       "status": "PASS",
-      "detail": "exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT"
+      "detail": "exit=1 signal=null marker=effects:after-call-before-record effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT"
     },
     {
       "name": "crash-remote-success-applied-before-record",
@@ -611,7 +611,7 @@
     {
       "name": "crash-timer-inside-fire-txn-durable-state",
       "status": "PASS",
-      "detail": "exit=1 timer events=0 timer=SCHEDULED"
+      "detail": "exit=1 signal=null marker=timers:inside-fire-txn timer events=0 timer=SCHEDULED"
     },
     {
       "name": "crash-timer-inside-fire-txn-recovery-single-event",
@@ -621,7 +621,7 @@
     {
       "name": "crash-timer-after-fire-commit-durable-state",
       "status": "PASS",
-      "detail": "exit=1 timer events=1 timer=FIRED"
+      "detail": "exit=1 signal=null marker=timers:after-fire-commit timer events=1 timer=FIRED"
     },
     {
       "name": "crash-timer-after-fire-commit-recovery-single-event",
@@ -631,7 +631,7 @@
     {
       "name": "recovery-flagship-submitting-unknown-and-budget-calibrated",
       "status": "PASS",
-      "detail": "mode=open; efx:notify%3Adm%253atelegram%253a5001%3Av1 -> UNKNOWN (per retry_mode or human); res:recovery:stale-held -> CHARGED_BOUND; stale reservation=CHARGED_BOUND"
+      "detail": "exit=1 signal=null marker=effects:after-cas-before-call; mode=open; efx:notify%3Adm%253atelegram%253a5001%3Av1 -> UNKNOWN (per retry_mode or human); res:recovery:stale-held -> CHARGED_BOUND; stale reservation=CHARGED_BOUND"
     },
     {
       "name": "recovery-idempotent-on-rerun",
@@ -641,17 +641,17 @@
     {
       "name": "job-orphan-outlived-killed-daemon",
       "status": "PASS",
-      "detail": "fake job pid 27368 alive after daemon kill"
+      "detail": "fake job pid 2652 alive after daemon kill"
     },
     {
       "name": "recovery-kills-orphan-and-losts-job",
       "status": "PASS",
-      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 27368 killed)"
+      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 2652 killed)"
     },
     {
       "name": "outbox-crash-child-died-before-send",
       "status": "PASS",
-      "detail": "exit=1; finalize committed, send never ran"
+      "detail": "exit=1 signal=null marker=scenario:outbox-before-send; finalize committed, send never ran"
     },
     {
       "name": "recovery-resumes-pending-notification",
@@ -701,12 +701,12 @@
     {
       "name": "daemon-first-instance-opens",
       "status": "PASS",
-      "detail": "first daemon reached open (pid line: daemon: open (pid 10040) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
+      "detail": "first daemon reached open (pid line: daemon: open (pid 13844) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
     },
     {
       "name": "daemon-second-instance-refuses-lock-exits",
       "status": "PASS",
-      "detail": "second exit=1: another daemon (pid 10040) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
+      "detail": "second exit=1: another daemon (pid 13844) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
     },
     {
       "name": "daemon-once-smoke-timer-to-settled-task",
@@ -756,7 +756,7 @@
     {
       "name": "daemon-restart-reconciles-idempotency-to-succeeded",
       "status": "PASS",
-      "detail": "crash exit=1; daemon --once exit=0; effect=SUCCEEDED external=ext-0001; remote applied exactly once"
+      "detail": "exit=1 signal=null marker=effects:after-cas-before-call; daemon --once exit=0; effect=SUCCEEDED external=ext-0001; remote applied exactly once"
     },
     {
       "name": "daemon-restart-stdout-shows-reconcile-action",
@@ -771,7 +771,7 @@
     {
       "name": "daemon-restart-lookup-then-retry-records-hit-no-resend",
       "status": "PASS",
-      "detail": "crash exit=1; daemon --once exit=0; effect=SUCCEEDED external=ext-0001 (lookup holds ext-0001); remote applied exactly once, no resend"
+      "detail": "exit=1 signal=null marker=effects:after-call-before-record; daemon --once exit=0; effect=SUCCEEDED external=ext-0001 (lookup holds ext-0001); remote applied exactly once, no resend"
     },
     {
       "name": "daemon-restart-lookup-reconcile-in-daemon-log",
@@ -781,7 +781,7 @@
     {
       "name": "daemon-restart-at-most-once-stays-unknown",
       "status": "PASS",
-      "detail": "remote really holds the action (ext-0001) yet the daemon keeps UNKNOWN and exits 4 — the mode forbids automatic resend; delivered 1x, no second application"
+      "detail": "exit=1 signal=null marker=effects:after-call-before-record; daemon --once exit=4; remote really holds the action (ext-0001) yet the daemon keeps UNKNOWN — the mode forbids automatic resend; delivered 1x, no second application"
     },
     {
       "name": "at-most-once-exits-only-through-recorded-human-reconciliation",
@@ -791,7 +791,7 @@
     {
       "name": "daemon-once-no-upstream-unknown-exit-reflects-state",
       "status": "PASS",
-      "detail": "daemon --once exit=4; effect UNKNOWN in the database, remote delivered 1x, log says UNKNOWN stays UNKNOWN without an upstream"
+      "detail": "exit=1 signal=null marker=effects:after-call-before-record; daemon --once exit=4; effect UNKNOWN in the database, remote delivered 1x, log says UNKNOWN stays UNKNOWN without an upstream"
     },
     {
       "name": "scope-epoch-stored-integer-with-numeric-semantics",
@@ -812,6 +812,21 @@
       "name": "gc-keeps-file-referenced-by-legacy-backslash-row",
       "status": "PASS",
       "detail": "dry-run trashed=0 (legacy backslash ref counts as referenced after normalization); real sweep trashed=0, file still on disk"
+    },
+    {
+      "name": "crash-predicate-accepts-armed-crashpoint-kill",
+      "status": "PASS",
+      "detail": "exit=1 signal=null marker=probe:crashpoint — this platform's real SIGKILL self-kill shape"
+    },
+    {
+      "name": "crash-predicate-rejects-uncaught-exception-death",
+      "status": "PASS",
+      "detail": "exit=1 signal=null marker=none — same exit shape as the kill, no marker, rejected"
+    },
+    {
+      "name": "crash-predicate-rejects-clean-exit",
+      "status": "PASS",
+      "detail": "clean exit 0 while armed is not a crash"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"
