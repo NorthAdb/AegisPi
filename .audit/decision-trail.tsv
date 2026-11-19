@@ -28,6 +28,8 @@ date	id	decision	rationale	evidence	result
 2026-11-19	D-24	启动恢复做成带 action log 的固定十步序列（06 §9 顺序），任何硬失败停在出错步并转只读；孤儿 job 的 pid sidecar 文件名做平台净化（Windows 禁冒号）	job/对象/审批各窗口的恢复动作需要单一入口可审计；job id 含 ':' 直接当 Windows 文件名 ENOENT（实测抓出），sanitize 后 start/reap 共用同一派生	旗舰窗恢复实测 SUBMITTING→UNKNOWN+预算 CHARGED_BOUND 校准+二次运行幂等；孤儿进程真实存活后被杀；对象文件缺失 → 只读、执行不开放	daemon 入口（步骤 10）按同序列接线：锁→完整性→迁移前备份→迁移→恢复→循环
 2026-11-19	D-25	recall.sql 内嵌为唯一实现并加「与包文件结构一致」门（逐行空白归一比较）；查询编译器逐词引号限 8 词；<3 字符走同一 allowed 集上的有界 LIKE 回退	01 §5「唯一召回查询见 recall.sql，不再复制不同版本」但运行时必须有实现；字节级比较会被行首缩进差误伤，结构一致才是安全属性；LIKE 回退按 01 §5 单独验收、不冒称 RRF	45 条无权候选零泄漏、12 条合法全保留；三触发器增删改实测；撤权单事务升 acl_version+authorization_revision；包缺失或漂移即红	acl suite 14/14；真实监控范围仍只盯 NorthAdb/AegisPi（基线第 1 句）
 2026-11-19	D-26	daemon 入口落地：锁→完整性→迁移前备份（VACUUM INTO）→迁移→startupRecovery→循环；循环 tick 顺序为清扫→Timer→PENDING inbox 补派单→claim+fake worker（预算门禁走真路径）→（仅显式 --fake-upstream 时）effect 派发→outbox 报告	06 §9 启动顺序与「不依赖内存唤醒」要求补派单扫描；Phase 2 无真实上游适配器，默认循环如实报「无上游、READY 保持持久化」而非假装派发	--check 退出 0/3、双实例退出 1、--once 冒烟 timer→SETTLED 全链实测	真实 ingress/上游适配器与 Agent 执行是 Phase 3 范围，入口保持显式缝
+2026-11-19	D-27	最小控制台 = 本机只读诊断：hono + node:http 适配（不新增 @hono/node-server 依赖），Bearer token 本地文件、Host/Origin 同源校验、后阶段端点 501 不造假数据、只读模式仅诊断可达；id 路径段需 encodeURIComponent（自然键自带转义，URL 会二次解码）	04 §4「所有端点需已认证会话 + Origin/Host 验证」「尚未实现端点返回明确不可用」；AGENTS「新增依赖先审必要性」——40 行适配器优于新依赖	实测：401/403/501/503 与六个诊断端点全部断言；budget 20/20、acl 14/14 回归绿	审批卡、取消/授权/预算台与四大终态视图明确不属本阶段
+
 
 
 

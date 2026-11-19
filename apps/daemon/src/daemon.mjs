@@ -32,6 +32,12 @@ import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
 import { insertObjectRow } from "./objects.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { dispatchEffect } from "./effects.mjs";
+import {
+  createConsoleApp,
+  serveConsole,
+  ensureConsoleToken,
+  CONSOLE_DEFAULT_PORT,
+} from "./console/api.mjs";
 
 export async function main(argv = process.argv.slice(2)) {
   const args = new Set(argv.filter((a) => a.startsWith("--")));
@@ -40,6 +46,8 @@ export async function main(argv = process.argv.slice(2)) {
   const fakeUpstream = args.has("--fake-upstream");
 
   const config = loadDaemonConfig();
+  const portFlag = argv.find((a) => a.startsWith("--port="));
+  const consolePort = portFlag ? Number(portFlag.slice("--port=".length)) : CONSOLE_DEFAULT_PORT;
 
   mkdirSync(join(dataDir, "db"), { recursive: true });
   const lock = acquireDaemonLock(dataDir);
@@ -85,18 +93,37 @@ export async function main(argv = process.argv.slice(2)) {
     console.error(`recovery failed at ${recovery.failedStep}; read-only diagnostics only`);
   }
 
-  // The console (Phase 2 minimal diagnostics) always starts in step 11's
-  // wiring; this entry leaves the seam explicit.
+  // The console (Phase 2 minimal diagnostics) starts in EVERY mode: open
+  // mode serves the full read-only surface, read-only mode keeps exactly the
+  // diagnostics reachable and everything else answers 503.
+  const { token } = ensureConsoleToken(dataDir);
+  const consoleApp = createConsoleApp(db, { recovery, mode: recovery.mode, token, port: consolePort });
+  const served = await serveConsole(consoleApp, { port: consolePort });
+  console.log(`console: ${served.bind}:${served.port} (auth: local bearer token; diagnostics${recovery.mode === "open" ? "" : " only"})`);
+
   if (args.has("--check")) {
     console.log(`check: mode=${recovery.mode} steps=${recovery.actions.length} ${recovery.mode === "open" ? "GREEN" : "RED"}`);
+    served.server.close();
     lock.release();
     process.exit(recovery.mode === "open" ? 0 : 3);
   }
 
   if (recovery.mode !== "open") {
-    console.error("daemon loop not started: recovery is read-only");
-    lock.release();
-    process.exit(3);
+    console.error("daemon loop not started: recovery is read-only, the console serves diagnostics only");
+    let staying = true;
+    process.on("SIGINT", () => {
+      staying = false;
+    });
+    const hold = () => {
+      if (!staying) {
+        served.server.close();
+        lock.release();
+        process.exit(3);
+      }
+      setTimeout(hold, 1000);
+    };
+    hold();
+    return 3;
   }
 
   const ledger = createBudgetLedger(db, {

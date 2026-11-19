@@ -3,7 +3,7 @@
 // daemon modules against real SQLite files under workspace-state/phase2/.
 // Crash-window cases (06 section 9) kill real child processes and recover.
 
-import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport, repoRoot, spawnNode } from "../lib/harness.mjs";
 import { loadCanonicalSchema, migrate, verifySchema, SchemaSourceError, SchemaDriftError } from "../../../apps/daemon/src/db/migrate.mjs";
@@ -2399,6 +2399,157 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
         taskRow.result_class === "not_applicable" && deliveryRow.state === "DONE" &&
         inboxStates.every((r) => r.state === "DONE") && reservation.state === "SETTLED",
       `exit=${done.code}; timer=${timerState} task=${taskRow.state}/${taskRow.result_class} delivery=${deliveryRow.state} reservation=${reservation.state}`,
+    );
+  }
+}
+
+// --------------------------------------------------------- case: local console
+{
+  const canonical = loadCanonicalSchema();
+
+  // Open-mode console: settled state from a real daemon run, served on a
+  // local port, reachable only with the local bearer token.
+  {
+    const ws = makeWorkspace("daemon-console-open");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const seedDb = openDatabase(join(ws.stateDir, "db", "aegis.db"));
+    migrate(seedDb, canonical);
+    const seedNow = Date.now();
+    const ing = receiveEvent(seedDb, ws.stateDir, {
+      now: seedNow,
+      source: "telegram",
+      sourceEventId: "evt-console-1",
+      principal: { platform: "telegram", subject: "6101" },
+      scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+      threadKey: "t1",
+      priority: 5,
+      policyVersion: "pv1",
+      payload: "console smoke task",
+      verdict: "ADMIT",
+    });
+    const inbox = seedDb.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    createTimer(seedDb, {
+      id: "tmr:console-smoke",
+      scopeId: inbox.scope_id,
+      principalId: inbox.principal_id,
+      scopeEpoch: 1,
+      threadKey: "t1",
+      condition: { type: "none" },
+      dueAt: seedNow,
+      recurrence: null,
+      payloadObjectId: inbox.payload_object_id,
+      now: seedNow,
+    });
+    seedDb.close();
+    const drain = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`,
+    ]);
+    const drainDone = await drain.done;
+    const daemon = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      `--data-dir=${ws.stateDir}`, "--port=4390",
+    ]);
+    let ready = false;
+    for (let i = 0; i < 100 && !ready; i += 1) {
+      ready = daemon.stdout.includes("console: 127.0.0.1:4390");
+      if (!ready) await new Promise((r) => setTimeout(r, 100));
+    }
+    const token = readFileSync(join(ws.stateDir, "console", "token"), "utf8").trim();
+    const auth = { authorization: `Bearer ${token}` };
+    const health = await fetch("http://127.0.0.1:4390/api/health", { headers: auth });
+    const healthBody = await health.json();
+    const snapshot = await fetch("http://127.0.0.1:4390/api/snapshot", { headers: auth });
+    const snapshotBody = await snapshot.json();
+    const tasks = await fetch("http://127.0.0.1:4390/api/tasks", { headers: auth });
+    const tasksBody = await tasks.json();
+    const taskId = tasksBody.tasks[0]?.id;
+    const taskDetail = await fetch(`http://127.0.0.1:4390/api/tasks/${encodeURIComponent(taskId)}`, { headers: auth });
+    const taskDetailBody = await taskDetail.json();
+    const checkpoints = await fetch(`http://127.0.0.1:4390/api/tasks/${encodeURIComponent(taskId)}/checkpoints`, { headers: auth });
+    const notifications = await fetch("http://127.0.0.1:4390/api/notifications", { headers: auth });
+    const recoveryApi = await fetch("http://127.0.0.1:4390/api/recovery", { headers: auth });
+    const recoveryBody = await recoveryApi.json();
+    const unauth = await fetch("http://127.0.0.1:4390/api/snapshot");
+    const wrongToken = await fetch("http://127.0.0.1:4390/api/snapshot", { headers: { authorization: "Bearer nope" } });
+    const notImplemented = await fetch("http://127.0.0.1:4390/api/approvals/x/decide", {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ decision: "approve" }),
+    });
+    const notImplementedBody = await notImplemented.json();
+    const crossOrigin = await fetch("http://127.0.0.1:4390/api/snapshot", {
+      headers: { ...auth, origin: "http://evil.example" },
+    });
+    await killHard(daemon.child);
+    await daemon.done;
+    suite.check(
+      "console-serves-authenticated-local-surface",
+      ready && drainDone.code === 0 && health.status === 200 && healthBody.mode === "open" &&
+        snapshot.status === 200 && snapshotBody.overview.tasksByState.some((r) => r.state === "SUCCEEDED" && r.c >= 1) &&
+        tasks.status === 200 && taskDetail.status === 200 &&
+        Array.isArray(taskDetailBody.attempts) && taskDetailBody.attempts.length >= 1 &&
+        checkpoints.status === 200 && notifications.status === 200 && recoveryBody.mode === "open",
+      `health=${health.status} snapshot tasks SUCCEEDED=1, task detail attempts=${taskDetailBody.attempts.length}, recovery mode=${recoveryBody.mode}`,
+    );
+    suite.check(
+      "console-refuses-unauthenticated-and-cross-origin",
+      unauth.status === 401 && wrongToken.status === 401 && crossOrigin.status === 403,
+      `no token=${unauth.status}, wrong token=${wrongToken.status}, cross origin=${crossOrigin.status}`,
+    );
+    suite.check(
+      "later-phase-endpoints-answer-explicit-not-implemented",
+      notImplemented.status === 501 && notImplementedBody.code === "not_implemented_in_phase2",
+      `approval decide -> ${notImplemented.status} ${notImplementedBody.code}; no fake data`,
+    );
+  }
+
+  // Read-only console: recovery failed, only diagnostics answer; everything
+  // else is 503.
+  {
+    const ws = makeWorkspace("daemon-console-readonly");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, canonical);
+    const stored = putObjectContent(ws.stateDir, "console-readonly-reference");
+    db.prepare("INSERT OR IGNORE INTO principals(id, platform, platform_subject) VALUES ('prn:web:1','web','1')").run();
+    db.prepare(
+      "INSERT OR IGNORE INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused) VALUES ('scp:dm:web:1','prn:web:1','owner_dm','dm:web:1','web','1',NULL,1,1,'pv1',0)",
+    ).run();
+    insertObjectRow(db, {
+      scopeId: "scp:dm:web:1",
+      kind: "task_result",
+      sourceUri: "test",
+      sourceActor: "host",
+      content: "console-readonly-reference",
+      contentHash: stored.contentHash,
+      storageRef: stored.storageRef,
+      observedAt: 1797500000000,
+      requiredScopeIds: ["scp:dm:web:1"],
+    });
+    rmSync(join(ws.stateDir, ...stored.storageRef.split("/")), { force: true });
+    db.close();
+
+    const daemon = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      `--data-dir=${ws.stateDir}`, "--port=4391",
+    ]);
+    let ready = false;
+    for (let i = 0; i < 100 && !ready; i += 1) {
+      ready = daemon.stdout.includes("console: 127.0.0.1:4391");
+      if (!ready) await new Promise((r) => setTimeout(r, 100));
+    }
+    const token = readFileSync(join(ws.stateDir, "console", "token"), "utf8").trim();
+    const auth = { authorization: `Bearer ${token}` };
+    const recoveryApi = await fetch("http://127.0.0.1:4391/api/recovery", { headers: auth });
+    const recoveryBody = await recoveryApi.json();
+    const snapshot = await fetch("http://127.0.0.1:4391/api/snapshot", { headers: auth });
+    const snapshotBody = await snapshot.json();
+    const loopNeverRan = daemon.stdout.includes("daemon: open") === false;
+    await killHard(daemon.child);
+    await daemon.done;
+    suite.check(
+      "readonly-mode-serves-diagnostics-only",
+      ready && recoveryApi.status === 200 && recoveryBody.failedStep === "object-references" &&
+        snapshot.status === 503 && snapshotBody.code === "read_only_maintenance" && loopNeverRan,
+      `recovery 200 (failedStep=${recoveryBody.failedStep}); snapshot ${snapshot.status} ${snapshotBody.code}; execution loop never started`,
     );
   }
 }
