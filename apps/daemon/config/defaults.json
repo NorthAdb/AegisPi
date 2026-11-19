@@ -29,5 +29,27 @@
     "$evidence": "Pi 1.5.2 内置目录 node_modules/@earendil-works/pi-ai/dist/providers/data/deepseek.json：deepseek-flash（显示名 DeepSeek V4.1 Flash，reasoning，thinkingLevelMap 含 high）。最小推理契约待 DeepSeek API key 安全录入后执行（Phase 1 收口项）。"
   },
   "time": { "timezoneIANA": "Asia/Hong_Kong", "epochUnit": "unixMilliseconds" },
-  "sqlite": { "driver": "node:sqlite", "bundledSqlite": "3.54.1", "journalMode": "WAL", "synchronous": "FULL" }
+  "sqlite": { "driver": "node:sqlite", "bundledSqlite": "3.54.1", "journalMode": "WAL", "synchronous": "FULL" },
+  "policy": {
+    "$comment": "宿主策略开关（02 §4）。allowRealExternalWrites 保持 false：真实外部写在主人显式授权前失败关闭；Phase 3 的外部写测试只走 --fake-upstream 测试缝。",
+    "allowRealExternalWrites": false
+  },
+  "adapters": {
+    "$comment": "宿主适配器部署值（02 §4）：固定发送身份与授权白名单。空数组 = 适配器层不做额外白名单限制（形状校验与审批门禁仍然生效）；主人授权真实 scope 后再填入。",
+    "fixedSendingIdentity": "aegispi@local",
+    "allowedRecipients": [],
+    "allowedRepos": [],
+    "allowedBranches": []
+  },
+  "disk": {
+    "$comment": "磁盘水位阈值（06 §10：常开前必须有实测水位告警）。warn 阻断新离线 job；critical 转只读诊断。单位 GiB（字节换算在代码内）。",
+    "warnFreeGiB": 20,
+    "criticalFreeGiB": 10
+  },
+  "backup": {
+    "$comment": "一致性备份维护窗口（Asia/Hong_Kong，小时区间）与保留天数。manifest 密钥经凭据槽位 backup.manifest 提供，未配置则按失败关闭跳过并如实记录。",
+    "windowStartHour": 4,
+    "windowEndHour": 5,
+    "retentionDays": 14
+  }
 }

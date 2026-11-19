@@ -275,7 +275,7 @@ function hashOfActionJson(actionJson) {
 // The dispatcher. One short transaction re-checks everything and CASes
 // READY -> SUBMITTING; the upstream call happens after COMMIT, outside any
 // SQLite transaction.
-export function dispatchEffect(db, upstream, { effectId, now, precondition = null, label = "dispatcher", submitMode = undefined }) {
+export function dispatchEffect(db, upstream, { effectId, now, precondition = null, label = "dispatcher", submitMode = undefined, reservationId = null }) {
   let cas;
   cas = withTx(db, () => {
     const e = db.prepare("SELECT * FROM effects WHERE id=?").get(effectId);
@@ -345,6 +345,10 @@ export function dispatchEffect(db, upstream, { effectId, now, precondition = nul
     // Fault-injection seam for the fake remote only: real adapters ignore
     // an unset mode and behave like themselves.
     mode: submitMode,
+    // Chargeable dispatches carry their live reservation id; the adapter
+    // upstream refuses chargeable operations without one (06 section 8).
+    reservationId,
+    effectId,
   });
   // Remote may have succeeded here while the local record does not exist
   // yet: the 06 crash row "远端已成功、本地未记账".
@@ -725,4 +729,235 @@ export function cancelTask(db, { taskId, now, actorId = null }) {
   const task = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(taskId);
   if (!task) throw new EffectError(`task ${taskId} not found`);
   return cancelScope(db, { scopeId: task.scope_id, now, actorId, onlyTaskId: taskId });
+}
+
+// ---------------------------------------------------------------------------
+// Revision and HEAD-change re-proposal (06 section 5: "编辑正文、变更附件、
+// HEAD变化、过期、策略或ACL变化、Task换attempt，都使旧审批INVALIDATED或
+// EXPIRED。产生新effect、business_key版本和新审批，不修改原action_json").
+// Both paths mint a NEW effect with a NEW business_key version and a NEW
+// approval; the original action_json and its history are never edited.
+
+// business_key decoding: every component escapes ':' to %3A before joining,
+// so the ':' separator splits the key into exactly three parts. The parts
+// are ESCAPED — reuse through proposeEffect requires unescaping first (the
+// proposal re-escapes), or the new action would carry double-escaped keys.
+export function splitBusinessKey(businessKey) {
+  const parts = String(businessKey).split(":");
+  if (parts.length !== 3) {
+    throw new EffectError(`business_key ${businessKey} does not have the three-part 06 section 1.1 shape`);
+  }
+  return { effectType: parts[0], domainKey: parts[1], naturalKey: parts[2] };
+}
+
+export function unescapeKeyComponent(component) {
+  try {
+    return decodeURIComponent(component);
+  } catch {
+    throw new EffectError(`business_key component ${component} is not a valid escape sequence`);
+  }
+}
+
+// canonicalActionJson spreads operationIntent.extra at the TOP level of the
+// action, so recovering the extra fields means "every key that is not one of
+// the canonical fields".
+const CANONICAL_ACTION_FIELDS = new Set([
+  "schema_version",
+  "principal",
+  "sending_identity",
+  "scope",
+  "domain_key",
+  "target_resource",
+  "operation",
+  "content_hash",
+  "attachment_hash",
+  "expected_head",
+  "attempt_id",
+  "proposal_fence",
+  "scope_epoch",
+  "authorization_revision",
+  "policy_version",
+  "expires_at",
+  "evidence_manifest_hash",
+]);
+
+export function extraFieldsOfAction(action) {
+  const extra = {};
+  for (const key of Object.keys(action)) {
+    if (!CANONICAL_ACTION_FIELDS.has(key)) {
+      extra[key] = action[key];
+    }
+  }
+  return extra;
+}
+
+function nextNaturalKeyVersion(db, { effectType, domainKey, naturalKey }) {
+  let candidate = `${naturalKey}~rev1`;
+  let n = 1;
+  while (db.prepare("SELECT id FROM effects WHERE business_key=?").get(encodeBusinessKey(effectType, domainKey, candidate))) {
+    n += 1;
+    candidate = `${naturalKey}~rev${n}`;
+  }
+  return candidate;
+}
+
+// Edit path (04 section 2 "编辑创建新动作和新审批，旧卡失效"): the old card is
+// invalidated, the old effect cancelled, and a fresh approval card is minted
+// for the edited intent. Two transactions: invalidate-then-propose. A crash
+// between them leaves the old card dead and NO new card — the human simply
+// proposes again; nothing half-approved can ever submit.
+export function reviseEffect(db, stateDir, {
+  now,
+  effectId,
+  editedIntent, // same shape as proposeEffect's operationIntent
+  approverPrincipalId,
+  actorId = null,
+  expiresAt,
+}) {
+  const old = db.prepare("SELECT * FROM effects WHERE id=?").get(effectId);
+  if (!old) throw new EffectError(`effect ${effectId} not found`);
+  if (old.state !== "WAITING_APPROVAL") {
+    throw new EffectError(`effect ${effectId} is ${old.state}; only a WAITING_APPROVAL effect can be revised`);
+  }
+  const approvalId = approvalIdFor(effectId);
+  const parts = splitBusinessKey(old.business_key);
+  const domainKey = unescapeKeyComponent(parts.domainKey);
+  const naturalKey = unescapeKeyComponent(parts.naturalKey);
+  const newNaturalKey = nextNaturalKeyVersion(db, {
+    effectType: unescapeKeyComponent(parts.effectType),
+    domainKey,
+    naturalKey,
+  });
+  const invalidation = invalidateApproval(db, { approvalId, reason: "revised by editor", now });
+  if (invalidation.invalidated !== true) {
+    throw new EffectError(`approval ${approvalId} could not be invalidated (${invalidation.state}); refusing to mint a second live card`);
+  }
+  db.prepare(
+    "UPDATE effects SET state='CANCELLED', last_error='superseded by revision', updated_at=? WHERE id=? AND state='WAITING_APPROVAL'",
+  ).run(now, effectId);
+  writeAudit(db, {
+    code: "effect_revised",
+    taskId: old.task_id,
+    actorId,
+    details: { old_effect_id: effectId, new_natural_key: newNaturalKey, reason: "editor revision" },
+    now,
+  });
+  const proposed = proposeEffect(db, stateDir, {
+    now,
+    taskId: old.task_id,
+    attemptId: old.attempt_id,
+    effectType: unescapeKeyComponent(parts.effectType),
+    domainKey,
+    naturalKey: newNaturalKey,
+    operationIntent: editedIntent,
+    retryMode: old.retry_mode,
+    provider: old.provider,
+    resource: old.resource,
+    requiresApproval: true,
+    approverPrincipalId,
+    expiresAt,
+  });
+  return {
+    oldEffectId: effectId,
+    oldApprovalId: approvalId,
+    newEffectId: proposed.effectId,
+    newApprovalId: proposed.approvalId,
+    newApprovalNonce: proposed.approvalNonce,
+    newActionHash: proposed.actionHash,
+    newBusinessKey: proposed.businessKey,
+  };
+}
+
+// HEAD-change path (04 section 2 "HEAD变化返回需重审"): the dispatcher found
+// the target at a different head than the approved action pinned. The old
+// effect is cancelled, and a NEW card is minted against the CURRENT head so
+// the human re-approves with fresh facts. The consumed old approval stays in
+// history; the task parks again for the new one.
+export function reproposeHeadChanged(db, stateDir, {
+  now,
+  effectId,
+  currentHead,
+  actorId = null,
+  expiresAt,
+}) {
+  if (typeof currentHead !== "string" || currentHead.length === 0) {
+    throw new EffectError("reproposeHeadChanged needs the real current head from the transport");
+  }
+  const old = db.prepare("SELECT * FROM effects WHERE id=?").get(effectId);
+  if (!old) throw new EffectError(`effect ${effectId} not found`);
+  if (old.state !== "READY") {
+    throw new EffectError(`effect ${effectId} is ${old.state}; only a READY effect can be re-proposed after a head change`);
+  }
+  const parts = splitBusinessKey(old.business_key);
+  const domainKey = unescapeKeyComponent(parts.domainKey);
+  const oldAction = JSON.parse(old.action_json);
+  const newNaturalKey = nextNaturalKeyVersion(db, {
+    effectType: unescapeKeyComponent(parts.effectType),
+    domainKey,
+    naturalKey: unescapeKeyComponent(parts.naturalKey),
+  });
+  const changed = db.prepare(
+    "UPDATE effects SET state='CANCELLED', last_error='head_changed', updated_at=? WHERE id=? AND state='READY'",
+  ).run(now, effectId).changes;
+  if (changed !== 1) {
+    throw new EffectError(`effect ${effectId} left READY before the head-change cancellation`);
+  }
+  const taskParked = db
+    .prepare("UPDATE tasks SET state='WAITING_APPROVAL', updated_at=? WHERE id=? AND state='WAITING_EFFECT'")
+    .run(now, old.task_id).changes;
+  writeAudit(db, {
+    code: "effect_head_changed_reproposed",
+    taskId: old.task_id,
+    actorId,
+    details: {
+      old_effect_id: effectId,
+      pinned_head: oldAction.expected_head,
+      current_head: currentHead,
+      new_natural_key: newNaturalKey,
+      task_reparked: taskParked === 1,
+    },
+    now,
+  });
+  writeStreamEvent(db, {
+    scopeId: old.scope_id,
+    eventType: "approval_changed",
+    entityId: `effect:${effectId}`,
+    entityVersion: 2,
+    payload: { state: "CANCELLED", reason: "head_changed", current_head: currentHead },
+    now,
+  });
+  const proposed = proposeEffect(db, stateDir, {
+    now,
+    taskId: old.task_id,
+    attemptId: old.attempt_id,
+    effectType: unescapeKeyComponent(parts.effectType),
+    domainKey,
+    naturalKey: newNaturalKey,
+    operationIntent: {
+      targetResource: oldAction.target_resource,
+      operation: oldAction.operation,
+      contentHash: oldAction.content_hash,
+      attachmentHash: oldAction.attachment_hash ?? null,
+      expectedHead: currentHead,
+      evidenceManifestHash: oldAction.evidence_manifest_hash,
+      // canonicalActionJson spreads extra at the top level, so the recovery
+      // is "everything that is not a canonical field".
+      extra: { ...extraFieldsOfAction(oldAction), reproposed_from: effectId },
+    },
+    retryMode: old.retry_mode,
+    provider: old.provider,
+    resource: old.resource,
+    requiresApproval: true,
+    approverPrincipalId: db.prepare("SELECT approver_id FROM approvals WHERE effect_id=?").get(effectId)?.approver_id,
+    expiresAt,
+  });
+  return {
+    oldEffectId: effectId,
+    newEffectId: proposed.effectId,
+    newApprovalId: proposed.approvalId,
+    newApprovalNonce: proposed.approvalNonce,
+    newActionHash: proposed.actionHash,
+    pinnedHead: currentHead,
+    taskReparked: taskParked === 1,
+  };
 }

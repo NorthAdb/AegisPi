@@ -68,6 +68,22 @@ export function createFakeRemote(stateDir, { label = "fake-remote" } = {}) {
       }
       return { found: true, externalId: hit[1].externalId, strong: true };
     },
+    // Head state for dispatcher precondition tests (06 section 6: the CAS
+    // transaction re-checks the target resource precondition). Tests mutate
+    // this to simulate HEAD drift between approval and dispatch.
+    setHead(targetResource, head) {
+      state.heads = state.heads ?? {};
+      state.heads[targetResource] = head;
+      persist();
+    },
+    lookupHead({ targetResource }) {
+      state.heads = state.heads ?? {};
+      const head = state.heads[targetResource];
+      if (head === undefined) {
+        return { ok: false, reason: `no head recorded for ${targetResource}` };
+      }
+      return { ok: true, head };
+    },
     appliedCount(businessKey) {
       return state.deliveryCounts[businessKey] ?? 0;
     },

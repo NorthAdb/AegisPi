@@ -32,7 +32,11 @@ import { expireApprovals } from "./approvals.mjs";
 import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
 import { insertObjectRow } from "./objects.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
-import { dispatchEffect, autoRecoverUnknown } from "./effects.mjs";
+import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
+import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
+import { createContainerExecutor } from "./container-executor.mjs";
+import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
+import { consistencyBackup, insideMaintenanceWindow } from "./db/backup-window.mjs";
 import {
   createConsoleApp,
   serveConsole,
@@ -86,27 +90,48 @@ export async function main(argv = process.argv.slice(2)) {
   for (const a of recovery.actions) {
     console.log(`recovery ${a.ok ? "ok " : "FAIL"} ${a.step}: ${a.detail}`);
   }
+  // Disk watermark (06 section 10): a critically full disk is a recovery-level
+  // failure — only read-only diagnostics open, containers never auto-start.
+  const diskNow = diskWatermark(dataDir, {
+    warnFreeBytes: config.disk.warnFreeBytes,
+    criticalFreeBytes: config.disk.criticalFreeBytes,
+  });
+  const openMode = recovery.mode === "open" && diskNow.level !== "critical";
+  if (diskNow.level !== "ok") {
+    console.error(`disk: level=${diskNow.level} free=${Math.round(diskNow.freeBytes / 1024 / 1024 / 1024)}GiB ratio=${diskNow.freeRatio}`);
+  }
+  if (recovery.mode === "open" && diskNow.level === "critical") {
+    console.error("disk: CRITICAL watermark; opening read-only diagnostics only");
+  }
   if (recovery.mode !== "open") {
     console.error(`recovery failed at ${recovery.failedStep}; read-only diagnostics only`);
   }
 
-  // The console (Phase 2 minimal diagnostics) starts in EVERY mode: open
-  // mode serves the full read-only surface, read-only mode keeps exactly the
-  // diagnostics reachable and everything else answers 503.
+  // The console (Phase 2 minimal diagnostics + Phase 3 approval/cancel/
+  // authorize/budget surfaces) starts in EVERY mode: open mode serves the
+  // full surface, read-only mode keeps exactly the diagnostics reachable
+  // and everything else answers 503.
   const { token } = ensureConsoleToken(dataDir);
-  const consoleApp = createConsoleApp(db, { recovery, mode: recovery.mode, token, port: consolePort });
+  const consoleApp = createConsoleApp(db, {
+    recovery,
+    mode: openMode ? "open" : recovery.mode,
+    token,
+    port: consolePort,
+    stateDir: dataDir,
+    ownerPrincipalId: "prn:local:owner",
+  });
   const served = await serveConsole(consoleApp, { port: consolePort });
-  console.log(`console: ${served.bind}:${served.port} (auth: local bearer token; diagnostics${recovery.mode === "open" ? "" : " only"})`);
+  console.log(`console: ${served.bind}:${served.port} (auth: local bearer token; diagnostics${openMode ? "" : " only"})`);
 
   if (args.has("--check")) {
-    console.log(`check: mode=${recovery.mode} steps=${recovery.actions.length} ${recovery.mode === "open" ? "GREEN" : "RED"}`);
+    console.log(`check: mode=${openMode ? "open" : "read-only"} steps=${recovery.actions.length} disk=${diskNow.level} ${openMode ? "GREEN" : "RED"}`);
     served.server.close();
     lock.release();
-    process.exit(recovery.mode === "open" ? 0 : 3);
+    process.exit(openMode ? 0 : 3);
   }
 
-  if (recovery.mode !== "open") {
-    console.error("daemon loop not started: recovery is read-only, the console serves diagnostics only");
+  if (!openMode) {
+    console.error("daemon loop not started: recovery or disk watermark keeps the daemon read-only; the console serves diagnostics only");
     let staying = true;
     process.on("SIGINT", () => {
       staying = false;
@@ -130,9 +155,67 @@ export async function main(argv = process.argv.slice(2)) {
     timeZone: config.timezone,
   });
   const upstream = fakeUpstream ? createFakeRemote(dataDir, { label: "daemon-fake-upstream" }) : null;
+  // The production dispatch path is the ADAPTER upstream, never the raw
+  // transport: the trusted registry gates every operation (unknown operations
+  // refuse; real external writes stay fail-closed; chargeable submits need a
+  // live reservation; adapter-owned templates, never model-assembled URLs).
+  const adapterUpstream = upstream
+    ? createAdapterUpstream(db, {
+        baseUpstream: upstream,
+        transportKind: "fake", // the declared test seam, set only under --fake-upstream
+        policy: { allowRealExternalWrites: config.policy.allowRealExternalWrites },
+        config: {
+          fixedSendingIdentity: config.adapters.fixedSendingIdentity,
+          allowedRecipients: config.adapters.allowedRecipients,
+          allowedRepos: config.adapters.allowedRepos,
+          allowedBranches: config.adapters.allowedBranches,
+        },
+      })
+    : null;
+
+  // Optional REAL container execution (Phase 3): the executor only exists
+  // when the operator passes a digest-pinned image reference. Without the
+  // flag the daemon says so honestly — QUEUED jobs stay durable.
+  const executionImageFlag = argv.find((a) => a.startsWith("--execution-image="));
+  let executor = null;
+  if (executionImageFlag) {
+    try {
+      executor = createContainerExecutor(db, {
+        stateDir: dataDir,
+        imageRef: executionImageFlag.slice("--execution-image=".length),
+        quotas: {
+          cpus: config.containerPlaceholders.execution.cpus,
+          memory: `${config.containerPlaceholders.execution.memoryGiB}g`,
+          pids: config.containerPlaceholders.execution.pids,
+          tmpfsSize: `${config.containerPlaceholders.execution.writableDiskGiB}g`,
+        },
+        machineWideMax: config.leases.maxOfflineJobsMachineWide,
+      });
+    } catch (e) {
+      console.error(`execution image flag invalid: ${e.message}`);
+      process.exit(2);
+    }
+  }
+
+  // Watermark level changes stream an alert once per transition; the backup
+  // runs once per window-day when the manifest key is configured.
+  let lastDiskLevel = diskNow.level;
+  let lastBackupDayKey = null;
+  const backupKey = process.env.AEGISPI_BACKUP_MANIFEST_KEY ?? null;
 
   const tick = () => {
     const now = Date.now();
+    // 0. Disk watermark: warn blocks NEW job launches; critical never reaches
+    //    here (startup already opened read-only).
+    const disk = diskWatermark(dataDir, {
+      warnFreeBytes: config.disk.warnFreeBytes,
+      criticalFreeBytes: config.disk.criticalFreeBytes,
+    });
+    if (disk.level !== lastDiskLevel) {
+      recordWatermark(db, { state: disk, previousLevel: lastDiskLevel, now });
+      console.error(`disk: watermark ${lastDiskLevel} -> ${disk.level}`);
+      lastDiskLevel = disk.level;
+    }
     // 1. Sweeps: leases, approvals, stale reminders, expired notifications.
     reapExpiredLeases(db, { now, maxAttempts: 3 });
     expireApprovals(db, { now });
@@ -227,7 +310,7 @@ export async function main(argv = process.argv.slice(2)) {
         .all();
       for (const u of unknowns) {
         try {
-          const action = autoRecoverUnknown(db, upstream, { effectId: u.id, now, backoffMs: 0 });
+          const action = autoRecoverUnknown(db, adapterUpstream, { effectId: u.id, now, backoffMs: 0 });
           if (action.action !== "none") {
             console.log(`reconcile: ${u.id} (${u.retry_mode}) -> ${action.action}`);
           }
@@ -240,8 +323,38 @@ export async function main(argv = process.argv.slice(2)) {
         .all(now);
       for (const e of ready) {
         try {
-          dispatchEffect(db, upstream, { effectId: e.id, now, precondition: () => true });
+          const row = db.prepare("SELECT * FROM effects WHERE id=?").get(e.id);
+          // Head precondition (06 section 6: the CAS transaction re-checks the
+          // target resource precondition) — INSIDE the dispatcher transaction.
+          const precondition = adapterUpstream ? headPrecondition(adapterUpstream, row) : () => true;
+          dispatchEffect(db, adapterUpstream, { effectId: e.id, now, precondition });
         } catch (err) {
+          if (
+            err instanceof AdapterRefused &&
+            err.message.startsWith("head_changed:") &&
+            adapterUpstream
+          ) {
+            // HEAD drifted between approval and dispatch: the old action is
+            // cancelled, a NEW card is minted against the CURRENT head and
+            // the task parks for re-approval (06 section 5: "HEAD变化返回
+            // 需重审"). The human sees fresh facts, never a silent mismatch.
+            const row = db.prepare("SELECT action_json FROM effects WHERE id=?").get(e.id);
+            const target = JSON.parse(row.action_json).target_resource;
+            const head = adapterUpstream.lookupHead({ targetResource: target });
+            if (head.ok) {
+              const out = reproposeHeadChanged(db, dataDir, {
+                now,
+                effectId: e.id,
+                currentHead: head.head,
+                actorId: "daemon-dispatcher",
+                expiresAt: now + 60 * 60 * 1000,
+              });
+              console.log(`dispatcher: ${e.id} head changed -> re-approval ${out.newApprovalId} pinned to ${head.head}`);
+            } else {
+              console.error(`dispatcher: ${e.id} head changed and the transport cannot read the new head; effect stays READY, refusing to submit`);
+            }
+            continue;
+          }
           console.error(`dispatcher refused ${e.id}: ${err.message}`);
         }
       }
@@ -254,6 +367,45 @@ export async function main(argv = process.argv.slice(2)) {
     }
     // 6. Outbox: only a report — delivery status lives in effects.state.
     const due = dueNotifications(db, { now });
+    // 7. Offline container jobs: poll always, launch only while the disk has
+    //    room (the watermark's warn stance blocks NEW workspaces, not
+    //    reaping).
+    if (executor) {
+      const events = executor.tick({ now, allowLaunch: disk.level === "ok" });
+      for (const ev of events) {
+        console.log(`job: ${ev.jobId} -> ${ev.state}`);
+      }
+    } else if (db.prepare("SELECT count(*) c FROM execution_jobs WHERE state='QUEUED'").get().c > 0) {
+      console.error("jobs: QUEUED offline jobs exist but no execution image is wired (--execution-image=<digest ref>); they stay durable");
+    }
+    // 8. Scheduled consistency backup: once per maintenance-window day, and
+    //    ONLY with the manifest key configured — without it the backup would
+    //    be an unsealable promise, so it is skipped with the reason on record.
+    const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: config.backup.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now));
+    const backupWindow = {
+      windowStartHour: config.backup.windowStartHour,
+      windowEndHour: config.backup.windowEndHour,
+      timeZone: config.backup.timeZone,
+    };
+    if (insideMaintenanceWindow(now, backupWindow) && lastBackupDayKey !== dayKey) {
+      if (!backupKey || !/^[0-9a-f]{64}$/.test(backupKey)) {
+        console.error("backup: inside the maintenance window but AEGISPI_BACKUP_MANIFEST_KEY is not configured; the consistency backup is skipped (fail closed, not silently unsealed)");
+      } else {
+        try {
+          const backup = consistencyBackup(db, {
+            stateDir: dataDir,
+            backupsDir: join(dataDir, "backups"),
+            now,
+            manifestKeyHex: backupKey,
+            window: backupWindow,
+          });
+          lastBackupDayKey = dayKey;
+          console.log(`backup: consistency snapshot ${backup.path} (${backup.bytes} bytes, manifest sealed, ledger entries=${backup.entries})`);
+        } catch (e) {
+          console.error(`backup: consistency backup refused: ${e.message}`);
+        }
+      }
+    }
     if (timers.fired.length > 0 || pending.length > 0 || claim || due.length > 0) {
       console.log(
         `tick: timers=${timers.fired.length} dispatched_pending=${pending.length} claimed=${claim ? claim.taskId : "none"} due_notifications=${due.length}`,
@@ -266,6 +418,29 @@ export async function main(argv = process.argv.slice(2)) {
     let rounds = 0;
     while (tick() > 0 && rounds < 20) {
       rounds += 1;
+    }
+    // Offline container jobs are async by nature: a once-run that launched
+    // them WAITS for their completion, bounded by each job's host-enforced
+    // deadline. Never exit --once with a live container behind us.
+    if (executor) {
+      let waited = 0;
+      for (;;) {
+        const outstanding = db
+          .prepare("SELECT count(*) c FROM execution_jobs WHERE state IN ('QUEUED','RUNNING')")
+          .get().c;
+        if (outstanding === 0) break;
+        await new Promise((r) => setTimeout(r, 500));
+        waited += 500;
+        const diskOnce = diskWatermark(dataDir, {
+          warnFreeBytes: config.disk.warnFreeBytes,
+          criticalFreeBytes: config.disk.criticalFreeBytes,
+        });
+        const events = executor.tick({ now: Date.now(), allowLaunch: diskOnce.level === "ok" });
+        for (const ev of events) {
+          console.log(`job: ${ev.jobId} -> ${ev.state}`);
+        }
+      }
+      console.log(`once: waited ${Math.round(waited / 1000)}s for offline jobs to reach terminal state`);
     }
     console.log(`once: ${rounds + 1} tick(s) to drain the durable backlog`);
     // An honest exit code: UNKNOWN effects are committed-but-unresolved

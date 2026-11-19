@@ -53,5 +53,27 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     timezone: defaults.time.timezoneIANA,
     sqlite: { ...defaults.sqlite },
     containerPlaceholders: { ...defaults.containerPlaceholders },
+    // Host adapter policy (02 section 4). Real external writes stay fail
+    // closed until the owner explicitly authorizes them; the allowlists are
+    // deployment values the owner sets when granting real scopes.
+    policy: {
+      allowRealExternalWrites: defaults.policy?.allowRealExternalWrites === true,
+    },
+    adapters: {
+      fixedSendingIdentity: defaults.adapters?.fixedSendingIdentity ?? "aegispi@local",
+      allowedRecipients: defaults.adapters?.allowedRecipients ?? [],
+      allowedRepos: defaults.adapters?.allowedRepos ?? [],
+      allowedBranches: defaults.adapters?.allowedBranches ?? [],
+    },
+    disk: {
+      warnFreeBytes: (defaults.disk?.warnFreeGiB ?? 20) * 1024 * 1024 * 1024,
+      criticalFreeBytes: (defaults.disk?.criticalFreeGiB ?? 10) * 1024 * 1024 * 1024,
+    },
+    backup: {
+      windowStartHour: defaults.backup?.windowStartHour ?? 4,
+      windowEndHour: defaults.backup?.windowEndHour ?? 5,
+      retentionDays: defaults.backup?.retentionDays ?? 14,
+      timeZone: defaults.time?.timezoneIANA ?? "Asia/Hong_Kong",
+    },
   };
 }

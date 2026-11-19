@@ -2495,10 +2495,10 @@ function crashDetail(done, ws) {
     const recoveryBody = await recoveryApi.json();
     const unauth = await fetch("http://127.0.0.1:4390/api/snapshot");
     const wrongToken = await fetch("http://127.0.0.1:4390/api/snapshot", { headers: { authorization: "Bearer nope" } });
-    const notImplemented = await fetch("http://127.0.0.1:4390/api/approvals/x/decide", {
+    const notImplemented = await fetch("http://127.0.0.1:4390/api/replay/jobs", {
       method: "POST",
       headers: { ...auth, "content-type": "application/json" },
-      body: JSON.stringify({ decision: "approve" }),
+      body: JSON.stringify({ taskId }),
     });
     const notImplementedBody = await notImplemented.json();
     const crossOrigin = await fetch("http://127.0.0.1:4390/api/snapshot", {
@@ -2522,8 +2522,8 @@ function crashDetail(done, ws) {
     );
     suite.check(
       "later-phase-endpoints-answer-explicit-not-implemented",
-      notImplemented.status === 501 && notImplementedBody.code === "not_implemented_in_phase2",
-      `approval decide -> ${notImplemented.status} ${notImplementedBody.code}; no fake data`,
+      notImplemented.status === 501 && notImplementedBody.code === "not_implemented_yet",
+      `replay jobs (a later-phase surface) -> ${notImplemented.status} ${notImplementedBody.code}; no fake data`,
     );
   }
 
