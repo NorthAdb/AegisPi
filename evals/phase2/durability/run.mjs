@@ -3,7 +3,7 @@
 // daemon modules against real SQLite files under workspace-state/phase2/.
 // Crash-window cases (06 section 9) kill real child processes and recover.
 
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport, repoRoot, spawnNode } from "../lib/harness.mjs";
 import { loadCanonicalSchema, migrate, verifySchema, SchemaSourceError, SchemaDriftError } from "../../../apps/daemon/src/db/migrate.mjs";
@@ -37,6 +37,8 @@ import {
   dueNotifications,
   expireStaleNotifications,
 } from "../../../apps/daemon/src/outbox.mjs";
+import { startupRecovery } from "../../../apps/daemon/src/recovery.mjs";
+import { killHard } from "../lib/harness.mjs";
 import {
   claimNextTask,
   heartbeat,
@@ -2041,6 +2043,225 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       `crash-${w.name}-recovery-single-event`,
       rerun.fired.length + rerun.skipped.length <= 1 && finalEvents === 1 && finalTimer.state === "FIRED" && finalTimer.occurrence_no === 1,
       `reprocess fired=${rerun.fired.length}; final timer events=1, FIRED occurrence=1`,
+    );
+  }
+}
+
+// ---------------------------------------------------- case: startup recovery
+{
+  const canonical = loadCanonicalSchema();
+
+  // a. The flagship SUBMITTING workspace plus a stale HELD reservation:
+  //    recovery must open, mark SUBMITTING->UNKNOWN, and calibrate budget.
+  {
+    const ws = makeWorkspace("durability-recovery-submitting");
+    const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "effect-crash.mjs");
+    const crashNow = 1796000000000;
+    const proc = spawnNode(scenario, [], {
+      env: {
+        AEGISPI_WS: ws.stateDir,
+        AEGISPI_CRASH_POINT: "effects:after-cas-before-call",
+        AEGISPI_NOW: String(crashNow),
+        AEGISPI_RETRY_MODE: "IDEMPOTENCY_KEY",
+        AEGISPI_FAKE_MODE: "ok",
+      },
+    });
+    const done = await proc.done;
+    // Seed a reservation whose usage never arrived, timed out long ago.
+    const dbSeed = openDatabase(ws.dbPath);
+    const ledger = createBudgetLedger(dbSeed, {});
+    const staleTaskId = dbSeed.prepare("SELECT task_id FROM effects").get().task_id;
+    const taskAcc = ledger.ensureTaskAccount({ taskId: staleTaskId, now: crashNow - 30 * 60 * 1000 }).accountId;
+    const dayAcc = ledger.ensureDayAccount({ now: crashNow - 30 * 60 * 1000 }).accountId;
+    ledger.reserve({
+      requestKey: "recovery:stale-held",
+      taskId: staleTaskId,
+      purpose: "worker",
+      provider: "deepseek",
+      priceVersion: "catalog-v1",
+      upperMicrousd: 2000,
+      accounts: [
+        { accountId: taskAcc, amountMicrousd: 1000 },
+        { accountId: dayAcc, amountMicrousd: 1000 },
+      ],
+      now: crashNow - 30 * 60 * 1000,
+    });
+    dbSeed.close();
+
+    const db = openDatabase(ws.dbPath);
+    const rec = startupRecovery(db, {
+      stateDir: ws.stateDir,
+      canonical,
+      now: crashNow + 60 * 1000,
+      maxAttempts: 3,
+      unknownUsageTimeoutMs: 15 * 60 * 1000,
+    });
+    const unknownStep = rec.actions.find((a) => a.step === "submitting-to-unknown");
+    const budgetStep = rec.actions.find((a) => a.step === "budget-calibrate");
+    const heldAfter = db.prepare("SELECT state FROM budget_reservations WHERE request_key='recovery:stale-held'").get().state;
+    const effectAfter = db.prepare("SELECT state FROM effects").get().state;
+    suite.check(
+      "recovery-flagship-submitting-unknown-and-budget-calibrated",
+      done.code !== 0 && rec.mode === "open" && unknownStep.ok && /UNKNOWN/.test(unknownStep.detail) &&
+        budgetStep.ok && /CHARGED_BOUND/.test(budgetStep.detail) &&
+        effectAfter === "UNKNOWN" && heldAfter === "CHARGED_BOUND",
+      `mode=${rec.mode}; ${unknownStep.detail}; ${budgetStep.detail}; stale reservation=${heldAfter}`,
+    );
+    // Same recovery run twice: idempotent, no double marking.
+    const rec2 = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: crashNow + 120 * 1000, maxAttempts: 3 });
+    const unknownCount = db
+      .prepare("SELECT count(*) c FROM audit_log WHERE code='effect_unknown_after_restart'")
+      .get().c;
+    suite.check(
+      "recovery-idempotent-on-rerun",
+      rec2.mode === "open" && unknownCount === 1,
+      `second recovery run open; unknown-marking audited once (${unknownCount})`,
+    );
+    db.close();
+  }
+
+  // b. Offline job orphan: the fake worker process outlives the killed
+  //    daemon; recovery kills it and marks the job LOST.
+  {
+    const ws = makeWorkspace("durability-recovery-job");
+    const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "job-crash.mjs");
+    const proc = spawnNode(scenario, [], { env: { AEGISPI_WS: ws.stateDir, AEGISPI_NOW: "1796100000000" } });
+    const donePromise = proc.done;
+    // Wait for the ORPHAN line, then SIGKILL the "daemon".
+    let orphanPid = null;
+    for (let i = 0; i < 100 && orphanPid === null; i += 1) {
+      const m = proc.stdout.match(/ORPHAN (\d+)/);
+      if (m) orphanPid = Number(m[1]);
+      else await new Promise((r) => setTimeout(r, 100));
+    }
+    await killHard(proc.child);
+    await donePromise;
+    suite.check(
+      "job-orphan-outlived-killed-daemon",
+      orphanPid !== null && isPidAlive(orphanPid) === true,
+      `fake job pid ${orphanPid} alive after daemon kill`,
+    );
+    const db = openDatabase(ws.dbPath);
+    const rec = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: 1796100010000, maxAttempts: 3 });
+    const jobRow = db.prepare("SELECT state FROM execution_jobs").get();
+    const jobStep = rec.actions.find((a) => a.step === "lost-jobs");
+    const orphanDead = isPidAlive(orphanPid) === false;
+    db.close();
+    suite.check(
+      "recovery-kills-orphan-and-losts-job",
+      rec.mode === "open" && jobRow.state === "LOST" && orphanPid !== null && orphanDead && /LOST/.test(jobStep.detail),
+      `job ${jobRow.state}, orphan killed=${orphanDead}; ${jobStep.detail}`,
+    );
+  }
+
+  // c. Task done, notification not yet dispatched: the durable pair carries
+  //    the work; recovery reports it and the dispatcher completes it.
+  {
+    const ws = makeWorkspace("durability-recovery-outbox");
+    const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "outbox-crash.mjs");
+    const proc = spawnNode(scenario, [], {
+      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: "scenario:outbox-before-send", AEGISPI_NOW: "1796200000000" },
+    });
+    const done = await proc.done;
+    suite.check(
+      "outbox-crash-child-died-before-send",
+      done.code !== 0 && done.stdout.includes("FINALIZED") && !done.stdout.includes("UNREACHABLE"),
+      `exit=${done.code}; finalize committed, send never ran`,
+    );
+    const db = openDatabase(ws.dbPath);
+    const rec = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: 1796200001000, maxAttempts: 3 });
+    const report = rec.actions.find((a) => a.step === "timers-outbox-inbox");
+    const remote = createFakeRemote(ws.stateDir);
+    const effectRow = db.prepare("SELECT id FROM effects WHERE state='READY'").get();
+    const dispatched = dispatchEffect(db, remote, { effectId: effectRow.id, now: 1796200002000, precondition: () => true });
+    db.close();
+    suite.check(
+      "recovery-resumes-pending-notification",
+      rec.mode === "open" && /ready_outbox=1/.test(report.detail) && dispatched.state === "SUCCEEDED",
+      `recovery reported ${report.detail}; dispatcher completed the notification`,
+    );
+  }
+
+  // d. Ingress committed, dispatch never ran: recovery reports the PENDING
+  //    inbox; the router loop resumes from the durable row.
+  {
+    const ws = makeWorkspace("durability-recovery-inbox");
+    const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "ingress-crash.mjs");
+    const proc = spawnNode(scenario, [], {
+      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: "ingress:after-commit", AEGISPI_NOW: "1796300000000" },
+    });
+    await proc.done;
+    const db = openDatabase(ws.dbPath);
+    const rec = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: 1796300001000, maxAttempts: 3 });
+    const report = rec.actions.find((a) => a.step === "timers-outbox-inbox");
+    const inboxRow = db.prepare("SELECT * FROM inbox WHERE state='PENDING'").get();
+    const dispatched = dispatchEventToTask(db, {
+      inboxId: inboxRow.id,
+      dispatchKey: dispatchKeyForInbox(inboxRow),
+      now: 1796300002000,
+      priority: 5,
+      maxSteps: 25,
+      deadlineAt: 1796300002000 + 15 * 60 * 1000,
+      skillSetHash: "skillset-v1",
+    });
+    db.close();
+    suite.check(
+      "recovery-reports-pending-inbox-router-resumes",
+      rec.mode === "open" && /pending\/routed=1\/0/.test(report.detail) && dispatched.created === true,
+      `recovery reported ${report.detail}; router created the task from the durable row`,
+    );
+  }
+
+  // e. A missing activated object file stops recovery in read-only mode.
+  {
+    const ws = makeWorkspace("durability-recovery-readonly");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, canonical);
+    const stored = putObjectContent(ws.stateDir, "referenced-content-recovery");
+    insertObjectRow(db, {
+      scopeId: (() => {
+        db.prepare(
+          "INSERT OR IGNORE INTO principals(id, platform, platform_subject) VALUES ('prn:telegram:1','telegram','1')",
+        ).run();
+        db.prepare(
+          "INSERT OR IGNORE INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused) VALUES ('scp:dm:telegram:1','prn:telegram:1','owner_dm','dm:telegram:1','telegram','1',NULL,1,1,'pv1',0)",
+        ).run();
+        return "scp:dm:telegram:1";
+      })(),
+      kind: "task_result",
+      sourceUri: "test",
+      sourceActor: "host",
+      content: "referenced-content-recovery",
+      contentHash: stored.contentHash,
+      storageRef: stored.storageRef,
+      observedAt: 1796400000000,
+      requiredScopeIds: ["scp:dm:telegram:1"],
+    });
+    rmSync(join(ws.stateDir, ...stored.storageRef.split("/")), { force: true });
+    const rec = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: 1796400001000, maxAttempts: 3 });
+    const openStep = rec.actions.find((a) => a.step === "open-execution");
+    suite.check(
+      "missing-object-file-opens-readonly",
+      rec.mode === "read-only" && rec.failedStep === "object-references" && openStep === undefined,
+      `failedStep=${rec.failedStep}; execution never opened`,
+    );
+    db.close();
+  }
+
+  // f. A healthy database recovers open with every step green.
+  {
+    const ws = makeWorkspace("durability-recovery-healthy");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, canonical);
+    const rec = startupRecovery(db, { stateDir: ws.stateDir, canonical, now: 1796500000000, maxAttempts: 3 });
+    const allOk = rec.actions.every((a) => a.ok === true);
+    db.close();
+    suite.check(
+      "healthy-database-recovers-open",
+      rec.mode === "open" && allOk && rec.actions.length >= 9,
+      `mode=${rec.mode}, ${rec.actions.length} steps all ok`,
     );
   }
 }

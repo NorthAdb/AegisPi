@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T08:36:25.609Z",
+  "generatedAt": "2026-11-19T08:43:07.609Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 124,
+    "pass": 133,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795077359772}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795077756711}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 16924 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 17800 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=16924"
+      "detail": "second acquire refused, heldBy=17800"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 16924"
+      "detail": "stolen, new pid 17800"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:16924:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:17800:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -627,6 +627,51 @@
       "name": "crash-timer-after-fire-commit-recovery-single-event",
       "status": "PASS",
       "detail": "reprocess fired=0; final timer events=1, FIRED occurrence=1"
+    },
+    {
+      "name": "recovery-flagship-submitting-unknown-and-budget-calibrated",
+      "status": "PASS",
+      "detail": "mode=open; efx:notify%3Adm%253atelegram%253a5001%3Av1 -> UNKNOWN (per retry_mode or human); res:recovery:stale-held -> CHARGED_BOUND; stale reservation=CHARGED_BOUND"
+    },
+    {
+      "name": "recovery-idempotent-on-rerun",
+      "status": "PASS",
+      "detail": "second recovery run open; unknown-marking audited once (1)"
+    },
+    {
+      "name": "job-orphan-outlived-killed-daemon",
+      "status": "PASS",
+      "detail": "fake job pid 14316 alive after daemon kill"
+    },
+    {
+      "name": "recovery-kills-orphan-and-losts-job",
+      "status": "PASS",
+      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 14316 killed)"
+    },
+    {
+      "name": "outbox-crash-child-died-before-send",
+      "status": "PASS",
+      "detail": "exit=1; finalize committed, send never ran"
+    },
+    {
+      "name": "recovery-resumes-pending-notification",
+      "status": "PASS",
+      "detail": "recovery reported due_timers=0 ready_outbox=1 inbox pending/routed=0/1 held_reservations=0; dispatcher completed the notification"
+    },
+    {
+      "name": "recovery-reports-pending-inbox-router-resumes",
+      "status": "PASS",
+      "detail": "recovery reported due_timers=0 ready_outbox=0 inbox pending/routed=1/0 held_reservations=0; router created the task from the durable row"
+    },
+    {
+      "name": "missing-object-file-opens-readonly",
+      "status": "PASS",
+      "detail": "failedStep=object-references; execution never opened"
+    },
+    {
+      "name": "healthy-database-recovers-open",
+      "status": "PASS",
+      "detail": "mode=open, 10 steps all ok"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"
