@@ -20,9 +20,17 @@
 - PI-10：脚本化 usage（100/50 token）按 0.3/1.2 价目实算 cost，误差 < 1e-12。
 - 凭据环境变量名：`DEEPSEEK_API_KEY`（docs/providers.md 实测行 36）。
 
-## 最小推理契约（未完成项）
+## 最小推理契约（已完成，2026-11-19 第三轮收口）
 
-规范要求“一次最小推理契约，绑定 DeepSeek Flash High 的真实模型 ID”。前置条件是 DeepSeek API key 经安全方式录入本地（开工检查单准备项 2；不阻塞开工，只影响 Phase 1 收口）。**该项在本次交付时未执行**：没有真实 key 就没有真实推理，不做模拟冒充。收口前补做：真实 `api.deepseek.com` 一次最小 prompt，记录请求/响应/usage/费用与退出码，作为契约证据归档。
+规范要求“一次最小推理契约，绑定 DeepSeek Flash High 的真实模型 ID”。**已执行**：key 经 `.env` 安全录入本地（不入库、不进聊天）后，在锁定 Node 22.23.5 上经 Pi 1.5.2 SDK 对真实 `api.deepseek.com` 完成**一次**最小推理（未做任何 baseUrl 重定向），验证项与实测：
+
+- **模型 ID `deepseek-flash` 被真实 API 接受**：`stopReason=stop`，无错误。
+- **thinking high 被接受**：目录 `thinkingFormat:"deepseek"`（thinkingLevelMap high→high，wire `thinking:{type:"enabled"}`）随请求发出并正常完成；极小 prompt 未回传 reasoning 文本（如实记录，不虚构）。
+- **实际返回**：回复恰为 "OK"。
+- **usage/费用**：input 461 / output 2 / totalTokens 463；目录价（0.3/1.2/0.006 USD/M）实算 cost.total **$0.0001407**；`cost.totalFromProvider=false`（与 PI-10 契约一致，DeepSeek 不回账单总额——usage 是唯一计费依据）。
+- **纪律**：单次调用，失败即停，无重试、未换模型。
+
+复现：`node evals/phase1-closure/verify-deepseek-minimal.mjs`（自带密钥形状预检与输出脱敏；需要自备 `.env` 的 `DEEPSEEK_API_KEY`）。脱敏证据：`docs/phase1/evidence/07-real-connections.md`。
 
 ## 配置落位
 

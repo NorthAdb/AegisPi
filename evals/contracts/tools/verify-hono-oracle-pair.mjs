@@ -1,17 +1,24 @@
-// hono oracle pair self-check: proves the A1/A2 exit-code matrix holds when
-// the checks load hono EXPLICITLY from each snapshot's install directory
-// (argv + createRequire), regardless of where this tool or the check scripts
-// live (audit round 2 N4: cwd-based or script-location-based resolution
-// silently loads the repo's hono 4.13.19 and false-greens the target).
+// hono oracle pair self-check: proves the exit-code matrix holds when the
+// checks load hono EXPLICITLY from each snapshot's install directory, and
+// (audit round 3 N9) that the checks REFUSE to run when hono resolves
+// outside the requested directory. createRequire walks up the tree, so
+// "loaded" is not proof of source: the checks now verify require.resolve
+// lands INSIDE the given dir (exit 2 otherwise) and report the real
+// resolved file path in honoFrom — this tool cross-checks THAT path, never
+// the bare argument string.
 //
 // Default mode: copy the committed snapshot fixture dirs
-// (evals/contracts/fixtures/hono-triage/snapshots/hono-<ver>/) into a temp
-// dir each and `npm ci` them (installs exactly the committed lock, incl. the
+// (evals/contracts/fixtures/hono-triage/snapshots/hono-<ver>/) into temp
+// dirs and `npm ci` them (installs exactly the committed lock, incl. the
 // recorded registry integrity), then run both checks per snapshot.
 // Explicit mode: --baseline=<dir> --target=<dir> to reuse existing installs.
 //
-// Expected matrix — baseline 4.13.19: csrf exit 0, cors exit 0;
-// target 4.12.24: csrf exit 1, cors exit 1. Any deviation exits 1.
+// Matrix — installed: baseline 4.13.19 csrf/cors exit 0/0; target 4.12.24
+// csrf/cors exit 1/1; resolution must be inside each install dir.
+// Un-installed: both COMMITTED snapshot dirs (repo tree, package.json+lock
+// only, no node_modules) must yield exit 2 on both checks — a green exit 0
+// there would mean the repo's own hono 4.13.19 silently took over.
+// Any deviation exits 1.
 //
 // Run (locked Node): node evals/contracts/tools/verify-hono-oracle-pair.mjs
 //   [--baseline=<dir>] [--target=<dir>]
@@ -21,7 +28,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, relative, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +40,15 @@ const LOCKED_NODE = process.env.AEGISPI_NODE_BIN ?? "D:\\AegisPi\\tools\\node-v2
 
 const arg = (name) =>
   process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+
+// Same containment rule the checks enforce: the resolved module path must be
+// strictly inside `dir` (a ".."-prefixed or absolute relative path means it
+// escaped the dir, e.g. up to the repo's node_modules).
+function insideDir(dir, p) {
+  if (!p) return false;
+  const rel = relative(resolve(dir), resolve(p));
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
 
 function npmCi(snapshotName) {
   const tmp = mkdtempSync(join(tmpdir(), "hono-pair-"));
@@ -55,7 +71,8 @@ function npmCi(snapshotName) {
 function runCheck(script, installDir) {
   // Script stays in the repo; cwd is the repo: any resolution that follows
   // cwd or script location would load the repo's hono 4.13.19. The check
-  // must report honoFrom === the requested install dir.
+  // must resolve hono INSIDE the requested install dir and report that real
+  // resolved path in honoFrom (audit round 3 N9).
   const res = spawnSync(LOCKED_NODE, [join(fixtures, "checks", script), installDir], {
     cwd: repoRoot,
     encoding: "utf8",
@@ -64,7 +81,12 @@ function runCheck(script, installDir) {
   try {
     parsed = JSON.parse(res.stdout);
   } catch {}
-  return { exit: res.status, honoFrom: parsed?.honoFrom ?? null, stdout: res.stdout.trim().slice(0, 200) };
+  return {
+    exit: res.status,
+    honoFrom: parsed?.honoFrom ?? null,
+    stderr: (res.stderr ?? "").trim().slice(0, 300),
+    stdout: res.stdout.trim().slice(0, 300),
+  };
 }
 
 const rows = [
@@ -84,14 +106,32 @@ try {
     for (const kind of ["csrf", "cors"]) {
       const script = kind === "csrf" ? "csrf-textping-check.mjs" : "cors-credential-check.mjs";
       const r = runCheck(script, expectedDir);
-      const resolutionOk = r.honoFrom === expectedDir;
+      const resolutionOk = insideDir(expectedDir, r.honoFrom);
       const exitOk = r.exit === row.expect[kind];
       const ok = exitOk && resolutionOk;
       if (!ok) failures++;
       console.log(
-        `[${row.role} hono@${row.version}] ${kind} exit=${r.exit} (expected ${row.expect[kind]}) resolution=${resolutionOk ? "target-dir" : "MISRESOLVED"} ${ok ? "OK" : "FAIL"}`,
+        `[${row.role} hono@${row.version}] ${kind} exit=${r.exit} (expected ${row.expect[kind]}) resolution=${resolutionOk ? "resolved-inside-target" : "ESCAPED-OR-MISSING"} ${ok ? "OK" : "FAIL"}`,
       );
-      if (!ok) console.log(`   honoFrom=${r.honoFrom} expected=${expectedDir}\n   output: ${r.stdout}`);
+      if (!ok) console.log(`   honoFrom=${r.honoFrom} expectedInside=${expectedDir}\n   output: ${r.stdout || r.stderr}`);
+    }
+  }
+
+  // Audit round 3 N9: the COMMITTED snapshot dirs sit inside the repo tree
+  // with no node_modules. Pointing a check at one of them must exit 2 — if
+  // it exited 0 the repo's own hono 4.13.19 walked up and took over, which
+  // is exactly the false green this row exists to catch.
+  for (const snapshot of ["hono-4.13.19", "hono-4.12.24"]) {
+    const uninstalledDir = join(fixtures, "snapshots", snapshot);
+    for (const kind of ["csrf", "cors"]) {
+      const script = kind === "csrf" ? "csrf-textping-check.mjs" : "cors-credential-check.mjs";
+      const r = runCheck(script, uninstalledDir);
+      const ok = r.exit === 2;
+      if (!ok) failures++;
+      console.log(
+        `[uninstalled snapshot ${snapshot}] ${kind} exit=${r.exit} (expected 2 — resolution must refuse) ${ok ? "OK" : "FAIL"}`,
+      );
+      if (!ok) console.log(`   output: ${r.stdout || r.stderr}`);
     }
   }
 } finally {

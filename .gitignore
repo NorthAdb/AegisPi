@@ -3,5 +3,6 @@ workspace-state/
 *.log
 .env
 .env.*
+owner-baseline.local.md
 evals/contracts/fixtures/**/*.labels.json
 evals/contracts/fixtures/**/*.labels.local.json

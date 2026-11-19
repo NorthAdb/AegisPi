@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-19T02:57:32.356Z",
+  "generatedAt": "2026-11-19T05:28:22.087Z",
   "nodeVersion": "v22.23.5",
   "results": [
     {
@@ -299,7 +299,7 @@
         {
           "name": "physical-model-in-catalog",
           "status": "PASS",
-          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:64082"
+          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:56593"
         },
         {
           "name": "dts-two-route-signatures",
@@ -574,7 +574,7 @@
         {
           "name": "entries-cursor",
           "status": "PASS",
-          "detail": "entries=8 leafId=ba49c0b8 after-cursor=0"
+          "detail": "entries=8 leafId=b7f86433 after-cursor=0"
         },
         {
           "name": "new_session",
@@ -657,7 +657,7 @@
         {
           "name": "compact-response-usage",
           "status": "PASS",
-          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"15644216\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
+          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"7e1b0ed7\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
         }
       ]
     },
@@ -673,17 +673,17 @@
           "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
         },
         {
-          "name": "confirm-request:3aec524d",
+          "name": "confirm-request:fa8e8efe",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe confirm\",\"message\":\"Allow?\",\"timeout\":8000}"
         },
         {
-          "name": "select-request:0021a209",
+          "name": "select-request:894e32fa",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe select\",\"options\":[\"A\",\"B\"],\"timeout\":8000}"
         },
         {
-          "name": "editor-request:0d933d34",
+          "name": "editor-request:98d62ad2",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe editor\",\"prefill\":\"draft\"}"
         },
@@ -743,32 +743,32 @@
         {
           "name": "persistent-session-created",
           "status": "PASS",
-          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-enz2mo\\2026-11-19T02-57-26-375Z_01a1f1bc-d366-738d-a6df-74a4eac08e2a.jsonl"
+          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-LcmS52\\2026-11-19T05-28-15-796Z_01a1f246-e8b4-743f-b399-b63585e78ad5.jsonl"
         },
         {
           "name": "original-dir-removed",
           "status": "PASS",
-          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-enz2mo\\2026-11-19T02-57-26-375Z_01a1f1bc-d366-738d-a6df-74a4eac08e2a.jsonl"
+          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-LcmS52\\2026-11-19T05-28-15-796Z_01a1f246-e8b4-743f-b399-b63585e78ad5.jsonl"
         },
         {
           "name": "rpc-resume-with-gone-dir-errors",
           "status": "PASS",
-          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-EJSW4G\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-enz2mo\\2026-11-19T02-57-26-375Z_01a1f1bc-d366-738d-a6df-74a4"
+          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-JxpKwZ\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-LcmS52\\2026-11-19T05-28-15-796Z_01a1f246-e8b4-743f-b399-b635"
         },
         {
           "name": "fork-into-new-dir-works",
           "status": "PASS",
-          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-enz2mo\\2026-11-19T02-57-27-550Z_01a1f1bc-d7fd-776b-821f-ea71acf28a28.jsonl"
+          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-LcmS52\\2026-11-19T05-28-16-992Z_01a1f246-ed5f-7231-afaf-1be81e1446ac.jsonl"
         },
         {
           "name": "fork-preserves-conversation",
           "status": "PASS",
-          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"cd7aa497\",\"parentId\":null,\"timestamp\":\"2026-11-19T02:57:26.376Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"62e10707\",\"parentId\":"
+          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"38a5a293\",\"parentId\":null,\"timestamp\":\"2026-11-19T05:28:15.799Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"b746c0c2\",\"parentId\":"
         },
         {
           "name": "fork-header-parent-session",
           "status": "PASS",
-          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-enz2mo\\2026-11-19T02-57-26-375Z_01a1f1bc-d366-738d-a6df-74a4eac08e2a.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-lnF3dW"
+          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-LcmS52\\2026-11-19T05-28-15-796Z_01a1f246-e8b4-743f-b399-b63585e78ad5.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-NmOu2W"
         }
       ]
     },
@@ -781,7 +781,7 @@
         {
           "name": "catalog-metadata-preserved-under-override",
           "status": "PASS",
-          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:58554"
+          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:64573"
         },
         {
           "name": "env-var-makes-provider-available",
@@ -869,7 +869,7 @@
         {
           "name": "missing-usage-shape-zeros-no-provider-total",
           "status": "PASS",
-          "detail": "usage with provider omission: {\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}} — numbers are all zero AND cost has no totalFromProvider key (absent, not false, not a number). Nothing here proves a zero-cost outcome; the host ledger (Phase 2, not yet implemented) must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)"
+          "detail": "usage with provider omission: {\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}} — all nine numeric fields (usage input/output/cacheRead/cacheWrite/totalTokens, cost input/output/cacheRead/cacheWrite/total) are pinned === 0 AND cost has no totalFromProvider key (absent, not false, not a number). Nothing here proves a zero-cost outcome; the host ledger (Phase 2, not yet implemented) must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)"
         },
         {
           "name": "ledger-sums-itself",

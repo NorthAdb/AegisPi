@@ -151,16 +151,34 @@ export async function run() {
     await session.prompt("pi10 no usage");
     unsub();
     const u = ends.at(-1)?.message?.usage;
-    // Assert the ACTUAL measured shape (audit round 2 N3): with provider
-    // omission the token/cost numbers are all zero AND cost carries no
-    // totalFromProvider key at all (pi-ai only sets that flag on the
-    // usage-present path). Zeros here are indistinguishable from "provider
+    // Assert the ACTUAL measured shape (audit round 2 N3; field coverage
+    // widened per round 3 N11): with provider omission the token/cost
+    // numbers are all zero AND cost carries no totalFromProvider key at all
+    // (pi-ai only sets that flag on the usage-present path). EVERY measured
+    // numeric field is pinned to === 0 — usage input/output/cacheRead/
+    // cacheWrite/totalTokens plus cost input/output/cacheRead/cacheWrite/
+    // total — so a future omission path that carries any non-zero number
+    // turns this check red. Zeros here are indistinguishable from "provider
     // omitted usage" — this is NOT settlement evidence, and the check name
     // and detail must not frame it as a successful zero-cost settlement.
+    const missingUsageShape =
+      !!u &&
+      u.input === 0 &&
+      u.output === 0 &&
+      u.cacheRead === 0 &&
+      u.cacheWrite === 0 &&
+      u.totalTokens === 0 &&
+      !!u.cost &&
+      u.cost.input === 0 &&
+      u.cost.output === 0 &&
+      u.cost.cacheRead === 0 &&
+      u.cost.cacheWrite === 0 &&
+      u.cost.total === 0 &&
+      !("totalFromProvider" in u.cost);
     probe.check(
       "missing-usage-shape-zeros-no-provider-total",
-      !!u && u.input === 0 && u.output === 0 && !!u.cost && !("totalFromProvider" in u.cost),
-      `usage with provider omission: ${JSON.stringify(u)} — numbers are all zero AND cost has no totalFromProvider key (absent, not false, not a number). Nothing here proves a zero-cost outcome; the host ledger (Phase 2, not yet implemented) must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)`,
+      missingUsageShape,
+      `usage with provider omission: ${JSON.stringify(u)} — all nine numeric fields (usage input/output/cacheRead/cacheWrite/totalTokens, cost input/output/cacheRead/cacheWrite/total) are pinned === 0 AND cost has no totalFromProvider key (absent, not false, not a number). Nothing here proves a zero-cost outcome; the host ledger (Phase 2, not yet implemented) must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)`,
     );
     session.dispose();
   } catch (e) {

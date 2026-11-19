@@ -83,15 +83,21 @@ const outPath = join(repoRoot, "docs", "phase1", "evidence", "contracts-report.j
 mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, JSON.stringify(report, null, 2), "utf8");
 
-// Gate (audit round 2 N1): the suite is green ONLY when every probe has at
-// least one real PASS finding and none is FAIL or SKIP. A probe made of
-// notes alone is not evidence and must break the run.
+// Gate (audit round 2 N1; round 3 N10): the suite is green ONLY when at
+// least one probe actually ran, every probe has at least one real PASS
+// finding, and none is FAIL or SKIP. A probe made of notes alone is not
+// evidence, and neither is an --only filter that matches nothing: zero
+// probes ran, zero assertions were checked — that is NOT a pass.
 const failedProbes = results.filter((r) => r.status === "FAIL");
 const skippedProbes = results.filter((r) => r.status === "SKIP");
 const noPassEvidence = results.filter(
   (r) => r.status !== "FAIL" && !r.findings.some((f) => f.status === "PASS"),
 );
-const bad = failedProbes.length > 0 || skippedProbes.length > 0 || noPassEvidence.length > 0;
+const emptyMatch = results.length === 0;
+const bad = emptyMatch || failedProbes.length > 0 || skippedProbes.length > 0 || noPassEvidence.length > 0;
+if (emptyMatch) {
+  console.error(`\n--only matched no probes (${only ? only.join(",") : "?"}) — nothing ran, nothing was asserted`);
+}
 if (failedProbes.length > 0) {
   console.error(`\nFAIL probes: ${failedProbes.map((r) => r.id).join(", ")}`);
 }
@@ -101,6 +107,8 @@ if (skippedProbes.length > 0) {
 if (noPassEvidence.length > 0) {
   console.error(`probes without any PASS finding: ${noPassEvidence.map((r) => r.id).join(", ")}`);
 }
-console.error(`\n${results.length} probe(s): ${bad ? "NOT GREEN (fail/skip/no-evidence present)" : "all PASS with falsifiable evidence"}`);
+console.error(
+  `\n${results.length} probe(s): ${bad ? (emptyMatch ? "NOTHING RAN (empty --only match)" : "NOT GREEN (fail/skip/no-evidence present)") : "all PASS with falsifiable evidence"}`,
+);
 console.error(`report: ${outPath}`);
 process.exit(bad ? 1 : 0);

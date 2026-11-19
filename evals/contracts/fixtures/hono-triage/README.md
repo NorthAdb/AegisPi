@@ -10,23 +10,30 @@
 - `checks/csrf-textping-check.mjs`（fixtureHash sha256 4e89f269…）与 `checks/cors-credential-check.mjs`（sha256 e1a328e1…）。
 - manifest 的快照值：baseline = v4.13.19（commit 676c8f80…，tarball sha256 e1a19a8a…，隔离安装 lockfile sha256 e5d0c57e…）；target = v4.12.24（commit 5fdde5ab…，tarball sha256 4ce62f3e…，隔离安装 lockfile sha256 db2bb134…，npm integrity `sha512-I36D1s…U4iw==` 与 registry 一致）。两对 manifest 共用同一快照对。
 
-## 复现方式（重要，2026-11-19 第二轮复审后更新）
+## 复现方式（重要，2026-11-19 第三轮复审后更新）
 
 每个快照的 `package.json` + `package-lock.json` 已**字节原样入库**于 `snapshots/hono-<version>/`——lockfileHash 可直接复算（SHA-256 与 manifest 一致），`npm ci` 即按 lock 复现安装。检查脚本以**安装目录为显式参数**解析 hono（`createRequire`，与 cwd、脚本位置完全无关）：
 
 ```
-node checks/csrf-textping-check.mjs <安装目录>   # 从任何位置跑，hono 都从该目录加载
+node checks/csrf-textping-check.mjs <安装目录>   # 任何位置跑，hono 都从该目录加载
 node checks/cors-credential-check.mjs <安装目录>
 ```
 
-在仓库目录对 4.12.24 目标跑必须得到 exit 1（实测在案）；旧的"复制脚本进快照目录"法仍兼容（无参数时按脚本所在目录解析）。一键自检：
+**解析遏制（第三轮 N9）**：`createRequire` 会向父目录上溯——"加载成功"不等于"加载自目标"。两检查在加载后用 `require.resolve` 核对 `hono` 与子模块的**真实路径必须落在参数目录之内**，否则 exit 2 并打印真实解析到的地方；`honoFrom` 字段输出的是真实模块文件路径（不是参数目录字符串）。因此：
+
+- 对**已 npm ci** 的安装目录跑：4.13.19 → 双检查 exit 0；4.12.24 → 双检查 exit 1（矩阵不变）。
+- 对**仓库内未安装的快照目录**（只有 package.json + lock）跑：双检查 **exit 2**（拒绝，而不是被仓库的 4.13.19 顶替出假绿）。
+- 对仓库外无 hono 的空目录跑：双检查 exit 2（Cannot find module）。
+
+一键自检：
 
 ```
 node evals/contracts/tools/verify-hono-oracle-pair.mjs
-→ 从入库快照 npm ci 两套安装 → 四项检查 → 断言 0/1 矩阵 + 解析来源 + 复算两个 lockfile 哈希
+→ 从入库快照 npm ci 两套安装 → 四项检查（断言 0/1 矩阵 + 解析路径遏制）
+→ 两个未安装快照 × 两检查（断言 exit 2）→ 复算两个 lockfile 哈希
 ```
 
-第二轮复审 N4 的教训在案：第一版检查头注释写"cwd must resolve hono"与实际相反（ESM 按脚本位置解析），照做会在仓库里命中 4.13.19 得到 target 假绿——已删除该注释并改为显式参数解析，输出含 `honoFrom` 自证解析来源。
+第三轮复审 N9 的教训在案：第二轮的 `honoFrom = 参数目录` 字符串自证不成立——参数指向未安装快照时，Node 上溯到仓库 `node_modules`，行为是仓库的 4.13.19，`honoFrom` 却仍打印快照目录（假绿）。修复后自证改为**真实解析路径 + 遏制断言**。第二轮 N4 的历史教训（cwd 误信）同样在案。
 
 ## 与开工检查单的差异记录（2026-11-19 修正）
 

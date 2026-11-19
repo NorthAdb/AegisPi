@@ -48,7 +48,7 @@
       "PI_SKIP_VERSION_CHECK": "1",
       "PI_TELEMETRY": "0"
     },
-    "installNote": "Same snapshot pair as manifest.hono-triage.json: lockfileHash values are SHA-256 of the COMMITTED snapshot fixtures (snapshots/hono-4.13.19 and snapshots/hono-4.12.24), recomputable by any third party; integrity values match registry.npmjs.org. Run checks as: node checks/cors-credential-check.mjs <install-dir> — hono loads via createRequire from the given dir, never via cwd or script location (audit round 2 N4). evals/contracts/tools/verify-hono-oracle-pair.mjs automates the pair matrix. A1 (exit 0) and A2 (exit 1) measured this way on 2026-11-19 on the locked Node."
+    "installNote": "Same snapshot pair as manifest.hono-triage.json: lockfileHash values are SHA-256 of the COMMITTED snapshot fixtures (snapshots/hono-4.13.19 and snapshots/hono-4.12.24), recomputable by any third party; integrity values match registry.npmjs.org. Run checks as: node checks/cors-credential-check.mjs <install-dir> — hono loads via createRequire from the given dir, never via cwd or script location (audit round 2 N4), and since audit round 3 N9 the check verifies require.resolve lands INSIDE that dir (exit 2 otherwise; honoFrom reports the real resolved file path). evals/contracts/tools/verify-hono-oracle-pair.mjs automates the pair matrix, resolution containment, and the uninstalled-snapshot exit-2 rule. A1 (exit 0) and A2 (exit 1) measured this way on 2026-11-19 on the locked Node."
   },
   "oracleRef": "oracles/hono-cors-credential-reflection-v1",
   "createdAt": 1768857600000
