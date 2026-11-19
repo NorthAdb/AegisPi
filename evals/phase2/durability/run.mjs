@@ -2712,6 +2712,48 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
     );
   }
 
+  // LOOKUP_THEN_RETRY at the DAEMON level, flagship-grade: the remote truly
+  // holds the action while the local row never recorded it. The daemon
+  // restart itself completes the reconciliation (this suite never calls a
+  // recovery function on its behalf): the strong lookup hit records the
+  // external id and lands SUCCEEDED with zero resends. Mutation-proven
+  // red-able: with the daemon's reconcile loop disabled the same scenario
+  // leaves the effect UNKNOWN.
+  {
+    const ws = makeWorkspace("daemon-restart-lookup-then-retry");
+    const crash = spawnNode(scenario, [], {
+      env: {
+        AEGISPI_WS: ws.stateDir,
+        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        AEGISPI_NOW: "1798410000000",
+        AEGISPI_RETRY_MODE: "LOOKUP_THEN_RETRY",
+        AEGISPI_FAKE_MODE: "ok",
+      },
+    });
+    const crashDone = await crash.done;
+    const daemon = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`,
+    ]);
+    const daemonDone = await daemon.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, external_id, business_key FROM effects").get();
+    db.close();
+    const remote = createFakeRemote(ws.stateDir);
+    const strongLookup = remote.lookup({ businessKey: effect.business_key, consistency: "strong" });
+    suite.check(
+      "daemon-restart-lookup-then-retry-records-hit-no-resend",
+      crashDone.code !== 0 && daemonDone.code === 0 && effect.state === "SUCCEEDED" &&
+        strongLookup.found === true && effect.external_id === strongLookup.externalId &&
+        remote.appliedCount(effect.business_key) === 1,
+      `crash exit=${crashDone.code}; daemon --once exit=${daemonDone.code}; effect=${effect.state} external=${effect.external_id} (lookup holds ${strongLookup.externalId}); remote applied exactly once, no resend`,
+    );
+    suite.check(
+      "daemon-restart-lookup-reconcile-in-daemon-log",
+      /reconcile: .*-> recorded_success/.test(daemonDone.stdout),
+      `the daemon's own log carries the lookup reconciliation it performed`,
+    );
+  }
+
   // AT_MOST_ONCE at the DAEMON level: even after the remote truly applied,
   // the daemon restart conservatively STOPS at UNKNOWN — no resend, no
   // invented success; the row waits for a human reconciliation.
