@@ -76,3 +76,18 @@ Phase 1 与 Phase 2 全部出口套件在收口树上终跑全绿：durability *
 按可验证单元分组提交（本提交组即镜像最终构建的源码树）：容器入口与镜像构建/门禁 → 宿主检查点/控制台/审批修订 → 容器执行器与离线 job → 验签/凭据/备份恢复/水位 → ingress 与配准 → 集成套件/证据/本收口报告。每组提交前对应套件在该组树形态上实测绿。
 
 Phase 3 未通过前不宣布常开；本报告亦不构成 Phase 4 授权。停止条件（移交 §6）全程未触发：无跨域泄露、无越权提交、无恢复丢任务、无预算旁路、无 UNKNOWN 被自动当成功或盲重试、控制台未授权不能审批、未向任何未授权外部系统写出副作用、隔离与逃逸测试无 P0/P1 边界失败。
+
+## 7. 独立审计（b3369bd）后的更正与移交（2026-11-19 追记）
+
+独立审计判定本报告所记 Phase 3 出口 **NOT MET**（`docs/phase3/audits/AUDIT-PHASE3-b3369bd.md`，F1–F8）。整改已完成并逐项回应（`docs/phase3/reports/audit-response-b3369bd.md`），本节只列**本报告被证伪或失真的表述**，原文保留不作涂改：
+
+1. **§1 应用镜像 digest 全表作废**：三个记录值（5355…/e045…/59f9…）是开工时点的构建，收口树并未重新构建；且实测均为 attestation **index digest**（`INDEX(2 manifests)`），不是本报告声称的「真实 digest（OCI）manifest」。现行证据为 v2 绑定格式（manifest+config+context），见 `docs/phase3/reports/image-digest.md` 机器块 v2，隔离套件跑在新 manifest digest 上。
+2. **§2 ingress「8/8」不可复现**：8/8 含真实只读两接口，但旧套件在无 token 环境仍 exit 0（审计环境实测 5/5+NOTE）。现已拆分：本地 7/7 与 `test:ingress-telegram:real`（缺 token exit 3 记未验收）。
+3. **§2「git -c 仅沙箱内」为空断言**：bookworm-slim 无 git，`IN_SANDBOX=false` 满足旧断言即 PASS，边界从未被演示。执行镜像现含 git，探针要求 `EXECUTED_IN_SANDBOX`，`GIT_ABSENT` 即红。
+4. **§2 预算门禁行的措辞**：「收费提交须持 HELD 预留」成立，但生产 tick 的 fake worker 在**无任何旗标**时也以常量 300 结清（复现实测），本报告未披露。现该结清仅存在于 `--fake-upstream` 夹具并带 `source=fake-worker-fixture` 标注；无旗标路径零结清。真实 HTTP 提交器仍未实现——如实记为实现缺口（属本阶段范围、待授权验证路径，非 Phase 4 遗留），失败关闭保证零字节外发。
+5. **§2 逃逸电池三项断言弱于标题**：host_ports 未等连接即报 BLOCKED 且无断言；直 HTTP 打 TEST-NET 任何错误都算 BLOCKED；metadata/TOCTOU 仅存于注释。探针现已全部读实测结果并新增对照容器证伪；acquisition 的「路径穿越拒」在源不可达时也会被旧断言计为 PASS（实测），现 `fetch failed` 记 DEAD SOURCE 不算拒绝。
+6. **§3「磁盘水位实测触发」未发生**：当时如实记为待演练项。现已注入阈值演练（warn 阻新 job、critical 只读 exit 3、transition 告警恰一次）。§3「备份保留期未实现」现已实现（`pruneExpiredBackups`）。
+7. **§2/§5 oracle 措辞**：「Task 结论归可信 oracle」无宿主侧比较支撑，且与 offline-jobs 残留 NOTE 同病。现该 NOTE 与本行一并改为「宿主按容器退出码与证据映射 job 终态；oracle 的宿主侧比较尚未接线，不宣称已验收」。
+8. **SSE**：`/api/events/stream` 旧实现无 scope 条件而注释声称 filtered（实测越权可见）。现按 caller 可见 scope 过滤（owned/granted/service）。
+
+回归基线：Phase 2 出口五条在整改树上全绿（164/20/15/15/hono 0）；整改新增门禁使计数只增不减（restore 9→11、security-unit 23→28、ingress 拆分）。本附记与整改回应同提交；审计原稿一字未改。
