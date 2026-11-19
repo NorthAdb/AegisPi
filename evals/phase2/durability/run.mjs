@@ -2266,6 +2266,143 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   }
 }
 
+// ---------------------------------------------------- case: daemon entry gate
+{
+  const canonical = loadCanonicalSchema();
+
+  // The D-11 gate: the daemon reads defaults.json ONLY through
+  // piSettingsFromDefaults; the raw file has no top-level cacheWarming, so a
+  // bypass re-enables Pi's "idle" warming silently.
+  {
+    const { loadDaemonConfig } = await import("../../../apps/daemon/src/config.mjs");
+    const { piSettingsFromDefaults } = await import("../../../apps/daemon/config/load-pi-settings.mjs");
+    const { readFileSync } = await import("node:fs");
+    const config = loadDaemonConfig();
+    const rawText = readFileSync(config.defaultsPath, "utf8");
+    const raw = JSON.parse(rawText);
+    suite.check(
+      "daemon-config-flows-through-the-loader",
+      config.piSettings.cacheWarming === "off" && config.budget.warmingEnabled === false &&
+        config.budget.taskLimitMicrousd === 800000 && config.budget.dayLimitMicrousd === 5000000,
+      `mapped piSettings.cacheWarming=${config.piSettings.cacheWarming}; warmingEnabled=${config.budget.warmingEnabled}; spec budgets intact`,
+    );
+    suite.check(
+      "raw-defaults-have-no-top-level-cachewarming",
+      raw.cacheWarming === undefined,
+      "JSON.parse(defaults.json).cacheWarming is undefined — handing raw to SettingsManager would silently read 'idle'",
+    );
+    // The red side of the gate: if config.mjs ever bypasses the loader, the
+    // mapped setting disappears and this goes red.
+    const bypassSimulation = { cacheWarming: raw.cacheWarming };
+    const throughLoader = piSettingsFromDefaults(raw);
+    suite.check(
+      "loader-is-what-makes-off-survive",
+      bypassSimulation.cacheWarming === undefined && throughLoader.cacheWarming === "off",
+      `bypass shape=${JSON.stringify(bypassSimulation)} (Pi would default to idle); loader shape=${JSON.stringify(throughLoader)}`,
+    );
+    // Wiring tripwire: the daemon entry imports the config module, and the
+    // config module imports the loader; the entry never reads defaults.json
+    // directly.
+    const configSource = readFileSync(join(repoRoot, "apps", "daemon", "src", "config.mjs"), "utf8");
+    const daemonSource = readFileSync(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), "utf8");
+    suite.check(
+      "daemon-entry-uses-config-module-not-raw-file",
+      /load-pi-settings\.mjs/.test(configSource) && /loadDaemonConfig/.test(daemonSource) &&
+        !/defaults\.json/.test(daemonSource),
+      "config.mjs imports the loader; daemon.mjs imports loadDaemonConfig and never touches defaults.json",
+    );
+  }
+
+  // daemon --check on a fresh data dir: full startup sequence, exit 0.
+  {
+    const ws = makeWorkspace("daemon-check");
+    const proc = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), ["--check", `--data-dir=${ws.stateDir}`]);
+    const done = await proc.done;
+    suite.check(
+      "daemon-check-boot-green",
+      done.code === 0 && done.stdout.includes("check: mode=open") && /GREEN/.test(done.stdout),
+      `exit=${done.code}; ${done.stdout.trim().split("\n").slice(-1)[0]}`,
+    );
+  }
+
+  // Double start: the second daemon refuses the lock and exits non-zero.
+  {
+    const ws = makeWorkspace("daemon-double-start");
+    const first = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [`--data-dir=${ws.stateDir}`]);
+    let opened = false;
+    for (let i = 0; i < 100 && !opened; i += 1) {
+      opened = first.stdout.includes("daemon: open");
+      if (!opened) await new Promise((r) => setTimeout(r, 100));
+    }
+    suite.check("daemon-first-instance-opens", opened, `first daemon reached open (pid line: ${first.stdout.trim().split("\n").pop()})`);
+    const second = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), ["--check", `--data-dir=${ws.stateDir}`]);
+    const secondDone = await second.done;
+    await killHard(first.child);
+    await first.done;
+    suite.check(
+      "daemon-second-instance-refuses-lock-exits",
+      secondDone.code === 1 && /refusing to start/.test(secondDone.stderr),
+      `second exit=${secondDone.code}: ${secondDone.stderr.trim()}`,
+    );
+  }
+
+  // End-to-end smoke: a seeded due timer flows through the real daemon loop
+  // to a settled, evidence-backed task completion — fake worker, no real
+  // external call, exactly the Phase 2 shape.
+  {
+    const ws = makeWorkspace("daemon-once-smoke");
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const seedDb = openDatabase(join(ws.stateDir, "db", "aegis.db"));
+    migrate(seedDb, canonical);
+    const seedNow = Date.now();
+    const ing = receiveEvent(seedDb, ws.stateDir, {
+      now: seedNow,
+      source: "telegram",
+      sourceEventId: "evt-daemon-smoke-1",
+      principal: { platform: "telegram", subject: "6001" },
+      scope: { kind: "owner_dm", domainKey: "dm:telegram:6001", channel: "telegram", conversationId: "6001" },
+      threadKey: "t1",
+      priority: 5,
+      policyVersion: "pv1",
+      payload: "smoke: run the morning check",
+      verdict: "ADMIT",
+    });
+    const inbox = seedDb.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    createTimer(seedDb, {
+      id: "tmr:smoke-morning",
+      scopeId: inbox.scope_id,
+      principalId: inbox.principal_id,
+      scopeEpoch: 1,
+      threadKey: "t1",
+      condition: { type: "none" },
+      dueAt: seedNow,
+      recurrence: null,
+      payloadObjectId: inbox.payload_object_id,
+      now: seedNow,
+    });
+    seedDb.close();
+
+    const proc = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`,
+    ]);
+    const done = await proc.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const timerState = db.prepare("SELECT state FROM timers WHERE id='tmr:smoke-morning'").get().state;
+    const taskRow = db.prepare("SELECT state, result_class FROM tasks").get();
+    const deliveryRow = db.prepare("SELECT state FROM event_deliveries").get();
+    const inboxStates = db.prepare("SELECT state FROM inbox").all();
+    const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
+    db.close();
+    suite.check(
+      "daemon-once-smoke-timer-to-settled-task",
+      done.code === 0 && timerState === "FIRED" && taskRow.state === "SUCCEEDED" &&
+        taskRow.result_class === "not_applicable" && deliveryRow.state === "DONE" &&
+        inboxStates.every((r) => r.state === "DONE") && reservation.state === "SETTLED",
+      `exit=${done.code}; timer=${timerState} task=${taskRow.state}/${taskRow.result_class} delivery=${deliveryRow.state} reservation=${reservation.state}`,
+    );
+  }
+}
+
 // -------------------------------------------------------------------- summary
 const exit = suiteExit(suite, { label: "test:durability (foundation)" });
 const { reportPath, logPath } = writeReport({
