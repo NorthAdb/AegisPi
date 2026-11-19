@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T07:48:00.541Z",
+  "generatedAt": "2026-11-19T07:57:31.946Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 41,
+    "pass": 68,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795074476809}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795075044856}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 20852 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 15700 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=20852"
+      "detail": "second acquire refused, heldBy=15700"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 20852"
+      "detail": "stolen, new pid 15700"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -212,6 +212,141 @@
       "name": "crash-ingress-after-commit-redelivery-single-durable-row",
       "status": "PASS",
       "detail": "redelivery exit=0, stdout=\"ACK inb:telegram:evt-0001 duplicate=true state=PENDING\", inbox=1"
+    },
+    {
+      "name": "dispatch-creates-task-delivery-subscription-routes-inbox",
+      "status": "PASS",
+      "detail": "task tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 state=QUEUED, delivery=PENDING, inbox=ROUTED"
+    },
+    {
+      "name": "recomputed-plan-reuses-same-task",
+      "status": "PASS",
+      "detail": "second dispatch created=false, tasks for event=1"
+    },
+    {
+      "name": "claim-mints-fence-and-active-attempt",
+      "status": "PASS",
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:15700:1795100010000"
+    },
+    {
+      "name": "attempt-row-active-with-lease-window",
+      "status": "PASS",
+      "detail": "attempt att:tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1:1 state=ACTIVE"
+    },
+    {
+      "name": "one-running-agent-per-scope",
+      "status": "PASS",
+      "detail": "claim while scope-1 RUNNING picked other-scope task tsk:inb%3Atelegram%3Aevt-life-2-3:telegram%3Aevt-life-2-3, not tsk:inb%3Atelegram%3Aevt-life-1-2:telegram%3Aevt-life-1-2"
+    },
+    {
+      "name": "scope-epoch-fence-blocks-claim",
+      "status": "PASS",
+      "detail": "task with stale scope_epoch is not claimed"
+    },
+    {
+      "name": "heartbeat-extends-lease",
+      "status": "PASS",
+      "detail": "extended to 1795100065000"
+    },
+    {
+      "name": "wrong-lease-owner-rejected",
+      "status": "PASS",
+      "detail": "StaleWorker on foreign lease_owner"
+    },
+    {
+      "name": "stale-fence-write-rejected",
+      "status": "PASS",
+      "detail": "StaleWorker on stale fence"
+    },
+    {
+      "name": "worker-step-increments",
+      "status": "PASS",
+      "detail": "step_count=1"
+    },
+    {
+      "name": "step-budget-refuses-beyond-max",
+      "status": "PASS",
+      "detail": "ClaimRefused when step_count==max_steps (3/3)"
+    },
+    {
+      "name": "retry-wait-fails-old-attempt-sets-backoff",
+      "status": "PASS",
+      "detail": "state=RETRY_WAIT available_at=1795100036000 old attempt=FAILED"
+    },
+    {
+      "name": "retry-claim-mints-new-fence",
+      "status": "PASS",
+      "detail": "re-claim attempt=2 fence=2"
+    },
+    {
+      "name": "success-without-evidence-refused",
+      "status": "PASS",
+      "detail": "SUCCEEDED without result_object_id throws"
+    },
+    {
+      "name": "complete-closes-task-and-attempt-with-evidence",
+      "status": "PASS",
+      "detail": "task=SUCCEEDED/unaffected attempt=SUCCEEDED"
+    },
+    {
+      "name": "reaper-losts-attempt-and-requeues",
+      "status": "PASS",
+      "detail": "reaped=[{\"taskId\":\"tsk:inb%3Atelegram%3Aevt-life-4-5:telegram%3Aevt-life-4-5\",\"attemptNo\":1,\"finalState\":\"QUEUED\"}] task=QUEUED attempt=LOST"
+    },
+    {
+      "name": "expired-lease-old-worker-cannot-renew-or-submit",
+      "status": "PASS",
+      "detail": "old worker heartbeat after reaper: StaleWorker"
+    },
+    {
+      "name": "requeued-task-claims-with-new-fence",
+      "status": "PASS",
+      "detail": "re-claim attempt=2 fence=2"
+    },
+    {
+      "name": "retry-exhaustion-goes-dead-not-loop",
+      "status": "PASS",
+      "detail": "final task state=DEAD after attempt 3"
+    },
+    {
+      "name": "dead-task-records-reason",
+      "status": "PASS",
+      "detail": "audit task_dead_retries_exhausted present"
+    },
+    {
+      "name": "delivery-ack-checkpoint-idempotent-and-foreign-checkpoint-refused",
+      "status": "PASS",
+      "detail": "ack=ACKED redeliver=duplicate:true different-checkpoint-refused=true"
+    },
+    {
+      "name": "inbox-done-only-when-all-deliveries-terminal",
+      "status": "PASS",
+      "detail": "inbox state after single delivery DONE: DONE"
+    },
+    {
+      "name": "dead-delivery-streams-alert-and-closes-inbox",
+      "status": "PASS",
+      "detail": "audit_alert rows=1, inbox=DONE"
+    },
+    {
+      "name": "crash-dispatch-pre-txn-died-before-dispatch-commit",
+      "status": "PASS",
+      "detail": "exit=1 signal=null tasks=0"
+    },
+    {
+      "name": "crash-dispatch-pre-txn-recomputed-plan-single-task",
+      "status": "PASS",
+      "detail": "redelivery exit=0, tasks=1, inbox=ROUTED"
+    },
+    {
+      "name": "crash-dispatch-inside-txn-died-before-dispatch-commit",
+      "status": "PASS",
+      "detail": "exit=1 signal=null tasks=0"
+    },
+    {
+      "name": "crash-dispatch-inside-txn-recomputed-plan-single-task",
+      "status": "PASS",
+      "detail": "redelivery exit=0, tasks=1, inbox=ROUTED"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"

@@ -10,8 +10,23 @@ import { loadCanonicalSchema, migrate, verifySchema, SchemaSourceError, SchemaDr
 import { openDatabase, checkDatabaseIntegrity, sqliteLibraryVersion } from "../../../apps/daemon/src/db/connect.mjs";
 import { acquireDaemonLock, isPidAlive } from "../../../apps/daemon/src/db/lock.mjs";
 import { canonicalJson, sha256LfHex, businessKey, dispatchKeyFromProviderId } from "../../../apps/daemon/src/keys.mjs";
-import { receiveEvent } from "../../../apps/daemon/src/ingress.mjs";
-import { putObjectContent, gcUnreferencedContent } from "../../../apps/daemon/src/objects.mjs";
+import { receiveEvent, dispatchKeyForInbox } from "../../../apps/daemon/src/ingress.mjs";
+import { putObjectContent, gcUnreferencedContent, insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
+import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
+import {
+  claimNextTask,
+  heartbeat,
+  workerStep,
+  completeTask,
+  retryTask,
+  reapExpiredLeases,
+  deliveryAckCheckpoint,
+  deliveryDone,
+  deliveryDead,
+  StaleWorker,
+  ClaimRefused,
+  DeliveryError,
+} from "../../../apps/daemon/src/scheduler.mjs";
 
 lockedNodeGuard();
 
@@ -377,6 +392,358 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       `crash-${w.name}-redelivery-single-durable-row`,
       reDone.code === 0 && reDone.stdout.includes("ACK") && finalCount === 1,
       `redelivery exit=${reDone.code}, stdout=${JSON.stringify(reDone.stdout.trim())}, inbox=${finalCount}`,
+    );
+  }
+}
+
+// ------------------------------------------------------- case: task lifecycle
+{
+  const canonical = loadCanonicalSchema();
+  const ws = makeWorkspace("durability-tasks");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, canonical);
+  const leaseMs = 45 * 1000;
+  let eventSeq = 0;
+  // Each scope gets its own DM conversation; the per-scope single-flight rule
+  // then only bites where the test asks for it.
+  const seed = async ({ maxSteps = 3, priority = 5, scopeN }) => {
+    const now = 1795100000000;
+    eventSeq += 1;
+    const ing = receiveEvent(db, ws.stateDir, {
+      now,
+      source: "telegram",
+      sourceEventId: `evt-life-${scopeN}-${eventSeq}`,
+      principal: { platform: "telegram", subject: String(scopeN) },
+      scope: {
+        kind: "owner_dm",
+        domainKey: `dm:telegram:${scopeN}`,
+        channel: "telegram",
+        conversationId: String(scopeN),
+      },
+      threadKey: `t-${scopeN}-${eventSeq}`,
+      priority,
+      policyVersion: "pv1",
+      payload: "check upstream",
+      verdict: "ADMIT",
+    });
+    const d = dispatchEventToTask(db, {
+      inboxId: ing.inboxId,
+      dispatchKey: dispatchKeyForInbox(db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId)),
+      now,
+      priority,
+      maxSteps,
+      deadlineAt: now + 15 * 60 * 1000,
+      skillSetHash: "skillset-v1",
+    });
+    return { ing, d, now, scopeId: db.prepare("SELECT scope_id FROM inbox WHERE id=?").get(ing.inboxId).scope_id };
+  };
+
+  // Dispatch: one event + one plan = one task, with delivery + subscription.
+  const t1 = await seed({ scopeN: 1 });
+  const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(t1.d.taskId);
+  const delivery = db.prepare("SELECT * FROM event_deliveries WHERE event_id=? AND task_id=?").get(t1.ing.inboxId, t1.d.taskId);
+  const sub = db.prepare("SELECT * FROM thread_subscriptions WHERE task_id=?").get(t1.d.taskId);
+  const inboxState = db.prepare("SELECT state FROM inbox WHERE id=?").get(t1.ing.inboxId).state;
+  suite.check(
+    "dispatch-creates-task-delivery-subscription-routes-inbox",
+    task.state === "QUEUED" && task.attempt_no === 0 && task.fence === 0 &&
+      delivery.state === "PENDING" && delivery.command_id.startsWith("cmd:") &&
+      sub.active === 1 && inboxState === "ROUTED",
+    `task ${t1.d.taskId} state=${task.state}, delivery=${delivery.state}, inbox=${inboxState}`,
+  );
+
+  const d2 = dispatchEventToTask(db, {
+    inboxId: t1.ing.inboxId,
+    dispatchKey: dispatchKeyForInbox(db.prepare("SELECT * FROM inbox WHERE id=?").get(t1.ing.inboxId)),
+    now: 1795100000001,
+    priority: 5,
+    maxSteps: 3,
+    deadlineAt: 1795100000000 + 15 * 60 * 1000,
+    skillSetHash: "skillset-v1",
+  });
+  const taskCount = db.prepare("SELECT count(*) c FROM tasks WHERE origin_event_id=?").get(t1.ing.inboxId).c;
+  suite.check(
+    "recomputed-plan-reuses-same-task",
+    d2.created === false && d2.taskId === t1.d.taskId && taskCount === 1,
+    `second dispatch created=${d2.created}, tasks for event=${taskCount}`,
+  );
+
+  // Claim: fence and attempt mint in one transaction, lease attached.
+  const claimed = claimNextTask(db, { now: 1795100010000, leaseMs });
+  suite.check(
+    "claim-mints-fence-and-active-attempt",
+    claimed !== null && claimed.taskId === t1.d.taskId && claimed.attemptNo === 1 && claimed.fence === 1,
+    `claimed task=${claimed?.taskId} attempt=${claimed?.attemptNo} fence=${claimed?.fence} owner=${claimed?.leaseOwner}`,
+  );
+  const attemptRow = db.prepare("SELECT * FROM attempts WHERE task_id=? AND attempt_no=1").get(t1.d.taskId);
+  suite.check(
+    "attempt-row-active-with-lease-window",
+    attemptRow.state === "ACTIVE" && attemptRow.started_at === 1795100010000,
+    `attempt ${attemptRow.id} state=${attemptRow.state}`,
+  );
+
+  // Per-scope single flight: another task in the SAME scope cannot claim
+  // while the first runs; a task in ANOTHER scope can.
+  const sameScope = await seed({ scopeN: 1, priority: 1 });
+  const otherScope = await seed({ scopeN: 2, priority: 1 });
+  const claimSame = claimNextTask(db, { now: 1795100015000, leaseMs });
+  suite.check(
+    "one-running-agent-per-scope",
+    claimSame !== null && claimSame.taskId === otherScope.d.taskId,
+    `claim while scope-1 RUNNING picked other-scope task ${claimSame?.taskId}, not ${sameScope.d.taskId}`,
+  );
+  db.prepare("UPDATE tasks SET state='QUEUED', lease_owner=NULL, lease_expires_at=NULL WHERE id=?").run(otherScope.d.taskId);
+
+  // Stale epoch fence: a task claiming under a cancelled scope is skipped
+  // while a healthy-scope task still claims.
+  suite.check(
+    "scope-epoch-fence-blocks-claim",
+    (() => {
+      db.prepare("UPDATE scopes SET epoch=epoch+1 WHERE id=?").run(t1.scopeId);
+      const afterBump = claimNextTask(db, { now: 1795100016000, leaseMs });
+      db.prepare("UPDATE scopes SET epoch=epoch-1 WHERE id=?").run(t1.scopeId);
+      const skippedStaleEpoch =
+        afterBump === null || afterBump.taskId !== sameScope.d.taskId;
+      if (afterBump) {
+        // The healthy-scope claim is a test artifact: retire it so it never
+        // pollutes later candidate scans.
+        db.prepare("UPDATE tasks SET state='CANCELLED', lease_owner=NULL, lease_expires_at=NULL WHERE id=?").run(afterBump.taskId);
+      }
+      return skippedStaleEpoch;
+    })(),
+    "task with stale scope_epoch is not claimed",
+  );
+
+  // Heartbeat / fenced writes on the running attempt.
+  const hb1 = heartbeat(db, {
+    taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1,
+    now: 1795100020000, leaseMs,
+  });
+  suite.check("heartbeat-extends-lease", hb1.extendedTo === 1795100020000 + leaseMs, `extended to ${hb1.extendedTo}`);
+
+  let wrongOwnerRejected = false;
+  try {
+    heartbeat(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: "wkr:impostor:1", fence: 1, now: 1795100021000, leaseMs });
+  } catch (e) {
+    wrongOwnerRejected = e instanceof StaleWorker;
+  }
+  suite.check("wrong-lease-owner-rejected", wrongOwnerRejected, "StaleWorker on foreign lease_owner");
+
+  let wrongFenceRejected = false;
+  try {
+    workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 99, now: 1795100022000 });
+  } catch (e) {
+    wrongFenceRejected = e instanceof StaleWorker;
+  }
+  suite.check("stale-fence-write-rejected", wrongFenceRejected, "StaleWorker on stale fence");
+
+  const st = workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100023000 });
+  suite.check("worker-step-increments", st.stepCount === 1, `step_count=${st.stepCount}`);
+  workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100024000 });
+  workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100024500 });
+  let stepsRefused = false;
+  try {
+    workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100025000 });
+  } catch (e) {
+    stepsRefused = e instanceof ClaimRefused;
+  }
+  suite.check(
+    "step-budget-refuses-beyond-max",
+    stepsRefused,
+    `ClaimRefused when step_count==max_steps (${db.prepare("SELECT step_count c FROM tasks WHERE id=?").get(t1.d.taskId).c}/3)`,
+  );
+
+  // Close t1 so its lease can never collide with the reaper timeline below.
+  const t1evidence = insertObjectRow(db, {
+    scopeId: t1.scopeId,
+    kind: "task_result",
+    sourceUri: `task:${t1.d.taskId}`,
+    sourceActor: "host",
+    content: "t1 done",
+    observedAt: 1795100025500,
+    requiredScopeIds: [t1.scopeId],
+  });
+  completeTask(db, {
+    taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1,
+    now: 1795100026000, resultClass: "not_applicable", resultObjectId: t1evidence.id,
+  });
+
+  // Retry semantics on a fresh scope.
+  const rt = await seed({ scopeN: 3, priority: 9 });
+  const c3 = claimNextTask(db, { now: 1795100030000, leaseMs });
+  const retry = retryTask(db, {
+    taskId: c3.taskId, attemptNo: c3.attemptNo, leaseOwner: c3.leaseOwner, fence: c3.fence,
+    now: 1795100031000, backoffMs: 5000, errorCode: "transient_provider_error",
+  });
+  const t3 = db.prepare("SELECT state, available_at FROM tasks WHERE id=?").get(c3.taskId);
+  const a3 = db.prepare("SELECT state, error_code FROM attempts WHERE task_id=? AND attempt_no=?").get(c3.taskId, c3.attemptNo);
+  suite.check(
+    "retry-wait-fails-old-attempt-sets-backoff",
+    t3.state === "RETRY_WAIT" && t3.available_at === 1795100031000 + 5000 && a3.state === "FAILED" && a3.error_code === "transient_provider_error",
+    `state=${t3.state} available_at=${t3.available_at} old attempt=${a3.state}`,
+  );
+  const c3b = claimNextTask(db, { now: 1795100040000, leaseMs });
+  suite.check(
+    "retry-claim-mints-new-fence",
+    c3b.taskId === c3.taskId && c3b.attemptNo === 2 && c3b.fence === 2,
+    `re-claim attempt=${c3b.attemptNo} fence=${c3b.fence}`,
+  );
+
+  // Complete: SUCCEEDED needs evidence; evidence closes attempt and task.
+  const evidence = insertObjectRow(db, {
+    scopeId: db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(c3.taskId).scope_id,
+    kind: "task_result",
+    sourceUri: `task:${c3.taskId}`,
+    sourceActor: "host",
+    content: "result evidence body",
+    observedAt: 1795100041000,
+    requiredScopeIds: [db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(c3.taskId).scope_id],
+  });
+  let noEvidenceRefused = false;
+  try {
+    completeTask(db, {
+      taskId: c3.taskId, attemptNo: 2, leaseOwner: c3b.leaseOwner, fence: 2,
+      now: 1795100042000, resultClass: "unaffected",
+    });
+  } catch (e) {
+    noEvidenceRefused = /result_object_id/.test(e.message);
+  }
+  suite.check("success-without-evidence-refused", noEvidenceRefused, "SUCCEEDED without result_object_id throws");
+  const done = completeTask(db, {
+    taskId: c3.taskId, attemptNo: 2, leaseOwner: c3b.leaseOwner, fence: 2,
+    now: 1795100043000, resultClass: "unaffected", resultObjectId: evidence.id,
+  });
+  const t3done = db.prepare("SELECT state, result_class FROM tasks WHERE id=?").get(c3.taskId);
+  const a3done = db.prepare("SELECT state FROM attempts WHERE task_id=? AND attempt_no=2").get(c3.taskId);
+  suite.check(
+    "complete-closes-task-and-attempt-with-evidence",
+    done.state === "SUCCEEDED" && t3done.state === "SUCCEEDED" && t3done.result_class === "unaffected" && a3done.state === "SUCCEEDED",
+    `task=${t3done.state}/${t3done.result_class} attempt=${a3done.state}`,
+  );
+
+  // Lease expiry: reaper LOSTs the attempt, requeues the task, and the OLD
+  // worker's writes die on the new fence. Times are chosen so ONLY this
+  // task's lease is inside the reaper window.
+  const lt = await seed({ scopeN: 4 });
+  const c4 = claimNextTask(db, { now: 1795100050000, leaseMs });
+  const reaped = reapExpiredLeases(db, { now: 1795100050000 + leaseMs + 1, maxAttempts: 3 });
+  const t4 = db.prepare("SELECT state FROM tasks WHERE id=?").get(c4.taskId);
+  const a4 = db.prepare("SELECT state FROM attempts WHERE task_id=? AND attempt_no=1").get(c4.taskId);
+  suite.check(
+    "reaper-losts-attempt-and-requeues",
+    reaped.length === 1 && reaped[0].taskId === c4.taskId && a4.state === "LOST" && t4.state === "QUEUED",
+    `reaped=${JSON.stringify(reaped)} task=${t4.state} attempt=${a4.state}`,
+  );
+  let oldWorkerWriteRejected = false;
+  try {
+    heartbeat(db, { taskId: c4.taskId, attemptNo: 1, leaseOwner: c4.leaseOwner, fence: 1, now: 1795100050000 + leaseMs + 2, leaseMs });
+  } catch (e) {
+    oldWorkerWriteRejected = e instanceof StaleWorker;
+  }
+  suite.check(
+    "expired-lease-old-worker-cannot-renew-or-submit",
+    oldWorkerWriteRejected,
+    "old worker heartbeat after reaper: StaleWorker",
+  );
+  const c4b = claimNextTask(db, { now: 1795100096000, leaseMs });
+  suite.check(
+    "requeued-task-claims-with-new-fence",
+    c4b.taskId === c4.taskId && c4b.attemptNo === 2 && c4b.fence === 2,
+    `re-claim attempt=${c4b.attemptNo} fence=${c4b.fence}`,
+  );
+  // Retries exhausted: reaping the last allowed attempt kills the task.
+  reapExpiredLeases(db, { now: 1795100096000 + leaseMs + 1, maxAttempts: 3 });
+  const c4c = claimNextTask(db, { now: 1795100142000, leaseMs });
+  reapExpiredLeases(db, { now: 1795100142000 + leaseMs + 1, maxAttempts: 3 });
+  const t4final = db.prepare("SELECT state FROM tasks WHERE id=?").get(c4.taskId);
+  suite.check(
+    "retry-exhaustion-goes-dead-not-loop",
+    t4final.state === "DEAD" && c4c.attemptNo === 3,
+    `final task state=${t4final.state} after attempt ${c4c.attemptNo}`,
+  );
+  const deadAudit = db
+    .prepare("SELECT count(*) c FROM audit_log WHERE task_id=? AND code='task_dead_retries_exhausted'")
+    .get(c4.taskId).c;
+  suite.check("dead-task-records-reason", deadAudit === 1, "audit task_dead_retries_exhausted present");
+
+  // Deliveries: checkpoint ACK, idempotent redelivery, DONE, inbox gate.
+  const ck = insertObjectRow(db, {
+    scopeId: t1.scopeId,
+    kind: "session_checkpoint",
+    sourceUri: `cmd:${t1.ing.inboxId}:${t1.d.taskId}`,
+    sourceActor: "host",
+    content: "event appended to session",
+    observedAt: 1795100080000,
+    requiredScopeIds: [t1.scopeId],
+  });
+  const ack1 = deliveryAckCheckpoint(db, { eventId: t1.ing.inboxId, taskId: t1.d.taskId, checkpointObjectId: ck.id, now: 1795100080000 });
+  const ack2 = deliveryAckCheckpoint(db, { eventId: t1.ing.inboxId, taskId: t1.d.taskId, checkpointObjectId: ck.id, now: 1795100081000 });
+  let differentCheckpointRefused = false;
+  try {
+    deliveryAckCheckpoint(db, { eventId: t1.ing.inboxId, taskId: t1.d.taskId, checkpointObjectId: "obj:other", now: 1795100082000 });
+  } catch (e) {
+    differentCheckpointRefused = e instanceof DeliveryError;
+  }
+  suite.check(
+    "delivery-ack-checkpoint-idempotent-and-foreign-checkpoint-refused",
+    ack1.state === "ACKED" && ack2.duplicate === true && differentCheckpointRefused,
+    `ack=${ack1.state} redeliver=duplicate:${ack2.duplicate} different-checkpoint-refused=${differentCheckpointRefused}`,
+  );
+  deliveryDone(db, { eventId: t1.ing.inboxId, taskId: t1.d.taskId, now: 1795100083000 });
+  const inboxFinal = db.prepare("SELECT state FROM inbox WHERE id=?").get(t1.ing.inboxId).state;
+  suite.check(
+    "inbox-done-only-when-all-deliveries-terminal",
+    inboxFinal === "DONE",
+    `inbox state after single delivery DONE: ${inboxFinal}`,
+  );
+
+  // DEAD delivery is loud, never silent success.
+  const dt = await seed({ scopeN: 5 });
+  deliveryDead(db, { eventId: dt.ing.inboxId, taskId: dt.d.taskId, now: 1795100090000, reason: "worker cannot handle" });
+  const alertStreamed = db
+    .prepare("SELECT count(*) c FROM stream_events WHERE event_type='audit_alert'")
+    .get().c;
+  const deadInbox = db.prepare("SELECT state FROM inbox WHERE id=?").get(dt.ing.inboxId).state;
+  suite.check(
+    "dead-delivery-streams-alert-and-closes-inbox",
+    alertStreamed >= 1 && deadInbox === "DONE",
+    `audit_alert rows=${alertStreamed}, inbox=${deadInbox}`,
+  );
+}
+
+// ------------------------------------------------ case: dispatch crash windows
+{
+  const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "dispatch-crash.mjs");
+  const windows = [
+    { name: "dispatch-pre-txn", point: "router:pre-txn", expectTasks: 0 },
+    { name: "dispatch-inside-txn", point: "router:inside-txn", expectTasks: 0 },
+  ];
+  for (const w of windows) {
+    const ws = makeWorkspace(`durability-crash-${w.name}`);
+    const proc = spawnNode(scenario, [], {
+      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: w.point, AEGISPI_NOW: "1795110000000" },
+    });
+    const done = await proc.done;
+    const diedBeforeDispatch = !done.stdout.includes("DISPATCHED") && done.code !== 0;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const tasks = db.prepare("SELECT count(*) c FROM tasks").get().c;
+    db.close();
+    suite.check(
+      `crash-${w.name}-died-before-dispatch-commit`,
+      diedBeforeDispatch && tasks === w.expectTasks,
+      `exit=${done.code} signal=${done.signal} tasks=${tasks}`,
+    );
+    const re = spawnNode(scenario, [], { env: { AEGISPI_WS: ws.stateDir, AEGISPI_NOW: "1795110001000" } });
+    const reDone = await re.done;
+    const db2 = openDatabase(ws.dbPath, { readOnly: true });
+    const tasksAfter = db2.prepare("SELECT count(*) c FROM tasks").get().c;
+    const inboxState = db2.prepare("SELECT state FROM inbox").get().state;
+    db2.close();
+    suite.check(
+      `crash-${w.name}-recomputed-plan-single-task`,
+      reDone.code === 0 && tasksAfter === 1 && inboxState === "ROUTED",
+      `redelivery exit=${reDone.code}, tasks=${tasksAfter}, inbox=${inboxState}`,
     );
   }
 }
