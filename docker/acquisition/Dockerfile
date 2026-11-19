@@ -1,12 +1,16 @@
-# acquisition 下载容器：受限下载（不执行源码），不携带宿主凭据。
+# acquisition 下载容器：受限下载（不执行源码），不携带宿主凭据（02 §1）。
+# 下载器只按宿主生成的白名单计划（/plan/plan.json）拉取 http/https 对象，
+# 校验大小、hash、tar 路径穿越/设备文件/越界软链，不执行任何生命周期或仓库程序。
 # 基础镜像与 agent 相同（Node 22.23.5-bookworm-slim，RepoDigest 见 docker/agent/Dockerfile 注释）。
-# 配额与网络隔离在 Phase 3 真实测试时校准；下载与任意代码执行分离是硬边界（02）。
+# 构建上下文（tools/build-app-images.mjs 分台）：本 Dockerfile + src/downloader.mjs。
 FROM node@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
 
 RUN groupadd --system aegis && useradd --system --gid aegis --create-home aegis
 USER aegis
 WORKDIR /downloads
 
+COPY src/downloader.mjs /app/downloader.mjs
+
 ENV NODE_ENV=production PI_OFFLINE=1 PI_TELEMETRY=0
 
-CMD ["node", "--version"]
+ENTRYPOINT ["node", "/app/downloader.mjs"]

@@ -24,7 +24,7 @@ docker image inspect node:22.23.5-bookworm-slim --format '{{json .RepoDigests}}'
 
 ## 应用镜像状态
 
-agent、acquisition、execution 三个应用镜像**尚未构建**（Phase 1 无产品代码可装入）。按规范（00 §4、04 Phase 1）：“应用镜像在首次构建时记录真实 digest，三者都锁定是 Phase 3 隔离测试与常开的入口条件”。当前 Dockerfile 已把构建上下文源文件入库，`PIN_REQUIRED` 类占位一律不出现——首次构建回填真实 digest 前，任何门禁必须拒绝以本文件冒充已锁定。
+agent、acquisition、execution 三个应用镜像已于 Phase 3 首次真实构建并记录 OCI digest（2026-11-19），证据与机器可读块见 `docs/phase3/reports/image-digest.md`；`PIN_REQUIRED` 类占位从未出现，未记录真实 digest 前任何门禁必须拒绝（evals/phase3/lib/image-gate.mjs 已落地）。本文件保留 Phase 1 的基础镜像证据与「Phase 1 不做逃逸测试」记录。
 
 ## 容器占位配额（记录，Phase 3 校准）
 
