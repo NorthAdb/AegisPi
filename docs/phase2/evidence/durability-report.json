@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T08:04:44.371Z",
+  "generatedAt": "2026-11-19T08:26:48.411Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 68,
+    "pass": 109,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795075469457}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795076788662}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 25868 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 24828 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=25868"
+      "detail": "second acquire refused, heldBy=24828"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 25868"
+      "detail": "stolen, new pid 24828"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:25868:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:24828:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -347,6 +347,211 @@
       "name": "crash-dispatch-inside-txn-recomputed-plan-single-task",
       "status": "PASS",
       "detail": "redelivery exit=0, tasks=1, inbox=ROUTED"
+    },
+    {
+      "name": "propose-parks-attempt-creates-waiting-approval-fence-unchanged",
+      "status": "PASS",
+      "detail": "task=WAITING_APPROVAL attempt=PARKED approval=WAITING fence=1"
+    },
+    {
+      "name": "approval-consume-cas-single-consume",
+      "status": "PASS",
+      "detail": "first=true second={\"accepted\":false,\"reason\":\"already CONSUMED\",\"state\":\"CONSUMED\"}"
+    },
+    {
+      "name": "approval-verification-refuses-wrong-nonce-hash-approver",
+      "status": "PASS",
+      "detail": "nonce=nonce mismatch hash=action hash mismatch approver=callback is not the designated approver; approval still WAITING"
+    },
+    {
+      "name": "approval-expiry-refuses-late-callback",
+      "status": "PASS",
+      "detail": "late callback: expired"
+    },
+    {
+      "name": "revoked-approver-cannot-consume",
+      "status": "PASS",
+      "detail": "revoked approver: approver has no live approve grant"
+    },
+    {
+      "name": "dispatch-succeeds-after-approved-cas",
+      "status": "PASS",
+      "detail": "effect SUCCEEDED external=ext-0001"
+    },
+    {
+      "name": "succeeded-effect-never-resubmits",
+      "status": "PASS",
+      "detail": "second dispatch refused; remote applied once for notify:dm%3atelegram%3a60:v1"
+    },
+    {
+      "name": "rejection-is-normal-terminal-outcome",
+      "status": "PASS",
+      "detail": "approval=REJECTED effect=DEAD task=FAILED"
+    },
+    {
+      "name": "edit-invalidates-old-and-mints-new-business-key-version",
+      "status": "PASS",
+      "detail": "old notify:dm%3atelegram%3a61:v1 CANCELLED; new notify:dm%3atelegram%3a61:v2-edited-body"
+    },
+    {
+      "name": "draft-to-ready-requires-allowlisted-routine",
+      "status": "PASS",
+      "detail": "unlisted routine refused; status-ping promoted to READY"
+    },
+    {
+      "name": "human-approval-effect-cannot-skip-approval",
+      "status": "PASS",
+      "detail": "WAITING_APPROVAL effect refuses draftToReady"
+    },
+    {
+      "name": "dispatcher-refuses-stale-epoch",
+      "status": "PASS",
+      "detail": "scope epoch bump blocks the CAS"
+    },
+    {
+      "name": "dispatcher-refuses-expired-effect",
+      "status": "PASS",
+      "detail": "expiry re-checked inside the CAS transaction"
+    },
+    {
+      "name": "dispatcher-refuses-failed-target-precondition",
+      "status": "PASS",
+      "detail": "target resource precondition re-checked inside the CAS"
+    },
+    {
+      "name": "approved-effect-dispatches-after-prechecks-pass",
+      "status": "PASS",
+      "detail": "state=SUCCEEDED"
+    },
+    {
+      "name": "at-most-once-unknown-stops-automatic-resend",
+      "status": "PASS",
+      "detail": "timeout outcome recorded as UNKNOWN, never success"
+    },
+    {
+      "name": "unknown-never-blind-retried",
+      "status": "PASS",
+      "detail": "AT_MOST_ONCE policy=AT_MOST_ONCE: UNKNOWN stops automatic resend; a human may mint a new action; dispatcher refuses UNKNOWN"
+    },
+    {
+      "name": "manual-reconciliation-records-actor-and-evidence",
+      "status": "PASS",
+      "detail": "CONFIRMED_NOT_SENT recorded; success claim without evidence/actor refused"
+    },
+    {
+      "name": "idempotency-key-resends-same-key-dedup-remote",
+      "status": "PASS",
+      "detail": "apply-then-die -> UNKNOWN -> same-key resend -> SUCCEEDED ext-0001; remote applied exactly once"
+    },
+    {
+      "name": "lookup-then-retry-strong-notfound-resends",
+      "status": "PASS",
+      "detail": "strong lookup not-found -> definite resend -> SUCCEEDED"
+    },
+    {
+      "name": "weak-lookup-never-triggers-resend",
+      "status": "PASS",
+      "detail": "eventual lookup says not-found while strong says found (ext-0001); the resend decision uses strong only"
+    },
+    {
+      "name": "lookup-recorded-success-from-strong-hit",
+      "status": "PASS",
+      "detail": "auto recovery recorded SUCCEEDED ext-0001 from upstream lookup"
+    },
+    {
+      "name": "at-least-once-resend-may-duplicate-declared",
+      "status": "PASS",
+      "detail": "apply-then-die -> requeued -> resend SUCCEEDED; remote delivered 2x (mode allows)"
+    },
+    {
+      "name": "zero-byte-local-failure-requeues-and-recover",
+      "status": "PASS",
+      "detail": "local error FAILED -> READY -> SUCCEEDED on retry"
+    },
+    {
+      "name": "remote-rejection-never-auto-requeues",
+      "status": "PASS",
+      "detail": "known-terminated failure stays terminal; a new action needs a new intent"
+    },
+    {
+      "name": "cancel-before-dispatch-fences-everything",
+      "status": "PASS",
+      "detail": "cancel committed first: uncommitted task CANCELLED, READY effect CANCELLED, dispatcher refuses (the consumed approval stays CONSUMED; only WAITING approvals invalidate)"
+    },
+    {
+      "name": "dispatch-committed-first-cancel-reports-committed-pending",
+      "status": "PASS",
+      "detail": "cancel after commitment: task stays WAITING_EFFECT, effect retained for reconciliation"
+    },
+    {
+      "name": "single-task-cancel-parks-scope-under-new-epoch",
+      "status": "PASS",
+      "detail": "target CANCELLED; peer parked QUEUED at new epoch 2, old attempt closed"
+    },
+    {
+      "name": "parked-peer-reclaims-under-new-epoch",
+      "status": "PASS",
+      "detail": "peer reclaimed as attempt 1"
+    },
+    {
+      "name": "reaper-never-touches-parked-approvals",
+      "status": "PASS",
+      "detail": "WAITING_APPROVAL attempts stay PARKED across lease sweeps"
+    },
+    {
+      "name": "crash-approval-inside-txn-durable-state",
+      "status": "PASS",
+      "detail": "exit=1 effect=WAITING_APPROVAL approval=WAITING task=WAITING_APPROVAL"
+    },
+    {
+      "name": "crash-approval-inside-txn-cas-rolled-back-clean-retry",
+      "status": "PASS",
+      "detail": "killed CAS rolled back; the approver's card still decides: effect READY"
+    },
+    {
+      "name": "crash-approval-after-commit-durable-state",
+      "status": "PASS",
+      "detail": "exit=1 effect=READY approval=CONSUMED task=WAITING_EFFECT"
+    },
+    {
+      "name": "crash-approval-after-commit-retry-idempotent",
+      "status": "PASS",
+      "detail": "double-click after crash: already CONSUMED"
+    },
+    {
+      "name": "crash-submitting-before-call-durable-state",
+      "status": "PASS",
+      "detail": "exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT"
+    },
+    {
+      "name": "crash-submitting-no-remote-bytes",
+      "status": "PASS",
+      "detail": "fake remote delivered 0 times while the effect sits SUBMITTING"
+    },
+    {
+      "name": "crash-submitting-recovery-marks-unknown",
+      "status": "PASS",
+      "detail": "recovery marked 1 SUBMITTING effect(s) UNKNOWN"
+    },
+    {
+      "name": "crash-submitting-idempotent-reconcile-lands-success",
+      "status": "PASS",
+      "detail": "UNKNOWN -> same-key resend -> SUCCEEDED ext-0001; remote applied exactly once"
+    },
+    {
+      "name": "crash-remote-success-unrecorded-durable-state",
+      "status": "PASS",
+      "detail": "exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT"
+    },
+    {
+      "name": "crash-remote-success-applied-before-record",
+      "status": "PASS",
+      "detail": "remote really holds the action (ext-0001) while the effect row is SUBMITTING"
+    },
+    {
+      "name": "crash-remote-success-recovery-records-no-resend",
+      "status": "PASS",
+      "detail": "recovery recorded SUCCEEDED ext-0001 from the lookup; remote still holds exactly one delivery"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"

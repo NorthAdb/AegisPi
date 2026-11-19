@@ -1,11 +1,11 @@
 # Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）
 
-生成：2026-11-19T08:04:44.371Z；Node v22.23.5；suite `durability`。
+生成：2026-11-19T08:26:48.411Z；Node v22.23.5；suite `durability`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
 | PASS | canonical-schema-checksum-matches-pinned | checksum ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995 from D:\AegisPi\aegis-pi-design-pack-v1.4.1\docs\reference\schema.sql |
-| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795075469457}] |
+| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795076788662}] |
 | PASS | reference-ddl-shape-27-user-2-fts-8-shadow | sqlite_master: 37 tables (27 user + 10 fts incl. 8 shadow per PI SQLITE probe), 3 trg_msg_* triggers |
 | PASS | system-state-seeds-present | system_state rows: [{"key":"schema_version","value":"140"},{"key":"authorization_revision","value":"1"}] |
 | PASS | migrate-is-idempotent | second run applied 0 migration(s) |
@@ -17,10 +17,10 @@
 | PASS | checksum-gate-fails-closed-on-tampered-sql | SchemaSourceError raised on mismatch |
 | PASS | partial-schema-refused-fail-closed | SchemaDriftError raised (no guessing on stray tables) |
 | PASS | torn-ddl-rolls-back-to-empty | apply threw=true, leftover tables=0 |
-| PASS | lock-first-acquire-ok | pid 25868 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
-| PASS | lock-second-acquire-refused | second acquire refused, heldBy=25868 |
+| PASS | lock-first-acquire-ok | pid 24828 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
+| PASS | lock-second-acquire-refused | second acquire refused, heldBy=24828 |
 | PASS | dead-pid-probe-says-dead | isPidAlive(400000000)=false |
-| PASS | lock-stolen-after-crash-holder | stolen, new pid 25868 |
+| PASS | lock-stolen-after-crash-holder | stolen, new pid 24828 |
 | PASS | lock-released-and-reacquired | released=true, reacquired=true |
 | PASS | canonical-json-key-order-stable | {"a":{"y":[3,2],"z":"x"},"b":1} |
 | PASS | canonical-json-rejects-nan | NaN throws |
@@ -47,7 +47,7 @@
 | PASS | crash-ingress-after-commit-redelivery-single-durable-row | redelivery exit=0, stdout="ACK inb:telegram:evt-0001 duplicate=true state=PENDING", inbox=1 |
 | PASS | dispatch-creates-task-delivery-subscription-routes-inbox | task tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 state=QUEUED, delivery=PENDING, inbox=ROUTED |
 | PASS | recomputed-plan-reuses-same-task | second dispatch created=false, tasks for event=1 |
-| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:25868:1795100010000 |
+| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:24828:1795100010000 |
 | PASS | attempt-row-active-with-lease-window | attempt att:tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1:1 state=ACTIVE |
 | PASS | one-running-agent-per-scope | claim while scope-1 RUNNING picked other-scope task tsk:inb%3Atelegram%3Aevt-life-2-3:telegram%3Aevt-life-2-3, not tsk:inb%3Atelegram%3Aevt-life-1-2:telegram%3Aevt-life-1-2 |
 | PASS | scope-epoch-fence-blocks-claim | task with stale scope_epoch is not claimed |
@@ -72,7 +72,48 @@
 | PASS | crash-dispatch-pre-txn-recomputed-plan-single-task | redelivery exit=0, tasks=1, inbox=ROUTED |
 | PASS | crash-dispatch-inside-txn-died-before-dispatch-commit | exit=1 signal=null tasks=0 |
 | PASS | crash-dispatch-inside-txn-recomputed-plan-single-task | redelivery exit=0, tasks=1, inbox=ROUTED |
+| PASS | propose-parks-attempt-creates-waiting-approval-fence-unchanged | task=WAITING_APPROVAL attempt=PARKED approval=WAITING fence=1 |
+| PASS | approval-consume-cas-single-consume | first=true second={"accepted":false,"reason":"already CONSUMED","state":"CONSUMED"} |
+| PASS | approval-verification-refuses-wrong-nonce-hash-approver | nonce=nonce mismatch hash=action hash mismatch approver=callback is not the designated approver; approval still WAITING |
+| PASS | approval-expiry-refuses-late-callback | late callback: expired |
+| PASS | revoked-approver-cannot-consume | revoked approver: approver has no live approve grant |
+| PASS | dispatch-succeeds-after-approved-cas | effect SUCCEEDED external=ext-0001 |
+| PASS | succeeded-effect-never-resubmits | second dispatch refused; remote applied once for notify:dm%3atelegram%3a60:v1 |
+| PASS | rejection-is-normal-terminal-outcome | approval=REJECTED effect=DEAD task=FAILED |
+| PASS | edit-invalidates-old-and-mints-new-business-key-version | old notify:dm%3atelegram%3a61:v1 CANCELLED; new notify:dm%3atelegram%3a61:v2-edited-body |
+| PASS | draft-to-ready-requires-allowlisted-routine | unlisted routine refused; status-ping promoted to READY |
+| PASS | human-approval-effect-cannot-skip-approval | WAITING_APPROVAL effect refuses draftToReady |
+| PASS | dispatcher-refuses-stale-epoch | scope epoch bump blocks the CAS |
+| PASS | dispatcher-refuses-expired-effect | expiry re-checked inside the CAS transaction |
+| PASS | dispatcher-refuses-failed-target-precondition | target resource precondition re-checked inside the CAS |
+| PASS | approved-effect-dispatches-after-prechecks-pass | state=SUCCEEDED |
+| PASS | at-most-once-unknown-stops-automatic-resend | timeout outcome recorded as UNKNOWN, never success |
+| PASS | unknown-never-blind-retried | AT_MOST_ONCE policy=AT_MOST_ONCE: UNKNOWN stops automatic resend; a human may mint a new action; dispatcher refuses UNKNOWN |
+| PASS | manual-reconciliation-records-actor-and-evidence | CONFIRMED_NOT_SENT recorded; success claim without evidence/actor refused |
+| PASS | idempotency-key-resends-same-key-dedup-remote | apply-then-die -> UNKNOWN -> same-key resend -> SUCCEEDED ext-0001; remote applied exactly once |
+| PASS | lookup-then-retry-strong-notfound-resends | strong lookup not-found -> definite resend -> SUCCEEDED |
+| PASS | weak-lookup-never-triggers-resend | eventual lookup says not-found while strong says found (ext-0001); the resend decision uses strong only |
+| PASS | lookup-recorded-success-from-strong-hit | auto recovery recorded SUCCEEDED ext-0001 from upstream lookup |
+| PASS | at-least-once-resend-may-duplicate-declared | apply-then-die -> requeued -> resend SUCCEEDED; remote delivered 2x (mode allows) |
+| PASS | zero-byte-local-failure-requeues-and-recover | local error FAILED -> READY -> SUCCEEDED on retry |
+| PASS | remote-rejection-never-auto-requeues | known-terminated failure stays terminal; a new action needs a new intent |
+| PASS | cancel-before-dispatch-fences-everything | cancel committed first: uncommitted task CANCELLED, READY effect CANCELLED, dispatcher refuses (the consumed approval stays CONSUMED; only WAITING approvals invalidate) |
+| PASS | dispatch-committed-first-cancel-reports-committed-pending | cancel after commitment: task stays WAITING_EFFECT, effect retained for reconciliation |
+| PASS | single-task-cancel-parks-scope-under-new-epoch | target CANCELLED; peer parked QUEUED at new epoch 2, old attempt closed |
+| PASS | parked-peer-reclaims-under-new-epoch | peer reclaimed as attempt 1 |
+| PASS | reaper-never-touches-parked-approvals | WAITING_APPROVAL attempts stay PARKED across lease sweeps |
+| PASS | crash-approval-inside-txn-durable-state | exit=1 effect=WAITING_APPROVAL approval=WAITING task=WAITING_APPROVAL |
+| PASS | crash-approval-inside-txn-cas-rolled-back-clean-retry | killed CAS rolled back; the approver's card still decides: effect READY |
+| PASS | crash-approval-after-commit-durable-state | exit=1 effect=READY approval=CONSUMED task=WAITING_EFFECT |
+| PASS | crash-approval-after-commit-retry-idempotent | double-click after crash: already CONSUMED |
+| PASS | crash-submitting-before-call-durable-state | exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT |
+| PASS | crash-submitting-no-remote-bytes | fake remote delivered 0 times while the effect sits SUBMITTING |
+| PASS | crash-submitting-recovery-marks-unknown | recovery marked 1 SUBMITTING effect(s) UNKNOWN |
+| PASS | crash-submitting-idempotent-reconcile-lands-success | UNKNOWN -> same-key resend -> SUCCEEDED ext-0001; remote applied exactly once |
+| PASS | crash-remote-success-unrecorded-durable-state | exit=1 effect=SUBMITTING approval=CONSUMED task=WAITING_EFFECT |
+| PASS | crash-remote-success-applied-before-record | remote really holds the action (ext-0001) while the effect row is SUBMITTING |
+| PASS | crash-remote-success-recovery-records-no-resend | recovery recorded SUCCEEDED ext-0001 from the lookup; remote still holds exactly one delivery |
 
-合计：68 PASS / 0 FAIL。
+合计：109 PASS / 0 FAIL。
 
 数据源：fake 远端与本地 SQLite（无真实外部连接）（fake 远端与录制数据，无真实外部连接）。

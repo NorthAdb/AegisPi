@@ -10,10 +10,25 @@ import { loadCanonicalSchema, migrate, verifySchema, SchemaSourceError, SchemaDr
 import { openDatabase, checkDatabaseIntegrity, sqliteLibraryVersion } from "../../../apps/daemon/src/db/connect.mjs";
 import { acquireDaemonLock, isPidAlive } from "../../../apps/daemon/src/db/lock.mjs";
 import { canonicalJson, sha256LfHex, businessKey, dispatchKeyFromProviderId } from "../../../apps/daemon/src/keys.mjs";
-import { receiveEvent, dispatchKeyForInbox } from "../../../apps/daemon/src/ingress.mjs";
+import { receiveEvent, dispatchKeyForInbox, ensurePrincipal } from "../../../apps/daemon/src/ingress.mjs";
 import { putObjectContent, gcUnreferencedContent, insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
 import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
 import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
+import { decideApproval, invalidateApproval } from "../../../apps/daemon/src/approvals.mjs";
+import {
+  proposeEffect,
+  dispatchEffect,
+  draftToReady,
+  requeueLocalFailure,
+  autoRecoverUnknown,
+  reconcileUnknown,
+  markSubmittingEffectsUnknown,
+  cancelScope,
+  cancelTask,
+  EffectError,
+  DispatcherRefused,
+} from "../../../apps/daemon/src/effects.mjs";
+import { createFakeRemote } from "../../../apps/daemon/src/testing/fake-remote.mjs";
 import {
   claimNextTask,
   heartbeat,
@@ -763,6 +778,736 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
       `crash-${w.name}-recomputed-plan-single-task`,
       reDone.code === 0 && tasksAfter === 1 && inboxState === "ROUTED",
       `redelivery exit=${reDone.code}, tasks=${tasksAfter}, inbox=${inboxState}`,
+    );
+  }
+}
+
+// -------------------------------------------------------- case: effects flow
+{
+  const canonical = loadCanonicalSchema();
+  const ws = makeWorkspace("durability-effects");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, canonical);
+  const remote = createFakeRemote(ws.stateDir);
+  const now = 1795600000000;
+  let seq = 0;
+  const seedClaimed = ({ scopeN }) => {
+    seq += 1;
+    const ing = receiveEvent(db, ws.stateDir, {
+      now,
+      source: "telegram",
+      sourceEventId: `evt-efx-${scopeN}-${seq}`,
+      principal: { platform: "telegram", subject: String(scopeN) },
+      scope: { kind: "owner_dm", domainKey: `dm:telegram:${scopeN}`, channel: "telegram", conversationId: String(scopeN) },
+      threadKey: `t-${scopeN}-${seq}`,
+      priority: 5,
+      policyVersion: "pv1",
+      payload: "propose an action",
+      verdict: "ADMIT",
+    });
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    const d = dispatchEventToTask(db, {
+      inboxId: ing.inboxId,
+      dispatchKey: dispatchKeyForInbox(inbox),
+      now, priority: 5, maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "skillset-v1",
+    });
+    const claim = claimNextTask(db, { now, leaseMs: 45000 });
+    return { ing, d, claim, scopeId: inbox.scope_id };
+  };
+  const grantApprove = (scopeId, subject = "approver-1") => {
+    const p = ensurePrincipal(db, { platform: "telegram", subject });
+    db.prepare(
+      "INSERT OR IGNORE INTO acl_grants(scope_id, principal_id, permission, expires_at, revoked_at) VALUES (?,?,'approve',NULL,NULL)",
+    ).run(scopeId, p.id);
+    return p.id;
+  };
+  const proposeAndApprove = (seeded, { domainKey, naturalKey = "v1", retryMode = "IDEMPOTENCY_KEY" } = {}) => {
+    const approverId = grantApprove(seeded.scopeId);
+    const proposal = proposeEffect(db, ws.stateDir, {
+      now,
+      taskId: seeded.d.taskId,
+      attemptId: seeded.claim.attemptId,
+      effectType: "notify",
+      domainKey,
+      naturalKey,
+      operationIntent: {
+        targetResource: `telegram-dm:${seeded.claim.taskId}`,
+        operation: "send_message",
+        contentHash: "aa01",
+        evidenceManifestHash: "bb02",
+      },
+      retryMode,
+      provider: "fake-telegram",
+      resource: "dm",
+      requiresApproval: true,
+      approverPrincipalId: approverId,
+      checkpointContent: "parked for approval",
+      expiresAt: now + 60 * 60 * 1000,
+    });
+    const decision = decideApproval(db, {
+      approvalId: proposal.approvalId,
+      decision: "approve",
+      actionHash: proposal.actionHash,
+      nonce: proposal.approvalNonce,
+      approverId,
+      now,
+    });
+    return { proposal, decision, approverId };
+  };
+
+  // Propose parks the task/attempt and creates one WAITING approval.
+  const s1 = seedClaimed({ scopeN: 60 });
+  const approver1 = grantApprove(s1.scopeId);
+  const p1 = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: s1.d.taskId,
+    attemptId: s1.claim.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:60",
+    naturalKey: "v1",
+    operationIntent: { targetResource: "telegram-dm:60", operation: "send_message", contentHash: "aa01", evidenceManifestHash: "bb02" },
+    retryMode: "IDEMPOTENCY_KEY",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: true,
+    approverPrincipalId: approver1,
+    checkpointContent: "worker parked awaiting approval",
+    expiresAt: now + 60 * 60 * 1000,
+  });
+  const t1 = db.prepare("SELECT state, lease_owner FROM tasks WHERE id=?").get(s1.d.taskId);
+  const a1 = db.prepare("SELECT state FROM attempts WHERE id=?").get(s1.claim.attemptId);
+  const apr1 = db.prepare("SELECT state FROM approvals WHERE id=?").get(p1.approvalId);
+  const fenceSame = db.prepare("SELECT fence FROM tasks WHERE id=?").get(s1.d.taskId).fence;
+  suite.check(
+    "propose-parks-attempt-creates-waiting-approval-fence-unchanged",
+    t1.state === "WAITING_APPROVAL" && t1.lease_owner === null && a1.state === "PARKED" &&
+      apr1.state === "WAITING" && fenceSame === s1.claim.fence,
+    `task=${t1.state} attempt=${a1.state} approval=${apr1.state} fence=${fenceSame}`,
+  );
+
+  // Consume CAS: approval CONSUMED + effect READY + task WAITING_EFFECT; a
+  // second decision is "already processed", never a second consume.
+  const dec1 = decideApproval(db, {
+    approvalId: p1.approvalId, decision: "approve",
+    actionHash: p1.actionHash, nonce: p1.approvalNonce, approverId: approver1, now,
+  });
+  const dec1again = decideApproval(db, {
+    approvalId: p1.approvalId, decision: "approve",
+    actionHash: p1.actionHash, nonce: p1.approvalNonce, approverId: approver1, now,
+  });
+  const e1 = db.prepare("SELECT state FROM effects WHERE id=?").get(p1.effectId);
+  suite.check(
+    "approval-consume-cas-single-consume",
+    dec1.accepted === true && e1.state === "READY" && dec1again.accepted === false && /already/.test(dec1again.reason ?? ""),
+    `first=${dec1.accepted} second=${JSON.stringify(dec1again)}`,
+  );
+
+  // Verification failures: wrong nonce, wrong hash, wrong approver, no grant,
+  // expired — each refused, nothing changes. This approval stays WAITING
+  // (it is only decided by the refusal attempts).
+  const s2 = seedClaimed({ scopeN: 61 });
+  const approver2 = grantApprove(s2.scopeId);
+  const p2 = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: s2.d.taskId,
+    attemptId: s2.claim.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:61",
+    naturalKey: "v1",
+    operationIntent: { targetResource: "telegram-dm:61", operation: "send_message", contentHash: "aa05", evidenceManifestHash: "bb06" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: true,
+    approverPrincipalId: approver2,
+    checkpointContent: "parked for verification tests",
+    expiresAt: now + 60 * 60 * 1000,
+  });
+  const foreigner = ensurePrincipal(db, { platform: "telegram", subject: "stranger-1" });
+  const wrongNonce = decideApproval(db, {
+    approvalId: p2.approvalId, decision: "approve",
+    actionHash: p2.actionHash, nonce: "not-the-nonce", approverId: approver2, now,
+  });
+  const wrongHash = decideApproval(db, {
+    approvalId: p2.approvalId, decision: "approve",
+    actionHash: "f".repeat(64), nonce: p2.approvalNonce, approverId: approver2, now,
+  });
+  const wrongApprover = decideApproval(db, {
+    approvalId: p2.approvalId, decision: "approve",
+    actionHash: p2.actionHash, nonce: p2.approvalNonce, approverId: foreigner.id, now,
+  });
+  const stateAfter = db.prepare("SELECT state FROM approvals WHERE id=?").get(p2.approvalId).state;
+  suite.check(
+    "approval-verification-refuses-wrong-nonce-hash-approver",
+    wrongNonce.accepted === false && wrongHash.accepted === false &&
+      wrongApprover.accepted === false && stateAfter === "WAITING",
+    `nonce=${wrongNonce.reason} hash=${wrongHash.reason} approver=${wrongApprover.reason}; approval still ${stateAfter}`,
+  );
+  const expiredDecide = decideApproval(db, {
+    approvalId: p2.approvalId, decision: "approve",
+    actionHash: p2.actionHash, nonce: p2.approvalNonce, approverId: approver2,
+    now: now + 61 * 60 * 1000,
+  });
+  suite.check(
+    "approval-expiry-refuses-late-callback",
+    expiredDecide.accepted === false && /expired/.test(expiredDecide.reason),
+    `late callback: ${expiredDecide.reason}`,
+  );
+  // The designated approver with a REVOKED grant: the callback is refused
+  // even with the right nonce and hash.
+  db.prepare("UPDATE acl_grants SET revoked_at=? WHERE scope_id=? AND principal_id=? AND permission='approve'")
+    .run(now, s2.scopeId, approver2);
+  const revokedDecide = decideApproval(db, {
+    approvalId: p2.approvalId, decision: "approve",
+    actionHash: p2.actionHash, nonce: p2.approvalNonce, approverId: approver2, now,
+  });
+  db.prepare("UPDATE acl_grants SET revoked_at=NULL WHERE scope_id=? AND principal_id=? AND permission='approve'")
+    .run(s2.scopeId, approver2);
+  suite.check(
+    "revoked-approver-cannot-consume",
+    revokedDecide.accepted === false && /grant/.test(revokedDecide.reason),
+    `revoked approver: ${revokedDecide.reason}`,
+  );
+
+  // Dispatch happy path: SUCCEEDED with external id, remote applied once.
+  const dis1 = dispatchEffect(db, remote, { effectId: p1.effectId, now, precondition: () => true });
+  const e1s = db.prepare("SELECT state, external_id, attempt_count FROM effects WHERE id=?").get(p1.effectId);
+  suite.check(
+    "dispatch-succeeds-after-approved-cas",
+    dis1.state === "SUCCEEDED" && e1s.state === "SUCCEEDED" && e1s.attempt_count === 1 &&
+      remote.appliedByIdempotencyKey(`idem:${p1.businessKey}`) !== null,
+    `effect SUCCEEDED external=${e1s.external_id}`,
+  );
+  let secondDispatchRefused = false;
+  try {
+    dispatchEffect(db, remote, { effectId: p1.effectId, now, precondition: () => true });
+  } catch (e) {
+    secondDispatchRefused = e instanceof DispatcherRefused;
+  }
+  suite.check(
+    "succeeded-effect-never-resubmits",
+    secondDispatchRefused && remote.appliedCount(p1.businessKey) === 1,
+    `second dispatch refused; remote applied once for ${p1.businessKey}`,
+  );
+
+  // Rejection: normal outcome, effect DEAD, task FAILED, no auto retry.
+  const s3 = seedClaimed({ scopeN: 62 });
+  const p3 = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: s3.d.taskId,
+    attemptId: s3.claim.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:62",
+    naturalKey: "v1",
+    operationIntent: { targetResource: "telegram-dm:62", operation: "send_message", contentHash: "aa03", evidenceManifestHash: "bb04" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: true,
+    approverPrincipalId: grantApprove(s3.scopeId),
+    expiresAt: now + 60 * 60 * 1000,
+  });
+  const rej = decideApproval(db, {
+    approvalId: p3.approvalId, decision: "reject",
+    actionHash: p3.actionHash, nonce: p3.approvalNonce,
+    approverId: grantApprove(s3.scopeId), now,
+  });
+  const rejEffect = db.prepare("SELECT state FROM effects WHERE id=?").get(p3.effectId);
+  const rejTask = db.prepare("SELECT state FROM tasks WHERE id=?").get(s3.d.taskId);
+  suite.check(
+    "rejection-is-normal-terminal-outcome",
+    rej.accepted === true && rejEffect.state === "DEAD" && rejTask.state === "FAILED",
+    `approval=${rej.state} effect=${rejEffect.state} task=${rejTask.state}`,
+  );
+
+  // Edit invalidates the old approval; the new intent is a new effect with a
+  // new business_key version; action_json of the old one never changes.
+  const inv = invalidateApproval(db, { approvalId: p2.approvalId, reason: "owner edited the message body", now });
+  const oldEffect = db.prepare("SELECT state, business_key FROM effects WHERE id=?").get(p2.effectId);
+  const p2b = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: s2.d.taskId,
+    attemptId: s2.claim.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:61",
+    naturalKey: "v2-edited-body",
+    operationIntent: { targetResource: "telegram-dm:61", operation: "send_message", contentHash: "aa09-edited", evidenceManifestHash: "bb10" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: true,
+    approverPrincipalId: approver2,
+    expiresAt: now + 60 * 60 * 1000,
+  });
+  suite.check(
+    "edit-invalidates-old-and-mints-new-business-key-version",
+    inv.invalidated === true && oldEffect.state === "CANCELLED" && p2b.businessKey !== p2.businessKey,
+    `old ${oldEffect.business_key} CANCELLED; new ${p2b.businessKey}`,
+  );
+
+  // DRAFT -> READY only via a pre-approved narrow routine.
+  const s4 = seedClaimed({ scopeN: 63 });
+  const p4 = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: s4.d.taskId,
+    attemptId: s4.claim.attemptId,
+    effectType: "notify",
+    domainKey: "dm:telegram:63",
+    naturalKey: "routine-v1",
+    operationIntent: { targetResource: "telegram-dm:63", operation: "send_message", contentHash: "aa11", evidenceManifestHash: "bb12" },
+    retryMode: "AT_LEAST_ONCE",
+    provider: "fake-telegram",
+    resource: "dm",
+    requiresApproval: false,
+    expiresAt: now + 60 * 60 * 1000,
+  });
+  let unlistedRoutineRefused = false;
+  try {
+    draftToReady(db, { effectId: p4.effectId, routineRef: "routine-not-on-list", approvedRoutines: ["status-ping"], now });
+  } catch (e) {
+    unlistedRoutineRefused = e instanceof EffectError;
+  }
+  const drafted = draftToReady(db, { effectId: p4.effectId, routineRef: "status-ping", approvedRoutines: ["status-ping"], now });
+  suite.check(
+    "draft-to-ready-requires-allowlisted-routine",
+    p4.state === "DRAFT" && unlistedRoutineRefused && drafted.state === "READY",
+    `unlisted routine refused; status-ping promoted to READY`,
+  );
+  let draftToReadyOnApprovalEffectRefused = false;
+  try {
+    draftToReady(db, { effectId: p2b.effectId, routineRef: "status-ping", approvedRoutines: ["status-ping"], now });
+  } catch (e) {
+    draftToReadyOnApprovalEffectRefused = /not DRAFT/.test(e.message);
+  }
+  suite.check(
+    "human-approval-effect-cannot-skip-approval",
+    draftToReadyOnApprovalEffectRefused,
+    "WAITING_APPROVAL effect refuses draftToReady",
+  );
+
+  // Dispatcher prechecks: epoch change, expiry, precondition.
+  const s5 = seedClaimed({ scopeN: 64 });
+  const p5 = proposeAndApprove(s5, { domainKey: "dm:telegram:64", naturalKey: "v1", retryMode: "IDEMPOTENCY_KEY" });
+  db.prepare("UPDATE scopes SET epoch=epoch+1 WHERE id=?").run(s5.scopeId);
+  let epochRefused = false;
+  try {
+    dispatchEffect(db, remote, { effectId: p5.proposal.effectId, now, precondition: () => true });
+  } catch (e) {
+    epochRefused = e instanceof DispatcherRefused && /epoch/.test(e.message);
+  }
+  db.prepare("UPDATE scopes SET epoch=epoch-1 WHERE id=?").run(s5.scopeId);
+  suite.check("dispatcher-refuses-stale-epoch", epochRefused, "scope epoch bump blocks the CAS");
+  let expiredEffectRefused = false;
+  db.prepare("UPDATE effects SET expires_at=? WHERE id=?").run(now - 1, p5.proposal.effectId);
+  try {
+    dispatchEffect(db, remote, { effectId: p5.proposal.effectId, now, precondition: () => true });
+  } catch (e) {
+    expiredEffectRefused = e instanceof DispatcherRefused && /expired/.test(e.message);
+  }
+  suite.check("dispatcher-refuses-expired-effect", expiredEffectRefused, "expiry re-checked inside the CAS transaction");
+  db.prepare("UPDATE effects SET expires_at=? WHERE id=?").run(now + 60 * 60 * 1000, p5.proposal.effectId);
+  let preconditionRefused = false;
+  try {
+    dispatchEffect(db, remote, { effectId: p5.proposal.effectId, now, precondition: () => false });
+  } catch (e) {
+    preconditionRefused = e instanceof DispatcherRefused && /precondition/.test(e.message);
+  }
+  suite.check(
+    "dispatcher-refuses-failed-target-precondition",
+    preconditionRefused,
+    "target resource precondition re-checked inside the CAS",
+  );
+  const dis5 = dispatchEffect(db, remote, { effectId: p5.proposal.effectId, now, precondition: () => true });
+  suite.check("approved-effect-dispatches-after-prechecks-pass", dis5.state === "SUCCEEDED", `state=${dis5.state}`);
+
+  // UNKNOWN semantics per retry mode, all against the fake remote.
+  const s7 = seedClaimed({ scopeN: 66 });
+  const p7 = proposeAndApprove(s7, { domainKey: "dm:telegram:66", naturalKey: "v1", retryMode: "AT_MOST_ONCE" });
+  const remoteTimeout = createFakeRemote(join(ws.stateDir, "timeout-remote"));
+  const dis7 = dispatchEffect(db, remoteTimeout, {
+    effectId: p7.proposal.effectId, now, precondition: () => true,
+    label: "at-most-once-timeout", submitMode: "timeout",
+  });
+  const e7 = db.prepare("SELECT state FROM effects WHERE id=?").get(p7.proposal.effectId);
+  suite.check(
+    "at-most-once-unknown-stops-automatic-resend",
+    dis7.state === "UNKNOWN" && e7.state === "UNKNOWN",
+    `timeout outcome recorded as UNKNOWN, never success`,
+  );
+  const auto7 = autoRecoverUnknown(db, remoteTimeout, { effectId: p7.proposal.effectId, now });
+  let unknownRedispatchRefused = false;
+  try {
+    dispatchEffect(db, remoteTimeout, { effectId: p7.proposal.effectId, now, precondition: () => true });
+  } catch (e) {
+    unknownRedispatchRefused = e instanceof DispatcherRefused;
+  }
+  suite.check(
+    "unknown-never-blind-retried",
+    auto7.action === "none" && unknownRedispatchRefused,
+    `AT_MOST_ONCE policy=${auto7.reason}; dispatcher refuses UNKNOWN`,
+  );
+  const recon7 = reconcileUnknown(db, {
+    effectId: p7.proposal.effectId,
+    resolution: "CONFIRMED_NOT_SENT",
+    externalEvidenceRef: "owner checked the provider console: no message sent",
+    actorId: "prn:telegram:owner",
+    now,
+  });
+  let reconWithoutEvidenceRefused = false;
+  try {
+    reconcileUnknown(db, {
+      effectId: p7.proposal.effectId,
+      resolution: "CONFIRMED_SUCCESS",
+      externalEvidenceRef: null,
+      externalId: "ext-9999",
+      actorId: null,
+      now,
+    });
+  } catch (e) {
+    reconWithoutEvidenceRefused = e instanceof EffectError;
+  }
+  suite.check(
+    "manual-reconciliation-records-actor-and-evidence",
+    recon7.state === "FAILED" && reconWithoutEvidenceRefused,
+    `CONFIRMED_NOT_SENT recorded; success claim without evidence/actor refused`,
+  );
+
+  // IDEMPOTENCY_KEY: remote applied then died; same key reconciles.
+  const s8 = seedClaimed({ scopeN: 67 });
+  const p8 = proposeAndApprove(s8, { domainKey: "dm:telegram:67", naturalKey: "v1", retryMode: "IDEMPOTENCY_KEY" });
+  const remoteIdem = createFakeRemote(join(ws.stateDir, "idem-remote"));
+  const dis8 = dispatchEffect(db, remoteIdem, {
+    effectId: p8.proposal.effectId, now, precondition: () => true,
+    label: "apply-then-die", submitMode: "apply_then_die",
+  });
+  const auto8 = autoRecoverUnknown(db, remoteIdem, { effectId: p8.proposal.effectId, now });
+  const dis8b = dispatchEffect(db, remoteIdem, {
+    effectId: p8.proposal.effectId, now: now + 5000, precondition: () => true,
+    label: "same-key-resend",
+  });
+  const e8 = db.prepare("SELECT state, external_id FROM effects WHERE id=?").get(p8.proposal.effectId);
+  const remote8 = remoteIdem.appliedByIdempotencyKey(`idem:${p8.proposal.businessKey}`);
+  suite.check(
+    "idempotency-key-resends-same-key-dedup-remote",
+    dis8.state === "UNKNOWN" && auto8.action === "requeued" && dis8b.state === "SUCCEEDED" &&
+      remote8 !== null && e8.external_id === remote8.externalId && remoteIdem.appliedCount(p8.proposal.businessKey) === 1,
+    `apply-then-die -> UNKNOWN -> same-key resend -> SUCCEEDED ${e8.external_id}; remote applied exactly once`,
+  );
+
+  // LOOKUP_THEN_RETRY: strong not-found resends; weak not-found waits.
+  const s9 = seedClaimed({ scopeN: 68 });
+  const p9 = proposeAndApprove(s9, { domainKey: "dm:telegram:68", naturalKey: "v1", retryMode: "LOOKUP_THEN_RETRY" });
+  const remoteLookup = createFakeRemote(join(ws.stateDir, "lookup-remote"));
+  const dis9 = dispatchEffect(db, remoteLookup, {
+    effectId: p9.proposal.effectId, now, precondition: () => true,
+    label: "pure-timeout-nothing-applied", submitMode: "timeout",
+  });
+  const auto9 = autoRecoverUnknown(db, remoteLookup, { effectId: p9.proposal.effectId, now });
+  const dis9b = dispatchEffect(db, remoteLookup, { effectId: p9.proposal.effectId, now: now + 5000, precondition: () => true });
+  suite.check(
+    "lookup-then-retry-strong-notfound-resends",
+    dis9.state === "UNKNOWN" && auto9.action === "requeued" && dis9b.state === "SUCCEEDED",
+    `strong lookup not-found -> definite resend -> SUCCEEDED`,
+  );
+  const s10 = seedClaimed({ scopeN: 69 });
+  const p10 = proposeAndApprove(s10, { domainKey: "dm:telegram:69", naturalKey: "v1", retryMode: "LOOKUP_THEN_RETRY" });
+  const remoteWeak = createFakeRemote(join(ws.stateDir, "weak-remote"));
+  const dis10 = dispatchEffect(db, remoteWeak, {
+    effectId: p10.proposal.effectId, now, precondition: () => true,
+    label: "applied-but-weak-visibility", submitMode: "apply_then_die",
+  });
+  const weakLookup = remoteWeak.lookup({ businessKey: p10.proposal.businessKey, consistency: "eventual" });
+  const weakFind = remoteWeak.lookup({ businessKey: p10.proposal.businessKey, consistency: "strong" });
+  suite.check(
+    "weak-lookup-never-triggers-resend",
+    dis10.state === "UNKNOWN" && weakLookup.found === false && weakLookup.strong === false && weakFind.found === true,
+    `eventual lookup says not-found while strong says found (${weakFind.externalId}); the resend decision uses strong only`,
+  );
+  const auto10 = autoRecoverUnknown(db, remoteWeak, { effectId: p10.proposal.effectId, now });
+  const e10 = db.prepare("SELECT state, external_id FROM effects WHERE id=?").get(p10.proposal.effectId);
+  suite.check(
+    "lookup-recorded-success-from-strong-hit",
+    e10.state === "SUCCEEDED" && e10.external_id === weakFind.externalId,
+    `auto recovery recorded SUCCEEDED ${e10.external_id} from upstream lookup`,
+  );
+
+  // AT_LEAST_ONCE: bounded duplicates are the mode's declared cost.
+  const s11 = seedClaimed({ scopeN: 70 });
+  const p11 = proposeAndApprove(s11, { domainKey: "dm:telegram:70", naturalKey: "v1", retryMode: "AT_LEAST_ONCE" });
+  const remoteALO = createFakeRemote(join(ws.stateDir, "alo-remote"));
+  const dis11 = dispatchEffect(db, remoteALO, {
+    effectId: p11.proposal.effectId, now, precondition: () => true,
+    label: "apply-then-die", submitMode: "apply_then_die",
+  });
+  const auto11 = autoRecoverUnknown(db, remoteALO, { effectId: p11.proposal.effectId, now });
+  const dis11b = dispatchEffect(db, remoteALO, { effectId: p11.proposal.effectId, now: now + 5000, precondition: () => true });
+  suite.check(
+    "at-least-once-resend-may-duplicate-declared",
+    dis11.state === "UNKNOWN" && auto11.action === "requeued" && dis11b.state === "SUCCEEDED" &&
+      remoteALO.appliedCount(p11.proposal.businessKey) === 2,
+    `apply-then-die -> requeued -> resend SUCCEEDED; remote delivered 2x (mode allows)`,
+  );
+
+  // Local zero-byte failure requeues; remote rejection does not.
+  const s12 = seedClaimed({ scopeN: 71 });
+  const p12 = proposeAndApprove(s12, { domainKey: "dm:telegram:71", naturalKey: "v1", retryMode: "IDEMPOTENCY_KEY" });
+  const remoteLocal = createFakeRemote(join(ws.stateDir, "local-remote"));
+  const dis12 = dispatchEffect(db, remoteLocal, {
+    effectId: p12.proposal.effectId, now, precondition: () => true,
+    label: "zero-bytes-local-error", submitMode: "local_error",
+  });
+  const re12 = requeueLocalFailure(db, { effectId: p12.proposal.effectId, now, backoffMs: 100 });
+  const dis12b = dispatchEffect(db, remoteLocal, { effectId: p12.proposal.effectId, now: now + 200, precondition: () => true });
+  suite.check(
+    "zero-byte-local-failure-requeues-and-recover",
+    dis12.state === "FAILED" && re12.state === "READY" && dis12b.state === "SUCCEEDED",
+    `local error FAILED -> READY -> SUCCEEDED on retry`,
+  );
+  const s13 = seedClaimed({ scopeN: 72 });
+  const p13 = proposeAndApprove(s13, { domainKey: "dm:telegram:72", naturalKey: "v1", retryMode: "IDEMPOTENCY_KEY" });
+  const remoteReject = createFakeRemote(join(ws.stateDir, "reject-remote"));
+  const dis13 = dispatchEffect(db, remoteReject, {
+    effectId: p13.proposal.effectId, now, precondition: () => true,
+    label: "remote-reject", submitMode: "reject",
+  });
+  let remoteRejectRequeueRefused = false;
+  try {
+    requeueLocalFailure(db, { effectId: p13.proposal.effectId, now, backoffMs: 100 });
+  } catch (e) {
+    remoteRejectRequeueRefused = /no automatic requeue/.test(e.message);
+  }
+  suite.check(
+    "remote-rejection-never-auto-requeues",
+    dis13.state === "FAILED" && remoteRejectRequeueRefused,
+    "known-terminated failure stays terminal; a new action needs a new intent",
+  );
+
+  // Cancellation linearization.
+  const s14 = seedClaimed({ scopeN: 73 });
+  const p14 = proposeAndApprove(s14, { domainKey: "dm:telegram:73", naturalKey: "v1", retryMode: "IDEMPOTENCY_KEY" });
+  const cancelA = cancelScope(db, { scopeId: s14.scopeId, now, actorId: "prn:telegram:owner" });
+  let dispatchAfterCancelRefused = false;
+  try {
+    dispatchEffect(db, remote, { effectId: p14.proposal.effectId, now, precondition: () => true });
+  } catch (e) {
+    dispatchAfterCancelRefused = e instanceof DispatcherRefused;
+  }
+  const e14 = db.prepare("SELECT state FROM effects WHERE id=?").get(p14.proposal.effectId);
+  const apr14 = db.prepare("SELECT state FROM approvals WHERE id=?").get(p14.proposal.approvalId);
+  suite.check(
+    "cancel-before-dispatch-fences-everything",
+    cancelA.cancelledTasks.includes(s14.d.taskId) && e14.state === "CANCELLED" &&
+      apr14.state === "CONSUMED" && dispatchAfterCancelRefused,
+    `cancel committed first: uncommitted task CANCELLED, READY effect CANCELLED, dispatcher refuses (the consumed approval stays CONSUMED; only WAITING approvals invalidate)`,
+  );
+  const s15 = seedClaimed({ scopeN: 74 });
+  const p15 = proposeAndApprove(s15, { domainKey: "dm:telegram:74", naturalKey: "v1", retryMode: "IDEMPOTENCY_KEY" });
+  const remoteC = createFakeRemote(join(ws.stateDir, "cancel-remote"));
+  const dis15 = dispatchEffect(db, remoteC, {
+    effectId: p15.proposal.effectId, now, precondition: () => true,
+    label: "apply-then-die", submitMode: "apply_then_die",
+  });
+  const cancelB = cancelScope(db, { scopeId: s15.scopeId, now, actorId: "prn:telegram:owner" });
+  const t15 = db.prepare("SELECT state FROM tasks WHERE id=?").get(s15.d.taskId);
+  suite.check(
+    "dispatch-committed-first-cancel-reports-committed-pending",
+    dis15.state === "UNKNOWN" && cancelB.retainedCommitted.length === 1 &&
+      cancelB.retainedCommitted[0].effects.includes(p15.proposal.effectId) &&
+      t15.state === "WAITING_EFFECT",
+    `cancel after commitment: task stays WAITING_EFFECT, effect retained for reconciliation`,
+  );
+  // Single-task cancel still fences the whole scope; others park under the
+  // new epoch instead of silently continuing.
+  const s16a = seedClaimed({ scopeN: 75 });
+  const s16b = seedClaimed({ scopeN: 75 });
+  const cancelC = cancelTask(db, { taskId: s16a.d.taskId, now, actorId: "prn:telegram:owner" });
+  const t16a = db.prepare("SELECT state FROM tasks WHERE id=?").get(s16a.d.taskId);
+  const t16b = db.prepare("SELECT state, scope_epoch FROM tasks WHERE id=?").get(s16b.d.taskId);
+  const scope75 = db.prepare("SELECT epoch FROM scopes WHERE id=?").get(s16a.scopeId);
+  const a16b = db.prepare("SELECT state FROM attempts WHERE task_id=? AND state='ACTIVE'").get(s16b.d.taskId);
+  suite.check(
+    "single-task-cancel-parks-scope-under-new-epoch",
+    cancelC.cancelledTasks.includes(s16a.d.taskId) && t16a.state === "CANCELLED" &&
+      cancelC.parkedTasks.includes(s16b.d.taskId) && t16b.state === "QUEUED" &&
+      t16b.scope_epoch === scope75.epoch && a16b === undefined,
+    `target CANCELLED; peer parked QUEUED at new epoch ${scope75.epoch}, old attempt closed`,
+  );
+  // The parked peer claims again under the new epoch.
+  const c16b = claimNextTask(db, { now, leaseMs: 45000 });
+  suite.check(
+    "parked-peer-reclaims-under-new-epoch",
+    c16b.taskId === s16b.d.taskId,
+    `peer reclaimed as attempt ${c16b.attemptNo}`,
+  );
+
+  // PARKED attempts hold no lease and are never reaped (06 section 4).
+  const reapedParked = reapExpiredLeases(db, { now: now + 10 * 60 * 1000, maxAttempts: 3 });
+  const anyParkedLost = db.prepare("SELECT count(*) c FROM attempts WHERE state='LOST' AND error_code IS NULL").get().c;
+  suite.check(
+    "reaper-never-touches-parked-approvals",
+    !reapedParked.some((r) => r.taskId === s1.d.taskId) && anyParkedLost === 0,
+    `WAITING_APPROVAL attempts stay PARKED across lease sweeps`,
+  );
+}
+
+// ------------------------------------------------- case: effect crash windows
+{
+  const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "effect-crash.mjs");
+  const canonical = loadCanonicalSchema();
+
+  const runWindow = async ({ name, env, expect }) => {
+    const ws = makeWorkspace(`durability-crash-${name}`);
+    const proc = spawnNode(scenario, [], { env: { AEGISPI_WS: ws.stateDir, ...env } });
+    const done = await proc.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, external_id FROM effects").get();
+    const approval = db.prepare("SELECT state FROM approvals").get();
+    const task = db.prepare("SELECT state FROM tasks").get();
+    db.close();
+    const nonce = (done.stdout.match(/NONCE ([0-9a-f]+)/) ?? [])[1] ?? null;
+    suite.check(
+      `crash-${name}-durable-state`,
+      done.code !== 0 && effect.state === expect.effect && approval.state === expect.approval && task.state === expect.task,
+      `exit=${done.code} effect=${effect?.state} approval=${approval?.state} task=${task?.state}`,
+    );
+    return { ws, stdout: done.stdout, nonce };
+  };
+
+  // Window: CAS mid-transaction rolls back. The approval card (with its
+  // nonce) is already in the approver's hands, so the honest retry decides
+  // cleanly with the SAME nonce.
+  {
+    const { ws, nonce } = await runWindow({
+      name: "approval-inside-txn",
+      env: { AEGISPI_CRASH_POINT: "approvals:inside-txn", AEGISPI_NOW: "1795700000000" },
+      expect: { effect: "WAITING_APPROVAL", approval: "WAITING", task: "WAITING_APPROVAL" },
+    });
+    const db = openDatabase(ws.dbPath);
+    const approval = db.prepare("SELECT * FROM approvals").get();
+    const effect = db.prepare("SELECT * FROM effects").get();
+    const principals = db.prepare("SELECT id FROM principals WHERE platform='telegram' AND platform_subject='approver-1'").get();
+    const again = decideApproval(db, {
+      approvalId: approval.id,
+      decision: "approve",
+      actionHash: effect.action_hash,
+      nonce,
+      approverId: principals.id,
+      now: 1795700000001,
+    });
+    const effectAfter = db.prepare("SELECT state FROM effects WHERE id=?").get(effect.id).state;
+    db.close();
+    suite.check(
+      "crash-approval-inside-txn-cas-rolled-back-clean-retry",
+      again.accepted === true && effectAfter === "READY",
+      `killed CAS rolled back; the approver's card still decides: effect READY`,
+    );
+  }
+
+  // Window: consume committed, caller never learned. A retry returns
+  // "already processed"; nothing double-consumes.
+  {
+    const { ws } = await runWindow({
+      name: "approval-after-commit",
+      env: { AEGISPI_CRASH_POINT: "approvals:after-commit", AEGISPI_NOW: "1795710000000" },
+      expect: { effect: "READY", approval: "CONSUMED", task: "WAITING_EFFECT" },
+    });
+    const db = openDatabase(ws.dbPath);
+    const approval = db.prepare("SELECT * FROM approvals").get();
+    const effect = db.prepare("SELECT * FROM effects").get();
+    const principals = db.prepare("SELECT id FROM principals WHERE platform='telegram' AND platform_subject='approver-1'").get();
+    const again = decideApproval(db, {
+      approvalId: approval.id,
+      decision: "approve",
+      actionHash: effect.action_hash,
+      nonce: "whatever-retry-nonce",
+      approverId: principals.id,
+      now: 1795710000001,
+    });
+    db.close();
+    suite.check(
+      "crash-approval-after-commit-retry-idempotent",
+      again.accepted === false && /already CONSUMED/.test(again.reason ?? ""),
+      `double-click after crash: ${again.reason}`,
+    );
+  }
+
+  // The flagship window: READY->SUBMITTING committed, no request byte sent.
+  {
+    const { ws } = await runWindow({
+      name: "submitting-before-call",
+      env: {
+        AEGISPI_CRASH_POINT: "effects:after-cas-before-call",
+        AEGISPI_NOW: "1795720000000",
+        AEGISPI_RETRY_MODE: "IDEMPOTENCY_KEY",
+        AEGISPI_FAKE_MODE: "ok",
+      },
+      expect: { effect: "SUBMITTING", approval: "CONSUMED", task: "WAITING_EFFECT" },
+    });
+    const remoteBefore = createFakeRemote(ws.stateDir);
+    const appliedBefore = remoteBefore.appliedCount(
+      openDatabase(ws.dbPath, { readOnly: true }).prepare("SELECT business_key FROM effects").get().business_key,
+    );
+    suite.check(
+      "crash-submitting-no-remote-bytes",
+      appliedBefore === 0,
+      `fake remote delivered 0 times while the effect sits SUBMITTING`,
+    );
+    // Startup recovery: SUBMITTING -> UNKNOWN, then per-mode reconciliation.
+    const db = openDatabase(ws.dbPath);
+    const marked = markSubmittingEffectsUnknown(db, { now: 1795720001000 });
+    const effect = db.prepare("SELECT * FROM effects").get();
+    suite.check(
+      "crash-submitting-recovery-marks-unknown",
+      marked.length === 1 && effect.state === "UNKNOWN",
+      `recovery marked ${marked.length} SUBMITTING effect(s) UNKNOWN`,
+    );
+    const remote = createFakeRemote(ws.stateDir);
+    const auto = autoRecoverUnknown(db, remote, { effectId: effect.id, now: 1795720002000 });
+    const redone = dispatchEffect(db, remote, { effectId: effect.id, now: 1795720010000, precondition: () => true });
+    const final = db.prepare("SELECT state, external_id FROM effects WHERE id=?").get(effect.id);
+    db.close();
+    suite.check(
+      "crash-submitting-idempotent-reconcile-lands-success",
+      auto.action === "requeued" && redone.state === "SUCCEEDED" && final.state === "SUCCEEDED" &&
+        remote.appliedCount(effect.business_key) === 1,
+      `UNKNOWN -> same-key resend -> SUCCEEDED ${final.external_id}; remote applied exactly once`,
+    );
+  }
+
+  // Window: remote already applied, local record missing (06 row "远端已
+  // 成功、本地未记账") — lookup recovers the external id, no resend.
+  {
+    const { ws } = await runWindow({
+      name: "remote-success-unrecorded",
+      env: {
+        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        AEGISPI_NOW: "1795730000000",
+        AEGISPI_RETRY_MODE: "LOOKUP_THEN_RETRY",
+        AEGISPI_FAKE_MODE: "ok",
+      },
+      expect: { effect: "SUBMITTING", approval: "CONSUMED", task: "WAITING_EFFECT" },
+    });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effectRow = db.prepare("SELECT * FROM effects").get();
+    db.close();
+    const remote = createFakeRemote(ws.stateDir);
+    const appliedRemote = remote.lookup({ businessKey: effectRow.business_key, consistency: "strong" });
+    suite.check(
+      "crash-remote-success-applied-before-record",
+      appliedRemote.found === true,
+      `remote really holds the action (${appliedRemote.externalId}) while the effect row is SUBMITTING`,
+    );
+    const db2 = openDatabase(ws.dbPath);
+    markSubmittingEffectsUnknown(db2, { now: 1795730001000 });
+    const auto = autoRecoverUnknown(db2, remote, { effectId: effectRow.id, now: 1795730002000 });
+    const final = db2.prepare("SELECT state, external_id FROM effects WHERE id=?").get(effectRow.id);
+    db2.close();
+    suite.check(
+      "crash-remote-success-recovery-records-no-resend",
+      auto.action === "recorded_success" && final.state === "SUCCEEDED" &&
+        final.external_id === appliedRemote.externalId && remote.appliedCount(effectRow.business_key) === 1,
+      `recovery recorded SUCCEEDED ${final.external_id} from the lookup; remote still holds exactly one delivery`,
     );
   }
 }

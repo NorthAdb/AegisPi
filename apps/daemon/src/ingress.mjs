@@ -69,7 +69,7 @@ export function ensureScope(db, { ownerId, kind, domainKey, channel, conversatio
   if (!existing) {
     db.prepare(
       `INSERT INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused)
-       VALUES (?,?,?,?,?,?,?,?,1,1,0)`,
+       VALUES (?,?,?,?,?,?,?, 1, 1, ?, 0)`,
     ).run(id, ownerId, kind, domainKey, channel, conversationId, repoId, policyVersion);
     return { id, created: true, epoch: 1, aclVersion: 1 };
   }
