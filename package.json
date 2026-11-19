@@ -17,6 +17,8 @@
     "test:security:unit": "node evals/phase3/security-unit/run.mjs",
     "test:restore": "node evals/phase3/restore/run.mjs",
     "test:security:integration": "node evals/phase3/security-integration/run.mjs",
-    "test:ingress-telegram": "node evals/phase3/ingress-telegram/run.mjs"
+    "test:ingress-telegram": "node evals/phase3/ingress-telegram/run.mjs",
+    "test:ingress-telegram:real": "node evals/phase3/ingress-telegram/real.mjs",
+    "test:quota-calibration": "node evals/phase3/quota-calibration/run.mjs"
   }
 }

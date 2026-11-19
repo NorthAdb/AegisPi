@@ -1,36 +1,61 @@
 // The Phase 3 isolation-test entry gate (handoff section 2.1: "没有这三份
 // 真实 digest 之前，不得开始隔离测试，更不得宣布常开。禁止编造 digest，
 // 禁止把 tag 或 PIN_REQUIRED 当成不可变摘要").
-// Suites import this and call requireAppImageDigests() FIRST: if any of the
-// three application images lacks a real sha256 digest (or the evidence holds
-// a placeholder), the suite refuses to run (exit 2) — a missing gate is not
-// a green suite.
+// Audit F1 hardened this from a FORMAT check into a BINDING check: suites
+// import requireAppImageDigests() FIRST and it now refuses unless the
+// evidence binds all three of source tree, registry manifest, and config:
+//   1. format      every value is a real sha256 content digest
+//   2. context     the recorded context hash equals the hash of THIS tree
+//                  (a changed tree makes the digests stale: rebuild and
+//                  commit fresh evidence before running any suite)
+//   3. registry    the digest resolves at the local build registry AND the
+//                  served bytes hash to that digest (proves it is an OCI
+//                  manifest digest, never a config/image id)
+//   4. config      the manifest's embedded config digest matches the
+//                  recorded one
+// A missing or placeholder binding is a refusal (exit 2). A gate refusal
+// is not a green suite.
 
 import { existsSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ImageBindError,
+  appImageContextHash,
+  fetchRegistryManifest,
+  isSha256,
+} from "./image-bind.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const DIGEST_REPORT_PATH = join(here, "..", "..", "..", "docs", "phase3", "reports", "image-digest.md");
+export const BUILD_REGISTRY = "127.0.0.1:5000";
 
 export const APP_IMAGES = ["agent", "acquisition", "execution"];
 
 export class ImageGateError extends Error {}
 
-export function parseAppImageDigests(reportPath = DIGEST_REPORT_PATH) {
+export async function parseAppImageDigests(
+  reportPath = DIGEST_REPORT_PATH,
+  { repoRoot = join(here, "..", "..", ".."), registry = BUILD_REGISTRY } = {},
+) {
   if (!existsSync(reportPath)) {
     throw new ImageGateError(`no image digest evidence at ${reportPath}; the three application images have not been recorded as built`);
   }
   const text = readFileSync(reportPath, "utf8");
-  const blockMatch = text.match(/<!--\s*app-image-digests v1([\s\S]*?)-->/);
-  if (!blockMatch) {
-    throw new ImageGateError("the digest evidence has no machine-readable app-image-digests block");
+  if (/<!--\s*app-image-digests v1/.test(text) && !/<!--\s*app-image-digests v2/.test(text)) {
+    throw new ImageGateError(
+      "the digest evidence is a v1 block: it records digest strings without binding them to the source tree that built them; rebuild with tools/build-app-images.mjs so the v2 block (manifest + config + context) replaces it",
+    );
   }
-  const found = {};
+  const blockMatch = text.match(/<!--\s*app-image-digests v2([\s\S]*?)-->/);
+  if (!blockMatch) {
+    throw new ImageGateError("the digest evidence has no machine-readable app-image-digests v2 block");
+  }
+  const fields = {};
   for (const line of blockMatch[1].split("\n")) {
-    const m = line.trim().match(/^([a-z]+):\s*(sha256:[0-9a-f]{64})$/);
+    const m = line.trim().match(/^([a-z]+(?:\.(?:manifest|config|context))?):\s*(sha256:[0-9a-f]{64})$/);
     if (m) {
-      found[m[1]] = m[2];
+      fields[m[1]] = m[2];
     }
     // Placeholders in VALUE positions are a hard refusal; prose that
     // explains the rule is not a placeholder.
@@ -38,24 +63,58 @@ export function parseAppImageDigests(reportPath = DIGEST_REPORT_PATH) {
       throw new ImageGateError(`the digest block carries a PIN_REQUIRED placeholder for a line: ${line.trim()}`);
     }
   }
+  const digests = {};
+  const configs = {};
+  const contexts = {};
   const missing = [];
   for (const name of APP_IMAGES) {
-    if (!found[name]) {
+    if (fields[name] && fields[`${name}.config`] && fields[`${name}.context`]) {
+      digests[name] = fields[name];
+      configs[name] = fields[`${name}.config`];
+      contexts[name] = fields[`${name}.context`];
+    } else {
       missing.push(name);
     }
   }
   if (missing.length > 0) {
     throw new ImageGateError(
-      `missing real digests for: ${missing.join(", ")} — a tag, an absent digest or a placeholder is not an immutable reference`,
+      `the v2 digest block is incomplete for: ${missing.join(", ")} — each image needs <name>, <name>.config and <name>.context`,
     );
   }
-  return { digests: found, reportPath };
+  // Context binding: the recorded digests must have been built from THIS
+  // tree. A drift means the evidence is stale, not that the tree is wrong.
+  for (const name of APP_IMAGES) {
+    const treeHash = appImageContextHash(name, repoRoot);
+    if (treeHash !== contexts[name]) {
+      throw new ImageGateError(
+        `the build context for ${name} changed after the recorded build (evidence ${contexts[name]}, this tree ${treeHash}); the recorded digests no longer name an image built from this source — run tools/build-app-images.mjs and commit the refreshed evidence before any isolation suite`,
+      );
+    }
+  }
+  // Registry + config binding.
+  for (const name of APP_IMAGES) {
+    let resolved;
+    try {
+      resolved = await fetchRegistryManifest(name, digests[name], { registry });
+    } catch (e) {
+      if (e instanceof ImageBindError) {
+        throw new ImageGateError(`${name}: ${e.message}`);
+      }
+      throw e;
+    }
+    if (resolved.configDigest !== configs[name]) {
+      throw new ImageGateError(
+        `the manifest for ${name} embeds config ${resolved.configDigest} but the evidence records ${configs[name]}; manifest and config digests are not interchangeable`,
+      );
+    }
+  }
+  return { digests, configs, contexts, reportPath, registry };
 }
 
 // Refuse-and-exit form for suite entry points.
-export function requireAppImageDigests() {
+export async function requireAppImageDigests(reportPath = DIGEST_REPORT_PATH, opts = {}) {
   try {
-    return parseAppImageDigests();
+    return await parseAppImageDigests(reportPath, opts);
   } catch (e) {
     console.error(`image-gate REFUSED: ${e.message}`);
     process.exit(2);
@@ -69,5 +128,5 @@ export function imageRef(name, digests) {
   if (!digest) {
     throw new ImageGateError(`no digest recorded for ${name}`);
   }
-  return `127.0.0.1:5000/aegispi/${name}@${digest}`;
+  return `${BUILD_REGISTRY}/aegispi/${name}@${digest}`;
 }

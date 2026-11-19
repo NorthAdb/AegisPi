@@ -1,17 +1,22 @@
 {
-  "generatedAt": "2026-11-19T13:23:16.390Z",
+  "generatedAt": "2026-11-19T16:30:09.466Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-integration",
-  "label": "test:security:integration — 真实容器隔离与逃逸矩阵（02 §8 第二组）",
+  "label": "test:security:integration — 真实容器隔离与逃逸矩阵（02 §8 第二组；探针经 bridge 对照证伪）",
   "counts": {
-    "pass": 21,
+    "pass": 29,
     "fail": 0
   },
   "results": [
     {
+      "name": "execution-image-owns-its-output-mount",
+      "status": "PASS",
+      "detail": "uid=999 writable=true (a fresh volume at /job/output initializes from the image's uid-999 directory; the host umask never decides)"
+    },
+    {
       "name": "escape-battery-direct-http-and-env-manipulation-blocked",
       "status": "PASS",
-      "detail": "direct_http=BLOCKED:ENETUNREACH env_manipulation=BLOCKED:ENETUNREACH"
+      "detail": "direct_http=BLOCKED:EAI_AGAIN env_manipulation=BLOCKED:EAI_AGAIN"
     },
     {
       "name": "escape-battery-no-egress-dns-blocked",
@@ -19,9 +24,24 @@
       "detail": "dns_ipv6=BLOCKED:EAI_AGAIN"
     },
     {
+      "name": "escape-battery-host-ports-unreachable",
+      "status": "PASS",
+      "detail": "host_ports=BLOCKED:EAI_AGAIN (verdict from a real TCP connect to this suite's own listening source)"
+    },
+    {
+      "name": "escape-battery-metadata-endpoint-unreachable",
+      "status": "PASS",
+      "detail": "metadata=BLOCKED:ENETUNREACH"
+    },
+    {
       "name": "escape-battery-host-paths-and-socket-absent",
       "status": "PASS",
       "detail": "absolute_paths=/etc/shadow:BLOCKED:EACCES|/var/run/docker.sock:BLOCKED:ENOENT|/proc/1/cmdline:42|/host:BLOCKED:ENOENT|/workspace:BLOCKE socket=BLOCKED:absent"
+    },
+    {
+      "name": "escape-battery-toctou-input-readonly",
+      "status": "PASS",
+      "detail": "toctou_input=BLOCKED:EROFS (the runner's manifest mount refuses a post-read rewrite)"
     },
     {
       "name": "escape-battery-no-secret-env-in-sandbox",
@@ -39,14 +59,14 @@
       "detail": "host_canary=BLOCKED:ENOENT acceptance_file=BLOCKED:EROFS"
     },
     {
-      "name": "escape-battery-pids-limit-bounds-the-fork-storm",
+      "name": "escape-battery-git-c-executes-and-stays-in-sandbox",
       "status": "PASS",
-      "detail": "pids_exhaust=spawned=241"
+      "detail": "git_c_execution=EXECUTED_IN_SANDBOX alias=true run=0 (git genuinely present and executed; GIT_ABSENT would fail this check)"
     },
     {
-      "name": "escape-battery-git-c-executes-only-in-sandbox",
+      "name": "escape-battery-pids-limit-bounds-the-fork-storm",
       "status": "PASS",
-      "detail": "git_c_execution=IN_SANDBOX=false"
+      "detail": "pids_exhaust=spawned=241 (limit 256; the few processes above the storm count are the runner and its reaper)"
     },
     {
       "name": "escape-battery-completed-with-evidence",
@@ -57,6 +77,11 @@
       "name": "host-canary-and-oracle-untouched-after-battery",
       "status": "PASS",
       "detail": "canary intact=true; oracle intact=true"
+    },
+    {
+      "name": "escape-probes-detect-reachability-under-bridge-control",
+      "status": "PASS",
+      "detail": "direct=CONNECTED:200 ports=CONNECTED dns=RESOLVED:192.168.65.254 — the probes can see a leak, so the BLOCKED verdicts above are falsifiable, not tautologies"
     },
     {
       "name": "agent-container-rootfs-readonly-proposals-only-no-network",
@@ -71,7 +96,7 @@
     {
       "name": "acquisition-refuses-path-traversal-members",
       "status": "PASS",
-      "detail": "exit=1 reason=tar extract failed (exit 2): tar: Archive contains escape-file-present=false"
+      "detail": "exit=1 reason=tar extract failed (exit 2): tar: Archive contains '00000000 escape-file-present=false"
     },
     {
       "name": "acquisition-refuses-escaping-symlinks",
@@ -104,20 +129,35 @@
       "detail": "exit=1 reason=more than 5 redirects"
     },
     {
-      "name": "acquisition-follows-same-scheme-http-redirects",
+      "name": "acquisition-refuses-cross-host-redirects",
+      "status": "PASS",
+      "detail": "exit=1 reason=redirect host allowlist-demo.host-gateway.local:64574 is not in the al"
+    },
+    {
+      "name": "acquisition-follows-plan-allowlisted-redirect-hosts",
+      "status": "PASS",
+      "detail": "exit=0 failures=0 extracted=true (allowlist-demo.host-gateway.local explicitly allowlisted by the host-generated plan)"
+    },
+    {
+      "name": "acquisition-follows-same-host-http-redirects",
       "status": "PASS",
       "detail": "exit=0 failures=0"
     },
     {
+      "name": "acquisition-dead-source-is-not-a-security-refusal",
+      "status": "PASS",
+      "detail": "exit=1 reason=unexpected: fetch failed — recorded as DEAD SOURCE, never counted as traversal/redirect/limit refusal above"
+    },
+    {
       "name": "offline-jobs-suite-green-under-integration-gate",
       "status": "PASS",
-      "detail": "exit=0 (node:28948) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
+      "detail": "exit=0 (node:22496) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
     }
   ],
-  "dataSources": "真实 docker 容器（execution/agent/acquisition 按记录 digest 运行）+ 本机一次性 HTTP 源（host.docker.internal，仅本机回环网关）；无模型调用、无真实外部写、无凭据入容器",
+  "dataSources": "真实 docker 容器（execution/agent/acquisition 按记录 manifest digest 运行）+ 本机一次性 HTTP 源（host.docker.internal 经 host-gateway，仅本机回环网关）+ bridge 对照容器（同镜像仅网络不同，证探针可见泄漏）；无模型调用、无真实外部写、无凭据入容器",
   "images": {
-    "execution": "127.0.0.1:5000/aegispi/execution@sha256:59f9a3577e2fdb7fb5c2c1e029251605ed093feb30d40a6cc0157cd1fa223cf8",
-    "agent": "127.0.0.1:5000/aegispi/agent@sha256:5355348ad93e1e9be4380531ab78265fac8a77fed89a2dc6181de98062bc1bf5",
-    "acquisition": "127.0.0.1:5000/aegispi/acquisition@sha256:e045e9670a804e9f3ab97b48e69e9c09047b1c05f0877bdaf72b39588f756c97"
+    "execution": "127.0.0.1:5000/aegispi/execution@sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050",
+    "agent": "127.0.0.1:5000/aegispi/agent@sha256:87e8c195145fdff304d1c3409396876ee49556855f9a1727e1f8617fc52d79b6",
+    "acquisition": "127.0.0.1:5000/aegispi/acquisition@sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658"
   }
 }

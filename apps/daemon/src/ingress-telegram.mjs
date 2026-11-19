@@ -5,18 +5,56 @@
 // real feed explicitly); without a token it refuses before any network call
 // (fail closed). Pull-mode authentication is the bot-token HTTPS channel
 // plus update_id as the platform event id — the dedup that receiveEvent
-// already enforces. Webhook-mode HMAC (X-Telegram-Bot-Api-Secret-Token)
-// verification lives in ingress-verify.mjs and is what a future webhook
-// wiring must call; this adapter is the sanctioned read-only pull path.
+// already enforces.
+//
+// Webhook truth (audit F7 fixed the conflated comment): ingress-verify.mjs
+// is a GENERIC HMAC-SHA256 signed-envelope verifier, not the Telegram
+// webhook header check. The Telegram-specific part — constant-time
+// comparison of the X-Telegram-Bot-Api-Secret-Token header against the
+// configured webhook secret — is createTelegramWebhookGuard below. It is
+// implemented but NOT wired to any public endpoint: a real webhook source
+// needs a public endpoint and an owner-authorized secret, which is the
+// recorded open item; until then nothing calls it.
 //
 // The fetch transport is INJECTED: the host decides how HTTP leaves this
 // machine (direct or its own proxy). No URL is ever assembled from model
 // output — the endpoint is fixed here.
 
+import { timingSafeEqual } from "node:crypto";
+
 export class TelegramAdapterError extends Error {}
 export class TelegramTokenMissing extends TelegramAdapterError {}
+export class TelegramWebhookSecretMissing extends TelegramAdapterError {}
 
 const API_BASE = "https://api.telegram.org";
+
+// Telegram webhook guard (the platform's documented header check): the
+// caller presents the X-Telegram-Bot-Api-Secret-Token header and it must
+// equal the configured secret in CONSTANT TIME. Implemented, not wired: no
+// public endpoint exists in this phase, so nothing here is "verified
+// against the real webhook source" — that stays an open item on record.
+export function createTelegramWebhookGuard({ secret }) {
+  if (typeof secret !== "string" || secret.length < 16) {
+    throw new TelegramWebhookSecretMissing(
+      "a webhook secret of at least 16 chars is required; without one the webhook guard refuses instead of guessing",
+    );
+  }
+  const expected = Buffer.from(secret, "utf8");
+  return {
+    mode: "webhook-header-guard",
+    verifyRequest(headers) {
+      const presented = headers["x-telegram-bot-api-secret-token"];
+      if (typeof presented !== "string" || presented.length === 0) {
+        return { ok: false, reason: "no X-Telegram-Bot-Api-Secret-Token header; the webhook guard refuses" };
+      }
+      const got = Buffer.from(presented, "utf8");
+      if (got.length !== expected.length || !timingSafeEqual(got, expected)) {
+        return { ok: false, reason: "webhook secret token mismatch; refused" };
+      }
+      return { ok: true };
+    },
+  };
+}
 
 export function createTelegramPullAdapter({ token, fetchImpl, apiBase = API_BASE }) {
   if (typeof token !== "string" || token.length === 0) {

@@ -9,6 +9,7 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   lockedNodeGuard,
   makeSuite,
@@ -16,6 +17,7 @@ import {
   suiteExit,
   writeReport,
   consoleFetch,
+  repoRoot,
 } from "../lib/harness.mjs";
 import { loadCanonicalSchema, migrate } from "../../../apps/daemon/src/db/migrate.mjs";
 import { openDatabase } from "../../../apps/daemon/src/db/connect.mjs";
@@ -28,6 +30,8 @@ import { grantPermission, revokePermission, hasReadGrant } from "../../../apps/d
 import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
 import { putObjectContent, insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
 import { recall } from "../../../apps/daemon/src/recall.mjs";
+import { writeStreamEvent } from "../../../apps/daemon/src/audit.mjs";
+import { recordWatermark } from "../../../apps/daemon/src/db/disk-water.mjs";
 import {
   verifyFeedEvent,
   computeEventSignature,
@@ -568,12 +572,168 @@ function seed(tag) {
   );
 }
 
+// -------------------------------------------------- SSE scope filter (audit F8)
+{
+  const { db, ws, now, OWNER } = seed("su-sse-scope");
+  const OTHER = "prn:telegram:8303";
+  db.prepare("INSERT INTO principals(id, platform, platform_subject) VALUES (?,?,?)").run(OTHER, "telegram", "8303");
+  db.prepare(
+    "INSERT INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+  ).run("scp:foreign", OTHER, "owner_dm", "dm:telegram:7102", "telegram", "7102", null, 1, 1, "pv1", 0);
+  // One event in a scope the caller OWNS, one in a scope they neither own
+  // nor hold a grant on.
+  writeStreamEvent(db, { scopeId: "scp:dm%3Atelegram%3A6101", eventType: "own_scope_event", entityId: "e1", entityVersion: 1, payload: JSON.stringify({ s: "own" }), now });
+  writeStreamEvent(db, { scopeId: "scp:foreign", eventType: "foreign_scope_event", entityId: "e2", entityVersion: 1, payload: JSON.stringify({ s: "foreign" }), now });
+  const { token } = ensureConsoleToken(ws.stateDir);
+  const app = createConsoleApp(db, {
+    recovery: { mode: "open", actions: [], failedStep: null },
+    mode: "open", token, port: 4310, stateDir: ws.stateDir, ownerPrincipalId: OWNER,
+  });
+  const fetch = consoleFetch(app);
+  const ungranted = await fetch("GET", "/api/events/stream", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  // A grant on the foreign scope makes its events visible — the filter is
+  // about ENTITLEMENT, not a hard list.
+  grantPermission(db, { scopeId: "scp:foreign", principalId: OWNER, permission: "read", now: now + 1 });
+  const granted = await fetch("GET", "/api/events/stream", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  suite.check(
+    "sse-filters-to-caller-scopes-until-granted",
+    ungranted.status === 200 &&
+      /own_scope_event/.test(ungranted.text) &&
+      !/foreign_scope_event/.test(ungranted.text) &&
+      /foreign_scope_event/.test(granted.text),
+    `own-visible=${/own_scope_event/.test(ungranted.text)} foreign-before-grant=${/foreign_scope_event/.test(ungranted.text)} foreign-after-grant=${/foreign_scope_event/.test(granted.text)}`,
+  );
+  db.close();
+}
+
+// ------------------------------------------- fake worker settlement isolation (audit F6)
+{
+  const daemonPath = join(repoRoot, "apps", "daemon", "src", "daemon.mjs");
+  function seedDispatchable(tag) {
+    const ws = makeWorkspace(tag);
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, loadCanonicalSchema());
+    const now = Date.now();
+    const ing = receiveEvent(db, ws.stateDir, {
+      now, source: "telegram", sourceEventId: `evt-${tag}`,
+      principal: { platform: "telegram", subject: "6101" },
+      scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+      threadKey: `t-${tag}`, priority: 5, policyVersion: "pv1", payload: `worker fixture ${tag}`, verdict: "ADMIT",
+    });
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    dispatchEventToTask(db, {
+      inboxId: inbox.id, dispatchKey: dispatchKeyForInbox(inbox), now, priority: 5,
+      maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "ss",
+    });
+    db.close();
+    return ws;
+  }
+  // WITHOUT --fake-upstream: the no-authorization path fabricates nothing.
+  {
+    const ws = seedDispatchable("su-worker-realpath");
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+    const reservations = db.prepare("SELECT count(*) c FROM budget_reservations WHERE purpose='worker'").get().c;
+    db.close();
+    suite.check(
+      "no-flag-daemon-tick-settles-no-fabricated-usage",
+      r.status === 0 && settled === 0 && reservations === 0,
+      `daemon exit=${r.status} settlements=${settled} worker-reservations=${reservations} (nothing is claimed or settled without the declared fixture flag)`,
+    );
+  }
+  // WITH --fake-upstream: the fixture settles, and its settlement row is
+  // LABELED as fixture usage — never a bare number masquerading as a bill.
+  {
+    const ws = seedDispatchable("su-worker-fixture");
+    const r = spawnSync(process.execPath, [daemonPath, "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const rows = db.prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'").all();
+    db.close();
+    const fixtureLabeled = rows.some((row) => {
+      try {
+        return JSON.parse(row.details_json).usage?.source === "fake-worker-fixture";
+      } catch {
+        return false;
+      }
+    });
+    suite.check(
+      "fixture-daemon-tick-settlement-is-labeled-fixture",
+      r.status === 0 && rows.length === 1 && fixtureLabeled,
+      `daemon exit=${r.status} settlements=${rows.length} fixture-labeled=${fixtureLabeled}`,
+    );
+  }
+}
+
+// ------------------------------------------- critical disk watermark drill (audit F8)
+{
+  const ws = makeWorkspace("su-disk-critical");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  // 1,000,000 GiB is far above any real disk: the real statfs path reads a
+  // healthy disk and the injected threshold trips the CRITICAL level — a
+  // measured alert drill, not a mocked counter.
+  const r = spawnSync(process.execPath, [
+    join(repoRoot, "apps", "daemon", "src", "daemon.mjs"),
+    "--check", `--data-dir=${ws.stateDir}`,
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    timeout: 60000,
+    env: { ...process.env, AEGISPI_DISK_DRILL_CRITICAL_GIB: "1000000" },
+  });
+  const out = (r.stdout ?? "") + (r.stderr ?? "");
+  suite.check(
+    "disk-watermark-critical-drill-opens-read-only",
+    r.status === 3 && /CRITICAL/.test(out),
+    `daemon exit=${r.status} disk-line=${(out.match(/disk:.*$/m) ?? ["absent"])[0].slice(0, 90)}`,
+  );
+}
+
+// ------------------------------------------- watermark alert transition (audit F8)
+{
+  const { db, now } = seed("su-disk-alert");
+  // The alert streams into the budget service scope; it must exist first
+  // (the daemon's ledger creation does this at startup — mirrored here).
+  db.prepare("INSERT OR IGNORE INTO principals(id, platform, platform_subject) VALUES ('prn:system:budget','system','budget')").run();
+  db.prepare(
+    `INSERT OR IGNORE INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused)
+     VALUES ('scp:service:budget','prn:system:budget','service','service:budget','internal',NULL,NULL,1,1,'pv1',0)`,
+  ).run();
+  // The alert fires on a LEVEL TRANSITION and streams once: ok -> warn must
+  // write the audit row and the stream event; a steady warn must not repeat.
+  const first = recordWatermark(db, {
+    state: { level: "warn", freeBytes: 1, totalBytes: 2, freeRatio: 0.01 },
+    previousLevel: "ok",
+    now,
+  });
+  const steady = recordWatermark(db, {
+    state: { level: "warn", freeBytes: 1, totalBytes: 2, freeRatio: 0.01 },
+    previousLevel: "warn",
+    now: now + 1000,
+  });
+  const alerts = db.prepare("SELECT count(*) c FROM audit_log WHERE code='disk_watermark_alert'").get().c;
+  const streamAlerts = db
+    .prepare("SELECT count(*) c FROM stream_events WHERE event_type='audit_alert' AND entity_id='disk:watermark'")
+    .get().c;
+  suite.check(
+    "disk-watermark-alerts-once-per-level-transition",
+    first.alerted === true && steady.alerted === false && alerts === 1 && streamAlerts === 1,
+    `transition-alert=${first.alerted} steady-repeat=${steady.alerted} audit-rows=${alerts} stream-events=${streamAlerts}`,
+  );
+  db.close();
+}
+
 writeReport({
   suiteId: "security-unit",
   suite,
   label: "test:security:unit — 确定性安全门禁（02 §8 第一组）",
   extra: {
-    dataSources: "本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS）；无容器、无网络、无模型调用",
+    dataSources: "本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS、SSE scope 过滤、daemon tick 夹具隔离、磁盘水位 critical 演练）；无容器、无付费网络",
   },
 });
 process.exit(suiteExit(suite, { label: "test:security:unit" }));

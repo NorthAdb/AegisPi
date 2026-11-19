@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T13:23:16.379Z",
+  "generatedAt": "2026-11-19T16:30:09.453Z",
   "nodeVersion": "v22.23.5",
   "suite": "offline-jobs",
   "label": "test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）",
   "counts": {
-    "pass": 10,
+    "pass": 11,
     "fail": 0
   },
   "results": [
@@ -41,12 +41,12 @@
     {
       "name": "memory-and-disk-quotas-are-enforced-not-advisory",
       "status": "PASS",
-      "detail": "oom=FAILED(FAILED) disk=FAILED/9 stdout=\"DISK_ENOSPC:ENOSPC\""
+      "detail": "oom=FAILED(FAILED) disk=FAILED/9 stdout=\"DISK_BOUND_HIT:ENOSPC\" — the tmpfs SIZE bound must be the killer (EACCES or any other code means the mount contract broke, not the quota)"
     },
     {
       "name": "startup-recovery-kills-orphan-container-and-marks-lost",
       "status": "PASS",
-      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"261843471df3d1bdd302daa99f9ca435e19f573168d48eeb4c074390e9e1e50b\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
+      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"07ad766786dd25790bc8f0e1aedc30ac43832b48e3028687c8f88927a2c5bcda\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
     },
     {
       "name": "invalid-manifest-refused-nothing-executed",
@@ -59,12 +59,17 @@
       "detail": "daemon exit=0 job=SUCCEEDED/0 containers=\"\" job-stdout-seen=true daemon-event-seen=true"
     },
     {
+      "name": "disk-warn-drill-blocks-new-job-launches",
+      "status": "PASS",
+      "detail": "daemon exit=5 job=QUEUED warn-line=true containers=\"\" — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill"
+    },
+    {
       "name": "residual-risk-recorded",
       "status": "NOTE",
-      "detail": "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）；Task 结论始终由可信 oracle 判定，job 的自述不作授权或成功标记。宿主墙钟 deadline 与容器回收不受影响。"
+      "detail": "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）。宿主按容器退出码与证据字段映射 job 终态，job 的自述不作授权或成功标记；宿主墙钟 deadline 与容器回收不受影响。「Task 结论归可信 oracle 判定」的宿主侧比较尚未接线：本阶段如实记录为实现待接线，不宣称已验收。"
     }
   ],
   "dataSources": "真实 docker 容器（execution/agent 镜像按记录 digest 运行，--network none，cgroup 限额）+ 本地 SQLite；无模型调用、无外部写、无凭据入容器",
-  "executionImage": "127.0.0.1:5000/aegispi/execution@sha256:59f9a3577e2fdb7fb5c2c1e029251605ed093feb30d40a6cc0157cd1fa223cf8",
-  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:5355348ad93e1e9be4380531ab78265fac8a77fed89a2dc6181de98062bc1bf5"
+  "executionImage": "127.0.0.1:5000/aegispi/execution@sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050",
+  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:87e8c195145fdff304d1c3409396876ee49556855f9a1727e1f8617fc52d79b6"
 }

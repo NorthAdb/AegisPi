@@ -15,7 +15,7 @@
 //      NOT resurrect (the ledger applies after restore).
 //   6. The restored database passes migration idempotence.
 
-import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, utimesSync } from "node:fs";
 import { join, basename } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
@@ -42,6 +42,7 @@ import {
   consistencyBackup,
   decryptManifest,
   insideMaintenanceWindow,
+  pruneExpiredBackups,
   restoreFromBackup,
   OutsideMaintenanceWindow,
   ManifestKeyMissing,
@@ -279,12 +280,82 @@ suite.check(
 );
 db2.close();
 
+// ---------------------------------------------------------------------------
+// Audit F3: a backup image tampered at EQUAL LENGTH must be REFUSED. The
+// manifest's sealed dbSha256 authenticates the image bytes; the size check
+// alone accepted exactly this substitution before the fix.
+{
+  const ws3 = makeWorkspace("restore-tamper");
+  mkdirSync(join(ws3.stateDir, "db"), { recursive: true });
+  const db3 = openDatabase(ws3.dbPath);
+  migrate(db3, loadCanonicalSchema());
+  db3.prepare("INSERT INTO system_state(key, value) VALUES ('restore:canary','AUDITTOKEN-AAAA')").run();
+  const now3 = Date.now();
+  const window3 = windowContainingNow(now3);
+  const backup3 = consistencyBackup(db3, {
+    stateDir: ws3.stateDir, backupsDir: ws3.backupsDir, now: now3, manifestKeyHex: KEY_HEX, window: window3,
+  });
+  db3.close();
+  // Equal-length byte substitution: same size, valid SQLite, different bytes.
+  const raw = readFileSync(backup3.path);
+  const needle = "AUDITTOKEN-AAAA";
+  const idx = raw.indexOf(needle);
+  const tampered = Buffer.concat([
+    raw.subarray(0, idx),
+    Buffer.from("AUDITTOKEN-BBBB", "utf8"),
+    raw.subarray(idx + needle.length),
+  ]);
+  writeFileSync(backup3.path, tampered);
+  let tamperAccepted = false;
+  let tamperError = null;
+  try {
+    restoreFromBackup({
+      backupPath: backup3.path,
+      manifestPath: backup3.manifestPath,
+      manifestKeyHex: KEY_HEX,
+      targetDbPath: join(ws3.stateDir, "db", "restored-tampered.db"),
+      now: now3 + 1000,
+    });
+    tamperAccepted = true;
+  } catch (e) {
+    tamperError = e;
+  }
+  suite.check(
+    "restore-rejects-equal-length-db-tampering",
+    tamperAccepted === false && /dbSha256|hash to/.test(tamperError?.message ?? ""),
+    `tampered image size unchanged=${tampered.length === raw.length} -> ${tamperError?.message?.slice(0, 80)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit F8: retentionDays is real. A pair older than the retention window
+// is pruned when a fresh backup exists; the fresh backup stays.
+{
+  const now4 = Date.now();
+  const oldStamp = now4 - 20 * 24 * 60 * 60 * 1000;
+  const oldDb = join(ws.backupsDir, `consistency-${oldStamp}.db`);
+  const oldManifest = join(ws.backupsDir, `consistency-${oldStamp}.manifest.json`);
+  writeFileSync(oldDb, "stale-image");
+  writeFileSync(oldManifest, "stale-manifest");
+  utimesSync(oldDb, new Date(oldStamp), new Date(oldStamp));
+  utimesSync(oldManifest, new Date(oldStamp), new Date(oldStamp));
+  const before = readdirSync(ws.backupsDir).filter((n) => /^consistency-.*\.db$/.test(n)).length;
+  const prunedRes = pruneExpiredBackups(ws.backupsDir, { retentionDays: 14, now: now4 });
+  const oldGone = !existsSync(oldDb) && !existsSync(oldManifest);
+  const freshKept = existsSync(backup.path) && existsSync(backup.manifestPath);
+  suite.check(
+    "backup-retention-prunes-expired-pairs",
+    before >= 2 && oldGone && freshKept && prunedRes.pruned.includes(`consistency-${oldStamp}.db`),
+    `before=${before} pruned=${JSON.stringify(prunedRes.pruned)} fresh-kept=${freshKept}`,
+  );
+}
+
 writeReport({
   suiteId: "restore",
   suite,
-  label: "test:restore — 一致性备份维护窗口 + 加密 manifest + 删除清单 + 恢复演练",
+  label: "test:restore — 一致性备份维护窗口 + 加密 manifest（含 dbSha256 字节认证）+ 删除清单 + 恢复演练 + 保留期清理",
   extra: {
-    dataSources: "本地 SQLite 与真实备份/恢复路径（VACUUM INTO + AES-256-GCM manifest）；无外部连接",
+    dataSources: "本地 SQLite 与真实备份/恢复路径（VACUUM INTO + AES-256-GCM manifest，dbSha256 拒等长篡改）；无外部连接",
   },
 });
 process.exit(suiteExit(suite, { label: "test:restore" }));

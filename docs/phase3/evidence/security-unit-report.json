@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T13:24:48.112Z",
+  "generatedAt": "2026-11-19T15:17:18.520Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-unit",
   "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
   "counts": {
-    "pass": 23,
+    "pass": 28,
     "fail": 0
   },
   "results": [
@@ -122,7 +122,32 @@
       "name": "sse-replays-with-cursor-and-resets-on-generation-change",
       "status": "PASS",
       "detail": "replay ids=2 events=inbox_changed,inbox_changed stale-reset=true unauth=401"
+    },
+    {
+      "name": "sse-filters-to-caller-scopes-until-granted",
+      "status": "PASS",
+      "detail": "own-visible=true foreign-before-grant=false foreign-after-grant=true"
+    },
+    {
+      "name": "no-flag-daemon-tick-settles-no-fabricated-usage",
+      "status": "PASS",
+      "detail": "daemon exit=0 settlements=0 worker-reservations=0 (nothing is claimed or settled without the declared fixture flag)"
+    },
+    {
+      "name": "fixture-daemon-tick-settlement-is-labeled-fixture",
+      "status": "PASS",
+      "detail": "daemon exit=0 settlements=1 fixture-labeled=true"
+    },
+    {
+      "name": "disk-watermark-critical-drill-opens-read-only",
+      "status": "PASS",
+      "detail": "daemon exit=3 disk-line=disk: level=critical free=466GiB ratio=0.5003"
+    },
+    {
+      "name": "disk-watermark-alerts-once-per-level-transition",
+      "status": "PASS",
+      "detail": "transition-alert=true steady-repeat=false audit-rows=1 stream-events=1"
     }
   ],
-  "dataSources": "本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS）；无容器、无网络、无模型调用"
+  "dataSources": "本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS、SSE scope 过滤、daemon tick 夹具隔离、磁盘水位 critical 演练）；无容器、无付费网络"
 }

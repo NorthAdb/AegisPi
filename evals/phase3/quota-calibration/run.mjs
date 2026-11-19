@@ -29,7 +29,7 @@ import {
 import { requireAppImageDigests, imageRef } from "../lib/image-gate.mjs";
 
 lockedNodeGuard();
-const { digests } = requireAppImageDigests();
+const { digests } = await requireAppImageDigests();
 const EXECUTION_REF = imageRef("execution", digests);
 const AGENT_REF = imageRef("agent", digests);
 
@@ -103,7 +103,7 @@ const measurements = {};
   measurements.pids = { limit: 256, maxSpawned };
   suite.check(
     "pids-256-placeholder-bounds-spawn-storm",
-    storm.code === 0 && maxSpawned > 0 && maxSpawned <= 260,
+    storm.code === 0 && maxSpawned > 0 && maxSpawned <= 256,
     `spawn storm topped out at ${maxSpawned} (limit 256)`,
   );
 }
@@ -116,13 +116,13 @@ const measurements = {};
   mkdirSync(ws.stateDir, { recursive: true });
   const under = spawnSync("docker", [
     "run", "--rm", "--memory", "2g", "--memory-swap", "2g", "--read-only",
-    "--tmpfs", "/job/work:rw,noexec,size=512m",
+    "--tmpfs", "/job/work:rw,noexec,size=512m,mode=1777",
     "--entrypoint", "node", EXECUTION_REF,
     "-e", "const fs=require('fs'); let n=0; for(let i=0;i<8;i++){ fs.writeFileSync('/job/work/c'+i, Buffer.alloc(64*1024*1024, 0x41)); n++; } console.log('disk-512m-ok chunks='+n)",
   ], { encoding: "utf8", timeout: 90000 });
   const over = spawnSync("docker", [
     "run", "--rm", "--memory", "2g", "--memory-swap", "2g", "--read-only",
-    "--tmpfs", "/job/work:rw,noexec,size=512m",
+    "--tmpfs", "/job/work:rw,noexec,size=512m,mode=1777",
     "--entrypoint", "node", EXECUTION_REF,
     "-e", "const fs=require('fs'); try { for(let i=0;i<12;i++){ fs.writeFileSync('/job/work/c'+i, Buffer.alloc(64*1024*1024, 0x41)); } console.log('disk-768m-unreachable'); } catch(e){ console.log('disk-enospc:'+e.code); process.exit(9); }",
   ], { encoding: "utf8", timeout: 90000 });
@@ -134,8 +134,11 @@ const measurements = {};
   };
   suite.check(
     "tmpfs-work-volume-bounds-disk-writes",
-    under.status === 0 && /disk-512m-ok/.test(under.stdout ?? "") && over.status === 9 && /disk-enospc/.test(over.stdout ?? ""),
-    `512MiB bound: 8x64MiB ok (exit ${under.status}); 12x64MiB -> ENOSPC (exit ${over.status})`,
+    under.status === 0 &&
+      /disk-512m-ok/.test(under.stdout ?? "") &&
+      over.status === 9 &&
+      /disk-enospc:ENOSPC/.test(over.stdout ?? ""),
+    `512MiB bound: 8x64MiB ok (exit ${under.status}); 12x64MiB -> ${((over.stdout ?? "").match(/disk-enospc:(\w+)/) ?? [])[1] ?? "no-marker"} (exit ${over.status}) — the SIZE bound must be the killer, any other code means the mount contract broke`,
   );
 }
 
@@ -145,7 +148,7 @@ const measurements = {};
   const agent = spawnSync("docker", [
     "run", "--rm", "--network", "none",
     "--cpus", "1", "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "256", "--read-only",
-    "--tmpfs", "/agent-work:rw,noexec,size=64m",
+    "--tmpfs", "/agent-work:rw,noexec,size=64m,mode=1777",
     AGENT_REF, "--self-check",
   ], { encoding: "utf8", timeout: 60000 });
   measurements.agent = { code: agent.status, out: (agent.stdout ?? "").trim().slice(0, 60) };

@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T13:25:05.001Z",
+  "generatedAt": "2026-11-19T15:17:25.231Z",
   "nodeVersion": "v22.23.5",
   "suite": "ingress-telegram",
-  "label": "test:ingress-telegram — 只读真实源接入与凭据生命周期（失败关闭默认）",
+  "label": "test:ingress-telegram — 本地确定性 ingress 检查（真实只读验收已拆分至 test:ingress-telegram:real）",
   "counts": {
-    "pass": 8,
+    "pass": 7,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "revoked-credential-slot-refuses-pull-adapter",
       "status": "PASS",
-      "detail": "resolve before=true after revoke=false (slot im.telegram was revoked at 17950946)"
+      "detail": "resolve before=true after revoke=false (slot im.telegram was revoked at 17951014)"
     },
     {
       "name": "drill-token-never-reaches-audit",
@@ -34,20 +34,20 @@
       "detail": "-> update 88002 carries no mappable message"
     },
     {
-      "name": "authorized-telegram-identity-readable",
+      "name": "getUpdates-reads-queue-without-advancing-offset",
       "status": "PASS",
-      "detail": "bot @aegispibot (id masked)"
+      "detail": "requests=2 offset-param-present=false same-backlog=true — the queue stays unconsumed; only an explicit, audited advance elsewhere could change that"
     },
     {
-      "name": "authorized-telegram-updates-readable-readonly",
+      "name": "webhook-guard-verifies-secret-token-header",
       "status": "PASS",
-      "detail": "queue read returned 1 update(s), nothing consumed"
+      "detail": "no-secret->refused true; exact=true wrong=false missing=false (implemented, NOT wired to any public endpoint)"
     },
     {
-      "name": "real-update-maps-into-durable-ingress-observe-only",
-      "status": "PASS",
-      "detail": "update 500045892 mapped; verdict OBSERVE (no automatic action)"
+      "name": "real-read-acceptance-not-run-here",
+      "status": "NOTE",
+      "detail": "本套件只含本地确定性检查；真实只读验收在 test:ingress-telegram:real（缺 token 时 exit 3、明确记未验收），不在本套件内冒充完成"
     }
   ],
-  "dataSources": "确定性用例为本地 SQLite；真实用例经主人授权的 bot token 只读调用 api.telegram.org（getMe/getUpdates，无 sendMessage，无 offset 确认），输出全程脱敏；无付费模型调用"
+  "dataSources": "本地 SQLite 与注入 fetch 的确定性用例；零网络调用、零模型调用、零发送"
 }

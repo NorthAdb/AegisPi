@@ -9,6 +9,11 @@
 //         sha256?,           hex, verified when present
 //         maxSizeBytes,      download cap (and cap for the decompressed tar)
 //         mode,              "file" | "tar"
+//         allowedRedirectHosts?,  hostnames a redirect may additionally
+//                                  target; by default redirects may only
+//                                  stay on the ORIGINAL host (audit F4:
+//                                  a source must not aim the fetch at an
+//                                  arbitrary third-party host)
 //     }] }
 //   /downloads (rw mount): artifacts land here, plus report.json.
 // The downloader never executes anything it fetched. Archive mode first
@@ -90,6 +95,20 @@ export function parsePlan(raw) {
     if (e.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(e.sha256)) {
       return { ok: false, reason: "sha256 must be 64 lowercase hex chars" };
     }
+    if (e.allowedRedirectHosts !== undefined) {
+      if (
+        !Array.isArray(e.allowedRedirectHosts) ||
+        e.allowedRedirectHosts.length === 0 ||
+        e.allowedRedirectHosts.length > 20
+      ) {
+        return { ok: false, reason: "allowedRedirectHosts must be an array of 1..20 hostnames when present" };
+      }
+      for (const h of e.allowedRedirectHosts) {
+        if (typeof h !== "string" || !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(h) || h.length > 253) {
+          return { ok: false, reason: `allowedRedirectHosts entry ${JSON.stringify(h)} is not a bare hostname` };
+        }
+      }
+    }
   }
   return { ok: true, plan: p };
 }
@@ -100,13 +119,33 @@ export function inside(root, path) {
   return rel === r || rel.startsWith(r + sep);
 }
 
-// Follows redirects manually so every hop stays http/https and is counted.
-export async function fetchTo(url, destPath, { maxSizeBytes, sha256 }) {
+// Follows redirects manually so every hop stays http/https, is counted, and
+// stays on an ALLOWED host: the original entry host by default, plus any
+// hostname the host-generated plan explicitly listed in
+// allowedRedirectHosts. A redirect to any other host is refused (audit F4:
+// a malicious source must not be able to aim the fetch elsewhere).
+export async function fetchTo(url, destPath, { maxSizeBytes, sha256, allowedRedirectHosts = [] } = {}) {
+  const original = new URL(url);
+  // Allowed targets: the planned host's own name (any port — the plan
+  // already trusts that operator for outbound HTTP; ports on the same
+  // name are not a third party) plus any bare hostname the host-generated
+  // plan listed in allowedRedirectHosts. Every other host is refused.
+  const allowedHostPorts = new Set([original.host]);
+  const allowedNames = new Set([original.hostname, ...allowedRedirectHosts.map((h) => String(h).toLowerCase())]);
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     const u = new URL(current);
     if (u.protocol !== "http:" && u.protocol !== "https:") {
       return { ok: false, reason: `redirect changed scheme to ${u.protocol}` };
+    }
+    if (u.username !== "" || u.password !== "") {
+      return { ok: false, reason: "redirect target embeds credentials; the downloader never carries credentials" };
+    }
+    if (!allowedHostPorts.has(u.host) && !allowedNames.has(u.hostname)) {
+      return {
+        ok: false,
+        reason: `redirect host ${u.host} is not in the allowed host set (original ${original.host}${allowedRedirectHosts.length > 0 ? ` + ${allowedRedirectHosts.join(",")}` : ""})`,
+      };
     }
     const res = await fetch(u, { redirect: "manual" });
     if (res.status >= 300 && res.status < 400) {
@@ -315,7 +354,11 @@ export async function main() {
     try {
       if (entry.mode === "tar") {
         const archive = `${dest}.tar.gz`;
-        const got = await fetchTo(entry.url, archive, { maxSizeBytes: entry.maxSizeBytes, sha256: entry.sha256 });
+        const got = await fetchTo(entry.url, archive, {
+          maxSizeBytes: entry.maxSizeBytes,
+          sha256: entry.sha256,
+          allowedRedirectHosts: entry.allowedRedirectHosts,
+        });
         if (!got.ok) {
           results.push({ destRelPath: entry.destRelPath, ok: false, reason: got.reason });
           failures += 1;
@@ -334,7 +377,11 @@ export async function main() {
         });
         if (!ex.ok) failures += 1;
       } else {
-        const got = await fetchTo(entry.url, dest, { maxSizeBytes: entry.maxSizeBytes, sha256: entry.sha256 });
+        const got = await fetchTo(entry.url, dest, {
+          maxSizeBytes: entry.maxSizeBytes,
+          sha256: entry.sha256,
+          allowedRedirectHosts: entry.allowedRedirectHosts,
+        });
         results.push({
           destRelPath: entry.destRelPath,
           ok: got.ok,

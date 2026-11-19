@@ -126,12 +126,14 @@ export function createConsoleApp(db, {
     }
     if (bearer === token) {
       c.set("authKind", "bootstrap");
+      c.set("principalId", ownerPrincipalId);
       return next();
     }
     const session = findSession(bearer, { now: Date.now() });
     if (session) {
       c.set("authKind", "session");
       c.set("session", session);
+      c.set("principalId", session.principalId);
       return next();
     }
     return c.json({ code: "unauthenticated", message: "console endpoints require the local bootstrap token or a live session" }, 401);
@@ -604,21 +606,49 @@ export function createConsoleApp(db, {
     }
   });
 
-  // SSE event stream (04 sections 4/5): authenticated, scope-filtered,
-  // replay-from-Last-Event-ID within a bounded window, generation-gated.
-  // The snapshot comes FIRST, then the stream from the snapshot's watermark
-  // — the client never trusts a stream without its starting cursor.
+  // SSE event stream (04 sections 4/5): authenticated, SCOPE-FILTERED to the
+  // caller's visible scopes, replay-from-Last-Event-ID within a bounded
+  // window, generation-gated. The snapshot comes FIRST, then the stream
+  // from the snapshot's watermark — the client never trusts a stream
+  // without its starting cursor.
+  //
+  // Visible scopes (audit F8 fixed the leak where every scope's events
+  // reached any bootstrap/session caller): scopes the caller OWNS, scopes
+  // with an ACTIVE grant for the caller, and service scopes (daemon-level
+  // alerts are for the local owner by construction). Anything else is
+  // filtered out of the replay.
   app.get("/api/events/stream", async (c) => {
+    const principalId = c.get("principalId");
+    if (!principalId) {
+      return c.json({ code: "unauthenticated", message: "the event stream requires a principal; no session or bootstrap caller resolved" }, 401);
+    }
+    const now = Date.now();
     const since = Number(c.req.header("last-event-id")?.split(":")?.[1] ?? 0);
     const generationRow = db.prepare("SELECT value FROM system_state WHERE key='stream_generation'").get();
     const generation = generationRow ? Number(generationRow.value) : 1;
     const clientGeneration = Number(c.req.header("last-event-id")?.split(":")?.[0] ?? generation);
-    // Bounded replay window (the retention bound; older ids are gone).
+    // Bounded replay window (the retention bound; older ids are gone),
+    // filtered to the caller's visible scopes.
     const window = db
       .prepare(
-        "SELECT seq, scope_id, event_type, entity_id, payload_json, created_at FROM stream_events WHERE seq>? ORDER BY seq LIMIT 500",
+        `SELECT seq, scope_id, event_type, entity_id, payload_json, created_at FROM stream_events
+          WHERE seq>?
+            AND scope_id IN (
+              SELECT id FROM scopes
+              WHERE kind='service' OR owner_id=?
+                 OR id IN (
+                   SELECT scope_id FROM acl_grants
+                   WHERE principal_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)
+                 )
+            )
+          ORDER BY seq LIMIT 500`,
       )
-      .all(Number.isFinite(since) ? since : 0);
+      .all(
+        Number.isFinite(since) ? since : 0,
+        principalId,
+        principalId,
+        now,
+      );
     const lines = [];
     if (clientGeneration !== generation) {
       lines.push(`event: reset`);

@@ -10,3 +10,4 @@ evals/contracts/fixtures/**/*.labels.local.json
 # Phase 3 local build/rerun scratch (staging copies and full console logs stay local)
 .audit/image-build/
 .audit/phase3-rerun/*.log
+.audit/phase3-audit-response-baseline/*.log

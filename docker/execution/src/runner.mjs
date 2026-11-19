@@ -12,9 +12,12 @@
 // runner or forges result.json only loses its own evidence, never the
 // deadline or the container's exit (02 section 5: stdout and files are
 // evidence inputs, never an authorization or an automatic success mark).
-// Runner exit codes: 0 ran to completion (the job's exit code is recorded in
-// result.json, not propagated — "退出码不是Task结论", 06 section 2),
-// 124 deadline hit, 125 cancelled (SIGTERM), 126 invalid manifest.
+// Runner exit codes: 0..255 the JOB's own exit code (the container exit is
+// the job's fate, owned by this runner code — a job cannot turn its failure
+// into a clean container exit), 124 deadline hit, 125 cancelled (SIGTERM),
+// 126 invalid manifest, 137 child died by signal. The exit code is still
+// NOT the Task conclusion (06 section 2): that stays a host-side oracle
+// decision, never a job's self-report.
 
 import { spawn } from "node:child_process";
 import {

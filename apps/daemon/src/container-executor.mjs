@@ -4,7 +4,12 @@
 //   --cpus/--memory/--pids-limit (06 section 4 quota placeholders, calibrated)
 //   --read-only root fs + bounded tmpfs work dir
 //   --cap-drop ALL --security-opt no-new-privileges
-//   only three mounts: the manifest (ro), the output dir, the work tmpfs.
+//   three mounts: the manifest (host bind, ro), the output (a NAMED VOLUME
+//   initialized from the image's own /job/output, owned by the image user),
+//   the work tmpfs. Audit F2: the image declares the mount-point ownership,
+//   so a Linux host's default umask can never deny the image user its own
+//   evidence directory, and the host does no global chmod 777. Evidence
+//   comes back with docker cp before the container is removed.
 // No host secrets, no session tickets, no docker socket, no agent home.
 //
 // The wall-clock deadline is enforced TWICE: the in-container runner kills
@@ -67,6 +72,23 @@ export function createContainerExecutor(db, {
     return join(jobsDir, jobId.replace(/[^A-Za-z0-9._-]/g, "_"));
   }
 
+  // One disposable, image-owned output volume per job attempt: a fresh volume
+  // mounts over the image's /job/output and initializes from it (uid 999).
+  function outputVolumeName(jobId) {
+    return `aegispi-job-out-${jobId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 72)}`;
+  }
+
+  // Copy the container's evidence out BEFORE the container is removed; the
+  // volume goes away with it. Best effort by design: a job that destroyed
+  // its own evidence keeps the container's exit code as the surviving fact.
+  function collectOutput(containerId, hostOutputDir) {
+    return docker(dockerBin, ["cp", `${containerId}:/job/output/.`, hostOutputDir], { capture: true });
+  }
+
+  function removeOutputVolume(jobId) {
+    docker(dockerBin, ["volume", "rm", "-f", outputVolumeName(jobId)]);
+  }
+
   // Shared launch path: write the manifest, run the container, record the
   // sidecar. The row must already exist (QUEUED) — submitJob creates it,
   // tick relaunches persisted rows.
@@ -77,7 +99,9 @@ export function createContainerExecutor(db, {
     mkdirSync(join(dir, "output"), { recursive: true });
     writeFileSync(join(dir, "input", "manifest.json"), JSON.stringify(manifest) + "\n", "utf8");
     const containerName = `aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 80)}`;
-    // The container is disposable; the host reads /job/output after exit.
+    const volume = outputVolumeName(jobId);
+    // A retry must not inherit a previous attempt's evidence directory.
+    docker(dockerBin, ["volume", "rm", "-f", volume]);
     const run = docker(dockerBin, [
       "run",
       "--detach",
@@ -98,9 +122,17 @@ export function createContainerExecutor(db, {
       "--read-only",
       "--cap-drop", "ALL",
       "--security-opt", "no-new-privileges",
-      "--tmpfs", `/job/work:rw,noexec,size=${quotas.tmpfsSize}`,
+      // The work dir is a tmpfs whose WRITABILITY is declared by the mount
+      // contract (mode=1777), not inherited from the image or the host: a
+      // pre-existing image directory would otherwise give the tmpfs root
+      // root:root 0755 and the image user EACCES (measured). noexec stays:
+      // the tmpfs holds data, never executables.
+      "--tmpfs", `/job/work:rw,noexec,size=${quotas.tmpfsSize},mode=1777`,
       "-v", `${join(dir, "input")}:/job/input:ro`,
-      "-v", `${join(dir, "output")}:/job/output`,
+      // The output is an image-owned volume (audit F2): the image's
+      // /job/output (uid 999) initializes a fresh volume, so the mount is
+      // writable by the image user on ANY engine regardless of host umask.
+      "--mount", `type=volume,src=${volume},dst=/job/output`,
       imageRef,
     ], { capture: true });
     if (run.code !== 0) {
@@ -115,13 +147,14 @@ export function createContainerExecutor(db, {
       // Never leave a detached container unowned: kill what we started.
       docker(dockerBin, ["kill", containerId]);
       docker(dockerBin, ["rm", "-f", containerId]);
+      removeOutputVolume(jobId);
       rmSync(dir, { recursive: true, force: true });
       throw e;
     }
     writeAudit(db, {
       code: "container_job_launched",
       taskId,
-      details: { job_id: jobId, container: containerId, image: imageRef, quotas, network },
+      details: { job_id: jobId, container: containerId, image: imageRef, quotas, network, output: "image-owned-volume" },
       now,
     });
     return { jobId, containerId, containerName };
@@ -200,6 +233,7 @@ export function createContainerExecutor(db, {
       // cancellation; the -f fallback is for jobs that trap SIGTERM.
       docker(dockerBin, ["stop", "--time", "5", containerId]);
       docker(dockerBin, ["rm", "-f", containerId]);
+      removeOutputVolume(jobId);
       rmSync(join(jobsDir, jobPidFileName(jobId)), { force: true });
     }
     return out;
@@ -229,6 +263,7 @@ export function createContainerExecutor(db, {
           }
         });
         rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
+        removeOutputVolume(job.id);
         events.push({ jobId: job.id, state: "LOST" });
         continue;
       }
@@ -236,20 +271,26 @@ export function createContainerExecutor(db, {
       if (running === "true") {
         if (now >= job.deadline_at) {
           // HOST-enforced deadline: the job cannot outlive its window by
-          // killing or lying to the in-container runner.
+          // killing or lying to the in-container runner. Evidence written
+          // before the kill is still collected best effort.
           docker(dockerBin, ["kill", containerId]);
           markTimedOutJob(db, { jobId: job.id, now });
+          collectOutput(containerId, join(jobDir(job.id), "output"));
           docker(dockerBin, ["rm", "-f", containerId]);
+          removeOutputVolume(job.id);
           rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
           events.push({ jobId: job.id, state: "TIMED_OUT", hostEnforced: true });
         }
         continue;
       }
-      // Exited: read the runner's evidence, then decide by OUR rules. A null
-      // exitCode with a signal is a killed child (OOM, pid-limit) — a FAILED
-      // job even when the runner itself exited cleanly after recording it.
+      // Exited: collect the runner's evidence from the volume BEFORE the
+      // container goes away, then decide by OUR rules. A null exitCode with
+      // a signal is a killed child (OOM, pid-limit) — a FAILED job even when
+      // the runner itself exited cleanly after recording it.
       const exitCode = Number(exitCodeStr);
+      collectOutput(containerId, join(jobDir(job.id), "output"));
       docker(dockerBin, ["rm", "-f", containerId]);
+      removeOutputVolume(job.id);
       rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
       const resultPath = join(jobDir(job.id), "output", "result.json");
       let evidence = null;
@@ -363,6 +404,7 @@ export function createContainerExecutor(db, {
         killed = k.code === 0;
         docker(dockerBin, ["rm", "-f", containerId]);
       }
+      removeOutputVolume(r.id);
       rmSync(join(jobsDir, jobPidFileName(r.id)), { force: true });
       withTx(db, () => {
         const changed = db

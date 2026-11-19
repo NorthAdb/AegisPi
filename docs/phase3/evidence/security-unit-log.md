@@ -1,6 +1,6 @@
 # test:security:unit — 确定性安全门禁（02 §8 第一组）
 
-生成：2026-11-19T13:24:48.112Z；Node v22.23.5；suite `security-unit`。
+生成：2026-11-19T15:17:18.520Z；Node v22.23.5；suite `security-unit`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -27,7 +27,12 @@
 | PASS | approval-consume-requires-exact-action-hash | wrong hash -> action hash mismatch; right hash accepted=true; effect=READY |
 | PASS | cancel-before-dispatch-refuses-dispatch | dispatch after cancel -> refused |
 | PASS | sse-replays-with-cursor-and-resets-on-generation-change | replay ids=2 events=inbox_changed,inbox_changed stale-reset=true unauth=401 |
+| PASS | sse-filters-to-caller-scopes-until-granted | own-visible=true foreign-before-grant=false foreign-after-grant=true |
+| PASS | no-flag-daemon-tick-settles-no-fabricated-usage | daemon exit=0 settlements=0 worker-reservations=0 (nothing is claimed or settled without the declared fixture flag) |
+| PASS | fixture-daemon-tick-settlement-is-labeled-fixture | daemon exit=0 settlements=1 fixture-labeled=true |
+| PASS | disk-watermark-critical-drill-opens-read-only | daemon exit=3 disk-line=disk: level=critical free=466GiB ratio=0.5003 |
+| PASS | disk-watermark-alerts-once-per-level-transition | transition-alert=true steady-repeat=false audit-rows=1 stream-events=1 |
 
-合计：23 PASS / 0 FAIL。
+合计：28 PASS / 0 FAIL。
 
-数据源：本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS）；无容器、无网络、无模型调用。
+数据源：本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS、SSE scope 过滤、daemon tick 夹具隔离、磁盘水位 critical 演练）；无容器、无付费网络。

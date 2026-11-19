@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-19T13:24:13.167Z",
+  "generatedAt": "2026-11-19T16:33:21.332Z",
   "nodeVersion": "v22.23.5",
   "suite": "quota-calibration",
   "label": "容器配额校准（06 §4 占位值实测，不宣称最优）",
@@ -11,7 +11,7 @@
     {
       "name": "cpu-quota-has-measurable-effect",
       "status": "PASS",
-      "detail": "2 worker threads: --cpus 1 实测 1440ms vs --cpus 2 实测 682ms (ratio 2.11)"
+      "detail": "2 worker threads: --cpus 1 实测 2597ms vs --cpus 2 实测 692ms (ratio 3.75)"
     },
     {
       "name": "memory-2gib-placeholder-enforced-with-dirty-pages",
@@ -26,7 +26,7 @@
     {
       "name": "tmpfs-work-volume-bounds-disk-writes",
       "status": "PASS",
-      "detail": "512MiB bound: 8x64MiB ok (exit 0); 12x64MiB -> ENOSPC (exit 9)"
+      "detail": "512MiB bound: 8x64MiB ok (exit 0); 12x64MiB -> ENOSPC (exit 9) — the SIZE bound must be the killer, any other code means the mount contract broke"
     },
     {
       "name": "agent-1cpu-1gib-placeholder-runs-self-check",
@@ -38,9 +38,9 @@
   "measurements": {
     "cpu": {
       "innerLoopMs": {
-        "cpus1": 1440,
-        "cpus2": 682,
-        "ratio": 2.11
+        "cpus1": 2597,
+        "cpus2": 692,
+        "ratio": 3.75
       }
     },
     "memory": {

@@ -31,12 +31,13 @@ import { processDueTimers, cancelSatisfiedFollowUpReminders } from "./timers.mjs
 import { expireApprovals } from "./approvals.mjs";
 import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
 import { insertObjectRow } from "./objects.mjs";
+import { writeAudit } from "./audit.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
 import { createContainerExecutor } from "./container-executor.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
-import { consistencyBackup, insideMaintenanceWindow } from "./db/backup-window.mjs";
+import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
   createConsoleApp,
   serveConsole,
@@ -237,63 +238,87 @@ export async function main(argv = process.argv.slice(2)) {
         skillSetHash: "skillset-phase2-default",
       });
     }
-    // 4. Claim and run the Phase 2 fake worker: heartbeat, one budgeted step
-    //    (the chargeable-path gate refuses without the reservation), then a
-    //    completion with evidence. Real agent execution is Phase 3+.
-    const claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
-    if (claim) {
-      heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
-      const taskAcc = ledger.ensureTaskAccount({ taskId: claim.taskId, now }).accountId;
-      const dayAcc = ledger.ensureDayAccount({ now }).accountId;
-      const res = ledger.reserve({
-        requestKey: `worker:${claim.taskId}:${claim.attemptNo}`,
-        taskId: claim.taskId,
-        purpose: "worker",
-        provider: config.model.provider,
-        priceVersion: "catalog-v1",
-        upperMicrousd: 1000,
-        accounts: [
-          { accountId: taskAcc, amountMicrousd: 500 },
-          { accountId: dayAcc, amountMicrousd: 500 },
-        ],
-        now,
-      });
-      workerStep(db, { ...claim, now, budgetReservationId: res.reservationId });
-      ledger.settle({ reservationId: res.reservationId, usage: { actualMicrousd: 300 }, now });
-      const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(claim.taskId).scope_id;
-      const evidence = insertObjectRow(db, {
-        scopeId,
-        kind: "task_result",
-        sourceUri: `task:${claim.taskId}`,
-        sourceActor: "fake-worker",
-        content: JSON.stringify({ done: true, at: now, worker: "phase2-fake" }),
-        observedAt: now,
-        requiredScopeIds: [scopeId],
-      });
-      completeTask(db, {
-        taskId: claim.taskId,
-        attemptNo: claim.attemptNo,
-        leaseOwner: claim.leaseOwner,
-        fence: claim.fence,
-        now,
-        resultClass: "not_applicable",
-        resultObjectId: evidence.id,
-      });
-      const delivery = db
-        .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
-        .get(claim.taskId);
-      if (delivery) {
-        const ck = insertObjectRow(db, {
+    // 4. The ONLY resident execution path in this daemon is the Phase 2 fake
+    //    worker, and it exists EXCLUSIVELY under --fake-upstream: it is a
+    //    test fixture, so the no-authorization path never fabricates usage
+    //    (audit F6 — the constant 300 must not masquerade as a provider
+    //    bill). Its settlement is labeled fixture usage in the audit row;
+    //    real settlements need a real provider bill or stay HELD.
+    let claim = null;
+    if (fakeUpstream) {
+      claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
+      if (claim) {
+        heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
+        const taskAcc = ledger.ensureTaskAccount({ taskId: claim.taskId, now }).accountId;
+        const dayAcc = ledger.ensureDayAccount({ now }).accountId;
+        const res = ledger.reserve({
+          requestKey: `worker:${claim.taskId}:${claim.attemptNo}`,
+          taskId: claim.taskId,
+          purpose: "worker",
+          provider: config.model.provider,
+          priceVersion: "catalog-v1",
+          upperMicrousd: 1000,
+          accounts: [
+            { accountId: taskAcc, amountMicrousd: 500 },
+            { accountId: dayAcc, amountMicrousd: 500 },
+          ],
+          now,
+        });
+        workerStep(db, { ...claim, now, budgetReservationId: res.reservationId });
+        ledger.settle({
+          reservationId: res.reservationId,
+          usage: {
+            actualMicrousd: 300,
+            source: "fake-worker-fixture",
+            basis: "phase2 fake worker constant under --fake-upstream; not a provider bill",
+          },
+          now,
+          actorId: "fake-worker",
+        });
+        const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(claim.taskId).scope_id;
+        const evidence = insertObjectRow(db, {
           scopeId,
-          kind: "session_checkpoint",
-          sourceUri: `cmd:${delivery.event_id}:${claim.taskId}`,
-          sourceActor: "host",
-          content: "fake worker consumed the event",
+          kind: "task_result",
+          sourceUri: `task:${claim.taskId}`,
+          sourceActor: "fake-worker",
+          content: JSON.stringify({ done: true, at: now, worker: "phase2-fake" }),
           observedAt: now,
           requiredScopeIds: [scopeId],
         });
-        deliveryAckCheckpoint(db, { eventId: delivery.event_id, taskId: claim.taskId, checkpointObjectId: ck.id, now });
-        deliveryDone(db, { eventId: delivery.event_id, taskId: claim.taskId, now });
+        completeTask(db, {
+          taskId: claim.taskId,
+          attemptNo: claim.attemptNo,
+          leaseOwner: claim.leaseOwner,
+          fence: claim.fence,
+          now,
+          resultClass: "not_applicable",
+          resultObjectId: evidence.id,
+        });
+        const delivery = db
+          .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
+          .get(claim.taskId);
+        if (delivery) {
+          const ck = insertObjectRow(db, {
+            scopeId,
+            kind: "session_checkpoint",
+            sourceUri: `cmd:${delivery.event_id}:${claim.taskId}`,
+            sourceActor: "host",
+            content: "fake worker consumed the event",
+            observedAt: now,
+            requiredScopeIds: [scopeId],
+          });
+          deliveryAckCheckpoint(db, { eventId: delivery.event_id, taskId: claim.taskId, checkpointObjectId: ck.id, now });
+          deliveryDone(db, { eventId: delivery.event_id, taskId: claim.taskId, now });
+        }
+      }
+    } else {
+      // No execution path is wired outside the fixture: nothing is claimed,
+      // nothing settles. Say so on the record instead of pretending.
+      const awaiting = db
+        .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
+        .get().c;
+      if (awaiting > 0) {
+        console.error(`worker: ${awaiting} task(s) await an execution path; the real agent worker is later wiring — nothing is claimed or settled on this path (fixture settlements require --fake-upstream)`);
       }
     }
     // 5. Effect dispatch only with an explicitly fake upstream; there is no
@@ -400,7 +425,22 @@ export async function main(argv = process.argv.slice(2)) {
             window: backupWindow,
           });
           lastBackupDayKey = dayKey;
-          console.log(`backup: consistency snapshot ${backup.path} (${backup.bytes} bytes, manifest sealed, ledger entries=${backup.entries})`);
+          // Retention is real housekeeping (audit F8): when a fresh backup
+          // lands, pairs older than retentionDays are deleted and the prune
+          // is audited.
+          const pruned = pruneExpiredBackups(join(dataDir, "backups"), {
+            retentionDays: config.backup.retentionDays,
+            now,
+          });
+          if (pruned.pruned.length > 0) {
+            writeAudit(db, {
+              code: "backup_retention_pruned",
+              details: { pruned: pruned.pruned, kept: pruned.kept.length, retention_days: config.backup.retentionDays },
+              now,
+            });
+            console.log(`backup: pruned ${pruned.pruned.length} expired backup(s) beyond ${config.backup.retentionDays} days`);
+          }
+          console.log(`backup: consistency snapshot ${backup.path} (${backup.bytes} bytes, manifest sealed with dbSha256, ledger entries=${backup.entries})`);
         } catch (e) {
           console.error(`backup: consistency backup refused: ${e.message}`);
         }
@@ -421,14 +461,24 @@ export async function main(argv = process.argv.slice(2)) {
     }
     // Offline container jobs are async by nature: a once-run that launched
     // them WAITS for their completion, bounded by each job's host-enforced
-    // deadline. Never exit --once with a live container behind us.
+    // deadline. Never exit --once with a live container behind us. The bound
+    // is the OUTSTANDING work's own deadlines: a launch policy (the disk
+    // watermark's warn stance) can keep a job QUEUED forever, and --once
+    // must say so and exit honestly instead of hanging.
     if (executor) {
       let waited = 0;
       for (;;) {
         const outstanding = db
-          .prepare("SELECT count(*) c FROM execution_jobs WHERE state IN ('QUEUED','RUNNING')")
-          .get().c;
-        if (outstanding === 0) break;
+          .prepare("SELECT count(*) c, max(deadline_at) d FROM execution_jobs WHERE state IN ('QUEUED','RUNNING')")
+          .get();
+        if (outstanding.c === 0) break;
+        if (outstanding.d && Date.now() > Number(outstanding.d) + 5000) {
+          console.error(
+            `once: ${outstanding.c} offline job(s) still QUEUED/RUNNING after the deadline bound (a launch policy — disk warn, watermark gate — can keep work queued); exit 5`,
+          );
+          lock.release();
+          process.exit(5);
+        }
         await new Promise((r) => setTimeout(r, 500));
         waited += 500;
         const diskOnce = diskWatermark(dataDir, {

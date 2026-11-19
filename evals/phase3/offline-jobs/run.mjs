@@ -30,7 +30,7 @@ import { insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
 import { createContainerExecutor } from "../../../apps/daemon/src/container-executor.mjs";
 
 lockedNodeGuard();
-const { digests } = requireAppImageDigests();
+const { digests } = await requireAppImageDigests();
 
 const suite = makeSuite("offline-jobs");
 const EXECUTION_REF = imageRef("execution", digests);
@@ -345,7 +345,7 @@ function jobOutput(ws, jobId) {
       schemaVersion: 1,
       jobId: diskJobId,
       command: "node",
-      args: ["-e", "const fs=require('fs'); try { for(let i=0;i<40;i++) fs.writeFileSync('/job/work/chunk'+i, Buffer.alloc(4*1024*1024)); console.log('DISK_WROTE_ALL'); } catch(e){ console.log('DISK_ENOSPC:'+e.code); process.exit(9); }"],
+      args: ["-e", "const fs=require('fs'); try { for(let i=0;i<40;i++) fs.writeFileSync('/job/work/chunk'+i, Buffer.alloc(4*1024*1024)); console.log('DISK_WROTE_ALL'); } catch(e){ console.log('DISK_BOUND_HIT:'+e.code); process.exit(9); }"],
       deadlineMs: 20000,
     },
     deadlineAt: Date.now() + 30000,
@@ -359,8 +359,9 @@ function jobOutput(ws, jobId) {
     oomRow.state === "FAILED" &&
       (oomEvent?.state === "FAILED" || oomEvent?.state === "TIMED_OUT") &&
       diskRow.state === "FAILED" &&
-      /DISK_ENOSPC/.test(diskOut.stdout),
-    `oom=${oomRow.state}(${oomEvent?.state}) disk=${diskRow.state}/${diskRow.exit_code} stdout=${JSON.stringify(diskOut.stdout.trim().slice(0, 40))}`,
+      diskRow.exit_code === 9 &&
+      /DISK_BOUND_HIT:ENOSPC/.test(diskOut.stdout),
+    `oom=${oomRow.state}(${oomEvent?.state}) disk=${diskRow.state}/${diskRow.exit_code} stdout=${JSON.stringify(diskOut.stdout.trim().slice(0, 40))} — the tmpfs SIZE bound must be the killer (EACCES or any other code means the mount contract broke, not the quota)`,
   );
   db.close();
 }
@@ -495,9 +496,72 @@ function jobOutput(ws, jobId) {
   );
 }
 
+// 11. Disk-watermark WARN drill (audit F8: 常开前必须有实测触警演练; 06
+// section 10). Same daemon path as case 10, same seeding — ONLY the
+// injected threshold differs (AEGISPI_DISK_DRILL_WARN_GIB). The real statfs
+// reads a healthy disk; the drill threshold trips warn, the tick must refuse
+// to launch the QUEUED job, and --once must exit 5 at the deadline bound
+// instead of hanging forever behind a launch policy.
+{
+  const ws = makeWorkspace("oj-disk-warn");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, loadCanonicalSchema());
+  const { task } = seedTask(db, ws.stateDir, { label: "diskwarn" });
+  const jobId = `job:oj:warn:${task.fence}:blocked`;
+  const jobDir = join(ws.stateDir, "jobs", jobId.replace(/[^A-Za-z0-9._-]/g, "_"));
+  mkdirSync(join(jobDir, "input"), { recursive: true });
+  writeFileSync(
+    join(jobDir, "input", "manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1, jobId,
+      command: "node", args: ["-e", "console.log('never launched')"], deadlineMs: 20000,
+    }) + "\n",
+    "utf8",
+  );
+  const { insertObjectRow } = await import("../../../apps/daemon/src/objects.mjs");
+  const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(task.id).scope_id;
+  const manifestObj = insertObjectRow(db, {
+    scopeId, kind: "job_manifest", sourceUri: `job:${jobId}`, sourceActor: "test",
+    content: JSON.stringify({ schemaVersion: 1, jobId, command: "node", args: ["-e", "console.log('never launched')"], deadlineMs: 20000 }),
+    observedAt: Date.now(), requiredScopeIds: [scopeId],
+  });
+  const oracleObj = insertObjectRow(db, {
+    scopeId, kind: "job_oracle", sourceUri: `job:${jobId}`, sourceActor: "test",
+    content: JSON.stringify({ schemaVersion: 1, verdict: "exit-code-evidence-only" }),
+    observedAt: Date.now(), requiredScopeIds: [scopeId],
+  });
+  db.prepare(
+    `INSERT INTO execution_jobs(id, task_id, attempt_id, fence, manifest_object_id, oracle_object_id,
+       state, deadline_at, exit_code, artifact_object_id, created_at, ended_at)
+     VALUES (?,?,?,?,?,?,'QUEUED',?,NULL,NULL,?,NULL)`,
+  ).run(jobId, task.id, attemptIdOf(db, task), task.fence, manifestObj.id, oracleObj.id, Date.now() + 8000, Date.now());
+  db.close();
+  const daemon = spawnSync(process.execPath, [
+    join(repoRoot, "apps", "daemon", "src", "daemon.mjs"),
+    "--once", `--data-dir=${ws.stateDir}`, `--execution-image=${EXECUTION_REF}`,
+  ], {
+    cwd: repoRoot, encoding: "utf8", timeout: 120000,
+    env: { ...process.env, AEGISPI_DISK_DRILL_WARN_GIB: "1000000" },
+  });
+  const daemonOut = (daemon.stdout ?? "") + (daemon.stderr ?? "");
+  const db2 = openDatabase(ws.dbPath, { readOnly: true });
+  const row = db2.prepare("SELECT state FROM execution_jobs WHERE id=?").get(jobId);
+  db2.close();
+  const containersLeft = dockerJson(["ps", "-aq", "-f", `name=aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-")}`]);
+  suite.check(
+    "disk-warn-drill-blocks-new-job-launches",
+    daemon.status === 5 &&
+      row.state === "QUEUED" &&
+      /level=warn/.test(daemonOut) &&
+      containersLeft.out === "",
+    `daemon exit=${daemon.status} job=${row.state} warn-line=${/level=warn/.test(daemonOut)} containers=${JSON.stringify(containersLeft.out)} — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill`,
+  );
+}
+
 suite.note(
   "residual-risk-recorded",
-  "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）；Task 结论始终由可信 oracle 判定，job 的自述不作授权或成功标记。宿主墙钟 deadline 与容器回收不受影响。",
+  "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）。宿主按容器退出码与证据字段映射 job 终态，job 的自述不作授权或成功标记；宿主墙钟 deadline 与容器回收不受影响。「Task 结论归可信 oracle 判定」的宿主侧比较尚未接线：本阶段如实记录为实现待接线，不宣称已验收。",
 );
 
 writeReport({

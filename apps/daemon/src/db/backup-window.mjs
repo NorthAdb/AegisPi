@@ -9,7 +9,14 @@
 //      than none: it pretends to be a rollback point)
 //   4. a manifest is written NEXT to the image, encrypted with AES-256-GCM
 //      using the host's backup-manifest key (credential slot "backup.manifest";
-//      NO key configured -> the backup refuses to run, fail closed)
+//      NO key configured -> the backup refuses to run, fail closed). The
+//      manifest carries dbSha256 over the image BYTES: restore re-verifies
+//      it before the file is ever opened (audit F3: an equal-length swap of
+//      the image must be refused, and a size match alone proves nothing).
+//      The .db image itself is PLAINTEXT SQLite at rest — only the manifest
+//      is sealed; if the threat model includes the backup directory being
+//      read by an attacker, that residual exposure is recorded as such, not
+//      papered over with a "whole backup is encrypted" claim.
 //   5. the manifest embeds the DELETION LEDGER: the list of objects whose
 //      deletion was intended BEFORE the backup. Restore applies the ledger,
 //      so a forgotten or revoked object never resurrects from a backup.
@@ -20,7 +27,7 @@
 // JSON array of {object_id, reason, deleted_at} entries.
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openDatabase, checkDatabaseIntegrity } from "./connect.mjs";
 import { loadCanonicalSchema, verifySchema } from "./migrate.mjs";
@@ -194,6 +201,8 @@ export function consistencyBackup(db, {
     throw new BackupError(`consistency snapshot failed its own integrity check: ${integrity.detail}`);
   }
   // 4. Manifest with row counts + the deletion ledger, encrypted at rest.
+  //    dbSha256 authenticates the image BYTES: the size check alone would
+  //    accept an equal-length substitution (audit F3).
   const ledger = readDeletionLedger(db, { stateDir });
   const tables = [
     "tasks", "attempts", "effects", "approvals", "timers", "inbox",
@@ -203,12 +212,14 @@ export function consistencyBackup(db, {
   for (const t of tables) {
     counts[t] = db.prepare(`SELECT count(*) c FROM ${t}`).get().c;
   }
+  const dbSha256 = "sha256:" + createHash("sha256").update(readFileSync(path)).digest("hex");
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "aegispi-consistency-backup",
     label,
     createdAt: now,
     backupBytes: statSync(path).size,
+    dbSha256,
     integrity: integrity.detail,
     tableCounts: counts,
     deletionLedger: ledger.entries,
@@ -248,10 +259,24 @@ export function restoreFromBackup({
   if (plaintextSha256 !== envelope.plaintextSha256) {
     throw new BackupError("manifest plaintext hash mismatch; refusing to trust the manifest");
   }
-  // Hash-verify the image against the manifest's expectations.
+  // v1 manifests did not authenticate the image bytes: an equal-length
+  // substitution of the .db passed restore (audit F3). Without dbSha256 the
+  // restore refuses, fail closed.
+  if (typeof manifest.dbSha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(manifest.dbSha256)) {
+    throw new BackupError("the manifest does not carry dbSha256 over the image bytes; a v1 backup without byte authentication is not restorable evidence");
+  }
+  // Byte authentication BEFORE the file is opened: hash the image and
+  // compare against the sealed manifest's dbSha256. The old size check
+  // stays only as a cheap early refusal — it never proves integrity.
   const imageBytes = statSync(backupPath).size;
   if (manifest.backupBytes !== imageBytes) {
     throw new BackupError(`backup image size ${imageBytes} does not match the manifest's ${manifest.backupBytes}`);
+  }
+  const actualSha = "sha256:" + createHash("sha256").update(readFileSync(backupPath)).digest("hex");
+  if (actualSha !== manifest.dbSha256) {
+    throw new BackupError(
+      `backup image bytes hash to ${actualSha} but the manifest sealed ${manifest.dbSha256}; the image was modified after the backup — refusing to restore`,
+    );
   }
   mkdirSync(join(targetDbPath, ".."), { recursive: true });
   const target = targetDbPath.replace(/\\/g, "/");
@@ -301,4 +326,41 @@ export function restoreFromBackup({
   };
   db.close();
   return { restored, manifest, appliedDeletions: removed, integrity: integrity.detail };
+}
+
+// ---------------------------------------------------------------------------
+// Retention (06 section 10 / defaults.backup.retentionDays): backups older
+// than the retention window are deleted when a new consistency backup
+// lands. Before this existed the default advertised 14 days but nothing ever
+// removed a backup (audit F8); now the value is real. Pairs (.db +
+// .manifest.json) are judged together by the .db mtime, and an orphan
+// manifest without its image is pruned with it.
+
+export function pruneExpiredBackups(backupsDir, { retentionDays, now }) {
+  if (!Number.isInteger(retentionDays) || retentionDays <= 0) {
+    throw new BackupError(`retentionDays must be a positive integer, got ${retentionDays}`);
+  }
+  if (!existsSync(backupsDir)) {
+    return { pruned: [], kept: [] };
+  }
+  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+  const pruned = [];
+  const kept = [];
+  for (const name of readdirSync(backupsDir).sort()) {
+    if (!/^consistency-\d+\.db$/.test(name)) continue;
+    const manifestName = name.replace(/\.db$/, ".manifest.json");
+    const st = statSync(join(backupsDir, name));
+    const manifestSt = existsSync(join(backupsDir, manifestName)) ? statSync(join(backupsDir, manifestName)) : null;
+    // The pair expires when the OLDER of the two is past the cutoff: a
+    // manifest rewritten later never resurrects a stale image.
+    const oldest = manifestSt ? Math.min(st.mtimeMs, manifestSt.mtimeMs) : st.mtimeMs;
+    if (oldest < cutoff) {
+      rmSync(join(backupsDir, name), { force: true });
+      if (manifestSt) rmSync(join(backupsDir, manifestName), { force: true });
+      pruned.push(name);
+    } else {
+      kept.push(name);
+    }
+  }
+  return { pruned, kept };
 }

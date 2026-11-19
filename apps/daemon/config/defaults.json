@@ -42,7 +42,7 @@
     "allowedBranches": []
   },
   "disk": {
-    "$comment": "磁盘水位阈值（06 §10：常开前必须有实测水位告警）。warn 阻断新离线 job；critical 转只读诊断。单位 GiB（字节换算在代码内）。",
+    "$comment": "磁盘水位阈值（06 §10）：warn（20GiB）阻断新离线 job，critical（10GiB）转只读诊断。触警演练缝：AEGISPI_DISK_DRILL_WARN_GIB / AEGISPI_DISK_DRILL_CRITICAL_GIB 可注入更严阈值，让真实 statfs 路径实测触警（只能更严，不能关闭水位；用于常开前演练与套件）。",
     "warnFreeGiB": 20,
     "criticalFreeGiB": 10
   },
