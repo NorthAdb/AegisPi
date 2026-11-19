@@ -1,6 +1,6 @@
 # Phase 2 test:budget — HELD 账本、八种 purpose、并发预留与结算（06 §8）
 
-生成：2026-11-19T09:54:46.443Z；Node v22.23.5；suite `budget`。
+生成：2026-11-19T09:58:20.964Z；Node v22.23.5；suite `budget`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -23,7 +23,7 @@
 | PASS | warming-enabled-creates-account-and-reserves | warming account acct:warming-day:2026-11-21 created, reservation HELD |
 | PASS | chargeable-step-refuses-without-live-reservation | workerStep without a reservation: BudgetError |
 | PASS | step-runs-with-reservation-and-refuses-foreign-purpose | step ok with worker reservation; router reservation refused for a worker step |
-| PASS | concurrent-reservations-exactly-one-wins-no-residue | slots exit 4/0, HELD winners=1, task held=60000, day held=60000 (loser left nothing) |
+| PASS | concurrent-reservations-exactly-one-wins-no-residue | slots exit 0/4, HELD winners=1, task held=60000, day held=60000 (loser left nothing) |
 
 合计：20 PASS / 0 FAIL。
 

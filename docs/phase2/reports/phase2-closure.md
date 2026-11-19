@@ -18,9 +18,9 @@
 锁定 Node 显式路径执行，全部实测退出码 0：
 
 ```
-node evals/phase2/durability/run.mjs  → 145/145 PASS, EXIT=0   （含全部崩溃窗口）
+node evals/phase2/durability/run.mjs  → 157/157 PASS, EXIT=0   （含崩溃矩阵与整改门禁，2026-11-19 整改后）
 node evals/phase2/budget/run.mjs      → 20/20  PASS, EXIT=0
-node evals/phase2/acl/run.mjs         → 14/14  PASS, EXIT=0
+node evals/phase2/acl/run.mjs         → 15/15  PASS, EXIT=0
 node evals/contracts/run-contracts.mjs          → 15/15 PASS, EXIT=0（Phase 1 回归）
 node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装快照 exit 2 两行）
 ```
@@ -28,23 +28,29 @@ node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装
 - 机器报告：`docs/phase2/evidence/{durability,budget,acl}-report.json`；人读日志：同名 `-log.md`；收口时点完整控制台转录：`docs/phase2/evidence/final-{durability,budget,acl}-console.txt`。
 - **数据源全部为 fake/录制**：fake 远端状态持久化于 `workspace-state/<case>/fake-remote.json`（进程崩溃后恢复仍见同一远端状态）；无任何真实外部调用（DeepSeek 单发授权已用尽不重放，Telegram 只读复测不重发）。`--once --fake-upstream` 冒烟的 worker 是 phase2-fake，结果对象如实标注。
 
-### 2.1 崩溃窗口矩阵（全部真实 SIGKILL 子进程 + 恢复验证）
+### 2.1 崩溃窗口矩阵（验证方式逐项区分，不再统称「全部真实 SIGKILL」）
 
-| 06 §9 窗口 | 恢复行为（实测） |
-| --- | --- |
-| 入库前 / 事务中 / 提交后未 ACK | 事务中回滚零残留、提交后重投返回 duplicate；终态恰好一行持久化；ACK 行仅在提交后打印 |
-| 入库后、通知调度前 | 恢复报告 inbox PENDING；router 从持久行补派单 |
-| 模型计划后、派单事务前 | dispatch_key 唯一约束防重建；重算计划复用同一任务 |
-| delivery 写入后 / RPC 前后 | command_id 检查点幂等重投；异检查点拒绝（不重复附加） |
-| 离线 job 运行中 | 真实 detached 孤儿进程越过被杀 daemon 存活，恢复杀之、job 置 LOST |
-| Task 完成、Outbox 发送前 | 恢复报告 ready_outbox；dispatcher 从持久对续跑送达 |
-| 审批消费前（事务中） | CAS 回滚干净，审批人手中卡片（nonce）重决成功 |
-| 审批消费后（提交后） | 重复回调返回 already CONSUMED，无二次消费 |
-| **READY→SUBMITTING 后（旗舰）** | 提交后未调用：恢复置 UNKNOWN → IDEMPOTENCY_KEY 同键重发 → SUCCEEDED，远端恰好一次 |
-| 远端已成功、本地未记账 | LOOKUP 强一致补记 external_id，零重发 |
-| Timer 触发事务中 / 提交后 | 事务中回滚重跑单事件；提交后 occurrence 唯一约束幂等 |
-| budget 请求中断 | 保守 HELD 不释放；恢复校准超时置 CHARGED_BOUND（可信账单+actor 才可修正） |
-| 文件落盘与 DB 激活之间 | 未引用文件 GC 只搬孤儿；恢复校验对象引用，缺失即只读 |
+**杀进程窗口（真实 SIGKILL 子进程 + 重启恢复，共 12 个场景）**：ingress 三窗、dispatch 两窗、审批两窗、`READY→SUBMITTING` 旗舰、远端已成功未记账、Timer 两窗、Task完成Outbox未发。这些由 `AEGISPI_CRASH_POINT` 自毁或父进程 `killHard` 实现，验收谓词含退出码与 stdout 契约行（如 ACK 行只在提交后打印）。
+
+**非杀进程窗口（按其实际验证方式如实记录，共 3 个）**：delivery/RPC 行验证的是宿主检查点幂等与异检查点拒绝（同进程状态测试，Phase 2 无真实 Pi RPC）；budget 中断行验证的是超时 HELD 的恢复校准（种子状态 + CHARGED_BOUND 校准）；文件落盘与 DB 激活之间验证的是 GC 孤儿识别与恢复期对象引用扫描。
+
+| 06 §9 窗口 | 恢复行为（实测） | 验证方式 |
+| --- | --- | --- |
+| 入库前 / 事务中 / 提交后未 ACK | 事务中回滚零残留、提交后重投返回 duplicate；终态恰好一行持久化；ACK 行仅在提交后打印 | SIGKILL ×3 |
+| 入库后、通知调度前 | 恢复报告 inbox PENDING；router 从持久行补派单 | SIGKILL + 恢复报告 |
+| 模型计划后、派单事务前 | dispatch_key 唯一约束防重建；重算计划复用同一任务 | SIGKILL ×2 |
+| delivery 写入后 / RPC 前后 | command_id 检查点幂等重投；异检查点拒绝（不重复附加） | 状态测试（宿主检查点语义） |
+| 离线 job 运行中 | 真实 detached 孤儿进程越过被杀 daemon 存活，恢复杀之、job 置 LOST | SIGKILL（父进程）+ 孤儿真杀 |
+| Task 完成、Outbox 发送前 | 恢复报告 ready_outbox；dispatcher 从持久对续跑送达 | SIGKILL + 恢复续跑 |
+| 审批消费前（事务中） | CAS 回滚干净，审批人手中卡片（nonce）重决成功 | SIGKILL |
+| 审批消费后（提交后） | 重复回调返回 already CONSUMED，无二次消费 | SIGKILL |
+| **READY→SUBMITTING 后（旗舰）** | 提交后未调用：恢复置 UNKNOWN；**daemon 重启自身**（非测试进程）按 retry_mode 对账——IDEMPOTENCY_KEY 同键重发落 SUCCEEDED、远端恰好一次 | SIGKILL + daemon `--once` 重启级验收 |
+| 远端已成功、本地未记账 | LOOKUP 强一致补记 external_id，零重发 | SIGKILL |
+| Timer 触发事务中 / 提交后 | 事务中回滚重跑单事件；提交后 occurrence 唯一约束幂等 | SIGKILL ×2 |
+| budget 请求中断 | 保守 HELD 不释放；恢复校准超时置 CHARGED_BOUND（可信账单+actor 才可修正） | 状态测试（超时校准） |
+| 文件落盘与 DB 激活之间 | 未引用文件 GC 只搬孤儿；恢复校验对象引用，缺失即只读 | 状态测试（GC + 引用扫描） |
+
+整改补充：AT_MOST_ONCE 的 daemon 重启级验收同样存在——远端确已持有动作时，daemon 保守停在 UNKNOWN、不重发，仅人工对账（actor+证据）可结清。
 
 ### 2.2 停止条件相关的不变量（实测）
 
@@ -59,7 +65,7 @@ node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装
 
 - **未对账 effect**：UNKNOWN 的自动策略按 retry_mode 分流，但真正结清需要上游对账凭据或人工 reconciliation；Phase 2 只用 fake 远端演练，未发生真实未对账积压。
 - **未知 usage**：CHARGED_BOUND 是保守占额不是账单；修正依赖可信账单（第二层保护），本阶段未接真实 provider 账单。
-- **备份**：迁移前自动 `VACUUM INTO` 快照落 `workspace-state/<dir>/backups/`；**一致性备份的维护窗口流程、加密 manifest 与恢复演练是 Phase 3 的 test:restore 范围**，本阶段只验证了快照可生成。
+- **备份**：迁移前快照是真正的**迁移前状态**（`VACUUM INTO` 于 `migrate()` 之前，仅当有迁移待执行时创建；撕裂迁移失败后主库回滚为空、快照可用）；**一致性备份的维护窗口流程、加密 manifest 与恢复演练仍是 Phase 3 的 test:restore 范围**，本阶段只验证了快照可生成且可打开、完整性通过。
 - **磁盘水位**：未配置告警（常开前必须有实测水位告警，属后续阶段）。
 - **租约时钟**：心跳 10s / 租约 45s 是规范可校准起点，未按真实工具时长校准（Phase 3 校准工作的一部分）。
 - **锁的残余风险**：lockfile+PID 探测存在 PID 复用窗口（单人单机接受，D-18 记录）。
@@ -89,4 +95,16 @@ node evals/contracts/tools/verify-hono-oracle-pair.mjs → EXIT=0（含未安装
 1. 重跑本报告第 2 节五条命令，全绿再继续；开工者持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包。
 2. 三个应用镜像均已记录真实 digest（04 Phase 3 入口硬条件）。
 3. 涉及安全边界、数据模型或阶段依赖的偏离先按包内 ADR 模板报批。
-4. 审计史：Phase 2 未安排外部审计轮；如需第五轮审计复核 Phase 1+2，入口证据 = phase1-closure.md + 本报告 + docs/phase2/evidence/ + `.audit/`（todo 与决策 trail 入库）。
+4. 审计史：Phase 2 独立复审（对象 461c58f）判定 **MET WITH RESIDUAL RISKS**，无 Phase 3 硬阻塞；原稿归档 `docs/phase2/audits/AUDIT-PHASE2-REREVIEW-461c58f968fd96ef9ee3ed752b14f6e879559592.md`（文首含协调更正：origin/main 观察不成立，GitHub main 已核实为被审提交）。四项整改（迁移前备份顺序、daemon 侧 UNKNOWN 对账、三张跨平台回归网、证据与文档校正）于同日完成，逐项红证先行；整改回应 `docs/phase2/reports/audit-response-461c58f.md`。残留项见该回应第 6 节与复审第 15 节。
+
+## 7. 2026-11-19 审计整改增补
+
+独立复审列出的三项残留缺陷已修，计数相应增长（只增不减）：
+
+| 复审残留 | 整改 | 新门禁 |
+| --- | --- | --- |
+| pre-migration 快照发生在 migrate() 后 | 快照先于 migrate()，仅待迁移时创建 | `pre-migration-backup-holds-pre-apply-state`、`no-backup-when-no-migration-pending`、`torn-migration-leaves-usable-pre-state-snapshot`、`snapshot-stays-pre-apply-after-successful-migration` |
+| daemon 不做 retry_mode 对账 | tick 内按 06 §6 表对账（仅在有上游适配器时） | `daemon-restart-reconciles-idempotency-to-succeeded`、`daemon-restart-stdout-shows-reconcile-action`、`daemon-restart-at-most-once-stays-unknown`、`at-most-once-exits-only-through-recorded-human-reconciliation` |
+| epoch typeof / 反斜杠 GC / 45 条计数三网在 Linux 不够红 | 存储类型断言 + 边界拒绝 + GC 归一化 + DB 实点夹具 | `scope-epoch-stored-integer-with-numeric-semantics`、`misbound-insert-shape-is-exactly-what-the-gate-catches`、`writer-refuses-backslash-storage-ref`、`gc-keeps-file-referenced-by-legacy-backslash-row`、`fixture-really-holds-45-unauthorized-and-12-legal` |
+
+证据同步：崩溃矩阵按杀进程/状态测试逐项区分（见第 2.1 节）；`package-lock.json` 根 engines 与仓库锁定同步为 `22.23.5`；`defaults.json` 顶部注释更新为当前事实（预算账本已在本树实现、最小推理契约已实测）；`AUDIT-HANDOFF.md` 第 0/7 节的「Phase 2 未开工」过时表述改为当前阶段状态（审计原稿未动）；decision-trail 对 D-22/D-26/D-28 的失实描述按勘误体例追加更正。

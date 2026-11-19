@@ -4,7 +4,7 @@
 
 ## 0. 当前状态（一句话）
 
-**Phase 1 已收口（2026-11-19，owner 授权）**：四轮外部审计——第 4 轮判定技术整改通过（N9/N10/N11 独立红绿实测关闭，无新技术阻塞），第 4 轮所余两项用户侧开放（75 条标注 owner 确认、Telegram getMe/getChat）随后由 owner 完成并经机器复测闭合（evidence/07）；收口级最小验收全绿（套件 15/15 退出码 0、配对自检 0、包验证器 14/14）。收口声明 `reports/phase1-closure.md`，四轮审计史 `reports/audit-history.md`，审计原稿归档 `docs/phase1/audits/`。**Phase 2 未开工**；入口条件见第 7 节。
+**Phase 1 已收口（2026-11-19，owner 授权）**：四轮外部审计——第 4 轮判定技术整改通过（N9/N10/N11 独立红绿实测关闭，无新技术阻塞），第 4 轮所余两项用户侧开放（75 条标注 owner 确认、Telegram getMe/getChat）随后由 owner 完成并经机器复测闭合（evidence/07）；收口级最小验收全绿（套件 15/15 退出码 0、配对自检 0、包验证器 14/14）。收口声明 `reports/phase1-closure.md`，四轮审计史 `reports/audit-history.md`，审计原稿归档 `docs/phase1/audits/`。**Phase 2 已实施并通过独立复审（2026-11-19，对象 461c58f，判定 MET WITH RESIDUAL RISKS，四项整改已落地）**；Phase 2 的入口、交付与残留见 `docs/phase2/reports/phase2-closure.md` 与 `docs/phase2/reports/audit-response-461c58f.md`；`load-pi-settings.mjs` 已接入 daemon 运行时（D-11 闭合，绕过即红）。
 
 ## 1. 本阶段目标（复述）
 
@@ -52,7 +52,7 @@
 
 ## 5. 风险与未决（如实）
 
-见 `reports/phase1-open-items.md`。收口后现状：**75 条标注已由 owner 确认**（原 12 条 uncertain 对照官方发行说明复核后转「可忽略」，终态 该关注 39 / 可忽略 36 / uncertain 0；确认记录在本地 owner-baseline §3，labels 文件本地不入库）；**Telegram ownerChat 确认已闭合**（owner 修正 `.env` 的 ID 值后复测退出码 0，startConfirmed=true，evidence/07 §2）；**加载器无产品入口**——`load-pi-settings.mjs` 目前仅被 PI-13 探针引用，daemon 运行时接线属 Phase 2，"探针调用了加载器"≠"运行时强制 off"；宿主 HELD 账本未实现（Phase 2）；三个应用镜像未构建；容器配额占位。
+见 `reports/phase1-open-items.md`。收口后现状（2026-11-19 Phase 2 整改后复核）：**75 条标注已由 owner 确认**（原 12 条 uncertain 对照官方发行说明复核后转「可忽略」，终态 该关注 39 / 可忽略 36 / uncertain 0；确认记录在本地 owner-baseline §3，labels 文件本地不入库）；**Telegram ownerChat 确认已闭合**（owner 修正 `.env` 的 ID 值后复测退出码 0，startConfirmed=true，evidence/07 §2）；**加载器已接入 daemon 运行时**（Phase 2 整改后：`config.mjs` 是唯一 defaults.json 读取点且必经 `piSettingsFromDefaults`，绕过即红，见 `docs/phase2/reports/phase2-closure.md`）；**宿主 HELD 账本已实现**（Phase 2：`apps/daemon/src/budget.mjs`，八种 purpose 全入账，缺 usage 拒绝结算）；三个应用镜像仍未构建（Phase 3 入口条件）；容器配额仍为占位（Phase 3 校准）。
 
 **本阶段宣称的"完成"范围**：契约核验（三轮整改后）、驱动选择、模型绑定（**含真实最小推理**）、镜像 digest、双 oracle 夹具（A1/A2 实测 + 遏制自检）、写入链路证实、三轮审计整改、DeepSeek 最小推理、**75 条标注 owner 确认（终态 39/36/0）**、**Telegram 身份与 ownerChat 确认（复测退出码 0）**、审计原稿归档、**Phase 1 收口（owner 授权 + 第四轮技术判定，见第 0 节与 `reports/phase1-closure.md`）**。**不宣称**：产品实现、安全实测、缓存/性能数字。
 
@@ -68,9 +68,9 @@
 8. 敏感内容核查：`git ls-files` 无 `.env` / labels / owner-baseline；`git check-ignore` 三者均命中规则。
 9. 真实连接证据：evidence/07（DeepSeek 实测 + Telegram 网络诊断，脱敏）。
 
-## 7. 阶段门禁（Phase 1 收口后 / Phase 2 开工前）
+## 7. 阶段门禁（Phase 1 收口后 / Phase 2 已实施）
 
-**Phase 1 已收口**（owner 授权 + 第四轮技术判定通过 + 用户侧两项复测闭合；声明 `reports/phase1-closure.md`）。Phase 2 开工前仍需：重跑第 6 节前两条最小验收（预期全绿）；开工者持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包；daemon 加载 defaults.json 必须走 `load-pi-settings.mjs`（D-11，Phase 2 接线时生效）；如需第五轮外部审计复核后再开工，入口证据 = 本报告 + audit-history.md + phase1-closure.md + evidence/04-07。**本阶段未开工 Phase 2 任何产品代码**（inbox/Task/lease/daemon 入口均未写）。Phase 4 证据类工作（容器化 security_repro、真实 warm 计费）按规范另行安排。
+**Phase 1 已收口**（owner 授权 + 第四轮技术判定通过 + 用户侧两项复测闭合；声明 `reports/phase1-closure.md`）。**Phase 2 已实施并通过独立复审**（对象 461c58f，判定 MET WITH RESIDUAL RISKS，无 Phase 3 硬阻塞；四项整改 2026-11-19 落地并逐项红证）：inbox/Task/lease/fence、HELD 账本、审批 CAS、effect/Outbox、Timer、启动恢复、ACL 召回与最小诊断台均已实现（`apps/daemon/src/`）；daemon 加载 defaults.json 走 `load-pi-settings.mjs`（D-11 已生效，绕过即红）。Phase 2 交付与残留见 `docs/phase2/reports/phase2-closure.md` 与 `docs/phase2/reports/audit-response-461c58f.md`。如需下一轮外部审计复核，入口证据 = 本报告 + audit-history.md + phase1-closure.md + evidence/04-07 + docs/phase2 全目录。Phase 4 证据类工作（容器化 security_repro、真实 warm 计费）按规范另行安排。
 
 ## 8. 交接给下一会话的入口证据
 

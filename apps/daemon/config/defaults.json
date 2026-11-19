@@ -1,5 +1,5 @@
 {
-  "$comment": "AegisPi 规范默认预算与资源上限（唯一来源：设计包 06 §4/§8；场景示例不得覆盖）。Phase 1 只落配置值，运行时预算门禁在 Phase 2/3 实现。金额单位 microUSD（整数，1 美元 = 1,000,000）。",
+  "$comment": "AegisPi 规范默认预算与资源上限（唯一来源：设计包 06 §4/§8；场景示例不得覆盖）。金额单位 microUSD（整数，1 美元 = 1,000,000）。预算账本与收费路径门禁已在本仓库 Phase 2 实现（apps/daemon/src/budget.mjs，2026-11-19 审计整改后 157/20/15 门禁全绿）；容器配额校准与真实镜像构建属 Phase 3。模型绑定经 Phase 1 实测（evidence/07：deepseek/deepseek-flash + thinking high 单发最小推理通过）；cacheWarming 映射必须经 config/load-pi-settings.mjs（D-11，绕过即读成 idle）。",
   "schemaVersion": 1,
   "budget": {
     "taskMicroUsd": 800000,
