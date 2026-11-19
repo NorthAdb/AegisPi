@@ -45,32 +45,44 @@ DEEPSEEK-EXIT=0
 - **usage 与可取得的费用信息**：input 461 / output 2 / totalTokens 463；目录价（0.3/1.2/0.006 USD per M）实算 cost.total **$0.0001407**；`totalFromProvider:false` 与 PI-10 实测形状一致（布尔旗标，DeepSeek 响应不含账单总额——usage 数字是唯一可取得的计费依据）。
 - **纪律**：单次调用、无重试、未换模型（脚本内 retry.enabled=false、单 prompt、无循环）。失败即停的设计未触发。
 
-## 2. Telegram 渠道身份验证 —— 本机网络不可达，如实开放
+## 2. Telegram 渠道身份验证 —— Bot 身份已证实；owner 聊天确认卡在 `.env` 值形状（owner 侧修正项）
 
-命令：`node evals\phase1-closure\verify-telegram-identity.mjs`（锁定 Node）
+**第一次尝试（直连失败）**：`node evals\phase1-closure\verify-telegram-identity.mjs` → `fetch failed`（`UND_ERR_CONNECT_TIMEOUT`）；`api.telegram.org:443` TCP 不通，DNS 解析到不可达地址（直连被网络环境阻断）。
 
-```
-TELEGRAM-EXIT=1
-{ "ok": false, "getMe": null, "ownerChat": null, "error": "fetch failed" }
-```
+**按 owner 指示重试（2026-11-19）**：发现本机有**系统级代理在运行**（WinINET `ProxyEnable=1, ProxyServer=127.0.0.1:7897`，端口监听）——这是该机器既定的外网通路。脚本新增代理支持（优先级：`AEGISPI_TG_PROXY` 显式覆盖 → `HTTPS_PROXY`/`HTTP_PROXY` 环境变量 → Windows 系统代理；CONNECT 隧道以 node:net+node:tls 自实现，**零新增依赖**）。Bot token 只经本机自己的代理进程（与其浏览器流量同路）。
 
-诊断（连接层，非凭据层）：
+**经代理的实测结果**：
 
 ```
-Test-NetConnection api.telegram.org -Port 443
-  RemoteAddress: 31.13.76.65    TcpTestSucceeded: False
-代理环境变量：仅 NO_PROXY 存在，无 HTTP_PROXY/HTTPS_PROXY 配置
+TELEGRAM-EXIT=1（部分通过：getMe ✓，ownerChat ✗）
+{
+  "via": "proxy 127.0.0.1:7897",
+  "getMe": { "ok": true, "isBot": true, "username": "aegispibot",
+             "idMasked": "****0813", "first_name": "aegispibot" },
+  "ownerChat": { "ok": false, "error": "Bad Request: chat not found" }
+}
 ```
 
-判读：
+**诊断（只读，脱敏）**：
 
-- `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_OWNER_USER_ID` 均已配置（变量名核验 SET；未输出值，脚本也未发送任何内容——getMe/getChat 均为只读调用，且本次连 API 层都未到达）。
-- 失败原因是 `api.telegram.org:443` **TCP 不通**（DNS 解析到不可达地址），属本机网络环境事实。不猜测、不配置代理、不盲重试。
-- 收口路径（二选一，均不需重新授权）：owner 在网络可达环境（或配置代理后）重跑同一脚本；或 owner 自行向 @aegispibot 复核。脚本已入库（`evals/phase1-closure/`），无密钥内容，可随 `.env` 在任何机器复跑。
-- **未发送任何测试消息**（按本轮指令）。
+```
+--diag-updates（getUpdates，无 offset，不消费不确认）：
+  { "ok": true, "updateCount": 0, "chatsSeen": [] }   ← 更新队列为空
+.env 值形状核验（只输出布尔，值从未打印）：
+  found var: true | pure digits: FALSE | has surrounding whitespace: false
+  contains @: false | contains letters: TRUE | no quote chars
+```
+
+**判读（如实）**：
+
+- **getMe 通过**：Bot 身份机器证实——`@aegispibot`（与 owner-baseline §1 一致），`is_bot=true`，id 脱敏 `****0813`。
+- **getChat "chat not found"**：按当前配置的 `TELEGRAM_OWNER_USER_ID` 值，机器人从未见过这个私聊（更新队列亦空——更新即使曾被消费，聊天关系也不会消失，故不是消费问题）。
+- **根因指向 `.env` 值形状**：配置值**含字母、非纯数字**——Telegram 私聊 `getChat` 的 `chat_id` 必须是数字 user ID。按纪律不输出已有值、不猜正确值；**owner 侧修正**：把 `TELEGRAM_OWNER_USER_ID` 换成你的数字 Telegram user ID，并确认 /start 是从该账号发给 @aegispibot 的，然后重跑：
+  `node evals\phase1-closure\verify-telegram-identity.mjs`（预期 getMe ok + ownerChat.startConfirmed=true → 退出码 0）
+- **未发送任何消息**（getMe/getChat/getUpdates 均只读）。
 
 ## 3. 与本证据相关的边界声明
 
 - 本轮 DeepSeek 调用是 owner-baseline.local.md §4 授权的**一次**最小推理，用于核对「DeepSeek Flash High」的真实模型绑定；未授权的其他付费调用一概未发生。
-- Telegram 只读验证未完成不影响"渠道已选定"的事实（owner 已在 baseline §1 填 @aegispibot 与 /start 完成）；影响的是"机器侧核实"这一步，如实记为开放项。
-- Phase 1 宣布完成前仍需：75 条标注的 owner 确认（草案已生成，12 条 uncertain 待复核）与 Telegram getMe 的可达环境补验。
+- Telegram 验证经本机系统代理（127.0.0.1:7897，用户自配的本地 Clash 类代理）完成 getMe——**Bot 身份已机器证实**；owner 聊天确认（getChat）待 owner 把 `.env` 的 `TELEGRAM_OWNER_USER_ID` 修正为数字 user ID 后重跑收口。
+- Phase 1 宣布完成前仍需：75 条标注的 owner 确认（草案已生成，12 条 uncertain 待复核）与 Telegram ownerChat 确认（脚本已入库，改完 `.env` 一键复验）。

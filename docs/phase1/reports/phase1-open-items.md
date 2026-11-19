@@ -5,7 +5,7 @@
 ## 阻塞 Phase 1 收口的用户侧准备项（开工检查单已知，不阻塞开工）
 
 1. ~~DeepSeek API key 安全录入 + 一次最小推理契约~~ **已完成（2026-11-19 第三轮）**：key 安全录入 `.env`（不入库）；锁定 Node 上经 Pi 1.5.2 对真实 `api.deepseek.com` **单次**最小推理（deepseek/deepseek-flash + thinking high）通过——`stopReason=stop`、回复 "OK"、usage 461+2=463、目录价 cost.total $0.0001407、无重试未换模型。脱敏证据 `evidence/07-real-connections.md`；脚本 `evals/phase1-closure/verify-deepseek-minimal.mjs`。
-2. **通知渠道**：渠道已选定（Telegram Bot DM，@aegispibot，owner 已 /start——owner-baseline.local.md §1，本地文件）；**机器侧 getMe/getChat 核验因本机网络对 `api.telegram.org:443` TCP 不通未完成**（连接层失败，非凭据问题；未发送任何消息）。待可达网络/代理环境重跑 `evals/phase1-closure/verify-telegram-identity.mjs` 收口。打扰范围：owner 基线三句话已定（发现需关注的发布或安全公告时私聊通知，日常不发）。
+2. **通知渠道**：渠道已选定（Telegram Bot DM，@aegispibot——owner-baseline.local.md §1，本地文件）；**Bot 身份已机器证实**（重试经本机系统代理 127.0.0.1:7897，getMe 通过：@aegispibot、is_bot=true）；**owner 聊天确认待修正**——`.env` 的 `TELEGRAM_OWNER_USER_ID` 值含字母非纯数字（getChat 必然 chat not found，getUpdates 队列空），owner 换成数字 user ID 后重跑 `evals/phase1-closure/verify-telegram-identity.mjs` 即收口。打扰范围：owner 基线三句话已定（发现需关注的发布或安全公告时私聊通知，日常不发）。
 3. **人工基线三句话**：owner 已填入 owner-baseline.local.md §2（关注范围只盯 NorthAdb/AegisPi、默认只读、发现需关注事件才通知）。**75 条标注草案已按该基线原则全量生成**（本地 labels 文件：30 公告该关注 + 9 修复版该关注 + 12 拿不准[uncertain:true，仍标该关注] + 24 可忽略；逐条带理由；含"评测夹具 ≠ 服务监控范围"声明）。**owner 逐条复核仍未完成**——尤其 12 条 uncertain 项；确认前 6b 不勾选、不宣布收口。
 
 ## 工程未决项

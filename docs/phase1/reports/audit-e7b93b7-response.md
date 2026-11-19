@@ -49,7 +49,7 @@
 ## 本轮同时完成的用户侧收口项（按本轮任务授权）
 
 1. **DeepSeek 最小推理契约：完成**。锁定 Node 上经 Pi 1.5.2 SDK 对真实 `api.deepseek.com` **单次**推理（provider `deepseek`、model id `deepseek-flash`、thinkingLevel high）：`stopReason=stop`，回复恰为 "OK"，usage input 461 / output 2 / totalTokens 463，目录价计费 cost.total $0.0001407（totalFromProvider=false），耗时 904ms，脚本退出码 0。一次调用、无重试、未换模型。密钥仅在本机进程内从 `.env` 加载（`setRuntimeApiKey` 内存态），未打印、未入库。脚本：`evals/phase1-closure/verify-deepseek-minimal.mjs`；脱敏证据：evidence/07。
-2. **Telegram 渠道验证：本机网络不可达，如实开放**。`TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_OWNER_USER_ID` 均已配置（仅核验变量名，未读取输出值）；`getMe` 因 `api.telegram.org:443` TCP 不通（连接层失败，DNS 解析到不可达地址，shell 无代理配置）无法完成——这是本机网络环境事实，不是凭据问题。未发送任何消息（脚本只做只读调用）。脚本：`evals/phase1-closure/verify-telegram-identity.mjs`；网络可达的网络/代理环境下重跑即可完成收口。
+2. **Telegram 渠道验证：Bot 身份已证实；owner 聊天确认待 owner 修正 `.env` 值**。直连被本机网络阻断（DNS 污染 + TCP 不通）；重试经本机系统代理（WinINET `127.0.0.1:7897`，用户自配）完成：**getMe 通过**（@aegispibot，is_bot=true，id 脱敏 ****0813）；`getChat` 返回 "chat not found"——诊断显示配置的 `TELEGRAM_OWNER_USER_ID` 值**含字母、非纯数字**（Telegram 私聊 chat_id 必须数字 user ID；getUpdates 队列亦空）。按纪律不输出已有值、不猜正确值。脚本已入库（含代理支持与 `--diag-updates` 只读诊断），owner 把 ID 改为数字 user ID 后重跑即收口。未发送任何消息。脱敏证据：evidence/07。
 3. **75 条标注草案：已生成，待 owner 复核**。按 owner-baseline §3 原则全量生成（30 公告全部"该关注" + 9 个修复版"该关注" + 24 "可忽略" + 12 条 `uncertain:true` 按原则 4 仍标"该关注"），逐条带理由；含范围声明（hono 75 条是评测夹具，与 AegisPi 服务监控范围不混同）。草案在本地 labels 文件（gitignored），owner-baseline §3 已填草案路径与差异说明，**确认结果未写"全部同意"**。
 4. 基线三句话：owner 已写入 owner-baseline.local.md §2（本地文件，不入库），内容与规范无冲突，维持原状。
 

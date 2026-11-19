@@ -4,7 +4,7 @@
 
 ## 0. 当前状态（一句话）
 
-三轮外部审计/复审（P1、N1-N8、N9-N11）**均已整改并复测**：第三轮关闭了最后一条假绿 N9（hono 解析遏制 + 未安装快照必须 exit 2）、N10（--only 零命中退出码 1）、N11（缺 usage 九字段全零谓词），15/15 全绿退出码 0；同轮完成 **DeepSeek 最小推理契约（真实单次调用，通过）**与 **75 条标注草案全量生成**。**Phase 1 仍不宣布完成**——75 条标注的 owner 逐条复核（12 条 uncertain 待裁决）与 Telegram getMe 机器侧核验（本机网络不可达）两项开放；Phase 2 不开工。
+三轮外部审计/复审（P1、N1-N8、N9-N11）**均已整改并复测**：第三轮关闭了最后一条假绿 N9（hono 解析遏制 + 未安装快照必须 exit 2）、N10（--only 零命中退出码 1）、N11（缺 usage 九字段全零谓词），15/15 全绿退出码 0；同轮完成 **DeepSeek 最小推理契约（真实单次调用，通过）**与 **75 条标注草案全量生成**；Telegram **Bot 身份已证实**（@aegispibot，经本机系统代理），owner 聊天确认待 owner 把 `TELEGRAM_OWNER_USER_ID` 修正为数字 user ID。**Phase 1 仍不宣布完成**——75 条标注的 owner 逐条复核（12 条 uncertain 待裁决）与 Telegram ownerChat 确认两项开放；Phase 2 不开工。
 
 ## 1. 本阶段目标（复述）
 
@@ -44,15 +44,15 @@
 - **第三轮红证**（evidence/06）：未安装快照 → 双检查 exit 2（打印真实上溯路径）；仓库外空目录 → exit 2；`--only=does-not-exist` → 退出码 1；PI-10 双突变 → FAIL 退出码 1（还原复绿）。
 - **前两轮红证**（维持有效）：纯 note 探针 → SKIP → 退出码 1（evidence/05）；`result("PASS")` 升格封死；mutation 变红（evidence/04）。
 - **DeepSeek 最小推理契约（真实调用）**：`node evals\phase1-closure\verify-deepseek-minimal.mjs` → 退出码 0——`deepseek-flash` + thinking high 被真实 API 接受（stopReason=stop），回复 "OK"，usage 461+2=463，目录价 cost.total $0.0001407，904ms。单次、无重试、未换模型；密钥仅本机进程内加载。脱敏证据 `evidence/07-real-connections.md`。
-- **Telegram 身份核验（只读）**：`node evals\phase1-closure\verify-telegram-identity.mjs` → 连接层失败（`api.telegram.org:443` TCP 不通，本机网络不可达；变量已配置仅核验名称）。**未发送任何消息**。待可达环境重跑。
+- **Telegram 身份核验（只读）**：直连被本机网络阻断（DNS 污染 + TCP 不通）；经本机系统代理（WinINET `127.0.0.1:7897`，用户自配，脚本自实现 CONNECT 隧道零依赖）——**getMe 通过**（@aegispibot、is_bot=true）；getChat "chat not found"，根因是 `.env` 的 `TELEGRAM_OWNER_USER_ID` 值含字母非纯数字（getUpdates 队列空）。**owner 改为数字 user ID 后重跑即收口**；未发送任何消息。脱敏证据 `evidence/07-real-connections.md`。
 - **`python -X utf8 validation/validate_pack.py`**（包目录）：14/14 PASS、CONNECTIONS_LEFT=0（evidence/00/04；本轮未改受包约束文件）。
 - **失败与修复用例（如实记录）**：`tools: []` 压掉扩展工具；`bindExtensions()` MCP 专用；compact keepRecentTokens 门禁；typebox `Type` 命名空间对象；RPC 扩展需 settings.json 注册；第二轮：hono cwd 误信、Windows spawn `.cmd` 需 shell；第三轮：**`honoFrom=参数目录` 字符串自证被上溯攻破（N9）**——自证自此必须是真实解析路径 + 遏制断言。
 
 ## 5. 风险与未决（如实）
 
-见 `reports/phase1-open-items.md`。要点：**75 条标注草案已生成待 owner 复核**（12 条 uncertain，本地 labels 文件，确认前 6b 不勾）；**Telegram getMe 本机网络不可达未完成**（脚本在库，可达环境即收口）；**加载器无产品入口**——`load-pi-settings.mjs` 目前仅被 PI-13 探针引用，daemon 运行时接线属 Phase 2，"探针调用了加载器"≠"运行时强制 off"；宿主 HELD 账本未实现（Phase 2）；三个应用镜像未构建；容器配额占位。
+见 `reports/phase1-open-items.md`。要点：**75 条标注草案已生成待 owner 复核**（12 条 uncertain，本地 labels 文件，确认前 6b 不勾）；**Telegram Bot 身份已证实，ownerChat 确认待 owner 修正 `.env` 的 ID 值**（数字 user ID，改完重跑脚本即收口）；**加载器无产品入口**——`load-pi-settings.mjs` 目前仅被 PI-13 探针引用，daemon 运行时接线属 Phase 2，"探针调用了加载器"≠"运行时强制 off"；宿主 HELD 账本未实现（Phase 2）；三个应用镜像未构建；容器配额占位。
 
-**本阶段宣称的"完成"范围**：契约核验（三轮整改后）、驱动选择、模型绑定（**含真实最小推理**）、镜像 digest、双 oracle 夹具（A1/A2 实测 + 遏制自检）、写入链路证实、三轮审计整改、DeepSeek 最小推理、75 条草案生成、审计原稿归档。**不宣称**：产品实现、安全实测、缓存/性能数字、Phase 1 收口、75 条标注已确认、Telegram 机器侧核验完成。
+**本阶段宣称的"完成"范围**：契约核验（三轮整改后）、驱动选择、模型绑定（**含真实最小推理**）、镜像 digest、双 oracle 夹具（A1/A2 实测 + 遏制自检）、写入链路证实、三轮审计整改、DeepSeek 最小推理、75 条草案生成、**Telegram Bot 身份核验**、审计原稿归档。**不宣称**：产品实现、安全实测、缓存/性能数字、Phase 1 收口、75 条标注已确认、Telegram ownerChat 确认。
 
 ## 6. 审计建议入口（从哪里开始核）
 
@@ -68,7 +68,7 @@
 
 ## 7. 阶段门禁（Phase 2 开工前）
 
-三轮审计门禁逐项对照：**P1-1..P1-4、N1-N2、N9-N11 均已改完**（红绿证据 evidence/04/05/06）；**v22.23.5 上 test:contracts 退出码 0 已复验**；**断言破坏、纯 note、未安装快照、空 --only 四类破坏均实测变红**；**开工者须持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包**。**Phase 1 宣布完成前仍需**：75 条标注的 owner 逐条复核（12 条 uncertain + 全量 reason 检查）；Telegram getMe 在网络可达环境补验。daemon 加载 defaults.json 必须走 `load-pi-settings.mjs`（D-11，Phase 2 接线时生效）。Phase 4 在 Phase 1 收口前不能开。
+三轮审计门禁逐项对照：**P1-1..P1-4、N1-N2、N9-N11 均已改完**（红绿证据 evidence/04/05/06）；**v22.23.5 上 test:contracts 退出码 0 已复验**；**断言破坏、纯 note、未安装快照、空 --only 四类破坏均实测变红**；**开工者须持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包**。**Phase 1 宣布完成前仍需**：75 条标注的 owner 逐条复核（12 条 uncertain + 全量 reason 检查）；Telegram ownerChat 确认（owner 把 `.env` 的 `TELEGRAM_OWNER_USER_ID` 改为数字 user ID 后重跑脚本）。daemon 加载 defaults.json 必须走 `load-pi-settings.mjs`（D-11，Phase 2 接线时生效）。Phase 4 在 Phase 1 收口前不能开。
 
 ## 8. 交接给下一会话的入口证据
 

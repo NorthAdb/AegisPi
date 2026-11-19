@@ -2,7 +2,7 @@
 
 这里放的是 Phase 1 出口门禁中**用户侧收口项**的验证脚本。它们与 `evals/contracts/`（15 探针契约套件）刻意分离，原因：
 
-1. **真实外部调用**：`verify-deepseek-minimal.mjs` 执行**一次**真实付费推理（DeepSeek Flash High 绑定契约）；`verify-telegram-identity.mjs` 调用 Telegram Bot API 的只读方法（getMe / getChat）。契约套件全部走本地 fake 端点、零费用、可无限重跑——这两条不是。
+1. **真实外部调用**：`verify-deepseek-minimal.mjs` 执行**一次**真实付费推理（DeepSeek Flash High 绑定契约）；`verify-telegram-identity.mjs` 调用 Telegram Bot API 的只读方法（getMe / getChat；`--diag-updates` 额外做脱敏的更新队列诊断）。直连不可达时脚本自动走已配置的代理（优先级：`AEGISPI_TG_PROXY` → `HTTPS_PROXY`/`HTTP_PROXY` → Windows 系统代理；CONNECT 隧道 node:net+node:tls 自实现，零新增依赖）。契约套件全部走本地 fake 端点、零费用、可无限重跑——这两条不是。
 2. **凭据来源**：两脚本只在**本机进程内**从仓库根的 `.env` 读取 `DEEPSEEK_API_KEY` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_OWNER_USER_ID`，绝不打印、写盘或入库（`.env` 已被 `.gitignore` 排除）。脚本文件本身不含任何密钥，只含变量名。
 3. **无重试纪律**：DeepSeek 脚本一次推理、失败即停、不自动换模型（owner-baseline.local.md §4 的授权边界）；Telegram 脚本不发消息（暂不发送测试消息）。
 
