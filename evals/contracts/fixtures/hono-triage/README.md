@@ -10,9 +10,23 @@
 - `checks/csrf-textping-check.mjs`（fixtureHash sha256 4e89f269…）与 `checks/cors-credential-check.mjs`（sha256 e1a328e1…）。
 - manifest 的快照值：baseline = v4.13.19（commit 676c8f80…，tarball sha256 e1a19a8a…，隔离安装 lockfile sha256 e5d0c57e…）；target = v4.12.24（commit 5fdde5ab…，tarball sha256 4ce62f3e…，隔离安装 lockfile sha256 db2bb134…，npm integrity `sha512-I36D1s…U4iw==` 与 registry 一致）。两对 manifest 共用同一快照对。
 
-## 复现方式（重要）
+## 复现方式（重要，2026-11-19 第二轮复审后更新）
 
-每个快照在隔离目录独立 `npm install hono@<version>`（npm 10.9.9 / Node 22.23.5），然后把检查脚本**复制进该安装目录**再运行——ESM 的 `import "hono"` 按**脚本位置**解析而非 cwd，在仓库里直接跑会解析到仓库的 4.13.19（第一轮审计后实测踩过此坑，已写入 manifest 的 `installNote`）。
+每个快照的 `package.json` + `package-lock.json` 已**字节原样入库**于 `snapshots/hono-<version>/`——lockfileHash 可直接复算（SHA-256 与 manifest 一致），`npm ci` 即按 lock 复现安装。检查脚本以**安装目录为显式参数**解析 hono（`createRequire`，与 cwd、脚本位置完全无关）：
+
+```
+node checks/csrf-textping-check.mjs <安装目录>   # 从任何位置跑，hono 都从该目录加载
+node checks/cors-credential-check.mjs <安装目录>
+```
+
+在仓库目录对 4.12.24 目标跑必须得到 exit 1（实测在案）；旧的"复制脚本进快照目录"法仍兼容（无参数时按脚本所在目录解析）。一键自检：
+
+```
+node evals/contracts/tools/verify-hono-oracle-pair.mjs
+→ 从入库快照 npm ci 两套安装 → 四项检查 → 断言 0/1 矩阵 + 解析来源 + 复算两个 lockfile 哈希
+```
+
+第二轮复审 N4 的教训在案：第一版检查头注释写"cwd must resolve hono"与实际相反（ESM 按脚本位置解析），照做会在仓库里命中 4.13.19 得到 target 假绿——已删除该注释并改为显式参数解析，输出含 `honoFrom` 自证解析来源。
 
 ## 与开工检查单的差异记录（2026-11-19 修正）
 

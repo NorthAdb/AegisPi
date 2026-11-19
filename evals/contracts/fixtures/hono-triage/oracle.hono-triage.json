@@ -15,7 +15,7 @@
     {
       "id": "A2",
       "kind": "target_affected",
-      "description": "On target v4.12.24 (inside the affected range < 4.13.16) the same check fails: the text/ping POST bypasses csrf() and reaches the handler (exit code 1). MEASURED 2026-11-19 on locked Node 22.23.5 against an isolated hono@4.12.24 install: status 200, rejected=false, exit 1 — the 4.12.24 csrf() content-type regex matches only text/plain, so text/ping never enters the origin check at all. Reproduction requires running the check script from inside the snapshot's install directory (ESM resolves 'hono' relative to the script, not the cwd).",
+      "description": "On target v4.12.24 (inside the affected range < 4.13.16) the same check fails: the text/ping POST bypasses csrf() and reaches the handler (exit code 1). MEASURED 2026-11-19 on locked Node 22.23.5 against an isolated hono@4.12.24 install: status 200, rejected=false, exit 1 — the 4.12.24 csrf() content-type regex matches only text/plain, so text/ping never enters the origin check at all. Reproduction: node checks/csrf-textping-check.mjs <install-dir> — the check loads hono via createRequire from the given directory, never via cwd or its own location (audit round 2 N4).",
       "commandIndex": 1,
       "expectedExitCode": 1,
       "requiredOutputHash": null

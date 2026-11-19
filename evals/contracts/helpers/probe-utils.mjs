@@ -73,10 +73,12 @@ export function createProbe(id, title) {
 export function summarizeProbe(probe) {
   const failed = probe.findings.filter((f) => f.status === "FAIL");
   if (failed.length > 0) return "FAIL";
-  if (probe.finalStatus) return probe.finalStatus;
-  // A probe with no real (falsifiable) PASS finding cannot count as PASS:
-  // notes and skips are not evidence (audit round 1, P1-2).
+  if (probe.finalStatus === "FAIL") return "FAIL";
+  // A probe with no real (falsifiable) PASS finding cannot count as PASS
+  // and cannot be promoted by finalStatus: notes and skips are not
+  // evidence (audit round 1 P1-2; round 2 N1 closed the promotion path).
   if (!probe.findings.some((f) => f.status === "PASS")) return "SKIP";
+  if (probe.finalStatus) return probe.finalStatus;
   return "PASS";
 }
 

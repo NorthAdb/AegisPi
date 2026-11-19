@@ -2,7 +2,7 @@
 
 日期：2026-11-18 初测，2026-11-19 按第一轮审计整改后复测（Asia/Hong_Kong）。执行环境：Windows 11，锁定 Node v22.23.5（显式路径 `D:\AegisPi\tools\node-v22.23.5\node.exe`，npm 10.9.9；他机复测可用 `AEGISPI_NODE_BIN` 环境变量指向真实 22.23.5 二进制，RPC 探针会校验子进程版本），`@earendil-works/pi-coding-agent` exact 1.5.2（package-lock integrity `sha512-mUWI04rqF1Vd/…lom5yA==`）。全套探针位于 `evals/contracts/`，入口 `npm run test:contracts`（运行器拒绝非 22.23.5 的 Node）。机器判定结果：`docs/phase1/evidence/contracts-report.json`，15/15 PASS。
 
-**修订声明（2026-11-19）**：第一轮外部审计（Linux/Ubuntu 24.04.5，锁定 Node 22.23.5 复跑全绿）指出本报告 v1 有四处结论超出断言或与实测相反，均已整改并复测：PI-02 的 route“单参数全局事实”（实为双路径）、PI-07 的 timeout 时长（机器证据 4 秒，报告误写 8 秒）与“无重放”断言（原为字面量 true，已改为重启复验）、PI-10 的 totalFromProvider“字段不存在”（实为可选布尔，标准路径 false）、多处不可失败的 PASS（已全部改为可失败断言或降级为 note）。逐条映射见 `audit-response.md`。
+**修订声明（2026-11-19，含第二轮复审整改）**：第一轮外部审计指出本报告 v1 有四处结论超出断言或与实测相反（route 单参数全局事实、timeout 8 秒、totalFromProvider"不存在"、多处不可失败 PASS），已整改复测。**第二轮复审（同日）进一步关闭**：套件退出码门禁（纯 note 探针现在令退出码 1，升格路径 `result("PASS")` 已封死）、defaults.json 的 off 走 Pi 设置真实路径的映射加载器（`apps/daemon/config/load-pi-settings.mjs`，文件直读 = idle 的危险以断言记录）、缺 usage 路径按实测形状断言（`totalFromProvider` 键整个缺失）、hono 检查改 argv 显式目标解析（从仓库跑 target 必然 exit 1）、快照 lock 入库可复算。逐条映射见 `audit-response.md` 与 `re-review-response.md`。
 
 每个探针的逐条断言（含实际输出摘录）都在 contracts-report.json 的 findings 里，此处只写结论与规范需要的适配决定。
 
@@ -19,10 +19,10 @@
 | PI-07 | UI confirm/select/editor 及重启后恢复 | 成立，三项实测偏差 | 见下节“扩展 UI 三偏差”。宿主必须自持 deadline 与持久停车——与 04 §2 的预期设计一致 |
 | PI-08 | Session fork、原目录消失、分支定位 | 成立 | 持久会话目录删除后 RPC `--session` 拒绝启动（exit 非 0）；`--fork <file>` 从新 cwd 建新会话，对话完整保留，header 记 parentSession 指向原文件 |
 | PI-09 | provider 注册、base URL、headers、认证、流式错误 | 成立 | models.json 只覆盖 baseUrl 保留目录元数据（contextWindow 1000000 等实测不变）；DEEPSEEK_API_KEY 环境变量与 models.json 字面 apiKey 两条凭据路径实测认证成功；wire 形状 = OpenAI chat/completions（stream:true + stream_options.include_usage + max_tokens）；500 错误以 stopReason=error + errorMessage 呈现；URL/凭据只由宿主侧配置决定 |
-| PI-10 | Usage 字段、provider 费用、未知 usage | 成立（v1 的“totalFromProvider 不存在”已修正） | 末块 usage 解析为 input/output/totalTokens；cost 按目录价计算（deepseek-flash 0.3/1.2 USD per M，实测 100/50 token → 0.00003/0.00006）；**`cost.totalFromProvider` 实为可选布尔**（pi-ai types.d.ts:318 `totalFromProvider?: boolean`，标准路径赋 false，仅 OpenRouter 上报费用时 true）——它从来不是数字，账本必须自行求和 input+output+cache；provider 不回 usage 时 Pi 报**零**（usage 与 cost 均为零）而非 unknown——账本必须把“响应存在但 usage 缺失”保守处理为未结算（HELD），不得当零成本 |
+| PI-10 | Usage 字段、provider 费用、未知 usage | 成立（第二轮 N3 整改后按实测形状断言） | 末块 usage 解析为 input/output/totalTokens；cost 按目录价计算（deepseek-flash 0.3/1.2 USD per M，实测 100/50 token → 0.00003/0.00006）；**usage 在场时 `cost.totalFromProvider` 为可选布尔 false**（pi-ai types.d.ts:318，仅 OpenRouter 上报费用时 true）——从来不是数字，账本必须自行求和 input+output+cache；**usage 缺失路径实测形状：数字全零且 cost 上没有 `totalFromProvider` 键**（断言 `missing-usage-shape-zeros-no-provider-total`）——零值不可区分"provider 未上报"，**不是零成本成立的证据**；宿主 HELD 台账属 Phase 2，未实现、不宣称完成（open-items 在案） |
 | PI-11 | schema/typebox 支持范围、复杂参数校验 | 成立 | typebox 1.3.27（`Type` 为命名空间对象）；Union/嵌套 Object/Optional 模式被 registerTool 接受；缺必填与错枚举的调用在 execute 前被拒，错误成为转录 tool result。宿主业务校验（ACL/预算/目标白名单）仍必须独立存在 |
 | PI-12 | Codemode/QuickJS 输出、内存、timeout、tool exposure | 成立 | 沙箱拒绝 Node API（`process` → ReferenceError）；嵌套工具按 `<parent>/<n>` id 暴露且 details.calls 记录状态；`// @options` 行的 max_output_tokens/timeout_ms 生效路径存在；ALL_TOOLS 列 direct 工具、不含 codemode 自身（文档：脚本不能启动其他 codemode 脚本）。256MB/双 worker 限额为文档值，未做 OOM 实测——不作为安全边界（05 原文照办） |
-| PI-13 | cacheWarming 及 decision 事件 | 成立，一项默认值冲突 | **Pi 1.5.2 默认 cacheWarming="idle"**（settings-defaults.js 实测 + `inMemory({})` 读取实测），与 AegisPi 规范“保温默认关闭”冲突。缓解**仅到设置层**（如实记录）：`inMemory({cacheWarming:"off"})` 读取路径实测接受 off，`apps/daemon/config/defaults.json` 实测含 off 值；**加载该文件的 daemon 代码属 Phase 2，运行时强制尚未落地**。cache_warming_decision 事件在 types.d.ts/cache-warmer.d.ts 双双声明（静态断言）；deepseek-flash 目录无 promptCache 声明 → 该模型不符合保温条件。启用前须按 purpose=warming 计费验证 |
+| PI-13 | cacheWarming 及 decision 事件 | 成立，一项默认值冲突（第二轮 N2 整改后走真实路径） | **Pi 1.5.2 默认 cacheWarming="idle"**（settings-defaults.js 实测 + `inMemory({})` 读取实测）。**与 AegisPi 规范"保温默认关闭"的冲突以断言收口**：`defaults.json` 的 `budget.cacheWarming:"off"` **必须经唯一映射加载器** `apps/daemon/config/load-pi-settings.mjs` 才能到达 Pi 的设置路径——文件直读 `inMemory(JSON.parse(file))` 实测 = `idle`（危险，断言 `raw-defaults-json-reads-idle-hazard` 在案），经加载器 = `off`（断言 `defaults-json-off-reaches-pi-via-loader`）。Phase 2 daemon 必须经同一模块加载该文件——运行时强制未落地，如实记录。cache_warming_decision 事件在 types.d.ts/cache-warmer.d.ts 双双声明（静态断言）；deepseek-flash 无 promptCache 声明 → 不符合保温条件。启用前须按 purpose=warming 计费验证 |
 
 ## RPC LF 分帧（05 §3 复测，探针 FRAMING）
 
@@ -46,6 +46,9 @@
 ```
 npm run test:contracts          # = node evals/contracts/run-contracts.mjs（锁定 Node 下；Linux 用 AEGISPI_NODE_BIN 指向 22.23.5 二进制）
 node evals/contracts/tools/readline-repro.mjs   # 双版本 readline 行为对照
+node evals/contracts/tools/verify-hono-oracle-pair.mjs   # 双 oracle 配对自检（从入库快照 npm ci 复现安装，断言 0/1 矩阵与解析来源）
 ```
 
-整改的逐条映射（第一轮审计 P1/P2 → 修复 → 证据）见 `audit-response.md`。未决项见 `docs/phase1/reports/phase1-open-items.md`。
+套件退出码门禁（第二轮 N1）：任一探针 FAIL、SKIP、或无任何可失败 PASS 判据 → 退出码 1。只有 note 的"规范句"不能让套件变绿。
+
+整改的逐条映射见 `audit-response.md`（第一轮）与 `re-review-response.md`（第二轮）。未决项见 `docs/phase1/reports/phase1-open-items.md`。

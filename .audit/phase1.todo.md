@@ -11,4 +11,4 @@
 - [x] 6a. 用 honojs/hono 真实 release/advisory 样本写 oracle 与 environment manifest 夹具。证据：evals/contracts/fixtures/hono-triage/（**两对 oracle**：csrf text/ping + CORS 凭据反射；A1/A2 均在锁定 Node 隔离快照实测：4.13.19 → 403/不反射 exit 0，4.12.24 → 放行/反射 exit 1；events.json 75 候选=45 release+30 advisory，全量 per_page=100 拉取并窗口过滤）。
 - [ ] 6b. **标注集经用户确认**（依赖用户侧准备项：通知渠道、基线三句话）。证据：提案在本地 labels 文件（含检查单 High 锚点 GHSA-88fw），75 候选全量标注待确认。第一轮审计 P1-5：此项不得勾选。
 - [x] 7. 任何契约不成立，按 ADR 模板报批后改适配与文档，不编造方法名。证据：PI-contract-report.md「ADR 状态」节——零 ADR（发现的偏差均属宿主适配细节，不触报批线，实测事实已入 findings）。2026-11-19 第一轮审计整改后维持零 ADR（route 双路径、字面量断言、GHSA-88fw 数据修正均未改安全边界，见 audit-response.md）。
-- [x] 8. 自审 + 移交审计报告。证据：docs/phase1/AUDIT-HANDOFF.md；**第一轮外部审计（2026-11-19）结论“Phase 1 未完成”与整改记录 docs/phase1/reports/audit-response.md**——P1-1..P1-5 全部整改并复测 15/15，用户侧收口项（key/渠道/基线三句话/标注确认）维持未勾选。
+- [x] 8. 自审 + 移交审计报告。证据：docs/phase1/AUDIT-HANDOFF.md；第一轮外部审计（2026-11-19）整改记录 docs/phase1/reports/audit-response.md；**第二轮复审（同日）判定整改未通过（N1 套件退出码/N2 cacheWarming 真实路径），已再整改，映射见 docs/phase1/reports/re-review-response.md**。用户侧收口项（key/渠道/基线三句话/标注确认）维持未勾选。

@@ -151,10 +151,16 @@ export async function run() {
     await session.prompt("pi10 no usage");
     unsub();
     const u = ends.at(-1)?.message?.usage;
+    // Assert the ACTUAL measured shape (audit round 2 N3): with provider
+    // omission the token/cost numbers are all zero AND cost carries no
+    // totalFromProvider key at all (pi-ai only sets that flag on the
+    // usage-present path). Zeros here are indistinguishable from "provider
+    // omitted usage" — this is NOT settlement evidence, and the check name
+    // and detail must not frame it as a successful zero-cost settlement.
     probe.check(
-      "missing-usage-reports-zeros-not-unknown",
-      !!u && u.input === 0 && u.output === 0 && u.cost?.total === 0,
-      `usage with provider omission: ${JSON.stringify(u)} — Pi cannot distinguish "provider omitted usage" from "zero usage" (cost fields also zero); the ledger must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)`,
+      "missing-usage-shape-zeros-no-provider-total",
+      !!u && u.input === 0 && u.output === 0 && !!u.cost && !("totalFromProvider" in u.cost),
+      `usage with provider omission: ${JSON.stringify(u)} — numbers are all zero AND cost has no totalFromProvider key (absent, not false, not a number). Nothing here proves a zero-cost outcome; the host ledger (Phase 2, not yet implemented) must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)`,
     );
     session.dispose();
   } catch (e) {
@@ -164,13 +170,15 @@ export async function run() {
     agent2.cleanup();
   }
 
-  // Normative ledger rule (06 §8) — a host duty, not a Pi property, so it
-  // is recorded as a note rather than a check that cannot fail. The
-  // falsifiable shape facts live in cost-totalFromProvider-is-boolean-false
-  // and missing-usage-reports-zeros-not-unknown above.
+  // Normative ledger rule (06 §8) — a host duty, not a Pi property. It is
+  // a note here BY DESIGN: the real HELD gate lives in the host ledger,
+  // which does not exist yet (Phase 2). Until then this stays an open item,
+  // NOT a satisfied requirement — see phase1-open-items.md. The falsifiable
+  // shape facts live in cost-totalFromProvider-is-boolean-false and
+  // missing-usage-shape-zeros-no-provider-total above.
   probe.note(
     "ledger-sums-itself",
-    "usage carries per-field numbers only (input/output/cache*, cost.total) with cost.totalFromProvider as a boolean flag, never a provider-reported total; ledger code must sum input+output+cache itself and treat missing usage as un-settled (HELD), per 06 §8",
+    "usage carries per-field numbers only (input/output/cache*, cost.total) with cost.totalFromProvider as a boolean flag on the usage-present path and ABSENT on the omission path — never a provider-reported total; the Phase 2 ledger must sum input+output+cache itself and treat missing usage as un-settled (HELD). The host-side HELD gate is not implemented in Phase 1 and is not claimed as done.",
   );
 
   const status = summarizeProbe(probe);
@@ -180,7 +188,7 @@ export async function run() {
     status,
     summary:
       status === "PASS"
-        ? "Usage parses from the final streamed chunk (input/output/totalTokens), cost derives from catalog prices (deepseek-flash 0.3/1.2), cost.totalFromProvider exists as a boolean (false on this path, never a number to sum), and provider-omitted usage yields zeros — in usage AND cost — rather than an unknown marker. The host ledger, not Pi, must hold the conservative reservation (HELD)."
+        ? "Usage parses from the final streamed chunk (input/output/totalTokens), cost derives from catalog prices (deepseek-flash 0.3/1.2), cost.totalFromProvider is a boolean false on the usage-present path, and the provider-omission path yields all-zero numbers with NO totalFromProvider key on cost — an untrustworthy shape for settlement, recorded as such. The host-side HELD ledger is Phase 2 work, explicitly not claimed as done here."
         : "usage contract deviates; see findings.",
     findings: probe.findings,
   };

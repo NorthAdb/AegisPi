@@ -83,7 +83,24 @@ const outPath = join(repoRoot, "docs", "phase1", "evidence", "contracts-report.j
 mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, JSON.stringify(report, null, 2), "utf8");
 
-const anyFail = results.some((r) => r.status === "FAIL");
-console.error(`\n${results.length} probe(s): ${anyFail ? "FAILURES PRESENT" : "no FAIL"}`);
+// Gate (audit round 2 N1): the suite is green ONLY when every probe has at
+// least one real PASS finding and none is FAIL or SKIP. A probe made of
+// notes alone is not evidence and must break the run.
+const failedProbes = results.filter((r) => r.status === "FAIL");
+const skippedProbes = results.filter((r) => r.status === "SKIP");
+const noPassEvidence = results.filter(
+  (r) => r.status !== "FAIL" && !r.findings.some((f) => f.status === "PASS"),
+);
+const bad = failedProbes.length > 0 || skippedProbes.length > 0 || noPassEvidence.length > 0;
+if (failedProbes.length > 0) {
+  console.error(`\nFAIL probes: ${failedProbes.map((r) => r.id).join(", ")}`);
+}
+if (skippedProbes.length > 0) {
+  console.error(`SKIP (no falsifiable PASS evidence) probes: ${skippedProbes.map((r) => r.id).join(", ")}`);
+}
+if (noPassEvidence.length > 0) {
+  console.error(`probes without any PASS finding: ${noPassEvidence.map((r) => r.id).join(", ")}`);
+}
+console.error(`\n${results.length} probe(s): ${bad ? "NOT GREEN (fail/skip/no-evidence present)" : "all PASS with falsifiable evidence"}`);
 console.error(`report: ${outPath}`);
-process.exit(anyFail ? 1 : 0);
+process.exit(bad ? 1 : 0);

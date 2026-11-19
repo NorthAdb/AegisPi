@@ -22,7 +22,7 @@ node_modules/hono
   integrity: sha512-KmXvQAXwcAHV+muzbIwoJ23niEB5nMoDVr9WcRkU8mvjUECm/1+7v4Jgp7P7a+H6MLFrh+vXrGonGrGS+RQfkA==
 ```
 
-- 声明：`apps/daemon/package.json` exact `"@earendil-works/pi-coding-agent": "1.5.2"`、exact `"hono": "4.13.19"`（无 ^/~）。npm workspaces 布局，根 `package.json` engines `>=22.19.0 <23.0.0`。
+- 声明：`apps/daemon/package.json` exact `"@earendil-works/pi-coding-agent": "1.5.2"`、exact `"hono": "4.13.19"`（无 ^/~）。npm workspaces 布局，根 `package.json` engines **`"22.23.5"`**（2026-11-19 第一轮审计 P2 整改后收紧；注意区分：这是本仓库自己的 engines，Pi 包自己的 engines 仍是 `>=22.19.0`，运行时的版本强制由 `run-contracts.mjs` 执行）。
 - lockfile：`package-lock.json`（58897 字节，SHA-256 `f1364f6e23b29d020f164fa8cf83d50904215ae6c9f7a883a9950585a57f947e`）入库。
 - 安装目录结构：`node_modules/@earendil-works/pi-coding-agent/{dist,docs,examples,schemas}`；直接同系依赖（pi-agent-core/pi-ai/pi-codemode/pi-mcp/pi-tui 均 1.5.2）由 lockfile 固定并带 integrity。
 - 包结构事实：`exports` 仅开放 `.` 与 `./rpc-entry`；bin 为 `dist/bundle/cli.js`（RPC 探针的子进程入口）；`./package.json` 子路径不可导入（ERR_PACKAGE_PATH_NOT_EXPORTED 实测）。

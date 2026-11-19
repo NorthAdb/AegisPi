@@ -132,12 +132,22 @@ export async function run() {
     probe.check("reference-schema", false, `threw: ${e.message}`);
   }
 
-  // Driver-selection conclusion derives from the asserted gates above; as a
-  // conclusion it is a note, not an unfailable PASS (audit round 1, P1-2).
-  probe.note(
-    "driver-selection",
-    "node:sqlite on locked Node 22.23.5 satisfies every asserted gate (version floor, FTS5+trigram, 27 user tables + shadow split, triggers, WAL, synchronous=FULL, FK/integrity) — choose the built-in driver; no better-sqlite3 dependency (per 06 §1). The conclusion follows the PASS status of this probe's falsifiable checks.",
-  );
+  // Driver-selection conclusion (audit round 2 N8): only stated when the
+  // asserted gates have actually all passed in THIS run; a failing gate
+  // produces the negative form so the record never claims satisfaction it
+  // did not verify.
+  const gateFailures = probe.findings.filter((f) => f.status === "FAIL");
+  if (gateFailures.length === 0) {
+    probe.note(
+      "driver-selection",
+      "node:sqlite on locked Node 22.23.5 satisfied every asserted gate in this run (version floor, FTS5+trigram, 27 user tables + shadow split, triggers, WAL, synchronous=FULL, FK/integrity) — choose the built-in driver; no better-sqlite3 dependency (per 06 §1). Conclusion follows this probe's passing checks.",
+    );
+  } else {
+    probe.note(
+      "driver-selection",
+      `driver-selection NOT concluded in this run: failing gate(s): ${gateFailures.map((f) => f.name).join(", ")} — fix the gate before citing this probe as driver evidence`,
+    );
+  }
 
   const status = summarizeProbe(probe);
   return {

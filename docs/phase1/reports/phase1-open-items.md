@@ -12,8 +12,8 @@
 
 4. **三个应用镜像未构建**：Phase 1 无产品代码，Dockerfile 源文件与基础 digest 已入库；首次构建（Phase 3 前置）时记录真实应用 digest。
 5. **容器占位配额未校准**：按 06 §4 属 Phase 3 真实压测任务。
-6. **linux/amd64 清单 digest 本地复核**：index digest（sha256:e9f565d3…）本机实证；amd64 清单 digest（sha256:47725aca…）为审计对 registry 的核验值，本机 2026-11-19 registry 直连超时未能复验——网络恢复后 `docker manifest inspect node:22.23.5-bookworm-slim` 补拍。
-7. **探针未覆盖项（如实列出）**：cacheWarming 的真实 warm 请求周期（需 TTL 级等待 + 真实计费，Phase 4 证据）；codemode 256MB OOM 行为（文档值，不做安全边界）；两对 hono oracle 的容器化 security_repro job（方向性证据已实测闭合：4.12.24 上 csrf 放行 exit 1、cors 反射 exit 1；容器化重跑仍按规范留在 Phase 4）。
+6. **宿主 HELD 账本未实现（Phase 2）**：PI-10 已实测"缺 usage = 数字全零且无 totalFromProvider 键、零值不可区分 provider 未上报"的形状，但**记账门禁本身属宿主账本代码**——Phase 1 未实现、不宣称完成；Phase 2 落地前不得把缺 usage 响应当零成本结清。
+7. **探针未覆盖项（如实列出）**：cacheWarming 的真实 warm 请求周期（需 TTL 级等待 + 真实计费，Phase 4 证据）；codemode 256MB OOM 行为（文档值，不做安全边界）；两对 hono oracle 的容器化 security_repro job（方向性证据已实测闭合：4.12.24 上 csrf 放行 exit 1、cors 反射 exit 1，配对自检工具在库；容器化重跑仍按规范留在 Phase 4）。
 
 ## 与开工检查单的实测差异（2026-11-19 修订：撤回 v1 的一处错误“纠错”）
 

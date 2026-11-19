@@ -7,7 +7,7 @@
 | 镜像 | `node:22.23.5-bookworm-slim` |
 | RepoDigest（实测，**OCI 多架构 index**） | `sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee` |
 | index 类型实证 | 本机 `docker image inspect --format '{{json .Descriptor}}'` → `mediaType: application/vnd.oci.image.index.v1+json`（2026-11-19） |
-| linux/amd64 清单 digest | `sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc`（第一轮审计对 registry 核验值；本机 2026-11-19 registry 直连超时未复验，网络恢复后 `docker manifest inspect` 补拍——如实标注，见 open-items #6） |
+| linux/amd64 清单 digest | `sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc`（2026-11-19 第二轮复审对 registry-1.docker.io 独立核验一致：index 正文 SHA-256 = e9f565d3…，mediaType OCI index，index 内 linux/amd64 条目即此值；本机当日 registry 直连超时未复跑，以复审核验为准——如需本机补拍：`docker manifest inspect node:22.23.5-bookworm-slim`） |
 | 拉取命令 | `docker pull node:22.23.5-bookworm-slim` |
 | 架构 | `amd64`（本机 docker 实测） |
 | 拉取时间 | 2026-11-18（Asia/Hong_Kong）；2026-11-19 复核仍在本地 |

@@ -12,7 +12,7 @@
 | 预算默认 | apps/daemon/config/defaults.json | 800000 microUSD/25 步/900 秒；日 5000000；cacheWarming off；容器占位配额 |
 | 驱动选择 | docs/phase1/reports/sqlite-driver.md | node:sqlite 3.54.1 全门禁 PASS（非 FTS 表恰 27、synchronous=FULL 断言） |
 
-复现检查的**正确姿势**（manifest 的 installNote 有全文）：每快照隔离 `npm install hono@<ver>`（npm 10.9.9 / Node 22.23.5），把检查脚本**复制进该安装目录**运行——ESM 按脚本位置解析 `hono`，在仓库里跑会解析到仓库 4.13.19 得到假结果（本机实测踩坑）。
+复现检查的**正确姿势**（第二轮复审后）：检查脚本以安装目录为显式参数（`node checks/<x>.mjs <安装目录>`，createRequire 从该目录加载 hono，与 cwd/脚本位置无关）；快照的 `package.json` + `package-lock.json` 已入库（`snapshots/hono-4.13.19/`、`snapshots/hono-4.12.24/`），lockfileHash 可直接复算、`npm ci` 可复现安装。一键配对自检：`node evals/contracts/tools/verify-hono-oracle-pair.mjs`（断言 0/1 矩阵 + 解析来源 + 哈希复算，实测全 OK 退出码 0）。
 
 hono tag 的 commit/tarball 复算命令（审计者可直接重跑）：
 

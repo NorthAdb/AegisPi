@@ -48,7 +48,7 @@
       "PI_SKIP_VERSION_CHECK": "1",
       "PI_TELEMETRY": "0"
     },
-    "installNote": "Each snapshot's lockfileHash/integrity comes from its own isolated install (npm@10.9.9 on Node 22.23.5): baseline installs hono@4.13.19, target installs hono@4.12.24. The target integrity matches registry.npmjs.org exactly. To run a command against a snapshot, copy the check script INTO that snapshot's install directory and run it there — ESM resolves 'hono' relative to the script location, not the process cwd. Both A1 (exit 0) and A2 (exit 1) were measured this way on 2026-11-19 on the locked Node."
+    "installNote": "Each snapshot's lockfileHash is the SHA-256 of the COMMITTED snapshot fixture evals/contracts/fixtures/hono-triage/snapshots/hono-4.13.19/package-lock.json (byte-exact; third parties recompute it directly, no uncommitted root package.json involved). To reproduce: npm ci inside that snapshot dir, then run the check with the install dir as the first argument — node checks/csrf-textping-check.mjs <install-dir>. The check loads hono via createRequire from that dir (audit round 2 N4): it never resolves via cwd or the script's own location, both of which would hit the repo's 4.13.19 and false-green the target. evals/contracts/tools/verify-hono-oracle-pair.mjs automates the whole pair and asserts the exit-code matrix plus the resolution source. A1 (exit 0) and A2 (exit 1) measured this way on 2026-11-19 on the locked Node."
   },
   "oracleRef": "oracles/hono-csrf-textping-bypass-v1",
   "createdAt": 1768857600000

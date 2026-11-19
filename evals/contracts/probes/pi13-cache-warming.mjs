@@ -119,23 +119,39 @@ export async function run() {
     agent.cleanup();
   }
 
-  // The off value is respected by the runtime settings path (falsifiable):
-  // an explicit in-memory override must read back "off", and the shipped
-  // defaults.json must actually contain the off value.
-  const offMode = pi.SettingsManager.inMemory({ cacheWarming: "off" }).getCacheWarmingMode?.();
-  probe.check(
-    "explicit-off-respected-by-settings-path",
-    offMode === "off",
-    `SettingsManager.inMemory({cacheWarming:"off"}).getCacheWarmingMode() = ${offMode}`,
-  );
-  const defaultsFile = readFileSync(
+  // Round 2 N2 closed: the two previously-disconnected facts (regex on the
+  // file + a hand-written settings object) are now connected by the single
+  // loader module. The probe walks the REAL path: parse the shipped
+  // defaults.json, map it through apps/daemon/config/load-pi-settings.mjs,
+  // and hand the result to Pi's SettingsManager. Feeding the raw file to
+  // SettingsManager yields "idle" (budget.* nesting never reaches the
+  // top-level key Pi reads) — measured; this assertion must stay red until
+  // a loader performs the mapping.
+  const defaultsJson = readFileSync(
     join(process.cwd(), "apps", "daemon", "config", "defaults.json"),
     "utf8",
   );
+  const { pathToFileURL } = await import("node:url");
+  const { piSettingsFromDefaults } = await import(
+    pathToFileURL(join(process.cwd(), "apps", "daemon", "config", "load-pi-settings.mjs")).href,
+  );
+  const piSettings = piSettingsFromDefaults(JSON.parse(defaultsJson));
+  const fileModeRaw = pi.SettingsManager.inMemory(JSON.parse(defaultsJson)).getCacheWarmingMode?.();
+  probe.check(
+    "raw-defaults-json-reads-idle-hazard",
+    fileModeRaw === "idle",
+    `SettingsManager.inMemory(JSON.parse(defaults.json)) = ${fileModeRaw} — the nested budget.cacheWarming does NOT reach the top-level key Pi reads; loading the file without the mapping loader silently enables default warming (hazard recorded as an assertion)`,
+  );
+  const fileModeViaLoader = pi.SettingsManager.inMemory(piSettings).getCacheWarmingMode?.();
+  probe.check(
+    "defaults-json-off-reaches-pi-via-loader",
+    fileModeViaLoader === "off",
+    `JSON.parse(defaults.json) -> piSettingsFromDefaults() -> SettingsManager.inMemory(...).getCacheWarmingMode() = ${fileModeViaLoader}; mapped settings = ${JSON.stringify(piSettings)} — the shipped file's off value reaches Pi's runtime settings path through the single loader; the Phase 2 daemon must load the file through that same module`,
+  );
   probe.check(
     "defaults-json-sets-off",
-    /"cacheWarming"\s*:\s*"off"/.test(defaultsFile),
-    `apps/daemon/config/defaults.json contains "cacheWarming": "off" — config value written; the daemon loading this file is Phase 2 code, so runtime enforcement is NOT yet in place (recorded, not claimed)`,
+    /"cacheWarming"\s*:\s*"off"/.test(defaultsJson),
+    `apps/daemon/config/defaults.json contains "cacheWarming": "off" under budget (file-shape sanity; the reachability proof is the loader check above)`,
   );
   probe.note(
     "warming-must-be-budgeted-before-enabling",
@@ -149,7 +165,7 @@ export async function run() {
     status,
     summary:
       status === "PASS"
-        ? "Pi 1.5.2 defaults cacheWarming to 'idle' — measured, and a real conflict with the AegisPi 'off by default' budget rule. Mitigation is in place at the settings level only: inMemory({cacheWarming:'off'}) reads back 'off' and defaults.json carries the off value; daemon code that loads it is Phase 2, so runtime enforcement is recorded as NOT yet in place. cache_warming_decision is a declared, registrable override event; deepseek-flash declares no promptCache lifetime so warming is ineligible on the launch model. Future warming must be budgeted as purpose=warming."
+        ? "Pi 1.5.2 defaults cacheWarming to 'idle' — measured conflict with the AegisPi 'off by default' rule. The shipped defaults.json's budget.cacheWarming='off' reaches Pi's runtime settings ONLY through the single loader module (raw file -> SettingsManager reads 'idle', asserted as a hazard; loader-mapped settings -> 'off', asserted). The Phase 2 daemon must load the file through that module — recorded, not claimed as runtime enforcement. cache_warming_decision is a declared override event; deepseek-flash is warming-ineligible; future warming must be budgeted as purpose=warming."
         : "cacheWarming contract deviates; see findings.",
     findings: probe.findings,
   };
