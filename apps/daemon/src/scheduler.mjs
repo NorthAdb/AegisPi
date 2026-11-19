@@ -13,6 +13,7 @@
 
 import { withTx } from "./db/tx.mjs";
 import { writeAudit, writeStreamEvent } from "./audit.mjs";
+import { assertLiveReservation, BudgetError } from "./budget.mjs";
 import { crashpoint } from "./testing/crashpoints.mjs";
 
 export class ClaimRefused extends Error {}
@@ -146,7 +147,11 @@ export function heartbeat(db, { taskId, attemptNo, leaseOwner, fence, now, lease
   });
 }
 
-export function workerStep(db, { taskId, attemptNo, leaseOwner, fence, now }) {
+export function workerStep(db, { taskId, attemptNo, leaseOwner, fence, now, budgetReservationId }) {
+  // Chargeable-path gate (06 section 8): a step runs only against a live
+  // HELD reservation for this exact task and purpose=worker. No reservation,
+  // no step — the budget interface cannot be bypassed by calling the worker.
+  assertLiveReservation(db, { reservationId: budgetReservationId, taskId, purpose: "worker" });
   return withTx(db, () => {
     fencedTaskUpdate(db, { taskId, attemptNo, leaseOwner, fence, now });
     const row = db.prepare("SELECT step_count, max_steps FROM tasks WHERE id=?").get(taskId);

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-19T07:57:31.946Z",
+  "generatedAt": "2026-11-19T08:04:44.371Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795075044856}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795075469457}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 15700 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 25868 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=15700"
+      "detail": "second acquire refused, heldBy=25868"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 15700"
+      "detail": "stolen, new pid 25868"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:15700:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:25868:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",

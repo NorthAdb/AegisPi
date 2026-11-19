@@ -13,6 +13,7 @@ import { canonicalJson, sha256LfHex, businessKey, dispatchKeyFromProviderId } fr
 import { receiveEvent, dispatchKeyForInbox } from "../../../apps/daemon/src/ingress.mjs";
 import { putObjectContent, gcUnreferencedContent, insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
 import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
+import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
 import {
   claimNextTask,
   heartbeat,
@@ -404,6 +405,24 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   const db = openDatabase(ws.dbPath);
   migrate(db, canonical);
   const leaseMs = 45 * 1000;
+  const ledger = createBudgetLedger(db, {});
+  const stepReserve = (taskId, n, now = 1795100000000) => {
+    const taskAcc = ledger.ensureTaskAccount({ taskId, now }).accountId;
+    const dayAcc = ledger.ensureDayAccount({ now }).accountId;
+    return ledger.reserve({
+      requestKey: `worker:${taskId}:${n}`,
+      taskId,
+      purpose: "worker",
+      provider: "deepseek",
+      priceVersion: "catalog-v1",
+      upperMicrousd: 1000,
+      accounts: [
+        { accountId: taskAcc, amountMicrousd: 500 },
+        { accountId: dayAcc, amountMicrousd: 500 },
+      ],
+      now,
+    }).reservationId;
+  };
   let eventSeq = 0;
   // Each scope gets its own DM conversation; the per-scope single-flight rule
   // then only bites where the test asks for it.
@@ -532,19 +551,19 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
 
   let wrongFenceRejected = false;
   try {
-    workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 99, now: 1795100022000 });
+    workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 99, now: 1795100022000, budgetReservationId: stepReserve(t1.d.taskId, 0) });
   } catch (e) {
     wrongFenceRejected = e instanceof StaleWorker;
   }
   suite.check("stale-fence-write-rejected", wrongFenceRejected, "StaleWorker on stale fence");
 
-  const st = workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100023000 });
+  const st = workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100023000, budgetReservationId: stepReserve(t1.d.taskId, 1) });
   suite.check("worker-step-increments", st.stepCount === 1, `step_count=${st.stepCount}`);
-  workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100024000 });
-  workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100024500 });
+  workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100024000, budgetReservationId: stepReserve(t1.d.taskId, 2) });
+  workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100024500, budgetReservationId: stepReserve(t1.d.taskId, 3) });
   let stepsRefused = false;
   try {
-    workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100025000 });
+    workerStep(db, { taskId: t1.d.taskId, attemptNo: 1, leaseOwner: claimed.leaseOwner, fence: 1, now: 1795100025000, budgetReservationId: stepReserve(t1.d.taskId, 4) });
   } catch (e) {
     stepsRefused = e instanceof ClaimRefused;
   }

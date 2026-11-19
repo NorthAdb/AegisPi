@@ -1,11 +1,11 @@
 # Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）
 
-生成：2026-11-19T07:57:31.946Z；Node v22.23.5；suite `durability`。
+生成：2026-11-19T08:04:44.371Z；Node v22.23.5；suite `durability`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
 | PASS | canonical-schema-checksum-matches-pinned | checksum ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995 from D:\AegisPi\aegis-pi-design-pack-v1.4.1\docs\reference\schema.sql |
-| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795075044856}] |
+| PASS | fresh-migrate-applies-version-1 | applied [{"version":1,"checksum":"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995","appliedAt":1795075469457}] |
 | PASS | reference-ddl-shape-27-user-2-fts-8-shadow | sqlite_master: 37 tables (27 user + 10 fts incl. 8 shadow per PI SQLITE probe), 3 trg_msg_* triggers |
 | PASS | system-state-seeds-present | system_state rows: [{"key":"schema_version","value":"140"},{"key":"authorization_revision","value":"1"}] |
 | PASS | migrate-is-idempotent | second run applied 0 migration(s) |
@@ -17,10 +17,10 @@
 | PASS | checksum-gate-fails-closed-on-tampered-sql | SchemaSourceError raised on mismatch |
 | PASS | partial-schema-refused-fail-closed | SchemaDriftError raised (no guessing on stray tables) |
 | PASS | torn-ddl-rolls-back-to-empty | apply threw=true, leftover tables=0 |
-| PASS | lock-first-acquire-ok | pid 15700 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
-| PASS | lock-second-acquire-refused | second acquire refused, heldBy=15700 |
+| PASS | lock-first-acquire-ok | pid 25868 holds D:\AegisPi\aegis-pi\workspace-state\phase2\durability-lock\daemon.lock |
+| PASS | lock-second-acquire-refused | second acquire refused, heldBy=25868 |
 | PASS | dead-pid-probe-says-dead | isPidAlive(400000000)=false |
-| PASS | lock-stolen-after-crash-holder | stolen, new pid 15700 |
+| PASS | lock-stolen-after-crash-holder | stolen, new pid 25868 |
 | PASS | lock-released-and-reacquired | released=true, reacquired=true |
 | PASS | canonical-json-key-order-stable | {"a":{"y":[3,2],"z":"x"},"b":1} |
 | PASS | canonical-json-rejects-nan | NaN throws |
@@ -47,7 +47,7 @@
 | PASS | crash-ingress-after-commit-redelivery-single-durable-row | redelivery exit=0, stdout="ACK inb:telegram:evt-0001 duplicate=true state=PENDING", inbox=1 |
 | PASS | dispatch-creates-task-delivery-subscription-routes-inbox | task tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 state=QUEUED, delivery=PENDING, inbox=ROUTED |
 | PASS | recomputed-plan-reuses-same-task | second dispatch created=false, tasks for event=1 |
-| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:15700:1795100010000 |
+| PASS | claim-mints-fence-and-active-attempt | claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:25868:1795100010000 |
 | PASS | attempt-row-active-with-lease-window | attempt att:tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1:1 state=ACTIVE |
 | PASS | one-running-agent-per-scope | claim while scope-1 RUNNING picked other-scope task tsk:inb%3Atelegram%3Aevt-life-2-3:telegram%3Aevt-life-2-3, not tsk:inb%3Atelegram%3Aevt-life-1-2:telegram%3Aevt-life-1-2 |
 | PASS | scope-epoch-fence-blocks-claim | task with stale scope_epoch is not claimed |

@@ -20,4 +20,7 @@ date	id	decision	rationale	evidence	result
 
 2026-11-19	D-17	规范 DDL 不入库复制：迁移器经 config/schema-source.json 指针 + pinned LF SHA-256 加载本机设计包 schema.sql，AEGISPI_SCHEMA_SQL 只允许覆盖路径、永远不豁免校验和门	包不随库分发（D-01），重打 SQL 会破坏字节一致与校验和；首轮实现曾让 env 覆盖旁路 pin（篡改副本直通，红测抓出），修复为「pin 永远生效、只可覆盖路径」	红证：篡改副本→SchemaSourceError；残表无迁移记录→SchemaDriftError；撕裂 DDL→回滚至空库；绿证：27 用户表+10 FTS+3 触发器与 PI 探针一致，migrate 幂等（evals/phase2/durability/run.mjs 23/23 退出码 0）	迁移器自此与包字节绑定；包换版必须先更新 pin 并走 ADR
 2026-11-19	D-18	排他锁采用 lockfile+PID 存活探测（原子写、只删自己的锁），不用 SQLite 自身防双启动	Node 核心无跨平台 flock；WAL 允许多连接；PID 复用是残余风险，单人单机部署接受并记录	第二持锁被拒（heldBy=首个 pid）；伪造崩溃持有者后可夺回；释放后可重取（durability run 实测）	06「持锁失败直接退出」在 daemon 入口落地（步骤 10 接线）
+2026-11-19	D-19	收费路径门禁落在 scheduler.workerStep：步进必须持本任务本 purpose 的 HELD 预留 id，断言失败即拒绝执行	04 Phase 2「预留接口先覆盖所有 purpose，不允许收费路径绕过」要求真实执行点持门，不是旁路统计	红证：无预留/预留属他任务/异 purpose 的 workerStep 全部拒绝；绿证：持预留步进成功（budget run 20/20）	后续 dispatcher 提交外部动作同样接 assertLiveReservation（步骤 6）
+2026-11-19	D-20	结算分摊按预留账户份额整数化（余数归最后一个账户）；「日切不释放旧预留」由 period_key 固定在预留创建时的日键实现	06 §8「多账户分摊不是重复收费」「日期切换不释放旧请求预留」需要确定性规则；浮点与按当前日重算都会破坏对账	settle 实测 task 704+day 703=1407 与上界/实际闭环；CHARGED_BOUND 修正仅凭可信账单+actor	预算账本可审计：每笔 HELD→SETTLED/CHARGED_BOUND/RELEASED 都有 audit 行
+
 
