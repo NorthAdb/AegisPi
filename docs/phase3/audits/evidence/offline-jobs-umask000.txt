@@ -1,0 +1,15 @@
+(node:9873) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS  real-no-network-job-executes — event=SUCCEEDED row=SUCCEEDED/0 result.exit=0 stdout="offline ok"
+PASS  failing-job-records-exit-code-as-evidence — row=FAILED/7 evidence.exit=7
+PASS  job-namespace-has-no-network-dns-and-http-blocked — stdout="DNS_BLOCKED HTTP_BLOCKED"
+PASS  host-enforced-deadline-times-out-and-reaps-container — event=TIMED_OUT row=TIMED_OUT containers-left=""
+PASS  running-job-cancels-and-container-dies — cancel=CANCELLED row=CANCELLED containers-left=""
+PASS  agent-and-offline-job-carry-different-real-cgroup-limits — agent memory.max=1073741824 execution memory.max=2147483648 pids.max=256
+PASS  memory-and-disk-quotas-are-enforced-not-advisory — oom=FAILED(FAILED) disk=FAILED/9 stdout="DISK_ENOSPC:ENOSPC"
+PASS  startup-recovery-kills-orphan-container-and-marks-lost — reaped=[{"jobId":"job:oj:recover:1:orphan","container":"174f2cd2774689e0114586079f6af85183f0fec5788130520cf0ffd1ef82d253","killedOrphan":true}] row=LOST containers-left=""
+PASS  invalid-manifest-refused-nothing-executed — row=FAILED/126 refused=true reason="deadlineMs must be a positive integer of at most one hour"
+PASS  daemon-tick-launches-and-reaps-queued-container-job — daemon exit=0 job=SUCCEEDED/0 containers="" job-stdout-seen=true daemon-event-seen=true
+NOTE  residual-risk-recorded — 容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）；Task 结论始终由可信 oracle 判定，job 的自述不作授权或成功标记。宿主墙钟 deadline 与容器回收不受影响。
+
+=== test:offline-jobs: 10 pass, 0 fail, 10 judged ===

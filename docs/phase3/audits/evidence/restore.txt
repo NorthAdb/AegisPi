@@ -1,0 +1,11 @@
+PASS  consistency-backup-seals-manifest-with-ledger — image=workspace-state/phase3/restore-drill/backups/consistency-1795095876708.db entries=1
+PASS  manifest-is-encrypted-at-rest — alg=aes-256-gcm; plaintext fields absent=true
+PASS  backup-outside-window-refused — -> OutsideMaintenanceWindow
+PASS  backup-without-manifest-key-refused — -> ManifestKeyMissing
+PASS  manifest-rejects-wrong-key — -> Unsupported state or unable to authenticate data
+PASS  restore-reports-pending-ready-timer-work — approvals=1 ready=1 timers=1
+PASS  restore-applies-deletion-ledger-forgotten-stays-forgotten — applied deletions=["obj:scp:dm%3Atelegram%3A6101:089bf8e6a9b4be200625fa24a023dc6f5a09cdb4910f9b9b0b65b45cea835202"]
+PASS  restored-work-is-actionable-again — decide=true effect=READY dispatch=SUCCEEDED/SUCCEEDED timers fired=1 inbox_events=1
+PASS  restored-db-migration-idempotent — schema_migrations rows=1 (a restored database is not re-applied)
+
+=== test:restore: 9 pass, 0 fail, 9 judged ===

@@ -1,0 +1,1 @@
+Error response from daemon: failed to resolve reference "127.0.0.1:5000/aegispi/execution@sha256:59f9a3577e2fdb7fb5c2c1e029251605ed093feb30d40a6cc0157cd1fa223cf8": 127.0.0.1:5000/aegispi/execution@sha256:59f9a3577e2fdb7fb5c2c1e029251605ed093feb30d40a6cc0157cd1fa223cf8: not found

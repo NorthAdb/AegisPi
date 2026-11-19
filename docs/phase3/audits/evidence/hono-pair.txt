@@ -1,0 +1,10 @@
+[baseline hono@4.13.19] csrf exit=0 (expected 0) resolution=resolved-inside-target OK
+[baseline hono@4.13.19] cors exit=0 (expected 0) resolution=resolved-inside-target OK
+[target hono@4.12.24] csrf exit=1 (expected 1) resolution=resolved-inside-target OK
+[target hono@4.12.24] cors exit=1 (expected 1) resolution=resolved-inside-target OK
+[uninstalled snapshot hono-4.13.19] csrf exit=2 (expected 2 — resolution must refuse) OK
+[uninstalled snapshot hono-4.13.19] cors exit=2 (expected 2 — resolution must refuse) OK
+[uninstalled snapshot hono-4.12.24] csrf exit=2 (expected 2 — resolution must refuse) OK
+[uninstalled snapshot hono-4.12.24] cors exit=2 (expected 2 — resolution must refuse) OK
+hono-4.13.19 lockfile sha256 e5d0c57e9d576d5430cf0964deb3ccf228f862f8a9e809556f3cbf9d6247ba5e
+hono-4.12.24 lockfile sha256 db2bb1344fd16b2b2db9c2197a877bc9f3f853393706b6c62c5c5747ab95dad4

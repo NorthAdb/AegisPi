@@ -1,0 +1,51 @@
+{
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "schemaVersion": 2,
+    "config": {
+        "mediaType": "application/vnd.oci.image.config.v1+json",
+        "digest": "sha256:650b1f675dc8dd5295ddb843a79b3d2a64c976f4c2340320721258b504d19901",
+        "size": 7827
+    },
+    "layers": [
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:dd051e1b8c92ff101fa3071ab97ea4924885942f15644e01c3dc095764e863e3",
+            "size": 28247982
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:076cba098ace87d6950e8fa4cc530bfe59834eba28f30061e8526d6f00bf52c8",
+            "size": 3311
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:0c4023204e5b4bcd551170279c40ff58285cc8ea87ddf9ff25cb3713e6ecda79",
+            "size": 49903774
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:aa4e8910862263c3bad50c754fb555bbbb7661c41e35ba703ae082ec6749c175",
+            "size": 1713055
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:cce880541c96dc730321857781d113e3c75c0cb383f9510300922762006d734e",
+            "size": 448
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:4812fe73293d2479c9e27c0454e1262b14ac35b81c769bb72a03d475204ae47b",
+            "size": 3263
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:f0462e09a3fd5f06a7d0fa639c340292881db990a539fab87fd480fe0d571f96",
+            "size": 93
+        },
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "digest": "sha256:5980837068802a07d663a8da3035d864d6d68aad945da4f053c8e50d1d853147",
+            "size": 3142
+        }
+    ]
+}

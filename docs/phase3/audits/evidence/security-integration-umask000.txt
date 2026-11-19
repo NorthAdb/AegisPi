@@ -1,0 +1,23 @@
+PASS  escape-battery-direct-http-and-env-manipulation-blocked — direct_http=BLOCKED:ENETUNREACH env_manipulation=BLOCKED:ENETUNREACH
+PASS  escape-battery-no-egress-dns-blocked — dns_ipv6=BLOCKED:EAI_AGAIN
+PASS  escape-battery-host-paths-and-socket-absent — absolute_paths=/etc/shadow:BLOCKED:EACCES|/var/run/docker.sock:BLOCKED:ENOENT|/proc/1/cmdline:42|/host:BLOCKED:ENOENT|/workspace:BLOCKE socket=BLOCKED:absent
+PASS  escape-battery-no-secret-env-in-sandbox — env_secrets=CLEAN
+PASS  escape-battery-symlink-stays-container-local — symlink_escape=CONTAINER_LOCAL(.dockerenv,app,bin,boot,dev,etc,home,job,lib,lib64,media,mnt,opt
+PASS  escape-battery-host-canary-and-acceptance-unreachable — host_canary=BLOCKED:ENOENT acceptance_file=BLOCKED:EROFS
+PASS  escape-battery-pids-limit-bounds-the-fork-storm — pids_exhaust=spawned=241
+PASS  escape-battery-git-c-executes-only-in-sandbox — git_c_execution=IN_SANDBOX=false
+PASS  escape-battery-completed-with-evidence — battery exit=0 run-exit=0
+PASS  host-canary-and-oracle-untouched-after-battery — canary intact=true; oracle intact=true
+PASS  agent-container-rootfs-readonly-proposals-only-no-network — rootfs=BLOCKED:EROFS proposals=OK dns=BLOCKED:EAI_AGAIN socket=absent
+FAIL  acquisition-good-archive-extracts — exit=1 failures=1 extracted=false
+PASS  acquisition-refuses-path-traversal-members — exit=1 reason=unexpected: fetch failed escape-file-present=false
+FAIL  acquisition-refuses-escaping-symlinks — exit=1 reason=unexpected: fetch failed
+FAIL  acquisition-refuses-device-members — exit=1 reason=unexpected: fetch failed dev-node-present=false
+FAIL  acquisition-bounds-gzip-bombs-at-decompressed-size — exit=1 reason=unexpected: fetch failed
+FAIL  acquisition-enforces-download-size-cap — exit=1 reason=unexpected: fetch failed
+FAIL  acquisition-refuses-scheme-changing-redirects — exit=1 reason=unexpected: fetch failed
+FAIL  acquisition-refuses-redirect-loops — exit=1 reason=unexpected: fetch failed
+FAIL  acquisition-follows-same-scheme-http-redirects — exit=1 failures=1
+PASS  offline-jobs-suite-green-under-integration-gate — exit=0 (node:8407) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-war
+
+=== test:security:integration: 13 pass, 8 fail, 21 judged ===

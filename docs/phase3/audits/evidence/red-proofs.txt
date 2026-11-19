@@ -1,0 +1,4 @@
+RED-PROOF PASS: M1-revise-without-invalidation — clean probe exit 0; mutated probe exit 1; source restored byte-exact
+RED-PROOF PASS: M2-head-precondition-off — clean probe exit 0; mutated probe exit 1; source restored byte-exact
+RED-PROOF PASS: M3-console-session-guard-off — clean probe exit 0; mutated probe exit 1; source restored byte-exact
+red-proofs: all mutation gates proven red-able

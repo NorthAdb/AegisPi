@@ -1,0 +1,3 @@
+EXIT security-integration-umask000 1
+EXIT offline-jobs-umask000 0
+EXIT quota-umask000 0

@@ -1,0 +1,10 @@
+EXIT security-unit 0
+EXIT cancel-approval 0
+EXIT restore 0
+EXIT ingress-telegram 0
+EXIT budget 0
+EXIT acl 0
+EXIT durability 0
+EXIT contracts 0
+EXIT hono-pair 0
+EXIT red-proofs 0

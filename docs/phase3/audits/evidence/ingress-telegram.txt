@@ -1,0 +1,8 @@
+PASS  pull-adapter-refuses-without-token — -> no Telegram bot token configured; the pull adapter refuses i
+PASS  revoked-credential-slot-refuses-pull-adapter — resolve before=true after revoke=false (slot im.telegram was revoked at 17950958)
+PASS  drill-token-never-reaches-audit — audit rows carry slot names only
+PASS  telegram-update-maps-and-dedups-by-update-id — mappable=true first=false second=true rows=1
+PASS  non-message-update-refused-honestly — -> update 88002 carries no mappable message
+NOTE  real-telegram-read-skipped — TELEGRAM_BOT_TOKEN 未配置于本机 .env；真实只读接入需要主人授权的测试源（失败关闭，不跳过冒充通过）
+
+=== test:ingress-telegram: 5 pass, 0 fail, 5 judged ===
