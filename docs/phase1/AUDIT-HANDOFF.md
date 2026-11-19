@@ -1,10 +1,10 @@
 # Phase 1 审计移交报告（给下一个审计 agent）
 
-生成：2026-11-18 初版；2026-11-19 第一轮审计整改、第二轮复审整改、**第三轮复审整改后修订**。执行方：实施会话（OpenCode）。本文件是自审 + 交接的单一入口。
+生成：2026-11-18 初版；2026-11-19 四轮审计整改期间多次修订；**本版为 Phase 1 收口后状态**。执行方：实施会话（OpenCode）。本文件是自审 + 交接的单一入口。
 
 ## 0. 当前状态（一句话）
 
-三轮外部审计/复审（P1、N1-N8、N9-N11）**均已整改并复测**：第三轮关闭了最后一条假绿 N9（hono 解析遏制 + 未安装快照必须 exit 2）、N10（--only 零命中退出码 1）、N11（缺 usage 九字段全零谓词），15/15 全绿退出码 0；同轮完成 **DeepSeek 最小推理契约（真实单次调用，通过）**与 **75 条标注草案全量生成**；Telegram **Bot 身份已证实**（@aegispibot，经本机系统代理），owner 聊天确认待 owner 把 `TELEGRAM_OWNER_USER_ID` 修正为数字 user ID。**Phase 1 仍不宣布完成**——75 条标注的 owner 逐条复核（12 条 uncertain 待裁决）与 Telegram ownerChat 确认两项开放；Phase 2 不开工。
+**Phase 1 已收口（2026-11-19，owner 授权）**：四轮外部审计——第 4 轮判定技术整改通过（N9/N10/N11 独立红绿实测关闭，无新技术阻塞），第 4 轮所余两项用户侧开放（75 条标注 owner 确认、Telegram getMe/getChat）随后由 owner 完成并经机器复测闭合（evidence/07）；收口级最小验收全绿（套件 15/15 退出码 0、配对自检 0、包验证器 14/14）。收口声明 `reports/phase1-closure.md`，四轮审计史 `reports/audit-history.md`，审计原稿归档 `docs/phase1/audits/`。**Phase 2 未开工**；入口条件见第 7 节。
 
 ## 1. 本阶段目标（复述）
 
@@ -37,6 +37,8 @@
 - **N11**：缺 usage 谓词补齐九个数字字段逐项 `=== 0`；双突变（cost.total / totalTokens）实测变红，还原哈希相等复绿；零值仍无"结清成功"语义。
 - 审计 §3"加载器无产品入口"：如实写明（response 文档 + 本报告 §5）——`piSettingsFromDefaults` 目前仅探针引用，daemon 无运行入口，**运行时接线是 Phase 2 义务**。
 
+**第四轮复审**（同环境，对象 `ff6e497`，判定**技术整改通过**；原稿归档 `audits/AUDIT-PHASE1-REREVIEW-ff6e497d066a875acb50e65b3acce45985bb4b20.md`）：N9/N10/N11 由审计方独立红绿实测关闭（含路径规范化、同前缀兄弟目录、空目录、未安装快照全部 exit 2；双突变复现；配对工具退出码 0）；无新技术阻塞；判定 Phase 1 未完成仅余 owner 确认标注与 Telegram getMe 两项用户侧条件——二者随后由 owner 完成/修正并复测通过（标注终态 39/36/0；Telegram 复测退出码 0，startConfirmed=true，evidence/07 §2/§3）。同轮明示：`load-pi-settings.mjs` 接入 daemon 是 Phase 2 实现工作，不是 Phase 1 缺陷。
+
 ## 4. 行为证据（真实运行命令与退出码）
 
 - **`npm run test:contracts`**（锁定 Node）：15 探针全 PASS，退出码 0（2026-11-19 第三轮整改后全量复跑）。机器结果 `evidence/contracts-report.json`。Linux 主机设 `AEGISPI_NODE_BIN`；单次全量约 3-6 分钟（真实 Pi CLI 子进程 + 本地 fake OpenAI）。
@@ -66,10 +68,10 @@
 8. 敏感内容核查：`git ls-files` 无 `.env` / labels / owner-baseline；`git check-ignore` 三者均命中规则。
 9. 真实连接证据：evidence/07（DeepSeek 实测 + Telegram 网络诊断，脱敏）。
 
-## 7. 阶段门禁（Phase 2 开工前）
+## 7. 阶段门禁（Phase 1 收口后 / Phase 2 开工前）
 
-三轮审计门禁逐项对照：**P1-1..P1-4、N1-N2、N9-N11 均已改完**（红绿证据 evidence/04/05/06）；**v22.23.5 上 test:contracts 退出码 0 已复验**；**断言破坏、纯 note、未安装快照、空 --only 四类破坏均实测变红**；**开工者须持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包**。**Phase 1 宣布完成前仍需**：75 条标注的 owner 逐条复核（12 条 uncertain + 全量 reason 检查）；Telegram ownerChat 确认（owner 把 `.env` 的 `TELEGRAM_OWNER_USER_ID` 改为数字 user ID 后重跑脚本）。daemon 加载 defaults.json 必须走 `load-pi-settings.mjs`（D-11，Phase 2 接线时生效）。Phase 4 在 Phase 1 收口前不能开。
+**Phase 1 已收口**（owner 授权 + 第四轮技术判定通过 + 用户侧两项复测闭合；声明 `reports/phase1-closure.md`）。Phase 2 开工前仍需：重跑第 6 节前两条最小验收（预期全绿）；开工者持有 schema.sql SHA `ede73eca…` 对应的 v1.4.1 包；daemon 加载 defaults.json 必须走 `load-pi-settings.mjs`（D-11，Phase 2 接线时生效）；如需第五轮外部审计复核后再开工，入口证据 = 本报告 + audit-history.md + phase1-closure.md + evidence/04-07。**本阶段未开工 Phase 2 任何产品代码**（inbox/Task/lease/daemon 入口均未写）。Phase 4 证据类工作（容器化 security_repro、真实 warm 计费）按规范另行安排。
 
 ## 8. 交接给下一会话的入口证据
 
-Phase 2（持久化只读链路与恢复）入口 = 本报告 + `reports/audit-e7b93b7-response.md` + `reports/re-review-response.md` + `reports/audit-response.md` + `reports/PI-contract-report.md` + contracts-report.json + evidence/06/07。开工前先重跑第 6 节第 2 条的两个最小验收，绿了再继续；等待下一轮外部审计对第三轮整改的判定。schema/状态/事务的唯一规范仍是本机设计包 06 与其 schema.sql（D-01）；Phase 2 daemon 必须经 `load-pi-settings.mjs` 加载 defaults.json，并把 75 条标注确认与 Telegram 补验当作收口前置。
+Phase 2（持久化只读链路与恢复）入口 = 本报告 + `reports/phase1-closure.md`（收口声明与出口门禁对照）+ `reports/audit-history.md`（四轮审计史）+ `reports/audit-e7b93b7-response.md` + `reports/re-review-response.md` + `reports/audit-response.md` + `reports/PI-contract-report.md` + contracts-report.json + evidence/04-07。开工前先重跑第 6 节前两条最小验收，绿了再继续；schema/状态/事务的唯一规范仍是本机设计包 06 与其 schema.sql（D-01：包不随库分发）；Phase 2 daemon 必须经 `load-pi-settings.mjs` 加载 defaults.json（D-11）。

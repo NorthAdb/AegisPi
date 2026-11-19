@@ -45,44 +45,36 @@ DEEPSEEK-EXIT=0
 - **usage 与可取得的费用信息**：input 461 / output 2 / totalTokens 463；目录价（0.3/1.2/0.006 USD per M）实算 cost.total **$0.0001407**；`totalFromProvider:false` 与 PI-10 实测形状一致（布尔旗标，DeepSeek 响应不含账单总额——usage 数字是唯一可取得的计费依据）。
 - **纪律**：单次调用、无重试、未换模型（脚本内 retry.enabled=false、单 prompt、无循环）。失败即停的设计未触发。
 
-## 2. Telegram 渠道身份验证 —— Bot 身份已证实；owner 聊天确认卡在 `.env` 值形状（owner 侧修正项）
+## 2. Telegram 渠道身份验证 —— 通过（2026-11-19 最终复测）
 
-**第一次尝试（直连失败）**：`node evals\phase1-closure\verify-telegram-identity.mjs` → `fetch failed`（`UND_ERR_CONNECT_TIMEOUT`）；`api.telegram.org:443` TCP 不通，DNS 解析到不可达地址（直连被网络环境阻断）。
+**过程（如实全记）**：
 
-**按 owner 指示重试（2026-11-19）**：发现本机有**系统级代理在运行**（WinINET `ProxyEnable=1, ProxyServer=127.0.0.1:7897`，端口监听）——这是该机器既定的外网通路。脚本新增代理支持（优先级：`AEGISPI_TG_PROXY` 显式覆盖 → `HTTPS_PROXY`/`HTTP_PROXY` 环境变量 → Windows 系统代理；CONNECT 隧道以 node:net+node:tls 自实现，**零新增依赖**）。Bot token 只经本机自己的代理进程（与其浏览器流量同路）。
-
-**经代理的实测结果**：
+1. **直连失败**：`fetch failed`（`UND_ERR_CONNECT_TIMEOUT`）；`api.telegram.org:443` TCP 不通，DNS 解析到不可达地址（网络环境阻断）。
+2. **经本机系统代理**（WinINET `ProxyEnable=1, ProxyServer=127.0.0.1:7897`——用户自配的本地 Clash 类；脚本新增代理路由：`AEGISPI_TG_PROXY` → `HTTPS_PROXY`/`HTTP_PROXY` → Windows 系统代理，CONNECT 隧道 node:net+node:tls 自实现，零新增依赖）：**getMe 通过**，但 `getChat` 返回 "chat not found"。
+3. **诊断（只读、脱敏）**：`--diag-updates` 更新队列 0 条；`.env` 值形状核验（只出布尔）——`TELEGRAM_OWNER_USER_ID` 当时**含字母、非纯数字**。按纪律未输出原值、未猜正确值，owner 侧修正。
+4. **owner 修正 ID 值后最终复测**：
 
 ```
-TELEGRAM-EXIT=1（部分通过：getMe ✓，ownerChat ✗）
+TELEGRAM-EXIT=0
 {
   "via": "proxy 127.0.0.1:7897",
-  "getMe": { "ok": true, "isBot": true, "username": "aegispibot",
-             "idMasked": "****0813", "first_name": "aegispibot" },
-  "ownerChat": { "ok": false, "error": "Bad Request: chat not found" }
+  "getMe":     { "ok": true, "isBot": true, "username": "aegispibot",
+                 "idMasked": "****0813", "first_name": "aegispibot" },
+  "ownerChat": { "ok": true, "chatType": "private", "idMatchesOwner": true,
+                 "idMasked": "****1428", "firstNamePresent": true,
+                 "startConfirmed": true },
+  "nodeVersion": "v22.23.5"
 }
 ```
 
-**诊断（只读，脱敏）**：
+**判读**：Bot 身份证实（@aegispibot，is_bot=true）；owner 私聊证实（chatType=private、idMatchesOwner=true、**startConfirmed=true**——即 /start 已由该账号完成，机器可证）。全程未发送任何消息（getMe/getChat/getUpdates 皆只读）。Bot token 只经本机进程与 owner 自己的本地代理进程。
 
-```
---diag-updates（getUpdates，无 offset，不消费不确认）：
-  { "ok": true, "updateCount": 0, "chatsSeen": [] }   ← 更新队列为空
-.env 值形状核验（只输出布尔，值从未打印）：
-  found var: true | pure digits: FALSE | has surrounding whitespace: false
-  contains @: false | contains letters: TRUE | no quote chars
-```
+## 3. 75 条标注的 owner 确认（2026-11-19 收口时点）
 
-**判读（如实）**：
+owner 复核完成并授权确认（记录在本地 owner-baseline.local.md §3，不入库）：30 条窗口内公告保持该关注；9 条修复版保持该关注；**原 12 条 uncertain 对照官方 GitHub 发行说明复核后全部转「可忽略」**（其中 v4.13.0 的 CORS 变化只是默认允许方法加入 QUERY；v4.13.15/17 的转义/cookie 前缀小修复未作为安全公告发布；v4.13.19 为锁定版本常规发布）——最终计数**该关注 39 / 可忽略 36 / uncertain 0**。labels 文件实测与该记录逐项一致（本地 gitignored，per-item reason 不入库）。hono 75 条仍为评测/标注样本夹具，与 AegisPi 服务监控范围（基线第 1 句：只盯 NorthAdb/AegisPi）不混同。
 
-- **getMe 通过**：Bot 身份机器证实——`@aegispibot`（与 owner-baseline §1 一致），`is_bot=true`，id 脱敏 `****0813`。
-- **getChat "chat not found"**：按当前配置的 `TELEGRAM_OWNER_USER_ID` 值，机器人从未见过这个私聊（更新队列亦空——更新即使曾被消费，聊天关系也不会消失，故不是消费问题）。
-- **根因指向 `.env` 值形状**：配置值**含字母、非纯数字**——Telegram 私聊 `getChat` 的 `chat_id` 必须是数字 user ID。按纪律不输出已有值、不猜正确值；**owner 侧修正**：把 `TELEGRAM_OWNER_USER_ID` 换成你的数字 Telegram user ID，并确认 /start 是从该账号发给 @aegispibot 的，然后重跑：
-  `node evals\phase1-closure\verify-telegram-identity.mjs`（预期 getMe ok + ownerChat.startConfirmed=true → 退出码 0）
-- **未发送任何消息**（getMe/getChat/getUpdates 均只读）。
+## 4. 与本证据相关的边界声明
 
-## 3. 与本证据相关的边界声明
-
-- 本轮 DeepSeek 调用是 owner-baseline.local.md §4 授权的**一次**最小推理，用于核对「DeepSeek Flash High」的真实模型绑定；未授权的其他付费调用一概未发生。
-- Telegram 验证经本机系统代理（127.0.0.1:7897，用户自配的本地 Clash 类代理）完成 getMe——**Bot 身份已机器证实**；owner 聊天确认（getChat）待 owner 把 `.env` 的 `TELEGRAM_OWNER_USER_ID` 修正为数字 user ID 后重跑收口。
-- Phase 1 宣布完成前仍需：75 条标注的 owner 确认（草案已生成，12 条 uncertain 待复核）与 Telegram ownerChat 确认（脚本已入库，改完 `.env` 一键复验）。
+- 本轮 DeepSeek 调用是 owner-baseline.local.md §4 授权的**一次**最小推理（不重放：单发授权已用尽，第四轮审计已对脚本结构与目录价算式独立核对）。
+- 四项用户侧收口全部有机器证据或 owner 记录：DeepSeek（本文件 §1）、Telegram（§2）、基线三句话（owner-baseline §2）、75 条标注（§3）。
+- 收口级自审三件套实测：全套契约 15/15 退出码 0、hono 配对自检退出码 0、规范包验证器 14/14 退出码 0（收口提交时的最新 generatedAt 报告在库）。
