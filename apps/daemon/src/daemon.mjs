@@ -32,7 +32,7 @@ import { expireApprovals } from "./approvals.mjs";
 import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
 import { insertObjectRow } from "./objects.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
-import { dispatchEffect } from "./effects.mjs";
+import { dispatchEffect, autoRecoverUnknown } from "./effects.mjs";
 import {
   createConsoleApp,
   serveConsole,
@@ -216,6 +216,25 @@ export async function main(argv = process.argv.slice(2)) {
     // 5. Effect dispatch only with an explicitly fake upstream; there is no
     //    real submitter in Phase 2 and the loop says so instead of pretending.
     if (upstream) {
+      // Per-mode reconciliation of UNKNOWN effects (06 section 6 table) runs
+      // IN the daemon: IDEMPOTENCY_KEY requeues for a same-key resend,
+      // LOOKUP_THEN_RETRY records a strong-consistency hit or requeues only
+      // a definitive not-found, AT_LEAST_ONCE requeues within its bounded
+      // backoff, and AT_MOST_ONCE plus weak-visibility lookups stay UNKNOWN —
+      // no blind retry ever leaves this loop.
+      const unknowns = db
+        .prepare("SELECT id, retry_mode FROM effects WHERE state='UNKNOWN'")
+        .all();
+      for (const u of unknowns) {
+        try {
+          const action = autoRecoverUnknown(db, upstream, { effectId: u.id, now, backoffMs: 0 });
+          if (action.action !== "none") {
+            console.log(`reconcile: ${u.id} (${u.retry_mode}) -> ${action.action}`);
+          }
+        } catch (err) {
+          console.error(`reconcile refused ${u.id}: ${err.message}`);
+        }
+      }
       const ready = db
         .prepare("SELECT id FROM effects WHERE state='READY' AND next_attempt_at<=? ORDER BY next_attempt_at")
         .all(now);
@@ -228,6 +247,10 @@ export async function main(argv = process.argv.slice(2)) {
       }
     } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='READY'").get().c > 0) {
       console.error("dispatcher: READY effects exist but no upstream adapter is wired (Phase 3); they stay durable and dispatched later");
+    } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c > 0) {
+      // UNKNOWN without an upstream stays UNKNOWN, on the record: the daemon
+      // never converts uncertainty into a success or a blind resend.
+      console.error("reconcile: UNKNOWN effects present but no upstream adapter is wired; they stay UNKNOWN for a human or a later phase");
     }
     // 6. Outbox: only a report — delivery status lives in effects.state.
     const due = dueNotifications(db, { now });

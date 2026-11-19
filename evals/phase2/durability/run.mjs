@@ -2671,6 +2671,112 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   }
 }
 
+// ------------------------------------------- case: daemon restart reconciliation
+{
+  const canonical = loadCanonicalSchema();
+  const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "effect-crash.mjs");
+
+  // The flagship window at the DAEMON level: after the crash, the daemon
+  // process ITSELF (not the test process) must reconcile the applicable
+  // retry_mode and land SUCCEEDED with exactly one remote application.
+  {
+    const ws = makeWorkspace("daemon-restart-idempotency");
+    const crash = spawnNode(scenario, [], {
+      env: {
+        AEGISPI_WS: ws.stateDir,
+        AEGISPI_CRASH_POINT: "effects:after-cas-before-call",
+        AEGISPI_NOW: "1798200000000",
+        AEGISPI_RETRY_MODE: "IDEMPOTENCY_KEY",
+        AEGISPI_FAKE_MODE: "ok",
+      },
+    });
+    const crashDone = await crash.done;
+    const daemon = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`,
+    ]);
+    const daemonDone = await daemon.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, external_id, business_key FROM effects").get();
+    db.close();
+    const remote = createFakeRemote(ws.stateDir);
+    suite.check(
+      "daemon-restart-reconciles-idempotency-to-succeeded",
+      crashDone.code !== 0 && daemonDone.code === 0 && effect.state === "SUCCEEDED" &&
+        remote.appliedCount(effect.business_key) === 1 && effect.external_id !== null,
+      `crash exit=${crashDone.code}; daemon --once exit=${daemonDone.code}; effect=${effect.state} external=${effect.external_id}; remote applied exactly once`,
+    );
+    suite.check(
+      "daemon-restart-stdout-shows-reconcile-action",
+      /reconcile: .*-> requeued/.test(daemonDone.stdout),
+      `the daemon log records the reconciliation it performed itself`,
+    );
+  }
+
+  // AT_MOST_ONCE at the DAEMON level: even after the remote truly applied,
+  // the daemon restart conservatively STOPS at UNKNOWN — no resend, no
+  // invented success; the row waits for a human reconciliation.
+  {
+    const ws = makeWorkspace("daemon-restart-at-most-once");
+    const crash = spawnNode(scenario, [], {
+      env: {
+        AEGISPI_WS: ws.stateDir,
+        AEGISPI_CRASH_POINT: "effects:after-call-before-record",
+        AEGISPI_NOW: "1798300000000",
+        AEGISPI_RETRY_MODE: "AT_MOST_ONCE",
+        AEGISPI_FAKE_MODE: "apply_then_die",
+      },
+    });
+    const crashDone = await crash.done;
+    const daemon = spawnNode(join(repoRoot, "apps", "daemon", "src", "daemon.mjs"), [
+      "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`,
+    ]);
+    const daemonDone = await daemon.done;
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, external_id, business_key FROM effects").get();
+    db.close();
+    const remote = createFakeRemote(ws.stateDir);
+    const strongLookup = remote.lookup({ businessKey: effect.business_key, consistency: "strong" });
+    suite.check(
+      "daemon-restart-at-most-once-stays-unknown",
+      crashDone.code !== 0 && daemonDone.code === 0 &&
+        strongLookup.found === true && effect.state === "UNKNOWN" &&
+        remote.appliedCount(effect.business_key) === 1,
+      `remote really holds the action (${strongLookup.externalId}) yet the daemon leaves UNKNOWN — the mode forbids automatic resend; delivered 1x, no second application`,
+    );
+    // The manual reconciliation (with actor + evidence) remains the way out,
+    // and it is refused without either.
+    const db2 = openDatabase(ws.dbPath);
+    let reconWithoutActor = false;
+    try {
+      reconcileUnknown(db2, {
+        effectId: db2.prepare("SELECT id FROM effects").get().id,
+        resolution: "CONFIRMED_SUCCESS",
+        externalEvidenceRef: "provider console",
+        externalId: strongLookup.externalId,
+        actorId: null,
+        now: 1798300001000,
+      });
+    } catch (e) {
+      reconWithoutActor = /actor/.test(e.message);
+    }
+    const recon = reconcileUnknown(db2, {
+      effectId: db2.prepare("SELECT id FROM effects").get().id,
+      resolution: "CONFIRMED_SUCCESS",
+      externalEvidenceRef: "owner checked the provider console",
+      externalId: strongLookup.externalId,
+      actorId: "prn:telegram:owner",
+      now: 1798300002000,
+    });
+    const after = db2.prepare("SELECT state, external_id FROM effects").get();
+    db2.close();
+    suite.check(
+      "at-most-once-exits-only-through-recorded-human-reconciliation",
+      reconWithoutActor === true && recon.state === "SUCCEEDED" && after.external_id === strongLookup.externalId,
+      `reconciliation without an actor refused; with actor+evidence the row lands SUCCEEDED ${after.external_id}`,
+    );
+  }
+}
+
 // -------------------------------------------------------------------- summary
 const exit = suiteExit(suite, { label: "test:durability (foundation)" });
 const { reportPath, logPath } = writeReport({
