@@ -1,9 +1,11 @@
 {
- "generatedAt": "2026-11-18T00:00:00Z",
- "source": "GitHub REST API via gh CLI (read-only): repos/honojs/hono/security-advisories and /releases",
+ "generatedAt": "2026-11-19T01:32:42.019Z",
+ "source": "GitHub REST API via gh CLI (read-only): repos/honojs/hono/security-advisories (per_page=100, full list) and /releases",
  "windowStart": "2026-05-18T00:00:00Z",
  "windowEnd": "2026-11-18T00:00:00Z",
- "candidateCount": 65,
+ "windowEndExclusive": true,
+ "advisoryListTotal": 61,
+ "candidateCount": 75,
  "events": [
   {
    "eventId": "release:v4.12.20",
@@ -11,6 +13,70 @@
    "tag": "v4.12.20",
    "publishedAt": "2026-05-19T10:41:30Z",
    "sourceUrl": "https://github.com/honojs/hono/releases/tag/v4.12.20"
+  },
+  {
+   "eventId": "advisory:GHSA-f577-qrjj-4474",
+   "kind": "advisory",
+   "ghsaId": "GHSA-f577-qrjj-4474",
+   "cveId": "CVE-2026-47673",
+   "severity": "medium",
+   "summary": "JWT middleware accepts any Authorization scheme, not only Bearer",
+   "vulnerableRanges": [
+    "< 4.12.21"
+   ],
+   "patchedVersions": [
+    "4.12.21"
+   ],
+   "publishedAt": "2026-05-19T11:39:31Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-f577-qrjj-4474"
+  },
+  {
+   "eventId": "advisory:GHSA-3hrh-pfw6-9m5x",
+   "kind": "advisory",
+   "ghsaId": "GHSA-3hrh-pfw6-9m5x",
+   "cveId": "CVE-2026-47675",
+   "severity": "medium",
+   "summary": "Cookie helper does not sanitize sameSite and priority, allowing Set-Cookie injection",
+   "vulnerableRanges": [
+    "< 4.12.21"
+   ],
+   "patchedVersions": [
+    "4.12.21"
+   ],
+   "publishedAt": "2026-05-19T11:39:38Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-3hrh-pfw6-9m5x"
+  },
+  {
+   "eventId": "advisory:GHSA-xrhx-7g5j-rcj5",
+   "kind": "advisory",
+   "ghsaId": "GHSA-xrhx-7g5j-rcj5",
+   "cveId": "CVE-2026-47674",
+   "severity": "medium",
+   "summary": "IP Restriction bypasses static deny rules for non-canonical IPv6 ",
+   "vulnerableRanges": [
+    "< 4.12.21"
+   ],
+   "patchedVersions": [
+    "4.12.21"
+   ],
+   "publishedAt": "2026-05-19T11:39:48Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-xrhx-7g5j-rcj5"
+  },
+  {
+   "eventId": "advisory:GHSA-2gcr-mfcq-wcc3",
+   "kind": "advisory",
+   "ghsaId": "GHSA-2gcr-mfcq-wcc3",
+   "cveId": "CVE-2026-47676",
+   "severity": "medium",
+   "summary": "app.mount() strips mount prefix using undecoded path, causing incorrect routing for percent-encoded paths",
+   "vulnerableRanges": [
+    "< 4.12.21"
+   ],
+   "patchedVersions": [
+    "4.12.21"
+   ],
+   "publishedAt": "2026-05-19T11:39:57Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-2gcr-mfcq-wcc3"
   },
   {
    "eventId": "release:v4.12.21",
@@ -39,6 +105,70 @@
    "tag": "v4.12.24",
    "publishedAt": "2026-06-08T11:16:30Z",
    "sourceUrl": "https://github.com/honojs/hono/releases/tag/v4.12.24"
+  },
+  {
+   "eventId": "advisory:GHSA-j6c9-x7qj-28xf",
+   "kind": "advisory",
+   "ghsaId": "GHSA-j6c9-x7qj-28xf",
+   "cveId": "CVE-2026-54287",
+   "severity": "medium",
+   "summary": "AWS Lambda adapter merges multiple `Set-Cookie` headers into one value, dropping cookies on ALB single-header and Lattice",
+   "vulnerableRanges": [
+    "< 4.12.25"
+   ],
+   "patchedVersions": [
+    "4.12.25"
+   ],
+   "publishedAt": "2026-06-09T03:29:45Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-j6c9-x7qj-28xf"
+  },
+  {
+   "eventId": "advisory:GHSA-wgpf-jwqj-8h8p",
+   "kind": "advisory",
+   "ghsaId": "GHSA-wgpf-jwqj-8h8p",
+   "cveId": "CVE-2026-54289",
+   "severity": "medium",
+   "summary": "Lambda@Edge adapter keeps only the last value of a repeated request header, dropping the rest",
+   "vulnerableRanges": [
+    "< 4.12.25"
+   ],
+   "patchedVersions": [
+    "4.12.25"
+   ],
+   "publishedAt": "2026-06-09T03:29:48Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-wgpf-jwqj-8h8p"
+  },
+  {
+   "eventId": "advisory:GHSA-rv63-4mwf-qqc2",
+   "kind": "advisory",
+   "ghsaId": "GHSA-rv63-4mwf-qqc2",
+   "cveId": "CVE-2026-54288",
+   "severity": "medium",
+   "summary": "Body Limit Middleware can be bypassed on AWS Lambda by understating `Content-Length`",
+   "vulnerableRanges": [
+    "< 4.12.25"
+   ],
+   "patchedVersions": [
+    "4.12.25"
+   ],
+   "publishedAt": "2026-06-09T03:29:50Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-rv63-4mwf-qqc2"
+  },
+  {
+   "eventId": "advisory:GHSA-88fw-hqm2-52qc",
+   "kind": "advisory",
+   "ghsaId": "GHSA-88fw-hqm2-52qc",
+   "cveId": "CVE-2026-54290",
+   "severity": "high",
+   "summary": "CORS Middleware reflects any Origin with credentials when `origin` defaults to the wildcard",
+   "vulnerableRanges": [
+    "< 4.12.25"
+   ],
+   "patchedVersions": [
+    "4.12.25"
+   ],
+   "publishedAt": "2026-06-09T03:29:52Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-88fw-hqm2-52qc"
   },
   {
    "eventId": "advisory:GHSA-wwfh-h76j-fc44",
@@ -85,6 +215,38 @@
    ],
    "publishedAt": "2026-06-23T02:50:06Z",
    "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-xgm2-5f3f-mvvc"
+  },
+  {
+   "eventId": "advisory:GHSA-w62v-xxxg-mg59",
+   "kind": "advisory",
+   "ghsaId": "GHSA-w62v-xxxg-mg59",
+   "cveId": "CVE-2026-59895",
+   "severity": "medium",
+   "summary": "Server-Side XSS via JSX Escaping Bypass in cx() Utility",
+   "vulnerableRanges": [
+    ">= 4.0.0, < 4.12.27"
+   ],
+   "patchedVersions": [
+    "4.12.27"
+   ],
+   "publishedAt": "2026-06-23T02:50:15Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-w62v-xxxg-mg59"
+  },
+  {
+   "eventId": "advisory:GHSA-hvrm-45r6-mjfj",
+   "kind": "advisory",
+   "ghsaId": "GHSA-hvrm-45r6-mjfj",
+   "cveId": "CVE-2026-59896",
+   "severity": "medium",
+   "summary": "hono/jsx does not isolate context per request, leading to cross-request data disclosure",
+   "vulnerableRanges": [
+    ">= 4.11.8, < 4.12.27"
+   ],
+   "patchedVersions": [
+    "4.12.27"
+   ],
+   "publishedAt": "2026-06-23T02:50:24Z",
+   "sourceUrl": "https://github.com/honojs/hono/security/advisories/GHSA-hvrm-45r6-mjfj"
   },
   {
    "eventId": "release:v4.12.27",

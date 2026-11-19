@@ -17,6 +17,7 @@ import {
   piEnv,
   spawnPiRpc,
   waitFor,
+  assertChildNodeLocked,
 } from "../helpers/probe-utils.mjs";
 
 export const ID = "PI-06";
@@ -36,6 +37,7 @@ function makeRecorder() {
 
 export async function run() {
   const probe = createProbe(ID, TITLE);
+  assertChildNodeLocked(probe);
 
   // ---------- Phase 1: retry + abort on deepseek-flash ----------
   const server = createFakeOpenAIServer({

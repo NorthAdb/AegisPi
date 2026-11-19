@@ -8,7 +8,12 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 
-export const LOCKED_NODE = "D:\\AegisPi\\tools\\node-v22.23.5\\node.exe";
+// Locked Node binary. The default is the Windows install path; on other
+// hosts (e.g. the Linux audit environment) set AEGISPI_NODE_BIN to a real
+// v22.23.5 binary. RPC probes verify the child's actual version via
+// childNodeVersion() so an override pointing at another Node fails the run.
+export const LOCKED_NODE =
+  process.env.AEGISPI_NODE_BIN ?? "D:\\AegisPi\\tools\\node-v22.23.5\\node.exe";
 export const SPEC_PACK_DIR = process.env.AEGISPI_SPEC_PACK ?? "D:\\AegisPi\\aegis-pi-design-pack-v1.4.1";
 export const PROBE_TMP_ROOT = join(tmpdir(), "aegispi-phase1-probes");
 
@@ -17,6 +22,27 @@ export function assertLockedNode(probe) {
   const ok = v === "v22.23.5";
   probe.check("locked-node", ok, `process.version=${v}`, { version: v, expected: "v22.23.5" });
   return ok;
+}
+
+// Version of the Node binary that RPC probes spawn children with. Cached
+// after the first exec so the check costs one process launch per run.
+import { execFileSync } from "node:child_process";
+let cachedChildVersion = null;
+export function childNodeVersion() {
+  if (cachedChildVersion === null) {
+    cachedChildVersion = execFileSync(LOCKED_NODE, ["--version"], { encoding: "utf8" }).trim();
+  }
+  return cachedChildVersion;
+}
+
+export function assertChildNodeLocked(probe) {
+  const v = childNodeVersion();
+  probe.check(
+    "child-node-locked",
+    v === "v22.23.5",
+    `spawned CLI node is ${v} (LOCKED_NODE=${LOCKED_NODE}${process.env.AEGISPI_NODE_BIN ? ", via AEGISPI_NODE_BIN" : ""})`,
+  );
+  return v === "v22.23.5";
 }
 
 export function createProbe(id, title) {
@@ -46,10 +72,11 @@ export function createProbe(id, title) {
 
 export function summarizeProbe(probe) {
   const failed = probe.findings.filter((f) => f.status === "FAIL");
-  const skipped = probe.findings.filter((f) => f.status === "SKIP");
   if (failed.length > 0) return "FAIL";
   if (probe.finalStatus) return probe.finalStatus;
-  if (skipped.length > 0 && probe.findings.every((f) => f.status !== "PASS")) return "SKIP";
+  // A probe with no real (falsifiable) PASS finding cannot count as PASS:
+  // notes and skips are not evidence (audit round 1, P1-2).
+  if (!probe.findings.some((f) => f.status === "PASS")) return "SKIP";
   return "PASS";
 }
 

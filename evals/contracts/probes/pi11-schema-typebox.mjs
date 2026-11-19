@@ -123,10 +123,10 @@ export async function run() {
     agent.cleanup();
   }
 
-  probe.check(
+  // Normative boundary statement (02/AGENTS) — a host duty, not a Pi fact.
+  probe.note(
     "host-validation-still-mandatory",
-    true,
-    "typebox validation covers the declared schema only; business rules (ACL, budget, target allowlists) stay host-side per 02/AGENTS — schema validation is not an authorization boundary",
+    "typebox validation covers the declared schema only; business rules (ACL, budget, target allowlists) stay host-side — schema validation is not an authorization boundary",
   );
 
   const status = summarizeProbe(probe);

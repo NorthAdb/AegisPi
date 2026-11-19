@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-18T15:57:40.096Z",
+  "generatedAt": "2026-11-19T01:44:48.614Z",
   "nodeVersion": "v22.23.5",
   "results": [
     {
@@ -292,14 +292,29 @@
     },
     {
       "id": "PI-02",
-      "title": "virtual model route(): reason/previous/failed/state",
+      "title": "virtual model route(): two registration paths, reason/previous/failed/state",
       "status": "PASS",
-      "summary": "route() contract verified: user/continuation/retry reasons, previous/failed stickiness, JSON state survives across calls, dispatch records the physical model.",
+      "summary": "Two route() paths verified live: ModelRuntime-registered VMs receive route(request) with exactly 1 argument, while extension-registered VMs receive route(request, ctx) with ctx.modelRegistry resolving physical models — both wrappers ship in the installed dist and both dispatch record the physical model. reasons (user/continuation/retry), previous/failed stickiness, and JSON state verified on the ModelRuntime path.",
       "findings": [
         {
           "name": "physical-model-in-catalog",
           "status": "PASS",
-          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:61870"
+          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:59568"
+        },
+        {
+          "name": "dts-two-route-signatures",
+          "status": "PASS",
+          "detail": "virtual-models.d.ts declares VirtualModelDefinition.route(request) single-param; extensions/types.d.ts declares ExtensionVirtualModel.route(request, ctx: ExtensionContext) — both signatures ship in 1.5.2"
+        },
+        {
+          "name": "runtime-single-param-wrapper",
+          "status": "PASS",
+          "detail": "model-runtime.js wraps ModelRuntime-registered VMs as route(request) => definition.route(request) — single argument"
+        },
+        {
+          "name": "loader-two-param-wrapper",
+          "status": "PASS",
+          "detail": "extensions/loader.js wraps extension-registered VMs as route(request) => model.route(request, runtime.createContext()) — two arguments"
         },
         {
           "name": "virtual-model-registered",
@@ -307,14 +322,14 @@
           "detail": "getModel('probe-router','auto') found"
         },
         {
-          "name": "route-signature-single-param",
-          "status": "PASS",
-          "detail": "dist/core/virtual-models.d.ts declares route(request) with one parameter; docs virtual-models.md example shows route(request, ctx) with ctx.modelRegistry, which does not match the shipped types"
-        },
-        {
           "name": "route-user-reason",
           "status": "PASS",
-          "detail": "route call #1: {\"reason\":\"user\",\"model\":\"auto\",\"previous\":null,\"failed\":null,\"state\":null}"
+          "detail": "route call #1: {\"reason\":\"user\",\"model\":\"auto\",\"argsLength\":1,\"previous\":null,\"failed\":null,\"state\":null}"
+        },
+        {
+          "name": "runtime-path-route-single-argument",
+          "status": "PASS",
+          "detail": "ModelRuntime-registered route received arguments.length=1 (ctx is undefined on this path; the router must resolve physical models through a captured ModelRuntime)"
         },
         {
           "name": "dispatch-records-physical-model",
@@ -324,7 +339,7 @@
         {
           "name": "route-continuation-with-previous",
           "status": "PASS",
-          "detail": "continuation call: {\"reason\":\"continuation\",\"model\":\"auto\",\"previous\":{\"model\":\"deepseek-flash\",\"thinkingLevel\":\"high\"},\"failed\":null,\"state\":{\"n\":1}}"
+          "detail": "continuation call: {\"reason\":\"continuation\",\"model\":\"auto\",\"argsLength\":1,\"previous\":{\"model\":\"deepseek-flash\",\"thinkingLevel\":\"high\"},\"failed\":null,\"state\":{\"n\":1}}"
         },
         {
           "name": "route-state-passed-back",
@@ -334,7 +349,7 @@
         {
           "name": "route-retry-with-failed",
           "status": "PASS",
-          "detail": "retry route call: {\"reason\":\"retry\",\"model\":\"auto\",\"previous\":{\"model\":\"deepseek-flash\",\"thinkingLevel\":\"high\"},\"failed\":{\"model\":\"deepseek-flash\",\"stopReason\":\"error\"},\"state\":{\"n\":1}}"
+          "detail": "retry route call: {\"reason\":\"retry\",\"model\":\"auto\",\"argsLength\":1,\"previous\":{\"model\":\"deepseek-flash\",\"thinkingLevel\":\"high\"},\"failed\":{\"model\":\"deepseek-flash\",\"stopReason\":\"error\"},\"state\":{\"n\":1}}"
         },
         {
           "name": "retry-failed-shape",
@@ -347,12 +362,38 @@
           "detail": "route never threw"
         },
         {
+          "name": "ext-virtual-model-registered",
+          "status": "PASS",
+          "detail": "getModel('probe-ext-router','auto') after session init = found"
+        },
+        {
+          "name": "ext-path-route-receives-ctx",
+          "status": "PASS",
+          "detail": "extension-registered route received arguments.length=2, ctx.modelRegistry present=true"
+        },
+        {
+          "name": "ext-path-ctx-resolves-physical-model",
+          "status": "PASS",
+          "detail": "ctx.modelRegistry.find('deepseek','deepseek-flash') inside route returned deepseek-flash"
+        },
+        {
+          "name": "ext-path-dispatch-records-physical-model",
+          "status": "PASS",
+          "detail": "assistant message model after ext-path turn = deepseek-flash"
+        },
+        {
+          "name": "ext-route-no-error",
+          "status": "PASS",
+          "detail": "ext route never threw"
+        },
+        {
           "name": "server-hits",
           "status": "INFO",
-          "detail": "fake endpoint hits=5; each request body recorded in server.requests",
+          "detail": "fake endpoint hits=6; each request body recorded in server.requests",
           "evidence": {
-            "hits": 5,
+            "hits": 6,
             "paths": [
+              "/chat/completions",
               "/chat/completions",
               "/chat/completions",
               "/chat/completions",
@@ -461,6 +502,11 @@
       "summary": "All core RPC commands verified live: dispositions (started/queued), id correlation under concurrent commands, queue_update contents, clear_queue returning texts, abort-after-idle, parse-error response without id, correlated bash streaming, entry cursors, fork and session naming.",
       "findings": [
         {
+          "name": "child-node-locked",
+          "status": "PASS",
+          "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
+        },
+        {
           "name": "get_state-shape",
           "status": "PASS",
           "detail": "get_state data: model=deepseek-flash thinking=high streaming=false"
@@ -528,7 +574,7 @@
         {
           "name": "entries-cursor",
           "status": "PASS",
-          "detail": "entries=8 leafId=cdff79cf after-cursor=0"
+          "detail": "entries=8 leafId=1d425a12 after-cursor=0"
         },
         {
           "name": "new_session",
@@ -558,6 +604,11 @@
       "status": "PASS",
       "summary": "agent_settled is the only 'will not continue automatically' signal; agent_end(willRetry) precedes auto_retry_start/end; abort resolves after idle, marks settled.aborted, and stops provider work; manual compaction on a small context window emits start/end with summary and usage.",
       "findings": [
+        {
+          "name": "child-node-locked",
+          "status": "PASS",
+          "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
+        },
         {
           "name": "set_auto_retry",
           "status": "PASS",
@@ -606,7 +657,7 @@
         {
           "name": "compact-response-usage",
           "status": "PASS",
-          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"73f0a38e\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
+          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"34e771d7\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
         }
       ]
     },
@@ -614,20 +665,25 @@
       "id": "PI-07",
       "title": "extension UI: RPC dialogs, timeouts, no persistence across restart",
       "status": "PASS",
-      "summary": "Dialogs cross the RPC boundary as extension_ui_request/response with client ids, but with three measured deviations: options nest under one field (not the documented flat shape), the documented dialog timeout does NOT fire in RPC mode, and pending dialogs die with the process. The AegisPi host must therefore own dialog deadlines AND durable parking (04 §2), reading the nested wire shape.",
+      "summary": "Dialogs cross the RPC boundary as extension_ui_request/response with client ids, with three measured deviations: options nest under one field (not the documented flat shape), the documented dialog timeout does NOT fire in RPC mode (measured: 4s past a 1500ms timeout, still pending), and pending dialogs die with the process — verified by killing mid-dialog and restarting on the same dirs: extension reloads, zero dialog requests replay. The AegisPi host must therefore own dialog deadlines AND durable parking (04 §2), reading the nested wire shape.",
       "findings": [
         {
-          "name": "confirm-request:7de98d38",
+          "name": "child-node-locked",
+          "status": "PASS",
+          "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
+        },
+        {
+          "name": "confirm-request:889697f5",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe confirm\",\"message\":\"Allow?\",\"timeout\":8000}"
         },
         {
-          "name": "select-request:2c1d85c9",
+          "name": "select-request:fc4bc926",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe select\",\"options\":[\"A\",\"B\"],\"timeout\":8000}"
         },
         {
-          "name": "editor-request:fef3cef5",
+          "name": "editor-request:155db6de",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe editor\",\"prefill\":\"draft\"}"
         },
@@ -662,9 +718,14 @@
           "detail": "confirm(timeout:1500) still pending after 4s and no completion notify; documented auto-resolve did NOT fire. Host must own dialog deadlines"
         },
         {
-          "name": "no-ui-persistence-across-restart",
+          "name": "restart-loads-extension",
           "status": "PASS",
-          "detail": "killed the child with a confirm dialog pending: the request is gone with the process; no replay/requeue mechanism exists in 1.5.2, so the AegisPi host must implement durable parking itself (save state → park → restart → re-ask)"
+          "detail": "restart process lists probe_ui command — the extension reloads on the same agent dir"
+        },
+        {
+          "name": "no-dialog-replay-after-restart",
+          "status": "PASS",
+          "detail": "after SIGKILL with a confirm pending, a fresh process on the same dirs emitted 0 unprompted extension_ui_request(s) and 0 reused dialog id(s) — pending dialogs die with the process in 1.5.2, so the host must implement durable parking itself (save state → park → restart → re-ask)"
         }
       ]
     },
@@ -675,34 +736,39 @@
       "summary": "1.5.2 fork-when-folder-gone verified: RPC resume of a session whose cwd vanished errors out (no interactive offer), while --fork <path> from a new cwd creates a new session with the full conversation and a parentSession header. Workspace loss is recoverable by the host via fork; external state is NOT restored by this mechanism.",
       "findings": [
         {
+          "name": "child-node-locked",
+          "status": "PASS",
+          "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
+        },
+        {
           "name": "persistent-session-created",
           "status": "PASS",
-          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-kFRaSX\\2026-11-18T15-57-32-713Z_01a1ef60-aca8-7502-b652-34f4fe8ee432.jsonl"
+          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-NzO4X7\\2026-11-19T01-44-42-516Z_01a1f17a-3d13-73de-bf23-1a251989dee7.jsonl"
         },
         {
           "name": "original-dir-removed",
           "status": "PASS",
-          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-kFRaSX\\2026-11-18T15-57-32-713Z_01a1ef60-aca8-7502-b652-34f4fe8ee432.jsonl"
+          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-NzO4X7\\2026-11-19T01-44-42-516Z_01a1f17a-3d13-73de-bf23-1a251989dee7.jsonl"
         },
         {
           "name": "rpc-resume-with-gone-dir-errors",
           "status": "PASS",
-          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-I8XqRa\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-kFRaSX\\2026-11-18T15-57-32-713Z_01a1ef60-aca8-7502-b652-34f4"
+          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-Eg62az\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-NzO4X7\\2026-11-19T01-44-42-516Z_01a1f17a-3d13-73de-bf23-1a25"
         },
         {
           "name": "fork-into-new-dir-works",
           "status": "PASS",
-          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-kFRaSX\\2026-11-18T15-57-34-077Z_01a1ef60-b1fc-767e-ab06-86f42d211477.jsonl"
+          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-NzO4X7\\2026-11-19T01-44-43-671Z_01a1f17a-4196-72cf-b167-0f4790869e6b.jsonl"
         },
         {
           "name": "fork-preserves-conversation",
           "status": "PASS",
-          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"925ead88\",\"parentId\":null,\"timestamp\":\"2026-11-18T15:57:32.715Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"1c35a226\",\"parentId\":"
+          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"e30be3d1\",\"parentId\":null,\"timestamp\":\"2026-11-19T01:44:42.518Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"2e23426f\",\"parentId\":"
         },
         {
           "name": "fork-header-parent-session",
           "status": "PASS",
-          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-kFRaSX\\2026-11-18T15-57-32-713Z_01a1ef60-aca8-7502-b652-34f4fe8ee432.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-4aTjIN"
+          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-NzO4X7\\2026-11-19T01-44-42-516Z_01a1f17a-3d13-73de-bf23-1a251989dee7.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-k7lfGi"
         }
       ]
     },
@@ -715,7 +781,7 @@
         {
           "name": "catalog-metadata-preserved-under-override",
           "status": "PASS",
-          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:54174"
+          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:57136"
         },
         {
           "name": "env-var-makes-provider-available",
@@ -764,7 +830,7 @@
         },
         {
           "name": "worker-cannot-override-url",
-          "status": "PASS",
+          "status": "INFO",
           "detail": "baseUrl and credentials resolve from host-side models.json / ModelRuntime only; script or model text has no API to rewrite a provider URL per request (host-owned adapters remain the boundary)"
         }
       ]
@@ -773,7 +839,7 @@
       "id": "PI-10",
       "title": "usage parsing, catalog-based cost, missing-usage zeros",
       "status": "PASS",
-      "summary": "Usage parses from the final streamed chunk (input/output/totalTokens), cost derives from catalog prices (deepseek-flash 0.3/1.2), and provider-omitted usage yields zeros rather than an unknown marker — the host ledger, not Pi, must hold the conservative reservation.",
+      "summary": "Usage parses from the final streamed chunk (input/output/totalTokens), cost derives from catalog prices (deepseek-flash 0.3/1.2), cost.totalFromProvider exists as a boolean (false on this path, never a number to sum), and provider-omitted usage yields zeros — in usage AND cost — rather than an unknown marker. The host ledger, not Pi, must hold the conservative reservation (HELD).",
       "findings": [
         {
           "name": "usage-fields-present",
@@ -791,6 +857,11 @@
           "detail": "cost.input=0.000029999999999999997 (expected 0.00003), cost.output=0.000059999999999999995 (expected 0.00006), cost.total=0.00008999999999999999"
         },
         {
+          "name": "cost-totalFromProvider-is-boolean-false",
+          "status": "PASS",
+          "detail": "cost.totalFromProvider = false (typeof boolean); declared totalFromProvider?: boolean in pi-ai dist/types.d.ts; ledger sums input+output+cache itself per 06 §8"
+        },
+        {
           "name": "sdk-message_update-no-usage",
           "status": "PASS",
           "detail": "SDK message_update events (3) do not carry usage; usage is authoritative on message_end.message.usage (JSON/RPC mode adds usage to message_update records per docs/json.md)"
@@ -798,12 +869,12 @@
         {
           "name": "missing-usage-reports-zeros-not-unknown",
           "status": "PASS",
-          "detail": "usage with provider omission: {\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}} — Pi cannot distinguish \"provider omitted usage\" from \"zero usage\"; the AegisPi ledger must hold reservations until a trustworthy usage or bill arrives (06 §8)"
+          "detail": "usage with provider omission: {\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}} — Pi cannot distinguish \"provider omitted usage\" from \"zero usage\" (cost fields also zero); the ledger must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)"
         },
         {
-          "name": "no-totalFromProvider-dependency",
-          "status": "PASS",
-          "detail": "no totalFromProvider field exists in the usage shape; ledger code must sum input+output+cache fields itself and treat missing usage as un-settled (HELD), per 06 §8"
+          "name": "ledger-sums-itself",
+          "status": "INFO",
+          "detail": "usage carries per-field numbers only (input/output/cache*, cost.total) with cost.totalFromProvider as a boolean flag, never a provider-reported total; ledger code must sum input+output+cache itself and treat missing usage as un-settled (HELD), per 06 §8"
         }
       ]
     },
@@ -830,8 +901,8 @@
         },
         {
           "name": "host-validation-still-mandatory",
-          "status": "PASS",
-          "detail": "typebox validation covers the declared schema only; business rules (ACL, budget, target allowlists) stay host-side per 02/AGENTS — schema validation is not an authorization boundary"
+          "status": "INFO",
+          "detail": "typebox validation covers the declared schema only; business rules (ACL, budget, target allowlists) stay host-side — schema validation is not an authorization boundary"
         }
       ]
     },
@@ -873,7 +944,7 @@
         },
         {
           "name": "limits-not-security-boundary",
-          "status": "PASS",
+          "status": "INFO",
           "detail": "per 05 PI-12: unverified limits must not be treated as a security boundary; codemode output/timeout caps are resource guards only — the host remains the real boundary"
         }
       ]
@@ -882,7 +953,7 @@
       "id": "PI-13",
       "title": "cacheWarming default, decision event, eligibility",
       "status": "PASS",
-      "summary": "Pi 1.5.2 defaults cacheWarming to 'idle' (deviation risk for the AegisPi 'off by default' budget rule — the host must set it explicitly). The cache_warming_decision extension event can veto warming; deepseek-flash declares no promptCache lifetime so warming is ineligible on the launch model. Any future warming must be budgeted as purpose=warming.",
+      "summary": "Pi 1.5.2 defaults cacheWarming to 'idle' — measured, and a real conflict with the AegisPi 'off by default' budget rule. Mitigation is in place at the settings level only: inMemory({cacheWarming:'off'}) reads back 'off' and defaults.json carries the off value; daemon code that loads it is Phase 2, so runtime enforcement is recorded as NOT yet in place. cache_warming_decision is a declared, registrable override event; deepseek-flash declares no promptCache lifetime so warming is ineligible on the launch model. Future warming must be budgeted as purpose=warming.",
       "findings": [
         {
           "name": "default-is-idle",
@@ -900,14 +971,24 @@
           "detail": "deepseek-flash catalog entry has no promptCache lifetime declared → ineligible for cache warming on this model; no warm call is expected (hits=1)"
         },
         {
-          "name": "decision-event-surface-exists",
+          "name": "decision-event-type-declared",
           "status": "PASS",
-          "detail": "cache_warming_decision extension event registered; observed during run: 0 (0 expected: model ineligible, but the override surface exists and returns {action:'stop'|'warm'})"
+          "detail": "extensions/types.d.ts declares on(event: \"cache_warming_decision\", ...) with CacheWarmingDecisionEventResult, cache-warmer.d.ts declares the event type; observed during run: 0 invocations (0 expected: model ineligible)"
         },
         {
-          "name": "warming-off-for-aegispi",
+          "name": "explicit-off-respected-by-settings-path",
           "status": "PASS",
-          "detail": "AegisPi config must set cacheWarming: \"off\" initially (06: 保温默认关闭) even though Pi 1.5.2 defaults to \"idle\"; warming calls are billed (usage kind 'cache_warm') and must be budgeted as purpose=warming before enabling"
+          "detail": "SettingsManager.inMemory({cacheWarming:\"off\"}).getCacheWarmingMode() = off"
+        },
+        {
+          "name": "defaults-json-sets-off",
+          "status": "PASS",
+          "detail": "apps/daemon/config/defaults.json contains \"cacheWarming\": \"off\" — config value written; the daemon loading this file is Phase 2 code, so runtime enforcement is NOT yet in place (recorded, not claimed)"
+        },
+        {
+          "name": "warming-must-be-budgeted-before-enabling",
+          "status": "INFO",
+          "detail": "warming calls are billed (usage kind 'cache_warm') and must be budgeted as purpose=warming before enabling — normative 06 rule for later phases"
         }
       ]
     },
@@ -915,8 +996,13 @@
       "id": "FRAMING",
       "title": "RPC LF byte framing: U+2028/29, chunked UTF-8, overlong, stderr",
       "status": "PASS",
-      "summary": "LF byte framing holds on both directions (input buffered mid-UTF-8, CRLF stripped, U+2028/U+2029 intact in single frames); on locked Node 22.23.5 readline does NOT split U+2028/U+2029 (unlike v24), yet byte-LF framing stays the version-independent contract; Pi tolerates 1.5MiB lines, so max-frame/buffer/idle caps are a host adapter duty.",
+      "summary": "LF byte framing holds on both directions, now measured with a cut inside the 3 UTF-8 bytes of a CJK char (input buffers mid-character until LF), CRLF stripped, U+2028/U+2029 intact in single frames both ways, and 1.5MiB single lines accepted. On locked Node 22.23.5 readline matches byte-LF frames exactly (asserted); the v24 split hazard is recorded via the standalone repro tool. Host-side max-frame/buffer/idle caps remain a normative adapter duty.",
       "findings": [
+        {
+          "name": "child-node-locked",
+          "status": "PASS",
+          "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
+        },
         {
           "name": "prompt-accepted",
           "status": "PASS",
@@ -938,14 +1024,22 @@
           "detail": "one complete frame carries U+2028 and U+2029 intact (type=message_update)"
         },
         {
-          "name": "readline-behavior-recorded-on-locked-node",
+          "name": "readline-equals-byte-frames-on-locked-node",
           "status": "PASS",
-          "detail": "locked Node v22.23.5: readline saw 15 lines with 0 unparseable (no U+2028/2029 split); v24.17.0 repro splits into 3 lines with 3 failures (tools/readline-repro.mjs). Byte-LF framing stays the contract regardless"
+          "detail": "locked Node v22.23.5: readline produced 15 lines with 0 unparseable, identical to the 15 byte-LF frames (no U+2028/U+2029 split here). Byte-LF framing stays the version-independent host contract regardless"
+        },
+        {
+          "name": "readline-v24-hazard",
+          "status": "INFO",
+          "detail": "readline DOES split U+2028/U+2029 into 3 lines with 3 parse failures on the v24 line (v24.17.0 measured via tools/readline-repro.mjs); it must not be relied on as a protocol reader across Node versions",
+          "evidence": {
+            "repro": "node evals/contracts/tools/readline-repro.mjs (per Node binary)"
+          }
         },
         {
           "name": "input-chunked-utf8-buffered",
           "status": "PASS",
-          "detail": "chunked-write prompt response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+          "detail": "mid-character split (cut at byte 40, inside e5 93 88) prompt response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
         },
         {
           "name": "input-u2028-behavior",
@@ -962,9 +1056,9 @@
           }
         },
         {
-          "name": "input-u2028-verdict",
+          "name": "input-u2028-single-frame-accepted",
           "status": "PASS",
-          "detail": "Pi input framing is LF-byte-only: U+2028/U+2029 inside a command string survive in one frame"
+          "detail": "Pi input framing is LF-byte-only: U+2028/U+2029 inside a command string survive in one frame and the prompt is accepted"
         },
         {
           "name": "input-crlf-stripped",
@@ -981,9 +1075,14 @@
           }
         },
         {
-          "name": "adapter-must-cap-frames",
+          "name": "input-overlong-1-5mib-accepted",
           "status": "PASS",
-          "detail": "overlong-line behavior recorded; regardless of Pi-side tolerance, the host adapter must enforce max-frame/total-buffer/idle-timeout limits per 06 contract"
+          "detail": "1.5MiB single-line prompt accepted by Pi (success=true); 1.5MiB single line: success=true error=none"
+        },
+        {
+          "name": "adapter-must-cap-frames",
+          "status": "INFO",
+          "detail": "regardless of Pi-side tolerance, the host adapter must enforce max-frame/total-buffer/idle-timeout limits per the 06 contract — normative host duty, not a Pi property"
         },
         {
           "name": "stderr-separated",
@@ -996,7 +1095,7 @@
       "id": "SQLITE",
       "title": "node:sqlite on 22.23.5: version, FTS5+trigram, reference DDL",
       "status": "PASS",
-      "summary": "node:sqlite (SQLite 3.54.1) on Node v22.23.5 passes every gate: version floor, FTS5 with trigram on CJK and latin substrings, reference DDL with 27+ tables, FTS triggers, WAL + FULL synchronous, clean FK/integrity checks. Driver selection: built-in node:sqlite.",
+      "summary": "node:sqlite (SQLite 3.54.1) on Node v22.23.5 passes every gate: version floor, FTS5 with trigram on CJK and latin substrings, reference DDL with exactly 27 user tables (+2 FTS virtual +8 shadow, 37 total in sqlite_master), FTS trigger triple, WAL, synchronous=FULL (2), clean FK/integrity checks. Driver selection: built-in node:sqlite.",
       "findings": [
         {
           "name": "sqlite-version-gte-3-39",
@@ -1024,9 +1123,9 @@
           "detail": "trigram substring MATCH on latin returned rowid(s): [{\"rowid\":2}]"
         },
         {
-          "name": "reference-schema-loads",
+          "name": "reference-schema-user-tables-27",
           "status": "PASS",
-          "detail": "37 tables created from pack schema.sql (pack validator baseline: 27)"
+          "detail": "user (non-FTS) tables = 27 (expected exactly 27, the pack validator baseline); FTS virtual tables [\"fts_messages_lex\",\"fts_messages_tri\"] + 8 shadow tables (10 FTS-related names); sqlite_master table total = 37"
         },
         {
           "name": "reference-schema-fk-clean",
@@ -1049,14 +1148,19 @@
           "detail": "journal_mode = wal"
         },
         {
+          "name": "synchronous-full",
+          "status": "PASS",
+          "detail": "PRAGMA synchronous = 2 (2 = FULL)"
+        },
+        {
           "name": "integrity-check",
           "status": "PASS",
           "detail": "integrity_check = ok"
         },
         {
           "name": "driver-selection",
-          "status": "PASS",
-          "detail": "node:sqlite on locked Node 22.23.5 satisfies SQLite >=3.39, FTS5, trigram, WAL, foreign_keys, and executes the reference DDL — choose the built-in driver; no better-sqlite3 dependency (per 06 §1 and README: 满足则优先用内置)"
+          "status": "INFO",
+          "detail": "node:sqlite on locked Node 22.23.5 satisfies every asserted gate (version floor, FTS5+trigram, 27 user tables + shadow split, triggers, WAL, synchronous=FULL, FK/integrity) — choose the built-in driver; no better-sqlite3 dependency (per 06 §1). The conclusion follows the PASS status of this probe's falsifiable checks."
         }
       ]
     }

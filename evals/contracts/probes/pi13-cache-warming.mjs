@@ -87,16 +87,29 @@ export async function run() {
     const unsub = session.subscribe((e) => sessionEvents.push(e.type));
     await session.prompt("pi13 turn");
     unsub();
-    const hasUsageEntry = JSON.stringify(server.requests).length > 0;
     probe.check(
       "warming-eligible-model-check",
       flash.promptCache === undefined,
       `deepseek-flash catalog entry has no promptCache lifetime declared → ineligible for cache warming on this model; no warm call is expected (hits=${server.hits})`,
     );
+    // Falsifiable static evidence: the decision override surface is a real
+    // declared event in the installed dist — extensions/types.d.ts declares
+    // the registration signature on(event: "cache_warming_decision", ...)
+    // and cache-warmer.d.ts declares the event type plus its result.
+    const extTypes = readFileSync(
+      join(process.cwd(), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "extensions", "types.d.ts"),
+      "utf8",
+    );
+    const warmerDts = readFileSync(
+      join(process.cwd(), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "cache-warmer.d.ts"),
+      "utf8",
+    );
     probe.check(
-      "decision-event-surface-exists",
-      true,
-      `cache_warming_decision extension event registered; observed during run: ${warmingEvents.length} (0 expected: model ineligible, but the override surface exists and returns {action:'stop'|'warm'})`,
+      "decision-event-type-declared",
+      /on\(event:\s*"cache_warming_decision"/.test(extTypes) &&
+        /type:\s*"cache_warming_decision"/.test(warmerDts) &&
+        /CacheWarmingDecisionEventResult/.test(extTypes),
+      `extensions/types.d.ts declares on(event: "cache_warming_decision", ...) with CacheWarmingDecisionEventResult, cache-warmer.d.ts declares the event type; observed during run: ${warmingEvents.length} invocations (0 expected: model ineligible)`,
     );
     session.dispose();
   } catch (e) {
@@ -106,10 +119,27 @@ export async function run() {
     agent.cleanup();
   }
 
+  // The off value is respected by the runtime settings path (falsifiable):
+  // an explicit in-memory override must read back "off", and the shipped
+  // defaults.json must actually contain the off value.
+  const offMode = pi.SettingsManager.inMemory({ cacheWarming: "off" }).getCacheWarmingMode?.();
   probe.check(
-    "warming-off-for-aegispi",
-    true,
-    "AegisPi config must set cacheWarming: \"off\" initially (06: 保温默认关闭) even though Pi 1.5.2 defaults to \"idle\"; warming calls are billed (usage kind 'cache_warm') and must be budgeted as purpose=warming before enabling",
+    "explicit-off-respected-by-settings-path",
+    offMode === "off",
+    `SettingsManager.inMemory({cacheWarming:"off"}).getCacheWarmingMode() = ${offMode}`,
+  );
+  const defaultsFile = readFileSync(
+    join(process.cwd(), "apps", "daemon", "config", "defaults.json"),
+    "utf8",
+  );
+  probe.check(
+    "defaults-json-sets-off",
+    /"cacheWarming"\s*:\s*"off"/.test(defaultsFile),
+    `apps/daemon/config/defaults.json contains "cacheWarming": "off" — config value written; the daemon loading this file is Phase 2 code, so runtime enforcement is NOT yet in place (recorded, not claimed)`,
+  );
+  probe.note(
+    "warming-must-be-budgeted-before-enabling",
+    "warming calls are billed (usage kind 'cache_warm') and must be budgeted as purpose=warming before enabling — normative 06 rule for later phases",
   );
 
   const status = summarizeProbe(probe);
@@ -119,7 +149,7 @@ export async function run() {
     status,
     summary:
       status === "PASS"
-        ? "Pi 1.5.2 defaults cacheWarming to 'idle' (deviation risk for the AegisPi 'off by default' budget rule — the host must set it explicitly). The cache_warming_decision extension event can veto warming; deepseek-flash declares no promptCache lifetime so warming is ineligible on the launch model. Any future warming must be budgeted as purpose=warming."
+        ? "Pi 1.5.2 defaults cacheWarming to 'idle' — measured, and a real conflict with the AegisPi 'off by default' budget rule. Mitigation is in place at the settings level only: inMemory({cacheWarming:'off'}) reads back 'off' and defaults.json carries the off value; daemon code that loads it is Phase 2, so runtime enforcement is recorded as NOT yet in place. cache_warming_decision is a declared, registrable override event; deepseek-flash declares no promptCache lifetime so warming is ineligible on the launch model. Future warming must be budgeted as purpose=warming."
         : "cacheWarming contract deviates; see findings.",
     findings: probe.findings,
   };

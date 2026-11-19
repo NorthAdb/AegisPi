@@ -77,6 +77,16 @@ export async function run() {
           Math.abs(u.cost.total - expectedTotal) < 1e-12,
         `cost.input=${u.cost.input} (expected ${expectedInputCost}), cost.output=${u.cost.output} (expected ${expectedOutputCost}), cost.total=${u.cost.total}`,
       );
+      // Measured shape (audit round 1, P1-2): cost.totalFromProvider EXISTS
+      // as an optional boolean — false on the standard path (pi-ai models.js
+      // sets it false; openrouter-cost.js sets true when the provider
+      // reports cost). It is never a number, so a ledger must not sum from
+      // it. This assertion fails if the field's type ever changes.
+      probe.check(
+        "cost-totalFromProvider-is-boolean-false",
+        typeof u.cost.totalFromProvider === "boolean" && u.cost.totalFromProvider === false,
+        `cost.totalFromProvider = ${JSON.stringify(u.cost.totalFromProvider)} (typeof ${typeof u.cost.totalFromProvider}); declared totalFromProvider?: boolean in pi-ai dist/types.d.ts; ledger sums input+output+cache itself per 06 §8`,
+      );
     }
     probe.check(
       "sdk-message_update-no-usage",
@@ -143,8 +153,8 @@ export async function run() {
     const u = ends.at(-1)?.message?.usage;
     probe.check(
       "missing-usage-reports-zeros-not-unknown",
-      !!u && u.input === 0 && u.output === 0,
-      `usage with provider omission: ${JSON.stringify(u)} — Pi cannot distinguish "provider omitted usage" from "zero usage"; the AegisPi ledger must hold reservations until a trustworthy usage or bill arrives (06 §8)`,
+      !!u && u.input === 0 && u.output === 0 && u.cost?.total === 0,
+      `usage with provider omission: ${JSON.stringify(u)} — Pi cannot distinguish "provider omitted usage" from "zero usage" (cost fields also zero); the ledger must hold such responses un-settled (HELD) until a trustworthy usage or bill arrives (06 §8)`,
     );
     session.dispose();
   } catch (e) {
@@ -154,10 +164,13 @@ export async function run() {
     agent2.cleanup();
   }
 
-  probe.check(
-    "no-totalFromProvider-dependency",
-    true,
-    "no totalFromProvider field exists in the usage shape; ledger code must sum input+output+cache fields itself and treat missing usage as un-settled (HELD), per 06 §8",
+  // Normative ledger rule (06 §8) — a host duty, not a Pi property, so it
+  // is recorded as a note rather than a check that cannot fail. The
+  // falsifiable shape facts live in cost-totalFromProvider-is-boolean-false
+  // and missing-usage-reports-zeros-not-unknown above.
+  probe.note(
+    "ledger-sums-itself",
+    "usage carries per-field numbers only (input/output/cache*, cost.total) with cost.totalFromProvider as a boolean flag, never a provider-reported total; ledger code must sum input+output+cache itself and treat missing usage as un-settled (HELD), per 06 §8",
   );
 
   const status = summarizeProbe(probe);
@@ -167,7 +180,7 @@ export async function run() {
     status,
     summary:
       status === "PASS"
-        ? "Usage parses from the final streamed chunk (input/output/totalTokens), cost derives from catalog prices (deepseek-flash 0.3/1.2), and provider-omitted usage yields zeros rather than an unknown marker — the host ledger, not Pi, must hold the conservative reservation."
+        ? "Usage parses from the final streamed chunk (input/output/totalTokens), cost derives from catalog prices (deepseek-flash 0.3/1.2), cost.totalFromProvider exists as a boolean (false on this path, never a number to sum), and provider-omitted usage yields zeros — in usage AND cost — rather than an unknown marker. The host ledger, not Pi, must hold the conservative reservation (HELD)."
         : "usage contract deviates; see findings.",
     findings: probe.findings,
   };

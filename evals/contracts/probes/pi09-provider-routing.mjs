@@ -210,9 +210,10 @@ export async function run() {
     agentC.cleanup();
   }
 
-  probe.check(
+  // Normative host-boundary statement (02/AGENTS) — not a Pi-measurable
+  // property, so it is a note rather than an unfailable PASS.
+  probe.note(
     "worker-cannot-override-url",
-    true,
     "baseUrl and credentials resolve from host-side models.json / ModelRuntime only; script or model text has no API to rewrite a provider URL per request (host-owned adapters remain the boundary)",
   );
 

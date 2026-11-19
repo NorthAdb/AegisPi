@@ -3,8 +3,10 @@ date	id	decision	rationale	evidence	result
 2026-11-18	D-02	Node 锁定维持 22.23.5，无需追补丁	nodejs.org/dist/index.json 2026-11-18 复核：v22.x 最新即 v22.23.5（2026-11-11 安全版）	dist/index.json 拉取记录；本机 node --version = v22.23.5，SQLite 3.54.1	锁定不变
 2026-11-18	D-03	基础镜像选 node:22.23.5-bookworm-slim	slim 变体体积小且 glibc 兼容；三个应用镜像共用同一基础便于统一复测	docker pull + image inspect RepoDigest sha256:e9f565d3…（docs/phase1/reports/image-digest.md）	已锁定 digest
 2026-11-18	D-04	hono 加入 daemon 依赖 exact 4.13.19	00 §4 HTTP/UI 行选 Hono 为宿主框架且"影响我"锚点要求 lockfile 含其 exact 版本	package-lock.json hono 4.13.19 integrity sha512-KmXvQ…	已锁定
-2026-11-18	D-05	oracle 命题锚定 GHSA-46wx（csrf text/ping）而非检查单描述的"CORS 凭据反射/GHSA-88fw"	实测 advisory API 无 GHSA-88fw High 条目；csrf 绕过直接命中本项目控制台 CSRF 依赖面（02 §7）	gh api repos/honojs/hono/security-advisories 实测 20 条；PI-contract-report 与夹具 README 记录差异	hono-triage oracle 以实测条目为准
+2026-11-18	D-05	oracle 命题锚定 GHSA-46wx（csrf text/ping）【2026-11-19 勘误：rationale 原写"实测 API 无 GHSA-88fw"系分页截断所致的错误结论，见 D-09；命题维持 csrf 对并新增 CORS 对（GHSA-88fw 已建 oracle.hono-cors.json 双断言实测）】	csrf 绕过直接命中本项目控制台 CSRF 依赖面（02 §7）；CORS 反射对命中检查单的 High 锚点	gh api 全量（per_page=100，61 条）实测；两对 oracle A1/A2 均实测（2026-11-19）	hono-triage + hono-cors 两对 oracle，均以实测条目为准
 2026-11-18	D-06	宿主适配层自实现 dialog deadline 与字节 LF 分帧	Pi RPC 模式 dialog timeout 实测不生效；readline 在锁定 Node 虽安全但版本无关性不足	PI-07/FRAMING 探针 findings（contracts-report.json）	宿主职责确认，非 Pi 契约偏离
-2026-11-18	D-07	宿主配置显式 cacheWarming=off	Pi 1.5.2 默认"idle"与规范"保温默认关闭"冲突	settings-defaults.js 实测 cacheWarming:"idle"；apps/daemon/config/defaults.json 已写 off	冲突已消解
+2026-11-18	D-07	宿主配置显式 cacheWarming=off	Pi 1.5.2 默认"idle"与规范"保温默认关闭"冲突	settings-defaults.js 实测 cacheWarming:"idle"；apps/daemon/config/defaults.json 已写 off	【2026-11-19 修正措辞】设置层缓解就位（inMemory 路径实测接受 off、defaults.json 实测含 off 值）；加载该文件的 daemon 代码属 Phase 2，运行时强制未落地——不宣称"冲突已消解"
 2026-11-18	D-08	SQLite 驱动选 node:sqlite（不用 better-sqlite3）	全部门禁实测通过（3.54.1、FTS5+trigram、参考 DDL 27 表）；规范"满足则优先用内置"	sqlite-node 探针 + docs/phase1/reports/sqlite-driver.md	已定案
+2026-11-19	D-09	advisory 拉取改为全量分页并加窗口过滤；为 GHSA-88fw 建第二对 oracle	v1 用 per_page=20 被静默截断，导致错误宣称 GHSA-88fw 不存在并"纠正"检查单；数据完整性教训：任何"列表里没有 X"的结论必须先证明拉取全量	gh api per_page=100 全量 61 条、窗口内 30 条；GHSA-88fw-hqm2-52qc（high，<4.12.25）实测在窗；oracle.hono-cors.json A1/A2 实测（4.13.19 不反射 exit 0 / 4.12.24 反射 exit 1）	events.json 重建为 75 候选；教训入 audit-response.md P1-3
+2026-11-19	D-10	探针证据纪律整改：不可失败的检查不得计为 PASS	第一轮审计 P1-2：12 处字面量 true 的 PASS 使套件"绿"不代表结论被测过	probe-utils summarizeProbe 收紧（无 PASS 判据判 SKIP）；12 处全部转可失败断言或降级 note；mutation 实测（改 false 变红）存 evidence/04	grep 证明全库无残留字面量 true 的 probe.check
 

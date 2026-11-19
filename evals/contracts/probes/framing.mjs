@@ -19,6 +19,7 @@ import {
   makeWorkspaceDir,
   piEnv,
   LOCKED_NODE,
+  assertChildNodeLocked,
   sleep,
   waitFor,
 } from "../helpers/probe-utils.mjs";
@@ -84,6 +85,7 @@ function parseFrames(framesBuf) {
 
 export async function run() {
   const probe = createProbe(ID, TITLE);
+  assertChildNodeLocked(probe);
   const U2028 = "\u2028";
   const U2029 = "\u2029";
   const server = createFakeOpenAIServer({
@@ -116,7 +118,7 @@ export async function run() {
 
   try {
     await waitFor(() => settled, 30000, 50, "agent_settled");
-    probe.check("agent-settled-emitted", true, "agent_settled observed on stdout");
+    probe.check("agent-settled-emitted", settled === true, "agent_settled observed on stdout");
   } catch (e) {
     probe.check("agent-settled-emitted", false, e.message);
   }
@@ -170,15 +172,21 @@ export async function run() {
     rl.on("close", () => resolve({ lines: lines.length, badParse }));
     pt.end(raw);
   });
-  // Design-pack 05 §3 observed the split on Node v24.22.1. Retest on the
-  // locked v22.23.5: readline does NOT split U+2028/U+2029 here (verified
-  // with tools/readline-repro.mjs on both v22.23.5 and v24.17.0). The
-  // byte-LF framing contract stays: it is version-independent and also
-  // handles CRLF. This check records the locked-Node behavior as evidence.
+  // Design-pack 05 §3 observed the readline U+2028/U+2029 split on Node
+  // v24.22.1. On the locked v22.23.5 the split does NOT reproduce (this
+  // assertion fails if a future Node upgrade changes that — the byte-LF
+  // framing contract then needs re-verification). The cross-version repro is
+  // independently runnable: tools/readline-repro.mjs reports
+  // v22.23.5 => 1 line / 0 parse failures, v24.17.0 => 3 lines / 3 failures.
   probe.check(
-    "readline-behavior-recorded-on-locked-node",
-    true,
-    `locked Node v22.23.5: readline saw ${rlResult.lines} lines with ${rlResult.badParse} unparseable (no U+2028/2029 split); v24.17.0 repro splits into 3 lines with 3 failures (tools/readline-repro.mjs). Byte-LF framing stays the contract regardless`,
+    "readline-equals-byte-frames-on-locked-node",
+    rlResult.lines === lfFrames.length && rlResult.badParse === 0,
+    `locked Node v22.23.5: readline produced ${rlResult.lines} lines with ${rlResult.badParse} unparseable, identical to the ${lfFrames.length} byte-LF frames (no U+2028/U+2029 split here). Byte-LF framing stays the version-independent host contract regardless`,
+  );
+  probe.note(
+    "readline-v24-hazard",
+    "readline DOES split U+2028/U+2029 into 3 lines with 3 parse failures on the v24 line (v24.17.0 measured via tools/readline-repro.mjs); it must not be relied on as a protocol reader across Node versions", 
+    { repro: "node evals/contracts/tools/readline-repro.mjs (per Node binary)" },
   );
 
   // --- C/D/F/E: input-side behaviors, each in a fresh process ---
@@ -221,10 +229,15 @@ export async function run() {
       }, 50);
     });
 
-  // C: chunked UTF-8 mid-character split across two stdin writes
+  // C: chunked UTF-8 mid-character split across two stdin writes.
+  // The cut lands INSIDE the three UTF-8 bytes of 哈 (e5 93 88), not on an
+  // ASCII boundary (audit round 1, P1-2: the old cut at length-2 sliced
+  // between "}" and a quote, proving nothing about mid-character buffering).
   const msg = "哈"; // U+54C8, UTF-8: e5 93 88
+  const haBytes = Buffer.from(msg, "utf8");
   const promptCmd = Buffer.from(JSON.stringify({ id: "c1", type: "prompt", message: `x${msg}y` }), "utf8");
-  const cut = promptCmd.length - 2; // split inside the last bytes of the multibyte char sequence
+  const haStart = promptCmd.indexOf(haBytes);
+  const cut = haStart + 1; // first split byte is 0xe5, remainder 0x93 0x88 arrive later
   const part1 = promptCmd.subarray(0, cut);
   const part2 = Buffer.concat([promptCmd.subarray(cut), Buffer.from("\n")]);
   const cResult = await inputScenario("chunked-utf8", [
@@ -233,7 +246,7 @@ export async function run() {
   ], async (r2) => {
     const rec = await firstResp(r2, "prompt");
     const ok = rec.success === true && rec.id === "c1";
-    return { ok, detail: `chunked-write prompt response: ${JSON.stringify(rec)}` };
+    return { ok, detail: `mid-character split (cut at byte ${cut}, inside e5 93 88) prompt response: ${JSON.stringify(rec)}` };
   });
   probe.check("input-chunked-utf8-buffered", cResult.ok, cResult.detail);
 
@@ -254,12 +267,16 @@ export async function run() {
   });
   probe.note("input-u2028-behavior", dResult.detail, dResult.evidence);
   const dAccepted = dResult.evidence?.success === true;
+  // Measured contract (falsifiable): Pi's RPC input framing is LF-byte-only,
+  // so U+2028/U+2029 inside a command string stay in one frame and the
+  // command is accepted. If a future Pi changes input splitting, this goes
+  // red and the host adapter's escaping rules get revisited.
   probe.check(
-    "input-u2028-verdict",
-    true,
+    "input-u2028-single-frame-accepted",
+    dAccepted === true,
     dAccepted
-      ? "Pi input framing is LF-byte-only: U+2028/U+2029 inside a command string survive in one frame"
-      : "Pi input framing splits on U+2028/U+2029 (readline-style): host adapter MUST escape or avoid them in command payloads",
+      ? "Pi input framing is LF-byte-only: U+2028/U+2029 inside a command string survive in one frame and the prompt is accepted"
+      : `Pi rejected or mis-framed the command carrying U+2028/U+2029: ${dResult.detail}`,
   );
 
   // F: CRLF-terminated command
@@ -282,10 +299,16 @@ export async function run() {
     };
   });
   probe.note("input-overlong-behavior", eResult.detail, eResult.evidence);
+  // Measured contract (falsifiable): Pi accepted a 1.5 MiB single-line
+  // command. The host-side cap rule below is normative (06), not a Pi fact.
   probe.check(
+    "input-overlong-1-5mib-accepted",
+    eResult.evidence?.success === true,
+    `1.5MiB single-line prompt accepted by Pi (success=${eResult.evidence?.success}); ${eResult.detail}`,
+  );
+  probe.note(
     "adapter-must-cap-frames",
-    true,
-    "overlong-line behavior recorded; regardless of Pi-side tolerance, the host adapter must enforce max-frame/total-buffer/idle-timeout limits per 06 contract",
+    "regardless of Pi-side tolerance, the host adapter must enforce max-frame/total-buffer/idle-timeout limits per the 06 contract — normative host duty, not a Pi property",
   );
 
   // G: stderr separation
@@ -307,7 +330,7 @@ export async function run() {
     status,
     summary:
       status === "PASS"
-        ? "LF byte framing holds on both directions (input buffered mid-UTF-8, CRLF stripped, U+2028/U+2029 intact in single frames); on locked Node 22.23.5 readline does NOT split U+2028/U+2029 (unlike v24), yet byte-LF framing stays the version-independent contract; Pi tolerates 1.5MiB lines, so max-frame/buffer/idle caps are a host adapter duty."
+        ? "LF byte framing holds on both directions, now measured with a cut inside the 3 UTF-8 bytes of a CJK char (input buffers mid-character until LF), CRLF stripped, U+2028/U+2029 intact in single frames both ways, and 1.5MiB single lines accepted. On locked Node 22.23.5 readline matches byte-LF frames exactly (asserted); the v24 split hazard is recorded via the standalone repro tool. Host-side max-frame/buffer/idle caps remain a normative adapter duty."
         : "framing contract deviates; see findings.",
     findings: probe.findings,
   };

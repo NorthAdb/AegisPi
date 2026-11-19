@@ -2,7 +2,8 @@
 // boundary as extension_ui_request/response records; timeout auto-resolves;
 // nothing survives a process kill, so the host must own durable parking.
 
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";import { join } from "node:path";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { createFakeOpenAIServer } from "../helpers/fake-openai-server.mjs";
 import {
   createProbe,
@@ -11,6 +12,7 @@ import {
   makeWorkspaceDir,
   piEnv,
   spawnPiRpc,
+  assertChildNodeLocked,
   waitFor,
 } from "../helpers/probe-utils.mjs";
 
@@ -56,6 +58,7 @@ function notifyTexts(records) {
 
 export async function run() {
   const probe = createProbe(ID, TITLE);
+  assertChildNodeLocked(probe);
   const server = createFakeOpenAIServer({ scripts: [] });
   const port = await server.start();
   const agent = makeIsolatedAgentDir({ baseUrl: `http://127.0.0.1:${port}` });
@@ -168,9 +171,10 @@ export async function run() {
 
     // Timeout auto-resolve: docs/rpc-extension-ui.md claims the agent-side
     // auto-resolves after the dialog timeout. Measured on 1.5.2 (locked
-    // Node, RPC mode): it does NOT — a confirm(timeout:1500) stayed pending
-    // past 8s with no notify. The host adapter must implement its own
-    // dialog deadline; Pi-side timeout is not dependable.
+    // Node, RPC mode): it does NOT — a confirm(timeout:1500) was still
+    // pending after 4s (>2.5x the timeout) with no completion notify. The
+    // host adapter must implement its own dialog deadline; Pi-side timeout
+    // is not dependable.
     await rpc.send({ id: "p2", type: "prompt", message: "/probe_ui_timeout" });
     await waitFor(
       () => uiRequests(records).find((r) => r.method === "confirm" && !answered.has(r.id)),
@@ -196,7 +200,13 @@ export async function run() {
       );
     }
 
-    // Persistence across restart: kill mid-dialog, confirm nothing resumes.
+    // Persistence across restart: put a confirm dialog in pending state, kill
+    // mid-dialog, then start a FRESH process on the same agent dir +
+    // workspace and verify (a) the extension itself loads again (get_commands
+    // lists it — proves the restart is functional) and (b) no dialog request
+    // is replayed: nothing arrives unprompted and none of the killed
+    // process's dialog ids reappear. This is falsifiable: if 1.5.2 ever
+    // gains replay/restore, the second assertion goes red.
     const before = uiRequests(records).length;
     await rpc.send({ id: "p3", type: "prompt", message: "/probe_ui" });
     await waitFor(
@@ -205,13 +215,50 @@ export async function run() {
       50,
       "pending confirm before kill",
     );
+    const killedDialogIds = uiRequests(records).map((r) => r.id);
     rpc.child.kill("SIGKILL");
     await new Promise((r) => rpc.child.once("exit", r));
-    probe.check(
-      "no-ui-persistence-across-restart",
-      true,
-      "killed the child with a confirm dialog pending: the request is gone with the process; no replay/requeue mechanism exists in 1.5.2, so the AegisPi host must implement durable parking itself (save state → park → restart → re-ask)",
-    );
+
+    const restartRecords = [];
+    const rpc2 = spawnPiRpc({
+      cliPath: CLI,
+      agentDir: agent.dir,
+      env: piEnv(agent.dir),
+      cwd: wsDir,
+      onFrame: (f) => {
+        try {
+          restartRecords.push(JSON.parse(f.toString("utf8")));
+        } catch {}
+      },
+    });
+    try {
+      await rpc2.send({ id: "g1", type: "get_commands" });
+      const cmds = await waitFor(
+        () => restartRecords.find((r) => r.type === "response" && r.command === "get_commands"),
+        20000,
+        50,
+        "restart get_commands",
+      );
+      probe.check(
+        "restart-loads-extension",
+        cmds.success === true && (cmds.data?.commands ?? []).some((c) => c.name === "probe_ui"),
+        `restart process lists probe_ui command — the extension reloads on the same agent dir`,
+      );
+      // Watch for any unprompted dialog for 4 seconds.
+      await new Promise((r) => setTimeout(r, 4000));
+      const replayedDialogs = restartRecords.filter((r) => r.type === "extension_ui_request");
+      const oldIdsReplayed = replayedDialogs.filter((r) => killedDialogIds.includes(r.id));
+      probe.check(
+        "no-dialog-replay-after-restart",
+        replayedDialogs.length === 0 && oldIdsReplayed.length === 0,
+        `after SIGKILL with a confirm pending, a fresh process on the same dirs emitted ${replayedDialogs.length} unprompted extension_ui_request(s) and ${oldIdsReplayed.length} reused dialog id(s) — pending dialogs die with the process in 1.5.2, so the host must implement durable parking itself (save state → park → restart → re-ask)`,
+      );
+    } catch (e) {
+      probe.check("no-dialog-replay-after-restart", false, `restart verification failed: ${e.message}`);
+    } finally {
+      rpc2.child.stdin.end();
+      await new Promise((r) => rpc2.child.once("exit", r));
+    }
   } catch (e) {
     probe.check("probe-run", false, `threw: ${e.stack ?? e.message}`);
   } finally {
@@ -226,7 +273,7 @@ export async function run() {
     status,
     summary:
       status === "PASS"
-        ? "Dialogs cross the RPC boundary as extension_ui_request/response with client ids, but with three measured deviations: options nest under one field (not the documented flat shape), the documented dialog timeout does NOT fire in RPC mode, and pending dialogs die with the process. The AegisPi host must therefore own dialog deadlines AND durable parking (04 §2), reading the nested wire shape."
+        ? "Dialogs cross the RPC boundary as extension_ui_request/response with client ids, with three measured deviations: options nest under one field (not the documented flat shape), the documented dialog timeout does NOT fire in RPC mode (measured: 4s past a 1500ms timeout, still pending), and pending dialogs die with the process — verified by killing mid-dialog and restarting on the same dirs: extension reloads, zero dialog requests replay. The AegisPi host must therefore own dialog deadlines AND durable parking (04 §2), reading the nested wire shape."
         : "extension UI contract deviates; see findings.",
     findings: probe.findings,
   };

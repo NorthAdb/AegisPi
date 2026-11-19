@@ -1,19 +1,25 @@
 # honojs/hono triage fixture (Phase 1 task 6)
 
-监控对象 `honojs/hono`（本仓库 daemon 的 HTTP 宿主框架，锁定 exact 4.13.19，见 `apps/daemon/package.json`）。本目录是 Phase 1 的 oracle 与 environment manifest 夹具起点，全部数值为 2026-11-18 实测，无占位。
+监控对象 `honojs/hono`（本仓库 daemon 的 HTTP 宿主框架，锁定 exact 4.13.19，见 `apps/daemon/package.json`）。本目录是 Phase 1 的 oracle 与 environment manifest 夹具，全部数值为实测，无占位。
 
 ## 文件
 
-- `events.json`：候选事件窗口（2026-05-18 至 2026-11-18），45 个稳定 release + 20 条 GHSA，共 65 个候选，来源为 GitHub REST API 只读拉取（`gh api repos/honojs/hono/...`）。生成脚本见 `evals/contracts/tools/build-hono-events.mjs`。
-- `oracle.hono-triage.json`：命题 = csrf() text/ping hyperlink auditing 绕过（GHSA-46wx-v44x-9hh2，影响 <4.13.16）。断言 A1 已在锁定 Node 22.23.5 + hono 4.13.19 上实测通过（403 拒绝，exit 0）。断言 A2（target v4.12.24 预期绕过）为 Phase 4 security_repro 的记录约定，Phase 1 未执行。
-- `manifest.hono-triage.json`：baseline = v4.13.19（commit 676c8f80…，tarball sha256 e1a19a8a…），target = v4.12.24（commit 5fdde5ab…，tarball sha256 4ce62f3e…），基础镜像 digest 为实测 `node:22.23.5-bookworm-slim`。target 的 hono@4.12.24 integrity 待 Phase 4 隔离安装后回填真实值——按 schema 描述"缺值必须阻塞可复现 run"，gate 拒绝占位符。
-- `checks/csrf-textping-check.mjs`：最小检查脚本（fixtureHash = sha256 4e89f269…）。
+- `events.json`：候选事件窗口 **[2026-05-18, 2026-11-18)（端点排他）**，45 个稳定 release + 30 条 GHSA，共 **75 个候选**。来源为 GitHub REST API 只读全量拉取（`gh api "repos/honojs/hono/security-advisories?per_page=100"`，61 条全量 + `/releases`）。生成脚本 `evals/contracts/tools/build-hono-events.mjs`（对 release 与 advisory 都做窗口过滤）。
+- `oracle.hono-triage.json` + `manifest.hono-triage.json`：**csrf() text/ping hyperlink auditing 绕过**（GHSA-46wx-v44x-9hh2，<4.13.16）。A1/A2 均已在锁定 Node 22.23.5 实测：baseline 4.13.19 → 403/exit 0；target 4.12.24 → 200 放行/exit 1。
+- `oracle.hono-cors.json` + `manifest.hono-cors.json`：**CORS 凭据反射**（GHSA-88fw-hqm2-52qc / CVE-2026-54290，**high**，<4.12.25）。A1/A2 均已实测：baseline 4.13.19 → `acao:"*"` 不反射/exit 0；target 4.12.24 → `acao:"https://attacker.example"` 反射/exit 1。源码级根因：4.12.24 在默认 `origin:"*"` + credentials 下 `findAllowOrigin` 返回 `(origin) => origin || null`。
+- `checks/csrf-textping-check.mjs`（fixtureHash sha256 4e89f269…）与 `checks/cors-credential-check.mjs`（sha256 e1a328e1…）。
+- manifest 的快照值：baseline = v4.13.19（commit 676c8f80…，tarball sha256 e1a19a8a…，隔离安装 lockfile sha256 e5d0c57e…）；target = v4.12.24（commit 5fdde5ab…，tarball sha256 4ce62f3e…，隔离安装 lockfile sha256 db2bb134…，npm integrity `sha512-I36D1s…U4iw==` 与 registry 一致）。两对 manifest 共用同一快照对。
+
+## 复现方式（重要）
+
+每个快照在隔离目录独立 `npm install hono@<version>`（npm 10.9.9 / Node 22.23.5），然后把检查脚本**复制进该安装目录**再运行——ESM 的 `import "hono"` 按**脚本位置**解析而非 cwd，在仓库里直接跑会解析到仓库的 4.13.19（第一轮审计后实测踩过此坑，已写入 manifest 的 `installNote`）。
+
+## 与开工检查单的差异记录（2026-11-19 修正）
+
+1. 检查单写“10 条 GHSA，High 一条（GHSA-88fw CORS 凭据反射，<4.12.25）”。**第一版夹具错误地声称 GHSA-88fw 不存在**——原因是初版拉取用了 `per_page=20`，GitHub API 默认分页把列表截断在最近 20 条，而 GHSA-88fw 发布于 2026-06-09、恰好排在截断点之外。用 `per_page=100` 全量拉取后：61 条 advisory 总量、窗口内 30 条，**GHSA-88fw-hqm2-52qc 实存**（high，CVE-2026-54290，2026-06-09，<4.12.25，CORS 中间件在默认通配 origin + credentials 下反射任意 Origin）。**检查单的记忆是对的，本夹具第一版的“纠错”才是错的**。教训已入决策表 D-09：分页截断是数据完整性失败模式，任何“列表里没有 X”的结论必须先证明拉取是全量的。
+2. 检查单预估窗口约 47 个候选事件；实测 **75 个**（45 稳定 release + 30 advisory，窗口 [2026-05-18, 2026-11-18)）。
+3. 两对 oracle 的 A2（target 4.12.24 表现出漏洞行为）不再是“Phase 4 才测的约定”，已在锁定 Node 上隔离实测成立（exit 1）。Phase 4 的 security_repro job 仍待容器化执行，但命题的方向性证据已闭合。
 
 ## 标注状态
 
-`hono-triage.labels.local.json` 是标注提案（正/负/未知三类），**只留本地不入库**（labels 属于主人私密判断，.gitignore 已排除）。待用户三项准备齐（通知渠道、基线三句话）后确认或修正，再决定是否以脱敏形式入库。
-
-## 实测与开工检查单的差异记录
-
-1. 检查单写"2026-05 至 2026-11 共 10 条 GHSA，High 一条（GHSA-88fw CORS 凭据反射，<4.12.25）"。实测 API 返回 20 条，其中 `<4.12.25` 的条目为 GHSA-wwfh-h76j-fc44（CVE-2026-54286，medium，serve-static Windows 路径穿越）；未找到名为 GHSA-88fw 的 High 条目，也未找到"CORS 凭据反射"描述的条目（最接近的是 GHSA-8j4g-w8fx-2239，medium，CORS 中间件 ReDoS，<4.12.34）。以实测为准，检查单三分类示例的意图（csrf unknown 例、CORS 负例、RegExpRouter 正例）在 labels 提案中均已保留。
-2. 检查单预估窗口约 47 个候选事件；实测 65 个（45 稳定 release + 20 advisory）。
+`hono-triage.labels.local.json` 是标注提案（正/负/未知三类），**只留本地不入库**（labels 属于主人私密判断，.gitignore 已排除）。GHSA-88fw 已按 High 锚点补入提案（unaffected，4.13.19 > 4.12.25）。待用户三项准备齐（通知渠道、基线三句话）后确认或修正全部 75 个候选的标注。

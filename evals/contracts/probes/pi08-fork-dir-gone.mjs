@@ -13,6 +13,7 @@ import {
   piEnv,
   spawnPiRpc,
   waitFor,
+  assertChildNodeLocked,
 } from "../helpers/probe-utils.mjs";
 
 export const ID = "PI-08";
@@ -22,6 +23,7 @@ const CLI = join(process.cwd(), "node_modules", "@earendil-works", "pi-coding-ag
 
 export async function run() {
   const probe = createProbe(ID, TITLE);
+  assertChildNodeLocked(probe);
   const server = createFakeOpenAIServer({
     scripts: [
       { kind: "text", text: "pi08 original response" },

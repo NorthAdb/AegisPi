@@ -5,17 +5,12 @@
     "repo": "honojs/hono",
     "commitSha": "676c8f80fcafc49e6e74c847a8f0d9c44cc7faee",
     "sourceArchiveHash": "sha256:e1a19a8a7e393d4e457ef48061a13361b3c932cb5744fad65748542ddaacb7ed",
-    "lockfileHash": "sha256:f1364f6e23b29d020f164fa8cf83d50904215ae6c9f7a883a9950585a57f947e",
+    "lockfileHash": "sha256:e5d0c57e9d576d5430cf0964deb3ccf228f862f8a9e809556f3cbf9d6247ba5e",
     "dependencyIntegrity": [
       {
         "name": "hono",
         "version": "4.13.19",
         "hash": "sha512-KmXvQAXwcAHV+muzbIwoJ23niEB5nMoDVr9WcRkU8mvjUECm/1+7v4Jgp7P7a+H6MLFrh+vXrGonGrGS+RQfkA=="
-      },
-      {
-        "name": "@earendil-works/pi-coding-agent",
-        "version": "1.5.2",
-        "hash": "sha512-mUWI04rqF1Vd/m1q+Ps1XeWsTXEVvRUnsmRa83I3Dzua0Tx5bYS93imeqtIfrXf7PkkaR6ERz+AuQhIJlom5yA=="
       }
     ]
   },
@@ -23,12 +18,12 @@
     "repo": "honojs/hono",
     "commitSha": "5fdde5ab5a7d7c89eba4d1ceab76f4a7c011cd3b",
     "sourceArchiveHash": "sha256:4ce62f3e2b5a103d27c6b42cc446d007ed1ccdd310feabd6a78f7ac116f1685c",
-    "lockfileHash": "sha256:f1364f6e23b29d020f164fa8cf83d50904215ae6c9f7a883a9950585a57f947e",
+    "lockfileHash": "sha256:db2bb1344fd16b2b2db9c2197a877bc9f3f853393706b6c62c5c5747ab95dad4",
     "dependencyIntegrity": [
       {
         "name": "hono",
         "version": "4.12.24",
-        "hash": "target install pending Phase 4: install hono@4.12.24 in an isolated dir and record the real integrity here before the repro run; PIN_REQUIRED-style placeholders are rejected by gate"
+        "hash": "sha512-I36D1s+HgQc55KbhEr4iybfxv/9o1zdpw+XEM6dJa91LqQD0HCoSGdxpRJCZE+aavs87j4V3Ls2OJzq8c/U4iw=="
       }
     ]
   },
@@ -37,8 +32,7 @@
     "cpuArch": "amd64",
     "toolchain": {
       "node": "22.23.5",
-      "sqlite": "3.54.1 (node:sqlite bundled)",
-      "pi": "@earendil-works/pi-coding-agent 1.5.2"
+      "pi": "@earendil-works/pi-coding-agent 1.5.2 (host repo; not used by this check)"
     },
     "commands": [
       ["node", "checks/csrf-textping-check.mjs"],
@@ -53,7 +47,8 @@
       "PI_OFFLINE": "1",
       "PI_SKIP_VERSION_CHECK": "1",
       "PI_TELEMETRY": "0"
-    }
+    },
+    "installNote": "Each snapshot's lockfileHash/integrity comes from its own isolated install (npm@10.9.9 on Node 22.23.5): baseline installs hono@4.13.19, target installs hono@4.12.24. The target integrity matches registry.npmjs.org exactly. To run a command against a snapshot, copy the check script INTO that snapshot's install directory and run it there — ESM resolves 'hono' relative to the script location, not the process cwd. Both A1 (exit 0) and A2 (exit 1) were measured this way on 2026-11-19 on the locked Node."
   },
   "oracleRef": "oracles/hono-csrf-textping-bypass-v1",
   "createdAt": 1768857600000

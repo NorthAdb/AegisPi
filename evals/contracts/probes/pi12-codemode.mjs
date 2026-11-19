@@ -126,9 +126,9 @@ export async function run() {
     "memory-limit-doc-verified",
     "256MB per script VM and PI_CODEMODE_MAX_WORKERS=2 are documented limits (docs/codemode.md, dist/extensions/codemode/tool.d.ts); not OOM-forced at runtime in this probe",
   );
-  probe.check(
+  // Normative statement (05 PI-12) — a spec rule, not a Pi fact.
+  probe.note(
     "limits-not-security-boundary",
-    true,
     "per 05 PI-12: unverified limits must not be treated as a security boundary; codemode output/timeout caps are resource guards only — the host remains the real boundary",
   );
 
