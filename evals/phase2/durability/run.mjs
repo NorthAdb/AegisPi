@@ -3,13 +3,15 @@
 // daemon modules against real SQLite files under workspace-state/phase2/.
 // Crash-window cases (06 section 9) kill real child processes and recover.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport, repoRoot } from "../lib/harness.mjs";
+import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport, repoRoot, spawnNode } from "../lib/harness.mjs";
 import { loadCanonicalSchema, migrate, verifySchema, SchemaSourceError, SchemaDriftError } from "../../../apps/daemon/src/db/migrate.mjs";
 import { openDatabase, checkDatabaseIntegrity, sqliteLibraryVersion } from "../../../apps/daemon/src/db/connect.mjs";
 import { acquireDaemonLock, isPidAlive } from "../../../apps/daemon/src/db/lock.mjs";
 import { canonicalJson, sha256LfHex, businessKey, dispatchKeyFromProviderId } from "../../../apps/daemon/src/keys.mjs";
+import { receiveEvent } from "../../../apps/daemon/src/ingress.mjs";
+import { putObjectContent, gcUnreferencedContent } from "../../../apps/daemon/src/objects.mjs";
 
 lockedNodeGuard();
 
@@ -212,6 +214,171 @@ const PINNED_CHECKSUM = "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6b
   );
   const env1 = sha256LfHex(canonicalJson({ a: 1 }));
   suite.check("sha256-lf-normalization", env1.length === 64, `digest ${env1.slice(0, 16)}…`);
+}
+
+// ---------------------------------------------------------------- case: inbox
+{
+  const canonical = loadCanonicalSchema();
+  const ws = makeWorkspace("durability-inbox");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, canonical);
+  const ev = (over = {}) => ({
+    now: 1795000000000,
+    source: "telegram",
+    sourceEventId: "evt-100",
+    principal: { platform: "telegram", subject: "1001" },
+    scope: {
+      kind: "owner_dm",
+      domainKey: "dm:telegram:1001",
+      channel: "telegram",
+      conversationId: "1001",
+    },
+    threadKey: "t1",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "check the repo",
+    verdict: "ADMIT",
+    ...over,
+  });
+  const r1 = receiveEvent(db, ws.stateDir, ev());
+  const row1 = db.prepare("SELECT * FROM inbox WHERE id=?").get(r1.inboxId);
+  suite.check(
+    "admit-persists-inbox-pending",
+    row1.state === "PENDING" && row1.verdict === "ADMIT" && row1.source_event_id === "evt-100",
+    `inbox row ${r1.inboxId} state=${row1.state}`,
+  );
+  const obj = db.prepare("SELECT * FROM objects WHERE id=?").get(r1.objectId);
+  const closure = db
+    .prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?")
+    .all(r1.objectId);
+  const fileOnDisk = existsSync(join(ws.stateDir, obj.storage_ref));
+  suite.check(
+    "payload-object-row-and-own-scope-closure",
+    obj.kind === "event_payload" && closure.length === 1 && closure[0].scope_id === row1.scope_id && fileOnDisk,
+    `object ${obj.id} closure=${JSON.stringify(closure)} file=${fileOnDisk}`,
+  );
+  const audited = db
+    .prepare("SELECT code FROM audit_log WHERE event_id=? ORDER BY seq")
+    .all(r1.inboxId);
+  const streamed = db
+    .prepare("SELECT event_type FROM stream_events WHERE entity_id=?")
+    .all(`inbox:${r1.inboxId}`);
+  suite.check(
+    "admit-audit-and-stream-in-same-transaction",
+    audited.some((a) => a.code === "ingress_received") && streamed.some((s) => s.event_type === "inbox_changed"),
+    `audit=${JSON.stringify(audited.map((a) => a.code))} stream=${streamed.length}`,
+  );
+
+  const before = {
+    inbox: db.prepare("SELECT count(*) c FROM inbox").get().c,
+    objects: db.prepare("SELECT count(*) c FROM objects").get().c,
+  };
+  const r2 = receiveEvent(db, ws.stateDir, ev());
+  const after = {
+    inbox: db.prepare("SELECT count(*) c FROM inbox").get().c,
+    objects: db.prepare("SELECT count(*) c FROM objects").get().c,
+  };
+  const dupAudit = db
+    .prepare("SELECT count(*) c FROM audit_log WHERE code='ingress_duplicate'")
+    .get().c;
+  suite.check(
+    "duplicate-event-returns-success-no-new-rows",
+    r2.duplicate === true && after.inbox === before.inbox && after.objects === before.objects && dupAudit === 1,
+    `duplicate=${r2.duplicate} inbox ${before.inbox}→${after.inbox} objects ${before.objects}→${after.objects}`,
+  );
+
+  const r3 = receiveEvent(db, ws.stateDir, ev({ sourceEventId: "evt-200", verdict: "DROP" }));
+  const row3 = db.prepare("SELECT state, verdict FROM inbox WHERE id=?").get(r3.inboxId);
+  suite.check(
+    "drop-and-observe-go-straight-to-done",
+    r3.duplicate === false && row3.state === "DONE" && row3.verdict === "DROP",
+    `DROP inbox ${r3.inboxId} state=${row3.state}`,
+  );
+
+  const e1 = receiveEvent(db, ws.stateDir, ev({ source: "webhook", sourceEventId: null, payload: "p1" }));
+  const e2 = receiveEvent(db, ws.stateDir, ev({ source: "webhook", sourceEventId: null, payload: "p1" }));
+  const e3 = receiveEvent(db, ws.stateDir, ev({ source: "webhook", sourceEventId: null, payload: "p2" }));
+  const digestRows = db
+    .prepare("SELECT source_event_id FROM inbox WHERE source='webhook'")
+    .all();
+  suite.check(
+    "no-provider-id-source-dedups-on-envelope-digest",
+    e1.duplicate === false && e2.duplicate === true && e3.duplicate === false &&
+      digestRows.every((r) => /^[0-9a-f]{64}$/.test(r.source_event_id)) &&
+      new Set(digestRows.map((r) => r.source_event_id)).size === 2,
+    `webhook dedup ids: ${digestRows.map((r) => r.source_event_id.slice(0, 8)).join(", ")}`,
+  );
+
+  // Unreferenced content files (crash between file durability and DB
+  // activation) must be GC-able without touching referenced ones.
+  putObjectContent(ws.stateDir, "orphan-content");
+  const gc1 = gcUnreferencedContent(db, ws.stateDir, { dryRun: true, now: 1795000000001 });
+  suite.check(
+    "gc-detects-unreferenced-file",
+    gc1.trashed >= 1,
+    `dryRun gc: scanned=${gc1.scanned} trashed=${gc1.trashed}`,
+  );
+  const gc2 = gcUnreferencedContent(db, ws.stateDir, { now: 1795000000002 });
+  const referencedStill = existsSync(join(ws.stateDir, obj.storage_ref));
+  suite.check(
+    "gc-moves-unreferenced-keeps-referenced",
+    gc2.trashed >= 1 && referencedStill === true,
+    `gc moved ${gc2.trashed} file(s), referenced payload still on disk`,
+  );
+}
+
+// ------------------------------------------------- case: ingress crash windows
+{
+  const canonical = loadCanonicalSchema();
+  const scenario = join(repoRoot, "evals", "phase2", "durability", "scenarios", "ingress-crash.mjs");
+  const windows = [
+    { name: "ingress-before-file", point: "ingress:before-file", expectInbox: 0 },
+    { name: "ingress-inside-txn", point: "ingress:inside-txn", expectInbox: 0 },
+    { name: "ingress-after-commit", point: "ingress:after-commit", expectInbox: 1 },
+  ];
+  for (const w of windows) {
+    const ws = makeWorkspace(`durability-crash-${w.name}`);
+    const proc = spawnNode(scenario, [], {
+      env: { AEGISPI_WS: ws.stateDir, AEGISPI_CRASH_POINT: w.point, AEGISPI_NOW: "1795000000000" },
+    });
+    const done = await proc.done;
+    const diedWithoutAck = !done.stdout.includes("ACK") && (done.signal === "SIGKILL" || done.code !== 0);
+    suite.check(
+      `crash-${w.name}-child-died-before-ack`,
+      diedWithoutAck,
+      `exit=${done.code} signal=${done.signal} ack-line=${done.stdout.includes("ACK")}`,
+    );
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const inboxCount = db.prepare("SELECT count(*) c FROM inbox").get().c;
+    db.close();
+    suite.check(
+      `crash-${w.name}-durable-state-matches-window`,
+      inboxCount === w.expectInbox,
+      `inbox rows after kill: ${inboxCount} (expected ${w.expectInbox})`,
+    );
+    if (w.name === "ingress-inside-txn") {
+      const db2 = openDatabase(ws.dbPath, { readOnly: true });
+      const gcProbe = gcUnreferencedContent(db2, ws.stateDir, { dryRun: true });
+      db2.close();
+      suite.check(
+        "crash-inside-txn-leaves-unreferenced-file-for-gc",
+        gcProbe.trashed === 1,
+        `unreferenced files: ${gcProbe.trashed} (payload written, activation rolled back)`,
+      );
+    }
+    // Upstream redelivery after the crash: exactly one durable row in the end.
+    const re = spawnNode(scenario, [], { env: { AEGISPI_WS: ws.stateDir, AEGISPI_NOW: "1795000000001" } });
+    const reDone = await re.done;
+    const db3 = openDatabase(ws.dbPath, { readOnly: true });
+    const finalCount = db3.prepare("SELECT count(*) c FROM inbox").get().c;
+    db3.close();
+    suite.check(
+      `crash-${w.name}-redelivery-single-durable-row`,
+      reDone.code === 0 && reDone.stdout.includes("ACK") && finalCount === 1,
+      `redelivery exit=${reDone.code}, stdout=${JSON.stringify(reDone.stdout.trim())}, inbox=${finalCount}`,
+    );
+  }
 }
 
 // -------------------------------------------------------------------- summary

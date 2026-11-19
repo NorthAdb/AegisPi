@@ -85,6 +85,10 @@ function escapeComponent(component, { allowSlash = false } = {}) {
   return out;
 }
 
+// Shared with id builders (principals/scopes/inbox rows reuse the same
+// escaping so ids never collide across objects).
+export { escapeComponent };
+
 function lower(key) {
   return key.toLowerCase();
 }

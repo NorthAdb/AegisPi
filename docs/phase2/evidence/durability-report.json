@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T07:41:43.199Z",
+  "generatedAt": "2026-11-19T07:48:00.541Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
   "counts": {
-    "pass": 23,
+    "pass": 41,
     "fail": 0
   },
   "results": [
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795074102675}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795074476809}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 26500 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 20852 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=26500"
+      "detail": "second acquire refused, heldBy=20852"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 26500"
+      "detail": "stolen, new pid 20852"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -122,6 +122,96 @@
       "name": "sha256-lf-normalization",
       "status": "PASS",
       "detail": "digest 015abd7f5cc57a2d…"
+    },
+    {
+      "name": "admit-persists-inbox-pending",
+      "status": "PASS",
+      "detail": "inbox row inb:telegram:evt-100 state=PENDING"
+    },
+    {
+      "name": "payload-object-row-and-own-scope-closure",
+      "status": "PASS",
+      "detail": "object obj:scp:dm%3Atelegram%3A1001:464990b1ec477d387405ab57d467b2c7ed0c4fc4a835651d0fcfed8acc58cec4 closure=[{\"scope_id\":\"scp:dm%3Atelegram%3A1001\"}] file=true"
+    },
+    {
+      "name": "admit-audit-and-stream-in-same-transaction",
+      "status": "PASS",
+      "detail": "audit=[\"ingress_received\"] stream=1"
+    },
+    {
+      "name": "duplicate-event-returns-success-no-new-rows",
+      "status": "PASS",
+      "detail": "duplicate=true inbox 1→1 objects 1→1"
+    },
+    {
+      "name": "drop-and-observe-go-straight-to-done",
+      "status": "PASS",
+      "detail": "DROP inbox inb:telegram:evt-200 state=DONE"
+    },
+    {
+      "name": "no-provider-id-source-dedups-on-envelope-digest",
+      "status": "PASS",
+      "detail": "webhook dedup ids: 3cd282a7, 97aa1802"
+    },
+    {
+      "name": "gc-detects-unreferenced-file",
+      "status": "PASS",
+      "detail": "dryRun gc: scanned=4 trashed=1"
+    },
+    {
+      "name": "gc-moves-unreferenced-keeps-referenced",
+      "status": "PASS",
+      "detail": "gc moved 1 file(s), referenced payload still on disk"
+    },
+    {
+      "name": "crash-ingress-before-file-child-died-before-ack",
+      "status": "PASS",
+      "detail": "exit=1 signal=null ack-line=false"
+    },
+    {
+      "name": "crash-ingress-before-file-durable-state-matches-window",
+      "status": "PASS",
+      "detail": "inbox rows after kill: 0 (expected 0)"
+    },
+    {
+      "name": "crash-ingress-before-file-redelivery-single-durable-row",
+      "status": "PASS",
+      "detail": "redelivery exit=0, stdout=\"ACK inb:telegram:evt-0001 duplicate=false state=PENDING\", inbox=1"
+    },
+    {
+      "name": "crash-ingress-inside-txn-child-died-before-ack",
+      "status": "PASS",
+      "detail": "exit=1 signal=null ack-line=false"
+    },
+    {
+      "name": "crash-ingress-inside-txn-durable-state-matches-window",
+      "status": "PASS",
+      "detail": "inbox rows after kill: 0 (expected 0)"
+    },
+    {
+      "name": "crash-inside-txn-leaves-unreferenced-file-for-gc",
+      "status": "PASS",
+      "detail": "unreferenced files: 1 (payload written, activation rolled back)"
+    },
+    {
+      "name": "crash-ingress-inside-txn-redelivery-single-durable-row",
+      "status": "PASS",
+      "detail": "redelivery exit=0, stdout=\"ACK inb:telegram:evt-0001 duplicate=false state=PENDING\", inbox=1"
+    },
+    {
+      "name": "crash-ingress-after-commit-child-died-before-ack",
+      "status": "PASS",
+      "detail": "exit=1 signal=null ack-line=false"
+    },
+    {
+      "name": "crash-ingress-after-commit-durable-state-matches-window",
+      "status": "PASS",
+      "detail": "inbox rows after kill: 1 (expected 1)"
+    },
+    {
+      "name": "crash-ingress-after-commit-redelivery-single-durable-row",
+      "status": "PASS",
+      "detail": "redelivery exit=0, stdout=\"ACK inb:telegram:evt-0001 duplicate=true state=PENDING\", inbox=1"
     }
   ],
   "dataSources": "fake 远端与本地 SQLite（无真实外部连接）"
