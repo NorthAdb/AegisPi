@@ -1,6 +1,6 @@
 # test:ingress-telegram:real — 真实只读 Telegram 验收（getMe/getUpdates；零发送、零 offset 确认）
 
-生成：2026-11-19T15:17:35.018Z；Node v22.23.5；suite `ingress-telegram-real`。
+生成：2026-11-20T05:30:02.319Z；Node v22.23.5；suite `ingress-telegram-real`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
