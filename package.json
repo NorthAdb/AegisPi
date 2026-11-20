@@ -20,6 +20,7 @@
     "test:ingress-telegram": "node evals/phase3/ingress-telegram/run.mjs",
     "test:ingress-telegram:real": "node evals/phase3/ingress-telegram/real.mjs",
     "test:model:real": "node evals/phase3/model-real/run.mjs",
+    "test:external-write:real": "node evals/phase3/external-write-real/run.mjs",
     "test:quota-calibration": "node evals/phase3/quota-calibration/run.mjs"
   }
 }
