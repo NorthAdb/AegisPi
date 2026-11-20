@@ -74,19 +74,19 @@ usage 形状扩展为四字段 `{inputTokens, outputTokens, cacheReadTokens, cac
 **先说清边界**：`budget.mjs:199-204` 的 request_key 唯一只保证同一预留键不插第二行；`settle`/`release`/`chargeBound` 各自只看**账本表自身**的 HELD 状态（budget.mjs:294-295、348-358、370-393），看不见 `model_requests`。两表各写一次、中间宕机，**账本单表保证不了「没调用过」或「只调用一次」**——崩溃安全由下面的 request 状态机与同事务边界保证，不写成「账本本身保证」。request 状态与账本状态分开记账；全部状态转换沿用现有 `withTx`，不新建框架。FAILED 只出现在调用前，不从 EXECUTING 转入。
 
 - `RECEIVED`：`model_requests` 插入（主键 requestId）且校验通过，尚未预留。调用前拒绝可到 `FAILED`（此时没有预留）。
-- `RESERVED`：与 `ledger.reserve(requestKey="model:<requestId>")` 在**同一事务**里成功并记下 reservationId。调用前取消可以 release（budget.mjs:348-358，仅 HELD 可 release），随后到 `FAILED`。
-- `EXECUTING`：进入子进程**之前单独提交**。此后不重试、不 release、不到 FAILED——调用一旦可能已发出就不能 release；`chargeBound`（budget.mjs:370-393）是占满 upper 的保守处理，不是重试也不是 release。宕机后预留保持 HELD，只走现有保守超时 → `CHARGED_BOUND`。**测试要求**：注入 kill 点（复用 testing/crashpoints.mjs）断言 reserve 与调用间崩溃保持 HELD、EXECUTING 提交后宕机不重放不 release。
-- `SETTLED`：usage 可结算时，账本 `settle` 与 request 行落地在**同一事务**。同一 requestId 再来的 usage 看见预留非 HELD 即丢弃——只结清一次。
-- `HELD`：已进入 EXECUTING 但 usage 不可结算（§6 规则）。不第二次调用，不 release。
-- `ORPHAN`：任务已终态才写回结果时进入。不 settle。
+- `RESERVED`：与 `ledger.reserve(requestKey="model:<requestId>")` 在**同一事务**里成功并记下 reservationId。调用前取消可以 release（budget.mjs:348-358，仅**账本** HELD 可 release），随后到 `FAILED`。
+- `EXECUTING`：进入子进程**之前单独提交**。此后不重试、不 release、不到 FAILED——调用一旦可能已发出就不能 release；`chargeBound`（budget.mjs:370-393）是占满 upper 的保守处理，不是重试也不是 release。宕机后预留保持**账本** HELD，只走现有保守超时 → `CHARGED_BOUND`。**测试要求**：注入 kill 点（复用 testing/crashpoints.mjs）断言 reserve 与调用间崩溃保持 HELD、EXECUTING 提交后宕机不重放不 release。
+- `SETTLED`：usage 可结算时，账本 `settle` 与 request 行落地在**同一事务**。同一 requestId 再来的 usage 看见**账本**预留非 HELD 即丢弃——只结清一次。
+- `HELD`（**请求态**——与账本预留的 HELD 同名不同物，两命名空间并行记账）：已进入 EXECUTING、写回已落地，但当次 usage 按 §6 规则不可结算。不第二次调用，不 release。同 requestId 再来的 usage 视为重复投递，丢弃并审计——补结入口只有「迟到 usage」一条。
+- `ORPHAN`（**交付侧终态，只表示结果不再投递**）：任务已终态才写回时进入——结果落 scope-ACL 证据对象 + `model_result_orphan` 审计，不再向容器投递。**ORPHAN 不表达任何费用结论、不冻结费用路径**：写回时 usage 有效且**账本**预留仍 HELD → 同一事务里账本行落 SETTLED、request 行落 ORPHAN（费用结局以账本行为准，ORPHAN 只记交付未发生）；usage 无效 → **账本**预留保持 HELD → 保守超时 CHARGED_BOUND。
 
 **超时**：`callTimeoutMs` 子进程硬上限（model-call.mjs:56-59 现模式）→ `model_call_failed`，request 停在 EXECUTING/HELD → 保守超时转 CHARGED_BOUND。
 
 **重复提议**：主键冲突即回读已有状态，不插第二笔预留、不第二次调用。
 
-**迟到 usage**：只允许从 `EXECUTING` + 账本 HELD 进入一次 `SETTLED`；其余一律丢弃并审计。
+**迟到 usage**：只允许从 **请求行 `EXECUTING`**（调用确已发生、写回事务未落，如宕机在子进程完成与写回之间）**且账本预留仍 HELD** 进入一次 `SETTLED`——本句里的 HELD 指**账本状态**（budget.mjs:294-295 只有 HELD 可结清，是 settle 的唯一入口；状态机列表里的 `HELD` 是请求态，另一命名空间）。其余情形一律丢弃并审计。
 
-**任务已终态**：宿主写回前复查 RUNNING 领取行，已终态 → 结果落 scope-ACL 证据对象 + `model_result_orphan` 审计，request 转 `ORPHAN`。**结果不再投递，不等于已发生的费用可以不处理**：调用若已发出，其预留照常走 settle / 保持 HELD / 保守超时 CHARGED_BOUND，账本不因容器消失或任务终态豁免。
+**任务已终态**：宿主写回前复查 RUNNING 领取行，已终态 → 结果落 scope-ACL 证据对象 + `model_result_orphan` 审计，request 转 `ORPHAN`（交付侧终态，见状态机条目）。**结果不再投递，不等于已发生的费用可以不处理**：调用若已发出，费用照常处理——usage 有效且账本预留仍 HELD → 同一事务 `settle`（账本行 SETTLED）；usage 无效 → 账本保持 HELD → 保守超时 CHARGED_BOUND。账本不因容器消失或任务终态豁免，两命名空间各自落地。
 
 ## 8. 迁移步骤（退役 HTTP 客户端，不长期保留两套路径）
 
@@ -120,10 +120,10 @@ usage 形状扩展为四字段 `{inputTokens, outputTokens, cacheReadTokens, cac
 
 1. 未授权提议零调用零预留：白名单外 purpose、白名单外 modelId、scope 不匹配、fence/attempt 不匹配、信封带未知字段、messages 超 128 KiB——各断言 reservations=0、`model_request_refused` 审计在场。
 2. 幂等：同 requestId 重放恰一次调用、恰一次预留；主键冲突回读已有状态。
-3. 状态机事务边界（crashpoints 注入）：RESERVED 与 `ledger.reserve` 同一事务；EXECUTING 在子进程前提交，宕机后不重放、不 release、不到 FAILED；settle 与 request 行同一事务，只结清一次；迟到 usage 只从 EXECUTING+HELD 一次进入 SETTLED，其余丢弃并审计。
+3. 状态机事务边界（crashpoints 注入）：RESERVED 与 `ledger.reserve` 同一事务；EXECUTING 在子进程前提交，宕机后不重放、不 release、不到 FAILED；settle 与 request 行同一事务，只结清一次；迟到 usage 只从**请求行 EXECUTING + 账本预留 HELD**（两命名空间各自断言）一次进入 SETTLED，其余丢弃并审计。
 4. 结算条件三态（离线夹具，§6.1 规则）：无 usage 块（无 `totalFromProvider` 键）→ HELD；全零 → HELD；四字段 ≥0 整数且总和 >0（含 output=0、cache 未命中 0）→ 可结算。逐类价格：token>0 类缺价（非非负整数）→ 整笔 HELD；token=0 类价 null 不挡。`stopReason` error/aborted 无可结算 usage → HELD，不 release 不重试。
 5. 结清：夹具 usage 40/13 × 300000/1200000 microUSD/M → 28 microUSD（对齐 A 项实测口径）；reasoning 无独立计费行。wire 断言：`model=deepseek-flash`、`thinking.type=enabled`（`reasoning:"high"` 已传）且请求路径恰为单段 `/chat/completions`（根地址写入，非旧完整 URL）。
-6. 超时 → CHARGED_BOUND 保守占额；超额结算 → SETTLED + 冻结 + `budget_overcharge_frozen`；任务终态 → ORPHAN 不 settle，但已发出调用的费用照走（§7）。
+6. 超时 → CHARGED_BOUND 保守占额；超额结算 → SETTLED + 冻结 + `budget_overcharge_frozen`；任务终态 → 结果不再投递（request 转 ORPHAN，交付侧），已发出调用按有效 usage 照常同事务结清，无有效 usage 则账本保持 HELD 走保守占额（§7 两命名空间分别断言）。
 7. 隔离不变量：容器 denylist/PI_OFFLINE/无 socket 断言沿用（worker selfCheck）；bind-mount 生产形态用例（proposals 可写、host-commands ro、rootfs ro、无网络、无 URL 字段到达宿主配置层）；宿主 proposals 目录仅 daemon/uid 999 可写（非 1777）；requestId 非 uuid 拒绝入文件名；宿主以 RUNNING 行复检身份四元组。
 8. 全套件绿（含三 docker 套件）+ 纪元 3 证据 + `git grep model-call-child` 为空 + defaults 失败关闭不变。
 

@@ -23,3 +23,7 @@
 ## 边界遵守
 
 本轮零代码/配置/构建输入改动；未重建镜像、未跑任何 real 入口（含 simulate）、未读 `.env`、未做任何网络调用；`defaults.json` 保持失败关闭（git diff 0 行）；Phase 3 限定修复保持关闭；A/B/C 缺证不追补；$0.80/$5 不重开。ADR 修订稿与开工草案仍**不含任何运行授权**，等待主人方案确认后按单元 4.1 另行申报实施。
+
+## 追记（2026-11-20，主人澄清状态机两句后修订）
+
+主人指出 ADR §7 两句歧义，已澄清：①「迟到 usage 只允许从 EXECUTING + HELD 进入一次 SETTLED」中的 **HELD 指账本预留状态**——settle 的唯一入口（budget.mjs:294-295 只有 HELD 可结清）；状态机列表里的 `HELD` 是**请求态**（写回已落、当次 usage 不可结算），同名不同物。全文已加命名空间限定（仅账本 HELD 可 release、宕机后预留保持账本 HELD、SETTLED 条目见账本非 HELD 即丢弃），且请求态 HELD 下同 requestId 再来的 usage 视为重复投递丢弃——补结入口仅「请求行 EXECUTING + 账本 HELD」一条；②「ORPHAN 不 settle」改写为**只表示结果不再投递**：ORPHAN 是交付侧终态，不表达费用结论、不冻结费用路径——写回时 usage 有效且账本预留仍 HELD → 同一事务里账本行落 SETTLED、request 行落 ORPHAN（费用结局以账本行为准）；usage 无效 → 账本保持 HELD → 保守超时 CHARGED_BOUND。§10 第 3/6 测试项同步（迟到 usage 两命名空间各自断言；任务终态交付侧与费用侧分离断言）。
