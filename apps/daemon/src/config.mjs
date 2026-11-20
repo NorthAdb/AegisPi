@@ -20,12 +20,16 @@ export class ConfigError extends Error {}
 // statfs path stays untouched; the operator (or a drill suite) may inject
 // warn/critical thresholds via AEGISPI_DISK_DRILL_WARN_GIB /
 // AEGISPI_DISK_DRILL_CRITICAL_GIB to trip the watermark on a machine whose
-// disk is healthy. The seam can only provide sane positive thresholds — it
-// can never disable the watermark or widen a level.
+// disk is healthy. The seam can only TIGHTEN (re-review F8): an injected
+// threshold is a free-bytes GATE, and a gate may only RISE — a value below
+// the production threshold would loosen the watermark and a drill would
+// then lie about coverage. Looser or level-inverting values refuse startup.
 export function resolveDiskThresholds(defaults) {
+  const prodWarnGiB = defaults.disk?.warnFreeGiB ?? 20;
+  const prodCriticalGiB = defaults.disk?.criticalFreeGiB ?? 10;
   const base = {
-    warnFreeBytes: (defaults.disk?.warnFreeGiB ?? 20) * 1024 * 1024 * 1024,
-    criticalFreeBytes: (defaults.disk?.criticalFreeGiB ?? 10) * 1024 * 1024 * 1024,
+    warnFreeBytes: prodWarnGiB * 1024 * 1024 * 1024,
+    criticalFreeBytes: prodCriticalGiB * 1024 * 1024 * 1024,
   };
   const drill = (name) => {
     const raw = process.env[name];
@@ -38,10 +42,22 @@ export function resolveDiskThresholds(defaults) {
   };
   const warn = drill("AEGISPI_DISK_DRILL_WARN_GIB");
   const critical = drill("AEGISPI_DISK_DRILL_CRITICAL_GIB");
+  if (warn !== null && warn < base.warnFreeBytes) {
+    throw new ConfigError(
+      `AEGISPI_DISK_DRILL_WARN_GIB may only tighten the watermark (production warn is ${prodWarnGiB} GiB); the injected value loosens it — refusing to start`,
+    );
+  }
+  if (critical !== null && critical < base.criticalFreeBytes) {
+    throw new ConfigError(
+      `AEGISPI_DISK_DRILL_CRITICAL_GIB may only tighten the watermark (production critical is ${prodCriticalGiB} GiB); the injected value loosens it — refusing to start`,
+    );
+  }
   if (warn !== null) base.warnFreeBytes = warn;
   if (critical !== null) base.criticalFreeBytes = critical;
-  if (warn !== null && critical !== null && critical > warn) {
-    throw new ConfigError("AEGISPI_DISK_DRILL_CRITICAL_GIB must not exceed the warn threshold; a drill cannot invert the watermark levels");
+  if (base.criticalFreeBytes > base.warnFreeBytes) {
+    throw new ConfigError(
+      "the effective critical threshold exceeds warn; a drill cannot invert the watermark escalation order — refusing to start",
+    );
   }
   return base;
 }

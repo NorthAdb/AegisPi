@@ -1147,13 +1147,67 @@ function seed(tag) {
   }
 }
 
+// ------------------------------------------- drill seam may only tighten (re-review F8)
+// AEGISPI_DISK_DRILL_* is a free-bytes GATE and a gate may only RISE: a
+// value below production loosens the watermark and a drill would then lie
+// about coverage; a critical above the effective warn inverts the
+// escalation order. Both were accepted by the pre-fix tree (red on record).
+{
+  const { loadDaemonConfig, ConfigError } = await import("../../../apps/daemon/src/config.mjs");
+  const probeEnv = async (env) => {
+    const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(env)) process.env[k] = v;
+    try {
+      loadDaemonConfig();
+      return { refused: false, message: "" };
+    } catch (e) {
+      return { refused: e instanceof ConfigError, message: e.message ?? "" };
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  };
+  const looseWarn = await probeEnv({ AEGISPI_DISK_DRILL_WARN_GIB: "0.001" });
+  const looseCritical = await probeEnv({ AEGISPI_DISK_DRILL_CRITICAL_GIB: "5" });
+  const invertedCritical = await probeEnv({ AEGISPI_DISK_DRILL_CRITICAL_GIB: "25" });
+  const strictPair = await probeEnv({ AEGISPI_DISK_DRILL_WARN_GIB: "25", AEGISPI_DISK_DRILL_CRITICAL_GIB: "12" });
+  suite.check(
+    "disk-drill-seam-may-only-tighten-never-loosen",
+    looseWarn.refused && /tighten/.test(looseWarn.message) &&
+      looseCritical.refused && /tighten/.test(looseCritical.message) &&
+      invertedCritical.refused && /invert|exceeds/.test(invertedCritical.message) &&
+      strictPair.refused === false,
+    `warn 0.001 -> ${looseWarn.refused ? "refused" : "ACCEPTED"}; critical 5 -> ${looseCritical.refused ? "refused" : "ACCEPTED"}; critical 25 alone -> ${invertedCritical.refused ? "refused" : "ACCEPTED"}; warn 25 + critical 12 -> ${strictPair.refused ? "REFUSED" : "accepted"}`,
+  );
+  // The refusal is a BOOT condition: the daemon exits clean with the reason.
+  const bootWs = makeWorkspace("su-disk-refuse");
+  const r = spawnSync(process.execPath, [
+    join(repoRoot, "apps", "daemon", "src", "daemon.mjs"),
+    "--check", `--data-dir=${bootWs.stateDir}`,
+  ], {
+    cwd: repoRoot, encoding: "utf8", timeout: 60000,
+    env: { ...process.env, AEGISPI_DISK_DRILL_WARN_GIB: "0.001" },
+  });
+  const bootOut = (r.stdout ?? "") + (r.stderr ?? "");
+  suite.check(
+    "daemon-refuses-to-start-on-loosened-drill-seam",
+    r.status === 2 && /refusing to start/.test(bootOut) && /tighten/.test(bootOut),
+    `daemon exit=${r.status} line=${(bootOut.match(/config:.*$/m) ?? ["absent"])[0].slice(0, 110)}`,
+  );
+}
+
 // ------------------------------------------- critical disk watermark drill (audit F8)
 {
   const ws = makeWorkspace("su-disk-critical");
   mkdirSync(join(ws.stateDir, "db"), { recursive: true });
-  // 1,000,000 GiB is far above any real disk: the real statfs path reads a
-  // healthy disk and the injected threshold trips the CRITICAL level — a
-  // measured alert drill, not a mocked counter.
+  // Both gates rise together so the escalation order holds: 2,000,000 GiB
+  // warn above a 1,000,000 GiB critical, both far above any real disk. The
+  // real statfs path reads a healthy disk and the injected pair trips the
+  // CRITICAL level — a measured alert drill, not a mocked counter. (A
+  // critical injection alone would now be refused: a gate may only rise,
+  // and one gate cannot rise past the other.)
   const r = spawnSync(process.execPath, [
     join(repoRoot, "apps", "daemon", "src", "daemon.mjs"),
     "--check", `--data-dir=${ws.stateDir}`,
@@ -1161,7 +1215,7 @@ function seed(tag) {
     cwd: repoRoot,
     encoding: "utf8",
     timeout: 60000,
-    env: { ...process.env, AEGISPI_DISK_DRILL_CRITICAL_GIB: "1000000" },
+    env: { ...process.env, AEGISPI_DISK_DRILL_WARN_GIB: "2000000", AEGISPI_DISK_DRILL_CRITICAL_GIB: "1000000" },
   });
   const out = (r.stdout ?? "") + (r.stderr ?? "");
   suite.check(

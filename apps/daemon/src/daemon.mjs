@@ -9,7 +9,7 @@
 
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadDaemonConfig } from "./config.mjs";
+import { loadDaemonConfig, ConfigError } from "./config.mjs";
 import { acquireDaemonLock } from "./db/lock.mjs";
 import { openDatabase, checkDatabaseIntegrity } from "./db/connect.mjs";
 import { loadCanonicalSchema, migrate } from "./db/migrate.mjs";
@@ -59,9 +59,21 @@ export async function main(argv = process.argv.slice(2)) {
   // adapter gates, never in this file's contents.
   const configFlag = argv.find((a) => a.startsWith("--config="));
 
-  const config = configFlag
-    ? loadDaemonConfig({ path: configFlag.slice("--config=".length) })
-    : loadDaemonConfig();
+  // A config that refuses to load (a loosened drill seam, a broken value)
+  // refuses STARTUP with a clean exit rather than running on a guess
+  // (re-review F8: the drill invariant is a boot condition).
+  let config;
+  try {
+    config = configFlag
+      ? loadDaemonConfig({ path: configFlag.slice("--config=".length) })
+      : loadDaemonConfig();
+  } catch (e) {
+    if (e instanceof ConfigError) {
+      console.error(`config: refusing to start — ${e.message}`);
+      process.exit(2);
+    }
+    throw e;
+  }
   const portFlag = argv.find((a) => a.startsWith("--port="));
   const consolePort = portFlag ? Number(portFlag.slice("--port=".length)) : CONSOLE_DEFAULT_PORT;
 
