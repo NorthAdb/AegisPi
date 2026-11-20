@@ -1,6 +1,6 @@
 # ADR-0001 模型链路最小方案：容器提议、宿主复用 Pi 1.5.2 执行
 
-状态：**修订稿，待主人方案确认；未实施**。生成 2026-11-20，基线 `44b35141815bc890873f861ec34590654559faf9`；同日按方案审核 `REVIEW-MODEL-ADR-cde9bd3`（原稿字节归档于 `docs/phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md`，判定「需改后通过、4.1 为可实施候选、本次不授权实施」）修订四处：§6 usage 结算条件、§7 model_requests 状态机与事务边界、§5 pi-ai 单次推理接口与 baseUrl 根地址语义、§2/§3 宿主目录权限与 requestId 校验。本 ADR 落实主人指令「容器 agent 提出模型请求，宿主复用 Pi 1.5.2 执行」的最小方案，并作为 `docs/phase3/reports/model-path-and-pi.md` §5 缺口 A（容器→宿主提议链路）与缺口 B（宿主客户端形态）**设计归属的定夺载体**（该文 §7.2「归属待复核」的后续即本文状态：主人确认前不称已闭；实施属受限开工草案单元 4.1）。**本文不含任何运行授权**；真实调用前须逐项确认的检查表见 `docs/phase4/phase4-restricted-kickoff-draft.md`。
+状态：**方案已获主人确认（2026-11-20，含同日两句状态机澄清，落地提交 `3fd81c6`）；未实施，未获开工授权**。生成 2026-11-20，基线 `44b35141815bc890873f861ec34590654559faf9`；同日按方案审核 `REVIEW-MODEL-ADR-cde9bd3`（原稿字节归档于 `docs/phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md`，判定「需改后通过、4.1 为可实施候选、本次不授权实施」）修订四处：§6 usage 结算条件、§7 model_requests 状态机与事务边界、§5 pi-ai 单次推理接口与 baseUrl 根地址语义、§2/§3 宿主目录权限与 requestId 校验。本 ADR 落实主人指令「容器 agent 提出模型请求，宿主复用 Pi 1.5.2 执行」的最小方案，并作为 `docs/phase3/reports/model-path-and-pi.md` §5 缺口 A（容器→宿主提议链路）与缺口 B（宿主客户端形态）**设计归属的定夺载体**（该文 §7.2「归属待复核」的后续即本文状态：设计归属经主人方案确认就此定夺；实施属受限开工草案单元 4.1，开工另需主人授权——方案确认不等于实现完成或运行授权）。**本文不含任何运行授权**；真实调用前须逐项确认的检查表见 `docs/phase4/phase4-restricted-kickoff-draft.md`。
 
 ## 0. 验收基线（两份审计在案，不可偏离）
 

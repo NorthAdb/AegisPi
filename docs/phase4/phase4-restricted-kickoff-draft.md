@@ -1,6 +1,6 @@
-# 受限 Phase 4 开工草案（待主人方案审核；不含任何运行授权）
+# 受限 Phase 4 开工草案（方案已获主人确认 2026-11-20；4.1 未授权开工；不含任何运行授权）
 
-生成 2026-11-20，基线 `44b35141815bc890873f861ec34590654559faf9`。定位：把 04 Phase 4「真实仓库闭环」拆成可验收的小单元，先模型链路、后真实仓库 Observe，聚焦**首个仓库闭环**，不提前扩展 Phase 5/6。**本文是方案草案：任何建议不构成运行授权**；两种许可严格分列。模型链路的实现设计见 `docs/adr/0001-model-path-pi-host-execution.md`（ADR-0001），两文互为引用、口径一致。2026-11-20 同日修订：按方案审核 `REVIEW-MODEL-ADR-cde9bd3`（原稿字节归档于 `docs/phase4/reviews/`，回应另见同目录）同步——单元 4.1 执行接口为已锁定 pi-ai 1.5.2 的 `getBuiltinModel` + `completeSimple`（必传 `reasoning:"high"`）、`model.baseUrl` 为 SDK 根地址语义、`model_requests` 状态机与同事务边界、宿主目录权限与 requestId uuid 校验；**D 项延期不作为全部 Phase 4 的前置条件**。
+生成 2026-11-20，基线 `44b35141815bc890873f861ec34590654559faf9`。定位：把 04 Phase 4「真实仓库闭环」拆成可验收的小单元，先模型链路、后真实仓库 Observe，聚焦**首个仓库闭环**，不提前扩展 Phase 5/6。**本文是方案草案：任何建议不构成运行授权**；两种许可严格分列。模型链路的实现设计见 `docs/adr/0001-model-path-pi-host-execution.md`（ADR-0001），两文互为引用、口径一致。2026-11-20 同日修订：按方案审核 `REVIEW-MODEL-ADR-cde9bd3`（原稿字节归档于 `docs/phase4/reviews/`，回应另见同目录）同步——单元 4.1 执行接口为已锁定 pi-ai 1.5.2 的 `getBuiltinModel` + `completeSimple`（必传 `reasoning:"high"`）、`model.baseUrl` 为 SDK 根地址语义、`model_requests` 状态机与同事务边界、宿主目录权限与 requestId uuid 校验；**D 项延期不作为全部 Phase 4 的前置条件**。主人已确认本方案（2026-11-20，含 ADR-0001 同日两句澄清，提交 `3fd81c6`）；**方案确认不等于 4.1 开工授权，也不构成任何运行授权**——单元 4.1 开工与单元 4.2 首跑另需主人指令，首跑检查表未确认项照旧阻塞真实运行。
 
 既定不重开：任务预算 $0.80（`defaults.json` `budget.taskMicroUsd=800000`）、日预算 $5（`budget.dayMicroUsd=5000000`）；超额行为按现行事实（结算超限仍 SETTLED 并冻结账户，无金额硬拒绝，ADR-0001 §6 第 5 条）。D 项维持主人决定**延期至首次启用 Telegram 公网入站 webhook 前**，且**不作为全部 Phase 4 的前置条件**（4.1 与 4.2 的模型/仓库部分不等 D）；发送通知不依赖入站 webhook，但**发送本身另需主人逐项授权**，与 D 的延期互不混同。
 
