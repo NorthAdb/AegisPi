@@ -10,6 +10,7 @@
 // calls, no external writes, no credentials anywhere near these jobs.
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
@@ -106,6 +107,36 @@ function jobOutput(ws, jobId) {
   return { result, stdout: read("stdout.txt"), stderr: read("stderr.txt") };
 }
 
+// A host-authored acceptance definition in the pack's oracle shape
+// (oracle.schema.json v1). requiredOutputHash pins the EXACT collected
+// stdout bytes (runner-captured, including the trailing newline).
+const sha256Of = (s) => "sha256:" + createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
+function jobOracle({ id, expectedStdout = undefined, expectedExitCode = 0 }) {
+  return {
+    schemaVersion: 1,
+    oracleId: id,
+    proposition: `host-authored acceptance definition for ${id}`,
+    assertions: [
+      {
+        id: "A1",
+        kind: "baseline_passes",
+        description:
+          expectedStdout !== undefined
+            ? "container exit 0 AND the collected stdout bytes hash to the pinned value"
+            : "the container exit code equals the pinned value",
+        expectedExitCode,
+        requiredOutputHash: expectedStdout !== undefined ? sha256Of(expectedStdout) : null,
+      },
+    ],
+    resultClassRules: {
+      affected: "the pinned baseline holds against the collected evidence",
+      unaffected: "the pinned baseline holds and the target is unaffected",
+      unknown: "coverage, hashes, or contradictory evidence is insufficient to decide",
+      infra_error: "toolchain, timeout, or environment failure prevented a trustworthy run",
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 1. Execute: a clean no-network job runs to completion and its evidence is
 // honest (exit code 0 recorded, stdout captured).
@@ -123,6 +154,7 @@ function jobOutput(ws, jobId) {
     attemptId: attemptIdOf(db, task),
     fence: task.fence,
     manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "console.log('offline ok')"], deadlineMs: 20000 },
+    oracle: jobOracle({ id: `oj:exec:${task.fence}`, expectedStdout: "offline ok\n" }),
     deadlineAt: Date.now() + 30000,
     now: Date.now(),
   });
@@ -156,6 +188,7 @@ function jobOutput(ws, jobId) {
     attemptId: attemptIdOf(db, task),
     fence: task.fence,
     manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "process.exit(7)"], deadlineMs: 20000 },
+    oracle: jobOracle({ id: `oj:fail:${task.fence}`, expectedExitCode: 7 }),
     deadlineAt: Date.now() + 30000,
     now: Date.now(),
   });
@@ -198,6 +231,7 @@ function jobOutput(ws, jobId) {
       ],
       deadlineMs: 15000,
     },
+    oracle: jobOracle({ id: `oj:net:${task.fence}`, expectedStdout: "DNS_BLOCKED HTTP_BLOCKED\n" }),
     deadlineAt: Date.now() + 25000,
     now: Date.now(),
   });
@@ -227,6 +261,7 @@ function jobOutput(ws, jobId) {
     attemptId: attemptIdOf(db, task),
     fence: task.fence,
     manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "setTimeout(()=>{}, 600000)"], deadlineMs: 4000 },
+    oracle: jobOracle({ id: `oj:timeout:${task.fence}`, expectedExitCode: 124 }),
     deadlineAt: Date.now() + 6000,
     now: Date.now(),
   });
@@ -256,6 +291,7 @@ function jobOutput(ws, jobId) {
     attemptId: attemptIdOf(db, task),
     fence: task.fence,
     manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "setTimeout(()=>{}, 600000)"], deadlineMs: 600000 },
+    oracle: jobOracle({ id: `oj:cancel:${task.fence}`, expectedExitCode: 125 }),
     deadlineAt: Date.now() + 600000,
     now: Date.now(),
   });
@@ -330,6 +366,7 @@ function jobOutput(ws, jobId) {
       args: ["-e", "const bufs=[]; while(true){ const b=Buffer.alloc(64*1024*1024); b.fill(0x41); bufs.push(b); }"],
       deadlineMs: 20000,
     },
+    oracle: jobOracle({ id: `oj:oom:${task.fence}`, expectedExitCode: 137 }),
     deadlineAt: Date.now() + 30000,
     now: Date.now(),
   });
@@ -348,6 +385,7 @@ function jobOutput(ws, jobId) {
       args: ["-e", "const fs=require('fs'); try { for(let i=0;i<40;i++) fs.writeFileSync('/job/work/chunk'+i, Buffer.alloc(4*1024*1024)); console.log('DISK_WROTE_ALL'); } catch(e){ console.log('DISK_BOUND_HIT:'+e.code); process.exit(9); }"],
       deadlineMs: 20000,
     },
+    oracle: jobOracle({ id: `oj:disk:${task.fence}`, expectedExitCode: 9 }),
     deadlineAt: Date.now() + 30000,
     now: Date.now(),
   });
@@ -382,6 +420,7 @@ function jobOutput(ws, jobId) {
     attemptId: attemptIdOf(db, task),
     fence: task.fence,
     manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "setTimeout(()=>{}, 600000)"], deadlineMs: 600000 },
+    oracle: jobOracle({ id: `oj:recover:${task.fence}`, expectedExitCode: 124 }),
     deadlineAt: Date.now() + 600000,
     now: Date.now(),
   });
@@ -418,6 +457,7 @@ function jobOutput(ws, jobId) {
     attemptId: attemptIdOf(db, task),
     fence: task.fence,
     manifest: { schemaVersion: 1, jobId, command: "node", args: [], deadlineMs: "not-a-number" },
+    oracle: jobOracle({ id: `oj:refuse:${task.fence}`, expectedExitCode: 126 }),
     deadlineAt: Date.now() + 30000,
     now: Date.now(),
   });
@@ -455,17 +495,20 @@ function jobOutput(ws, jobId) {
     "utf8",
   );
   // Durable intent exactly the way the host executor writes it: the manifest
-  // and oracle are content-addressed OBJECTS, the row references them.
-  const { insertObjectRow } = await import("../../../apps/daemon/src/objects.mjs");
+  // and oracle are content-addressed OBJECTS, the row references them, and
+  // the oracle content is stored with a storage ref the finish path can read.
+  const { insertObjectRow, putObjectContent } = await import("../../../apps/daemon/src/objects.mjs");
   const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(task.id).scope_id;
   const manifestObj = insertObjectRow(db, {
     scopeId, kind: "job_manifest", sourceUri: `job:${jobId}`, sourceActor: "test",
     content: JSON.stringify({ schemaVersion: 1, jobId, command: "node", args: ["-e", "console.log('daemon tick job')"], deadlineMs: 20000 }),
     observedAt: Date.now(), requiredScopeIds: [scopeId],
   });
+  const daemonOracle = jobOracle({ id: `oj:daemon:${task.fence}`, expectedStdout: "daemon tick job\n" });
+  const storedDaemonOracle = putObjectContent(ws.stateDir, JSON.stringify(daemonOracle));
   const oracleObj = insertObjectRow(db, {
     scopeId, kind: "job_oracle", sourceUri: `job:${jobId}`, sourceActor: "test",
-    content: JSON.stringify({ schemaVersion: 1, verdict: "exit-code-evidence-only" }),
+    contentHash: storedDaemonOracle.contentHash, storageRef: storedDaemonOracle.storageRef,
     observedAt: Date.now(), requiredScopeIds: [scopeId],
   });
   db.prepare(
@@ -519,16 +562,20 @@ function jobOutput(ws, jobId) {
     }) + "\n",
     "utf8",
   );
-  const { insertObjectRow } = await import("../../../apps/daemon/src/objects.mjs");
+  const { insertObjectRow, putObjectContent } = await import("../../../apps/daemon/src/objects.mjs");
   const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(task.id).scope_id;
   const manifestObj = insertObjectRow(db, {
     scopeId, kind: "job_manifest", sourceUri: `job:${jobId}`, sourceActor: "test",
     content: JSON.stringify({ schemaVersion: 1, jobId, command: "node", args: ["-e", "console.log('never launched')"], deadlineMs: 20000 }),
     observedAt: Date.now(), requiredScopeIds: [scopeId],
   });
+  // Never launched, never evaluated — but the durable intent still carries a
+  // real acceptance definition, not a vacuous verdict.
+  const warnOracle = jobOracle({ id: `oj:warn:${task.fence}`, expectedStdout: "never launched\n" });
+  const storedWarnOracle = putObjectContent(ws.stateDir, JSON.stringify(warnOracle));
   const oracleObj = insertObjectRow(db, {
     scopeId, kind: "job_oracle", sourceUri: `job:${jobId}`, sourceActor: "test",
-    content: JSON.stringify({ schemaVersion: 1, verdict: "exit-code-evidence-only" }),
+    contentHash: storedWarnOracle.contentHash, storageRef: storedWarnOracle.storageRef,
     observedAt: Date.now(), requiredScopeIds: [scopeId],
   });
   db.prepare(
@@ -559,9 +606,157 @@ function jobOutput(ws, jobId) {
   );
 }
 
+// 12. No acceptance definition, no job: submitJob without an oracle is
+// refused BEFORE anything runs (02 section 5 — there is nothing the host
+// could verify success against, so nothing may execute).
+{
+  const ws = makeWorkspace("oj-no-oracle");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, loadCanonicalSchema());
+  const { task } = seedTask(db, ws.stateDir, { label: "nooracle" });
+  const executor = freshExecutor(db, ws);
+  const jobId = `job:oj:nooracle:${task.fence}:refused`;
+  let refused = null;
+  try {
+    executor.submitJob({
+      jobId,
+      taskId: task.id,
+      attemptId: attemptIdOf(db, task),
+      fence: task.fence,
+      manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "console.log('never runs')"], deadlineMs: 20000 },
+      deadlineAt: Date.now() + 30000,
+      now: Date.now(),
+    });
+  } catch (e) {
+    refused = e.message;
+  }
+  const row = db.prepare("SELECT state FROM execution_jobs WHERE id=?").get(jobId);
+  const containersLeft = dockerJson(["ps", "-aq", "-f", `name=aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-")}`]);
+  suite.check(
+    "job-without-oracle-refused-nothing-executed",
+    /no oracle/.test(refused ?? "") && row === undefined && containersLeft.out === "",
+    `refused=${JSON.stringify((refused ?? "NOT REFUSED").slice(0, 80))} row=${row === undefined ? "absent" : row.state} containers=${JSON.stringify(containersLeft.out)}`,
+  );
+  db.close();
+}
+
+// 13. Exit 0 does not mean success: the host compares the bound acceptance
+// definition, and a contradicting requiredOutputHash records FAILED with
+// the mismatch on the audit trail (re-review P1; the pre-fix tree recorded
+// SUCCEEDED here — reproduced red before the fix).
+{
+  const ws = makeWorkspace("oj-oracle-mismatch");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, loadCanonicalSchema());
+  const { task } = seedTask(db, ws.stateDir, { label: "mismatch" });
+  const executor = freshExecutor(db, ws);
+  const jobId = `job:oj:mismatch:${task.fence}:contradiction`;
+  executor.submitJob({
+    jobId,
+    taskId: task.id,
+    attemptId: attemptIdOf(db, task),
+    fence: task.fence,
+    manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", "console.log('the job actually printed this')"], deadlineMs: 20000 },
+    // The acceptance definition pins bytes this job can never produce.
+    oracle: jobOracle({ id: `oj:mismatch:${task.fence}`, expectedStdout: "the reviewer expected something else\n" }),
+    deadlineAt: Date.now() + 30000,
+    now: Date.now(),
+  });
+  const event = await waitForFinish(executor, { jobId });
+  const row = db.prepare("SELECT state, exit_code FROM execution_jobs WHERE id=?").get(jobId);
+  const mismatchAudit = db
+    .prepare("SELECT details_json FROM audit_log WHERE code='job_oracle_mismatch' AND details_json LIKE ?")
+    .all(`%${jobId}%`);
+  suite.check(
+    "exit0-with-contradicting-oracle-is-not-success",
+    event?.state === "FAILED" &&
+      event.reason === "oracle_mismatch" &&
+      row.state === "FAILED" &&
+      row.exit_code === 0 &&
+      mismatchAudit.length === 1,
+    `event=${event?.state}(${event?.reason ?? "-"}) row=${row.state}/${row.exit_code} mismatch-audits=${mismatchAudit.length} — exit 0 is evidence, the bound oracle decides`,
+  );
+  db.close();
+}
+
+// 14. result.json is EVIDENCE, never a state decision (02 section 5): a
+// tampered result.json docker-cp'd into the stopped container — the same
+// trust position as a grandchild racing the runner's write — cannot flip
+// timedOut / cancelled / signal onto a job whose trusted facts are
+// "container exited 0, oracle holds". The pre-fix tree recorded
+// TIMED_OUT / CANCELLED / FAILED(signal) from exactly this evidence
+// (reproduced red before the fix).
+{
+  const tamperCases = [
+    ["timedout", { runnerVersion: 1, exitCode: 0, signal: null, timedOut: true, cancelled: false }],
+    ["cancelled", { runnerVersion: 1, exitCode: 0, signal: null, timedOut: false, cancelled: true }],
+    ["signal", { runnerVersion: 1, exitCode: null, signal: "SIGKILL", timedOut: false, cancelled: false }],
+  ];
+  const observed = [];
+  for (const [tag, tampered] of tamperCases) {
+    const ws = makeWorkspace(`oj-tamper-${tag}`);
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, loadCanonicalSchema());
+    const { task } = seedTask(db, ws.stateDir, { label: `tamper${tag}` });
+    const executor = freshExecutor(db, ws);
+    const jobId = `job:oj:tamper:${task.fence}:${tag}`;
+    executor.submitJob({
+      jobId,
+      taskId: task.id,
+      attemptId: attemptIdOf(db, task),
+      fence: task.fence,
+      manifest: { schemaVersion: 1, jobId, command: "node", args: ["-e", `console.log('tamper case ${tag}')`], deadlineMs: 20000 },
+      oracle: jobOracle({ id: `oj:tamper:${task.fence}:${tag}`, expectedStdout: `tamper case ${tag}\n` }),
+      deadlineAt: Date.now() + 30000,
+      now: Date.now(),
+    });
+    // Wait for the container to STOP without collecting: the tamper must
+    // land in the output volume BEFORE the host's poll reads it.
+    const containerName = `aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 80)}`;
+    for (let i = 0; i < 60; i++) {
+      const r = spawnSync("docker", ["inspect", "-f", "{{.State.Running}}", containerName], { encoding: "utf8" });
+      if (r.status === 0 && r.stdout.trim() === "false") break;
+      await sleep(500);
+    }
+    const tmp = join(ws.stateDir, "tampered.json");
+    writeFileSync(tmp, JSON.stringify(tampered), "utf8");
+    const cp = spawnSync("docker", ["cp", tmp, `${containerName}:/job/output/result.json`], { encoding: "utf8" });
+    if (cp.status !== 0) {
+      observed.push({ tag, state: `cp-failed:${cp.stderr.trim().slice(0, 60)}` });
+      db.close();
+      continue;
+    }
+    const event = executor.pollOnce({ now: Date.now() }).find((e) => e.jobId === jobId);
+    const out = jobOutput(ws, jobId);
+    const row = db.prepare("SELECT state, exit_code FROM execution_jobs WHERE id=?").get(jobId);
+    observed.push({
+      tag,
+      state: event?.state,
+      row: `${row?.state}/${row?.exit_code}`,
+      // The tampered evidence MUST have been collected (the tamper landed),
+      // and MUST have been ignored by the state decision.
+      tamperLanded:
+        (tag === "timedout" && out.result?.timedOut === true) ||
+        (tag === "cancelled" && out.result?.cancelled === true) ||
+        (tag === "signal" && out.result?.signal === "SIGKILL"),
+    });
+    db.close();
+  }
+  suite.check(
+    "tampered-result-json-cannot-rewrite-terminal-state",
+    observed.every((o) => o.state === "SUCCEEDED" && o.row === "SUCCEEDED/0" && o.tamperLanded === true),
+    observed
+      .map((o) => `${o.tag}: state=${o.state} row=${o.row} tamper-landed=${o.tamperLanded}`)
+      .join(" | ") + " — the forged fields reached the host as evidence and changed nothing",
+  );
+}
+
 suite.note(
   "residual-risk-recorded",
-  "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）。宿主按容器退出码与证据字段映射 job 终态，job 的自述不作授权或成功标记；宿主墙钟 deadline 与容器回收不受影响。「Task 结论归可信 oracle 判定」的宿主侧比较尚未接线：本阶段如实记录为实现待接线，不宣称已验收。",
+  "容器级退出码与 result.json 是证据输入（02 §5）：宿主已按绑定 oracle 比较后才记 SUCCEEDED，伪造 result.json 的 timedOut/cancelled/signal 不再改写终态（本套件第 14 例为证）。仍如实保留的窗口：孙进程在 runner 写完证据、容器退出前的微秒级竞态理论上可改写 stdout.txt 首字节集合（同容器同 uid），该竞态与上一轮审计记录一致、未稳定复现；runner 退出码约定与宿主墙钟/取消记录不受影响。",
 );
 
 writeReport({

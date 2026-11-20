@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-20T01:44:18.422Z",
+  "generatedAt": "2026-11-20T01:59:11.760Z",
   "nodeVersion": "v22.23.5",
   "suite": "offline-jobs",
   "label": "test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）",
   "counts": {
-    "pass": 11,
+    "pass": 14,
     "fail": 0
   },
   "results": [
@@ -46,7 +46,7 @@
     {
       "name": "startup-recovery-kills-orphan-container-and-marks-lost",
       "status": "PASS",
-      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"4ece29297957192416dc78dfdf8cae51192befccc64e8f2205f34745311e65c8\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
+      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"b4f1e57a12976c929b1c41f74cf9408e2c74c7a1cb742f15455ab76adbd425cc\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
     },
     {
       "name": "invalid-manifest-refused-nothing-executed",
@@ -64,12 +64,27 @@
       "detail": "daemon exit=5 job=QUEUED warn-line=true containers=\"\" — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill"
     },
     {
+      "name": "job-without-oracle-refused-nothing-executed",
+      "status": "PASS",
+      "detail": "refused=\"job job:oj:nooracle:1:refused has no oracle: an offline job requires a host-auth\" row=absent containers=\"\""
+    },
+    {
+      "name": "exit0-with-contradicting-oracle-is-not-success",
+      "status": "PASS",
+      "detail": "event=FAILED(oracle_mismatch) row=FAILED/0 mismatch-audits=1 — exit 0 is evidence, the bound oracle decides"
+    },
+    {
+      "name": "tampered-result-json-cannot-rewrite-terminal-state",
+      "status": "PASS",
+      "detail": "timedout: state=SUCCEEDED row=SUCCEEDED/0 tamper-landed=true | cancelled: state=SUCCEEDED row=SUCCEEDED/0 tamper-landed=true | signal: state=SUCCEEDED row=SUCCEEDED/0 tamper-landed=true — the forged fields reached the host as evidence and changed nothing"
+    },
+    {
       "name": "residual-risk-recorded",
       "status": "NOTE",
-      "detail": "容器级退出码与 result.json 是证据输入：同容器的恶意 job 可以伪造自己的 result.json（02 §5 明文承认）。宿主按容器退出码与证据字段映射 job 终态，job 的自述不作授权或成功标记；宿主墙钟 deadline 与容器回收不受影响。「Task 结论归可信 oracle 判定」的宿主侧比较尚未接线：本阶段如实记录为实现待接线，不宣称已验收。"
+      "detail": "容器级退出码与 result.json 是证据输入（02 §5）：宿主已按绑定 oracle 比较后才记 SUCCEEDED，伪造 result.json 的 timedOut/cancelled/signal 不再改写终态（本套件第 14 例为证）。仍如实保留的窗口：孙进程在 runner 写完证据、容器退出前的微秒级竞态理论上可改写 stdout.txt 首字节集合（同容器同 uid），该竞态与上一轮审计记录一致、未稳定复现；runner 退出码约定与宿主墙钟/取消记录不受影响。"
     }
   ],
   "dataSources": "真实 docker 容器（execution/agent 镜像按记录 digest 运行，--network none，cgroup 限额）+ 本地 SQLite；无模型调用、无外部写、无凭据入容器",
   "executionImage": "127.0.0.1:5000/aegispi/execution@sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050",
-  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:2b894a59dbe367f9bc0dfe5de792f07d20115012e2e1e6cee82a3c1f684dd155"
+  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:a33b6b257bc537e3a4d6bc02a022283dd9553e6e96017e7e30f15318d91f482c"
 }

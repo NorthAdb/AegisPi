@@ -17,6 +17,13 @@
 // deadline no matter what the job did to the runner. A job that forges or
 // destroys evidence only loses its own evidence.
 //
+// Terminal states are HOST decisions (02 section 5): the container exit
+// code and the runner's documented conventions (124/125/126/137) are the
+// trusted inputs; result.json is evidence, never a state decision. Exit 0
+// becomes SUCCEEDED only after the bound oracle (a host-authored,
+// content-addressed acceptance definition) holds against the collected
+// evidence; an unreadable oracle refuses success.
+//
 // Container sidecars are stored with a "container:" prefix so the legacy
 // pid-based reaper ignores them and this module owns their lifecycle.
 
@@ -31,7 +38,8 @@ import {
 import { join } from "node:path";
 import { withTx } from "./db/tx.mjs";
 import { writeAudit } from "./audit.mjs";
-import { insertObjectRow } from "./objects.mjs";
+import { insertObjectRow, putObjectContent } from "./objects.mjs";
+import { evaluateJobOracle, loadJobOracleContent, validateJobOracle } from "./job-oracle.mjs";
 import {
   createJob,
   finishJob,
@@ -163,10 +171,27 @@ export function createContainerExecutor(db, {
   // Submit a NEW offline job: durable intent first (manifest and oracle are
   // content-addressed OBJECTS per 06 section 2 — "manifest与oracle指向
   // objects"), then the launch.
+  //
+  // The oracle is REQUIRED (02 section 5, re-review P1): the container exit
+  // code is evidence, never the business conclusion, so a job without a
+  // host-authored acceptance definition has nothing the host could verify
+  // success against and is refused before anything runs. The definition is
+  // validated at this boundary and stored as a content-addressed object the
+  // job can never touch.
   function submitJob({ jobId, taskId, attemptId, fence, manifest, oracle, deadlineAt, now }) {
     const task = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(taskId);
     if (!task) {
       throw new ExecutorError(`task ${taskId} not found; an offline job belongs to a task`);
+    }
+    if (oracle === undefined || oracle === null) {
+      throw new ExecutorError(
+        `job ${jobId} has no oracle: an offline job requires a host-authored acceptance definition (02 section 5); the exit code alone is evidence, never success`,
+      );
+    }
+    try {
+      validateJobOracle(oracle);
+    } catch (e) {
+      throw new ExecutorError(`job ${jobId} oracle is not a valid acceptance definition: ${e.message}`);
     }
     const manifestObject = insertObjectRow(db, {
       scopeId: task.scope_id,
@@ -177,16 +202,17 @@ export function createContainerExecutor(db, {
       observedAt: now,
       requiredScopeIds: [task.scope_id],
     });
+    // The acceptance definition must be READABLE at finish time: store the
+    // content-addressed bytes and bind the row to them (a hash-only row
+    // would leave the host nothing to compare against).
+    const storedOracle = putObjectContent(stateDir, JSON.stringify(oracle));
     const oracleObject = insertObjectRow(db, {
       scopeId: task.scope_id,
       kind: "job_oracle",
       sourceUri: `job:${jobId}`,
       sourceActor: "host-executor",
-      content: JSON.stringify(oracle ?? {
-        schemaVersion: 1,
-        verdict: "exit-code-evidence-only",
-        note: "the exit code is evidence, never the Task conclusion (06 section 2)",
-      }),
+      contentHash: storedOracle.contentHash,
+      storageRef: storedOracle.storageRef,
       observedAt: now,
       requiredScopeIds: [task.scope_id],
     });
@@ -284,27 +310,25 @@ export function createContainerExecutor(db, {
         continue;
       }
       // Exited: collect the runner's evidence from the volume BEFORE the
-      // container goes away, then decide by OUR rules. A null exitCode with
-      // a signal is a killed child (OOM, pid-limit) — a FAILED job even when
-      // the runner itself exited cleanly after recording it.
+      // container goes away. From here the HOST decides by its own rules
+      // (02 section 5): result.json fields are evidence INPUTS, never state
+      // decisions — a job that forges timedOut/cancelled/signal in its own
+      // output only changes its own evidence file, never the terminal state
+      // (re-review P1). The trusted facts are the container exit code
+      // (daemon-reported, not job-reported) and the runner's documented exit
+      // conventions: 124 deadline, 125 cancelled, 126 invalid manifest,
+      // 137 child died by signal.
       const exitCode = Number(exitCodeStr);
       collectOutput(containerId, join(jobDir(job.id), "output"));
       docker(dockerBin, ["rm", "-f", containerId]);
       removeOutputVolume(job.id);
       rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
-      const resultPath = join(jobDir(job.id), "output", "result.json");
-      let evidence = null;
-      if (existsSync(resultPath)) {
-        try {
-          evidence = JSON.parse(readFileSync(resultPath, "utf8"));
-        } catch {}
-      }
-      if (exitCode === 124 || evidence?.timedOut === true) {
+      if (exitCode === 124) {
         markTimedOutJob(db, { jobId: job.id, now });
         events.push({ jobId: job.id, state: "TIMED_OUT", exitCode });
         continue;
       }
-      if (exitCode === 125 || evidence?.cancelled === true) {
+      if (exitCode === 125) {
         withTx(db, () => {
           db.prepare("UPDATE execution_jobs SET state='CANCELLED', ended_at=?, exit_code=? WHERE id=? AND state='RUNNING'")
             .run(now, exitCode, job.id);
@@ -322,21 +346,48 @@ export function createContainerExecutor(db, {
         events.push({ jobId: job.id, state: "FAILED", exitCode: 126 });
         continue;
       }
-      if (evidence && evidence.exitCode === null && evidence.signal) {
-        withTx(db, () => {
-          db.prepare("UPDATE execution_jobs SET state='FAILED', ended_at=?, exit_code=NULL WHERE id=? AND state='RUNNING'")
-            .run(now, job.id);
-          writeAudit(db, {
-            code: "container_job_child_killed_by_signal",
-            details: { job_id: job.id, signal: evidence.signal, container_exit: exitCode },
-            now,
-          });
-        });
-        events.push({ jobId: job.id, state: "FAILED", signal: evidence.signal });
+      if (exitCode !== 0) {
+        finishJob(db, { jobId: job.id, exitCode, state: "FAILED", now });
+        events.push({ jobId: job.id, state: "FAILED", exitCode });
         continue;
       }
-      finishJob(db, { jobId: job.id, exitCode, now });
-      events.push({ jobId: job.id, state: exitCode === 0 ? "SUCCEEDED" : "FAILED", exitCode });
+      // Container exit 0: success exists only after the host compares the
+      // bound acceptance definition (02 section 5 — the exit code alone is
+      // evidence, never the conclusion). An unreadable oracle refuses
+      // success rather than guessing.
+      const oracle = loadJobOracleContent(db, stateDir, job.oracle_object_id);
+      const stdoutPath = join(jobDir(job.id), "output", "stdout.txt");
+      const stdoutBytes = existsSync(stdoutPath) ? readFileSync(stdoutPath) : null;
+      const verdict = oracle === null ? null : evaluateJobOracle(oracle, { containerExitCode: exitCode, stdoutBytes });
+      if (verdict === null) {
+        writeAudit(db, {
+          code: "job_oracle_mismatch",
+          taskId: job.task_id,
+          details: { job_id: job.id, failure: "the bound oracle content is unreadable or malformed; success is refused", exit_code: 0 },
+          now,
+        });
+        finishJob(db, { jobId: job.id, exitCode, state: "FAILED", now });
+        events.push({ jobId: job.id, state: "FAILED", exitCode, reason: "oracle_unreadable" });
+        continue;
+      }
+      if (verdict.ok) {
+        finishJob(db, { jobId: job.id, exitCode, state: "SUCCEEDED", now });
+        events.push({ jobId: job.id, state: "SUCCEEDED", exitCode });
+      } else {
+        writeAudit(db, {
+          code: "job_oracle_mismatch",
+          taskId: job.task_id,
+          details: {
+            job_id: job.id,
+            failure: `assertion(s) ${verdict.failedIds.join(", ")} do not hold against the collected evidence`,
+            exit_code: 0,
+            checked: verdict.checkedIds,
+          },
+          now,
+        });
+        finishJob(db, { jobId: job.id, exitCode, state: "FAILED", now });
+        events.push({ jobId: job.id, state: "FAILED", exitCode, reason: "oracle_mismatch" });
+      }
     }
     return events;
   }

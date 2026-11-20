@@ -57,22 +57,29 @@ export function startJob(db, { stateDir, jobId, pid, now }) {
   });
 }
 
-export function finishJob(db, { jobId, exitCode, artifactObjectId = null, now }) {
+// The finish record is written by the HOST's decision logic (see
+// container-executor pollOnce): state is passed explicitly — SUCCEEDED only
+// ever follows a passed oracle evaluation, never the exit code alone
+// (02 section 5, re-review P1).
+export function finishJob(db, { jobId, exitCode, state, artifactObjectId = null, now }) {
+  if (state !== "SUCCEEDED" && state !== "FAILED") {
+    throw new JobError(`finishJob state must be SUCCEEDED or FAILED, got ${JSON.stringify(state)}`);
+  }
   return withTx(db, () => {
     const changed = db
       .prepare(
         "UPDATE execution_jobs SET state=?, exit_code=?, artifact_object_id=?, ended_at=? WHERE id=? AND state='RUNNING'",
       )
-      .run(exitCode === 0 ? "SUCCEEDED" : "FAILED", exitCode, artifactObjectId, now, jobId).changes;
+      .run(state, exitCode, artifactObjectId, now, jobId).changes;
     if (changed !== 1) {
       throw new JobError(`job ${jobId} is not RUNNING`);
     }
     writeAudit(db, {
-      code: exitCode === 0 ? "job_succeeded" : "job_failed",
+      code: state === "SUCCEEDED" ? "job_succeeded" : "job_failed",
       details: { job_id: jobId, exit_code: exitCode },
       now,
     });
-    return { jobId, state: exitCode === 0 ? "SUCCEEDED" : "FAILED", exitCode };
+    return { jobId, state, exitCode };
   });
 }
 
