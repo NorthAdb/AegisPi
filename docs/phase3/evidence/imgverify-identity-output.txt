@@ -1,0 +1,36 @@
+PASS  agent: tar bytes 105477120 (expected 105477120)
+PASS  agent: tar sha256 a569d4557a4edb7644f3cb93568155e81d9c1e2efee29177b9c6ccb808aed42c
+PASS  agent: index.json manifests[0].digest sha256:1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319 (expected sha256:1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319)
+PASS  agent: manifest.json Config blobs/sha256/e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5 (digest e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5 equals documented config digest)
+NOTE  agent: manifest.json RepoTags empty 鈥?digest-pinned export; tag verified daemon-side
+PASS  agent: manifest blob sha256 1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319 (self-addressed, equals documented manifest digest)
+PASS  agent: config blob sha256 e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5 (self-addressed, equals documented config digest)
+PASS  agent: manifest.config.digest sha256:e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5 points at the config blob
+PASS  agent: config declares os=linux architecture=amd64
+PASS  agent: all 14/14 referenced layer blobs hash to their own digests
+PASS  acquisition: tar bytes 79900160 (expected 79900160)
+PASS  acquisition: tar sha256 723a03953dde4ad1283519310a9795c34e4fc80e8a660df1ffd25044e950487b
+PASS  acquisition: index.json manifests[0].digest sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658 (expected sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658)
+PASS  acquisition: manifest.json Config blobs/sha256/665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f (digest 665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f equals documented config digest)
+NOTE  acquisition: manifest.json RepoTags empty 鈥?digest-pinned export; tag verified daemon-side
+PASS  acquisition: manifest blob sha256 3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658 (self-addressed, equals documented manifest digest)
+PASS  acquisition: config blob sha256 665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f (self-addressed, equals documented config digest)
+PASS  acquisition: manifest.config.digest sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f points at the config blob
+PASS  acquisition: config declares os=linux architecture=amd64
+PASS  acquisition: all 8/8 referenced layer blobs hash to their own digests
+PASS  execution: tar bytes 112399360 (expected 112399360)
+PASS  execution: tar sha256 1661868dc22a3adada29a2f2c5af722d4d2ea24da730e97597e33edf27a2b111
+PASS  execution: index.json manifests[0].digest sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050 (expected sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050)
+PASS  execution: manifest.json Config blobs/sha256/9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e (digest 9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e equals documented config digest)
+NOTE  execution: manifest.json RepoTags empty 鈥?digest-pinned export; tag verified daemon-side
+PASS  execution: manifest blob sha256 202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050 (self-addressed, equals documented manifest digest)
+PASS  execution: config blob sha256 9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e (self-addressed, equals documented config digest)
+PASS  execution: manifest.config.digest sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e points at the config blob
+PASS  execution: config declares os=linux architecture=amd64
+PASS  execution: all 8/8 referenced layer blobs hash to their own digests
+
+IDENTITY agent: manifestDigest=sha256:1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319 config/imageID=sha256:e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5 layers=14 tag=127.0.0.1:5000/aegispi/agent:phase3-52502432d21f
+IDENTITY acquisition: manifestDigest=sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658 config/imageID=sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f layers=8 tag=127.0.0.1:5000/aegispi/acquisition:phase3-52502432d21f
+IDENTITY execution: manifestDigest=sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050 config/imageID=sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e layers=8 tag=127.0.0.1:5000/aegispi/execution:phase3-52502432d21f
+
+=== verify-original-archives: 27 pass, 0 fail, 27 judged ===

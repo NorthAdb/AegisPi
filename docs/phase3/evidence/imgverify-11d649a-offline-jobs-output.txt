@@ -1,0 +1,25 @@
+(node:24320) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS  real-no-network-job-executes 鈥?event=SUCCEEDED row=SUCCEEDED/0 result.exit=0 stdout="offline ok"
+PASS  failing-job-records-exit-code-as-evidence 鈥?row=FAILED/7 evidence.exit=7
+PASS  job-namespace-has-no-network-dns-and-http-blocked 鈥?stdout="DNS_BLOCKED HTTP_BLOCKED"
+PASS  host-enforced-deadline-times-out-and-reaps-container 鈥?event=TIMED_OUT row=TIMED_OUT containers-left=""
+PASS  running-job-cancels-and-container-dies 鈥?cancel=CANCELLED row=CANCELLED containers-left=""
+PASS  agent-and-offline-job-carry-different-real-cgroup-limits 鈥?agent memory.max=1073741824 execution memory.max=2147483648 pids.max=256
+PASS  memory-and-disk-quotas-are-enforced-not-advisory 鈥?oom=FAILED(FAILED) disk=FAILED/9 stdout="DISK_BOUND_HIT:ENOSPC" 鈥?the tmpfs SIZE bound must be the killer (EACCES or any other code means the mount contract broke, not the quota)
+PASS  startup-recovery-kills-orphan-container-and-marks-lost 鈥?reaped=[{"jobId":"job:oj:recover:1:orphan","container":"e288e98bc794dc3daa787d4c004d00622876c4ca30960b28187af04f9120b566","killedOrphan":true}] row=LOST containers-left=""
+PASS  invalid-manifest-refused-nothing-executed 鈥?row=FAILED/126 refused=true reason="deadlineMs must be a positive integer of at most one hour"
+node:fs:440
+    return binding.readFileUtf8(path, stringToFlags(options.flag));
+                   ^
+
+Error: ENOENT: no such file or directory, open 'D:\AegisPi\aegispi-verify-11d649a\workspace-state\phase3\oj-daemon\jobs\job_oj_daemon_1_tick\output\stdout.txt'
+    at readFileSync (node:fs:440:20)
+    at file:///D:/AegisPi/aegispi-verify-11d649a/evals/phase3/offline-jobs/run.mjs:528:21 {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\AegisPi\\aegispi-verify-11d649a\\workspace-state\\phase3\\oj-daemon\\jobs\\job_oj_daemon_1_tick\\output\\stdout.txt'
+}
+
+Node.js v22.23.5
