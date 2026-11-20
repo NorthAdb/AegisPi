@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T03:01:49.076Z",
+  "generatedAt": "2026-11-20T03:24:30.852Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-unit",
   "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
@@ -141,12 +141,12 @@
     {
       "name": "http-transport-carries-bytes-and-maps-outcomes",
       "status": "PASS",
-      "detail": "submit=succeeded(ext-1795143694444) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
+      "detail": "submit=succeeded(ext-1795145056011) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
     },
     {
       "name": "authorized-production-tick-submits-over-real-http-transport",
       "status": "PASS",
-      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795143696852 local-service-saw=true"
+      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795145058492 local-service-saw=true"
     },
     {
       "name": "unauthorized-production-tick-sends-zero-bytes-through-real-transport",
@@ -156,7 +156,7 @@
     {
       "name": "worker-reserves-before-call-and-settles-real-usage",
       "status": "PASS",
-      "detail": "daemon exit=0 reservation=SETTLED settled=100 microusd source=model-http-transport task=SUCCEEDED/not_applicable reply=string:\"model reply for the local verification s\" ordering[created=1795143699281 at=1795143699832 settled=1795143699854] ok=true — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero"
+      "detail": "daemon exit=0 reservation=SETTLED settled=100 microusd source=model-http-transport task=SUCCEEDED/not_applicable reply=string:\"model reply for the local verification s\" ordering[created=1795145061455 at=1795145061991 settled=1795145062013] ok=true — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero"
     },
     {
       "name": "worker-no-usage-keeps-reservation-held-never-zero",

@@ -1,6 +1,6 @@
 # test:security:unit — 确定性安全门禁（02 §8 第一组）
 
-生成：2026-11-20T03:01:49.076Z；Node v22.23.5；suite `security-unit`。
+生成：2026-11-20T03:24:30.852Z；Node v22.23.5；suite `security-unit`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -30,10 +30,10 @@
 | PASS | sse-filters-to-caller-scopes-until-granted | own-visible=true foreign-before-grant=false foreign-after-grant=true |
 | PASS | no-flag-daemon-tick-settles-no-fabricated-usage | daemon exit=0 settlements=0 worker-reservations=0 (nothing is claimed or settled without the declared fixture flag) |
 | PASS | fixture-daemon-tick-settlement-is-labeled-fixture | daemon exit=0 settlements=1 fixture-labeled=true |
-| PASS | http-transport-carries-bytes-and-maps-outcomes | submit=succeeded(ext-1795143694444) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline |
-| PASS | authorized-production-tick-submits-over-real-http-transport | daemon exit=0 effect=SUCCEEDED/ext-1795143696852 local-service-saw=true |
+| PASS | http-transport-carries-bytes-and-maps-outcomes | submit=succeeded(ext-1795145056011) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline |
+| PASS | authorized-production-tick-submits-over-real-http-transport | daemon exit=0 effect=SUCCEEDED/ext-1795145058492 local-service-saw=true |
 | PASS | unauthorized-production-tick-sends-zero-bytes-through-real-transport | daemon exit=0 effect=FAILED zero-bytes=true adapter-refused-audits=1 |
-| PASS | worker-reserves-before-call-and-settles-real-usage | daemon exit=0 reservation=SETTLED settled=100 microusd source=model-http-transport task=SUCCEEDED/not_applicable reply=string:"model reply for the local verification s" ordering[created=1795143699281 at=1795143699832 settled=1795143699854] ok=true — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero |
+| PASS | worker-reserves-before-call-and-settles-real-usage | daemon exit=0 reservation=SETTLED settled=100 microusd source=model-http-transport task=SUCCEEDED/not_applicable reply=string:"model reply for the local verification s" ordering[created=1795145061455 at=1795145061991 settled=1795145062013] ok=true — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero |
 | PASS | worker-no-usage-keeps-reservation-held-never-zero | daemon exit=0 reservation=HELD settlements=0 not-settled-audits=1 |
 | PASS | worker-unauthorized-price-catalog-keeps-reservation-held | daemon exit=0 reservation=HELD settlements=0 price-not-authorized-audits=1 |
 | PASS | worker-refuses-unauthorized-endpoint-before-any-call | daemon exit=0 reservations=0 task=QUEUED honest-log=true |

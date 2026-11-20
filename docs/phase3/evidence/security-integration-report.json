@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T03:13:40.520Z",
+  "generatedAt": "2026-11-20T03:23:13.198Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-integration",
   "label": "test:security:integration — 真实容器隔离与逃逸矩阵（02 §8 第二组；探针经 bridge 对照证伪）",
@@ -131,7 +131,7 @@
     {
       "name": "acquisition-refuses-cross-host-redirects",
       "status": "PASS",
-      "detail": "exit=1 reason=redirect host allowlist-demo.host-gateway.local:61365 is not in the al"
+      "detail": "exit=1 reason=redirect host allowlist-demo.host-gateway.local:49946 is not in the al"
     },
     {
       "name": "acquisition-follows-plan-allowlisted-redirect-hosts",
@@ -151,7 +151,7 @@
     {
       "name": "offline-jobs-suite-green-under-integration-gate",
       "status": "PASS",
-      "detail": "exit=0 (node:30840) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
+      "detail": "exit=0 (node:35144) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
     }
   ],
   "dataSources": "真实 docker 容器（execution/agent/acquisition 按记录 manifest digest 运行）+ 本机一次性 HTTP 源（host.docker.internal 经 host-gateway，仅本机回环网关）+ bridge 对照容器（同镜像仅网络不同，证探针可见泄漏）；无模型调用、无真实外部写、无凭据入容器",

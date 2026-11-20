@@ -91,3 +91,14 @@ Phase 3 未通过前不宣布常开；本报告亦不构成 Phase 4 授权。停
 8. **SSE**：`/api/events/stream` 旧实现无 scope 条件而注释声称 filtered（实测越权可见）。现按 caller 可见 scope 过滤（owned/granted/service）。
 
 回归基线：Phase 2 出口五条在整改树上全绿（164/20/15/15/hono 0）；整改新增门禁使计数只增不减（restore 9→11、security-unit 23→28、ingress 拆分）。本附记与整改回应同提交；审计原稿一字未改。
+
+## 8. 独立复审（0a6f89a）后的整改（2026-11-20 追记）
+
+复审判定本报告的整改仍 **NOT MET**（`docs/phase3/audits/AUDIT-PHASE3-REREVIEW-0a6f89a.md`）：F2–F6 原缺陷确认关闭；F7「缺 token 冒充通过」关闭、真实只读未验收；F1/F8 仅部分关闭；出口被四个 P1 实现缺口挡住。本节只列**本报告及 §7 附记中被复审再次证伪或仍缺的表述**，原文保留不涂改；逐项整改记录见 `docs/phase3/reports/audit-response-rereview-0a6f89a.md`。
+
+1. **§7 附记第 4 条的措辞仍成立但范围表述已按勘误修正**：真实 HTTP 提交器、真实模型 worker、webhook 端点、宿主 oracle 属 **Phase 3 范围**；缺授权只使对应实测记未验收，不解释代码缺席。三项当时记为「实现缺口」的，本轮已实现并以本地可控服务验证（提交器 `ba14372`、worker `8af0966`、webhook `5250243`）；oracle 宿主比较已接线（`ff30376`）——「oracle 的宿主侧比较尚未接线」的表述自该提交起失效。
+2. **F1 第二层根因（§1/§7 第 1 条之外的）**：context 摘要除分隔符外还绑定**工作树字节**而非提交内容——Windows autocrlf 检出把 CRLF smudge 进工作树即改摘要，agent 记录值正是绑定 CRLF 工作树字节的实例。现行摘要按 LF 规范化字节，重算值与复审 Linux 独立计算逐位一致；门禁并强制 linux/amd64 config（`49f907d`）。
+3. **§7 第 6 条「保留期已实现」保持**；F8 磁盘演练的「只能更严」注释在本轮前确与代码不符（放宽值实测被接受），已改为拒绝启动的硬不变量（`f413046`）。
+4. **§5/§6 的镜像行**：`0a6f89a` 时的 agent manifest（87e8c195…）被证不可由已提交字节重算，该行作废；现行唯一权威为 `docs/phase3/reports/image-digest.md` 机器块。acquisition/execution 的 manifest 在六次重建中逐位不变（3c5b4dba…/202dfcd4…）。
+
+F2–F7 已关闭项未重开。仍挡在出口外的只剩授权类未验收（真实模型账单、真实外部写、真实 webhook、真实 Telegram 只读）与普通残留（同主机重定向换端口、备份明文、哈希后复制非同读、4 GiB 全量写、PID 复用、孙进程竞态）。Phase 3 整改不构成常开声明，也不构成 Phase 4 授权。
