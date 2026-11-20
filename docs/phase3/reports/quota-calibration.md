@@ -4,7 +4,7 @@
 
 | 维度 | 占位值 | 实测 | 结论 |
 | --- | --- | --- | --- |
-| CPU（job/agent 各 1） | 1 CPU | 双 worker 线程各 2e8 加法：--cpus 1 实测 1888ms；--cpus 2 实测 682ms（比值 2.77） | 限额真实生效；保留占位值 |
+| CPU（job/agent 各 1） | 1 CPU | 双 worker 线程各 2e8 加法：--cpus 1 实测 1331ms；--cpus 2 实测 676ms（比值 1.97） | 限额真实生效；保留占位值 |
 | 内存（job） | 2 GiB | 脏页 1.5 GiB 正常完成；脏页 3 GiB 被 cgroup OOM 终止（exit 137） | 强制生效；保留占位值。注意：零填充不触碰页面不计入 cgroup，压测必须脏页 |
 | pids | 256 | spawn 风暴实测峰值 249（含 runner 自身） | 强制生效；保留占位值 |
 | 可写盘（job work tmpfs） | 4 GiB | 在 512 MiB 同机制实测：8×64MiB 正常、12×64MiB ENOSPC | 机制强制生效；4 GiB 全量写会压开发机 Docker VM 内存，推迟到 Phase 4 真实 job 校准 |

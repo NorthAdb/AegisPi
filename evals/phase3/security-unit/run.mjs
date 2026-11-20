@@ -746,7 +746,14 @@ function seed(tag) {
 
   // Seed a READY im.notify effect the way the host does (proposal -> CAS
   // approval). The daemon's own tick will dispatch it through the adapter.
-  function seedReadyEffect(tag) {
+  // The decision clock is this suite's controlled input: deciding at the
+  // seed instant is the production shape (a human approves at T, the effect
+  // is dispatchable at T), so the spawned tick's real clock always lands
+  // past the due point. decideAt pins a future due point for the not-due
+  // regression below. The re-review caught the old now+100 stamp racing the
+  // first tick on a fast machine; the gate semantics it accidentally
+  // probed are pinned deliberately by the (d)/(e) cases instead.
+  function seedReadyEffect(tag, { decideAt = null } = {}) {
     const ws = makeWorkspace(tag);
     mkdirSync(join(ws.stateDir, "db"), { recursive: true });
     const db = openDatabase(ws.dbPath);
@@ -785,16 +792,17 @@ function seed(tag) {
       approverPrincipalId: ownerId,
       expiresAt: now + 60 * 60 * 1000,
     });
+    const decisionNow = decideAt ?? now;
     decideApproval(db, {
       approvalId: card.approvalId,
       decision: "approve",
       actionHash: card.actionHash,
       nonce: card.approvalNonce,
       approverId: ownerId,
-      now: now + 100,
+      now: decisionNow,
     });
     db.close();
-    return { ws, effectId: card.effectId, businessKey: card.businessKey };
+    return { ws, effectId: card.effectId, businessKey: card.businessKey, dueAt: decisionNow };
   }
 
   // A test config = the repo's real 06 defaults plus ONLY the deployment
@@ -851,6 +859,71 @@ function seed(tag) {
         zeroBytes &&
         refused.length >= 1,
       `daemon exit=${r.status} effect=${effect.state} zero-bytes=${zeroBytes} adapter-refused-audits=${refused.length}`,
+    );
+  }
+
+  // (d) The due-time gate, deterministic on every machine speed: an
+  // approval decided 60s in the FUTURE leaves the effect not-yet-due for
+  // any tick this suite can run, and even the AUTHORIZED production tick
+  // must send zero bytes and leave it READY. Authorization alone never
+  // dispatches before the due point — the fast-machine form of this race
+  // (first tick inside the 100ms decision offset) is now a pinned,
+  // intended behavior instead of a flaky accident.
+  {
+    const dueAt = Date.now() + 60_000;
+    const { ws, effectId, businessKey, dueAt: seededDue } = seedReadyEffect("su-submitter-notdue", { decideAt: dueAt });
+    const configPath = writeTestConfig(ws, { allow: true });
+    const before = serviceLog().length;
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, next_attempt_at FROM effects WHERE id=?").get(effectId);
+    const submitting = db.prepare("SELECT count(*) c FROM audit_log WHERE code='effect_submitting' AND details_json LIKE ?").get(`%${effectId}%`).c;
+    db.close();
+    const zeroBytes = !serviceLog().slice(before).some((s) => s.businessKey === businessKey);
+    suite.check(
+      "not-yet-due-effect-is-not-dispatched-even-when-authorized",
+      r.status === 0 &&
+        effect.state === "READY" &&
+        effect.next_attempt_at === seededDue &&
+        submitting === 0 &&
+        zeroBytes,
+      `daemon exit=${r.status} effect=${effect.state} due-in=${effect.next_attempt_at - Date.now()}ms submitting-audits=${submitting} zero-bytes=${zeroBytes} (authorization without due time sends nothing)`,
+    );
+  }
+
+  // (e) The dispatcher's own due-time layer under an exactly controlled
+  // clock, no spawn timing involved: one millisecond before the due point
+  // the CAS refuses without an effect_submitting audit row; at the due
+  // point the same call commits and the transport sees exactly one
+  // delivery. This is the production scheduling semantics the (b)/(c)
+  // cases now rely on, pinned independently of process spawn speed.
+  {
+    const { ws, effectId, businessKey, dueAt } = seedReadyEffect("su-dispatcher-gate");
+    const db = openDatabase(ws.dbPath);
+    const fake = createFakeRemote(join(ws.stateDir), { label: "su-gate-fake" });
+    const adapter = createAdapterUpstream(db, { baseUpstream: fake, transportKind: "fake", policy: {}, config: {} });
+    let early = null;
+    try {
+      dispatchEffect(db, adapter, { effectId, now: dueAt - 1, precondition: () => true });
+    } catch (e) {
+      early = e;
+    }
+    const stillReady = db.prepare("SELECT state FROM effects WHERE id=?").get(effectId).state;
+    const noSubmittingAudit = db.prepare("SELECT count(*) c FROM audit_log WHERE code='effect_submitting' AND details_json LIKE ?").get(`%${effectId}%`).c === 0;
+    const dispatched = dispatchEffect(db, adapter, { effectId, now: dueAt, precondition: () => true });
+    const after = db.prepare("SELECT state FROM effects WHERE id=?").get(effectId).state;
+    const deliveries = fake.appliedCount(businessKey);
+    db.close();
+    suite.check(
+      "dispatcher-refuses-before-due-time-and-commits-at-it",
+      early !== null &&
+        /next attempt at/.test(early.message) &&
+        stillReady === "READY" &&
+        noSubmittingAudit &&
+        dispatched.state === "SUCCEEDED" &&
+        after === "SUCCEEDED" &&
+        deliveries === 1,
+      `early -> ${early ? early.message.slice(0, 60) : "DISPATCHED EARLY"} still=${stillReady} submitting-audits-before=${noSubmittingAudit} due -> ${dispatched.state}/${after} deliveries=${deliveries}`,
     );
   }
   svc.kill();

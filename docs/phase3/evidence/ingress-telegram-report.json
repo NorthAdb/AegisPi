@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T03:24:35.812Z",
+  "generatedAt": "2026-11-20T04:50:52.300Z",
   "nodeVersion": "v22.23.5",
   "suite": "ingress-telegram",
   "label": "test:ingress-telegram — 本地确定性 ingress 检查（真实只读验收已拆分至 test:ingress-telegram:real）",
@@ -16,7 +16,7 @@
     {
       "name": "revoked-credential-slot-refuses-pull-adapter",
       "status": "PASS",
-      "detail": "resolve before=true after revoke=false (slot im.telegram was revoked at 17951450)"
+      "detail": "resolve before=true after revoke=false (slot im.telegram was revoked at 17951502)"
     },
     {
       "name": "drill-token-never-reaches-audit",

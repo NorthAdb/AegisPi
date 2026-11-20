@@ -13,7 +13,9 @@
 | acquisition | `127.0.0.1:5000/aegispi/acquisition:phase3-52502432d21f` | `sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658` | `sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f` | `sha256:8abae27516f116bc0805481b5ad5b65c904303cc4dcf2b417700267edd2f7012` | fail-closed fetch + report |
 | execution | `127.0.0.1:5000/aegispi/execution:phase3-52502432d21f` | `sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050` | `sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e` | `sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab` | no-network job completed clean |
 
-- 构建时间：20/11/2026, 11:07:49（Asia/Hong_Kong）；源码提交：52502432d21f；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
+- 构建时间：20/11/2026, 11:07:49（Asia/Hong_Kong）；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
+- 构建输入与标签的更正（复审 11d649a 文档偏差，2026-11-20 补记）：构建发生在 11:07:49，当时 HEAD 为 `5250243`（tag 字符串与旧人读行的「源码提交：52502432d21f」都指当时的 HEAD），但工作树已包含其后 `f413046` 的 `daemon.mjs`/`config.mjs` 改动——三枚 manifest 的字节由该内容构建，机器块的 context 列（`0eee2b6f…`/`8abae275…`/`8183df14…`）即该内容的哈希。`f413046` 之前一轮的记录（manifest `64e282f5…`，context `6ac4f3dc…`）对应 `8af0966`→`5250243` 期间的树。`11d649a` 相对 `f413046` 仅改 `docs/`，镜像输入内容与终树一致，image-gate 在终树重算通过。绑定一律以机器块 digest 为准；把 HEAD 误当作字节内容树的人读行已在此对齐，git 历史保留原文。
+- 原镜像字节的离库交付与独立环境校验说明见 `docs/phase3/reports/image-delivery.md`（OCI layout 归档，manifest blob 内容寻址自证；审计环境的 registry 404 因原镜像从未推送到该机）。
 - 冒烟记录：agent `--self-check` 退出码 0；execution 在 ``--network none`` 下经 volume 输出真实执行一个 job（result.json 干净完成）；acquisition 对不可达 URL 失败关闭并经 volume 写出 report.json。
 - 隔离与逃逸测试必须跑在 manifest digest 上（`docker run … 127.0.0.1:5000/aegispi/<name>@<digest>`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。
 

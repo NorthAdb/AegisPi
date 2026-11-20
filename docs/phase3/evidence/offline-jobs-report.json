@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T03:23:13.184Z",
+  "generatedAt": "2026-11-20T04:55:42.436Z",
   "nodeVersion": "v22.23.5",
   "suite": "offline-jobs",
   "label": "test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）",
@@ -46,7 +46,7 @@
     {
       "name": "startup-recovery-kills-orphan-container-and-marks-lost",
       "status": "PASS",
-      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"057f3c7a44f90ba2df3374a9ea7aba794386e72a6ed68a4ebcd9c4c2f66d683e\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
+      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"52c466d99259d4086540e6741c601d1e9de7344f2d04125fd02fa05315643e3b\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
     },
     {
       "name": "invalid-manifest-refused-nothing-executed",

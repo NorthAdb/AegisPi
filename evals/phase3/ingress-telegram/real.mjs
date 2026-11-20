@@ -11,9 +11,10 @@
 //       skip dressed as a pass: the acceptance is explicitly UNACCEPTED
 //       until the owner-authorized source is configured.
 //
-// `--simulate-no-token` drills the refusal path on a machine that DOES have
-// the token: the suite then behaves exactly like a token-less machine and
-// must exit 3.
+// `--simulate-no-token` drills the refusal path on any machine: with the
+// token present it behaves exactly like a token-less machine; on a machine
+// with no token it reports that machine's real state (the flag never
+// claims a token exists). Both forms must exit 3.
 //
 // The bot token transits only this process and the machine's own configured
 // proxy. It is never printed, logged or committed; all captured output is
@@ -55,13 +56,17 @@ function readEnv(name) {
   return undefined;
 }
 
-const token = simulateNoToken ? undefined : readEnv("TELEGRAM_BOT_TOKEN");
+const configuredToken = readEnv("TELEGRAM_BOT_TOKEN");
+const token = simulateNoToken ? undefined : configuredToken;
+const tokenPresentOnHost = configuredToken !== undefined;
 
 if (!token) {
   console.error("");
   console.error("=== test:ingress-telegram:real — NOT VERIFIED (exit 3) ===");
   console.error(simulateNoToken
-    ? "TELEGRAM_BOT_TOKEN 存在于本机，但本次以 --simulate-no-token 演练缺凭据路径：真实只读验收未执行，本条不冒充通过。"
+    ? tokenPresentOnHost
+      ? "TELEGRAM_BOT_TOKEN 存在于本机，但本次以 --simulate-no-token 演练缺凭据路径：真实只读验收未执行，本条不冒充通过。"
+      : "本机 .env 本就未配置 TELEGRAM_BOT_TOKEN；--simulate-no-token 在这台机器上演练的是真实缺凭据状态：真实只读验收未执行，本条不冒充通过。"
     : "TELEGRAM_BOT_TOKEN 未配置于本机 .env；真实只读验收未执行（未验收，非跳过冒充通过）。需主人授权的测试源；本地确定性检查在 test:ingress-telegram。");
   console.error("");
   process.exit(3);
