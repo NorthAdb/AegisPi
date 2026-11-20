@@ -10,7 +10,19 @@
 //                     any isolation suite: a changed tree makes the
 //                     recorded digests stale and the gate refuses.
 //
-//   node tools/build-app-images.mjs
+//   node tools/build-app-images.mjs                        (all three images)
+//   node tools/build-app-images.mjs --only=agent [--note="…"]   (selective)
+//
+// A selective --only build rebuilds ONLY the named images. Every other
+// image is CARRIED OVER from the existing report after proving it still
+// binds to THIS tree: its context hash is recomputed and must equal the
+// recorded one, and its manifest must still resolve at the local registry
+// with the recorded config digest. Any drift refuses the carry (rebuild the
+// drifted image too). The prior epoch's table and notes are preserved
+// verbatim as a history section; its machine block is dropped so the report
+// keeps exactly one live v2 block. A full build replaces the report as
+// before. The binding policy itself never changes: context + manifest +
+// config per image, recomputed by the gate before every suite.
 //
 // What it does, in order:
 //   1. Ensures a throwaway local registry (127.0.0.1:5000) is running so the
@@ -22,7 +34,7 @@
 //   4. Pushes to the local registry, reads back RepoDigests (the manifest
 //      digest), fetches the manifest from the registry to read its embedded
 //      config digest, and pull-verifies the digest resolves.
-//   5. Smoke-tests each image at its DIGEST. Output mounts use named
+//   5. Smoke-tests each REBUILT image at its DIGEST. Output mounts use named
 //      volumes so the IMAGE-OWNED /job/output initializes them: no host
 //      umask ever decides whether the runner can write (audit F2).
 //   6. Rewrites docs/phase3/reports/image-digest.md with the v2 machine
@@ -53,6 +65,7 @@ const REPORT_PATH = join(REPO, "docs", "phase3", "reports", "image-digest.md");
 const REGISTRY_NAME = "aegispi-build-registry";
 const REGISTRY = "127.0.0.1:5000";
 const BASE_DIGEST = "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee";
+const APP_IMAGE_NAMES = ["agent", "acquisition", "execution"];
 
 function die(msg) {
   console.error(`build-app-images: ${msg}`);
@@ -256,7 +269,40 @@ function smokeAcquisition(ref) {
   }
 }
 
-function writeReport(digests, { tag, builtAt, node, docker }) {
+// The prior report is the carry-over source for --only builds: its machine
+// block holds the recorded bindings, its table holds the tags and smoke
+// texts, and its table + notes become the history section of the new report
+// (the prior machine block itself is never carried: one live v2 block).
+function readExistingReport() {
+  if (!existsSync(REPORT_PATH)) return null;
+  const text = readFileSync(REPORT_PATH, "utf8");
+  const fields = {};
+  const block = text.match(/<!--\s*app-image-digests v2([\s\S]*?)-->/);
+  if (block) {
+    for (const line of block[1].split("\n")) {
+      const m = line.trim().match(/^([a-z]+(?:\.(?:manifest|config|context))?):\s*(sha256:[0-9a-f]{64})$/);
+      if (m) fields[m[1]] = m[2];
+    }
+  }
+  const rows = {};
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\|\s*(agent|acquisition|execution)\s*\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|\s*(.+?)\s*\|$/);
+    if (m) rows[m[1]] = { tag: m[2], smoke: m[6] };
+  }
+  const lines = text.split("\n");
+  const tableStart = lines.findIndex((l) => l.startsWith("| 镜像 |"));
+  const machineStart = lines.findIndex((l) => l.trim().startsWith("机器可读块"));
+  let historyLines = [];
+  if (tableStart >= 0 && machineStart > tableStart) {
+    historyLines = lines.slice(tableStart, machineStart);
+    while (historyLines.length > 0 && historyLines[historyLines.length - 1].trim() === "") {
+      historyLines.pop();
+    }
+  }
+  return { fields, rows, historyLines };
+}
+
+function writeReport(digests, { tag, builtAt, node, docker, rebuilt = [], carried = [], history = [], epochNote = "" }) {
   mkdirSync(join(REPO, "docs", "phase3", "reports"), { recursive: true });
   const lines = [];
   lines.push(`# Phase 3 应用镜像 digest 证据`);
@@ -268,28 +314,52 @@ function writeReport(digests, { tag, builtAt, node, docker }) {
   lines.push(`- **context digest**：构建上下文（Dockerfile + 分台源码，见 evals/phase3/lib/image-bind.mjs 的文件清单）的确定性字节哈希；staged 路径固定 \`/\`、文件字节按 LF 规范化，摘要是提交内容的函数——同一提交在 Linux 检出与 Windows autocrlf 检出上重算一致（复审 F1）。image-gate 在每条套件前重算本树哈希，漂移即拒绝；并核验 manifest 内嵌 config blob 声明 linux/amd64，非本平台 config 拒绝。`);
   lines.push(`- 输出挂载为镜像所有的 named volume（镜像内 /job/output、/downloads 属 uid 999），宿主 umask 不再决定可写性（审计 F2）；不使用全局 chmod 777。`);
   lines.push("");
+  if (carried.length > 0) {
+    lines.push(`## 现行纪元（本纪元重建 ${rebuilt.join("/")}；${carried.join("/")} 携带原 digest——context 已在本树复算一致、manifest 已在本地 registry 复解析）`);
+    lines.push("");
+  }
   lines.push(`| 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |`);
   lines.push(`| --- | --- | --- | --- | --- | --- |`);
-  for (const name of ["agent", "acquisition", "execution"]) {
+  for (const name of APP_IMAGE_NAMES) {
     lines.push(
       `| ${name} | \`${digests[name].full}\` | \`${digests[name].digest}\` | \`${digests[name].configDigest}\` | \`${digests[name].contextHash}\` | ${digests[name].smoke} |`,
     );
   }
   lines.push("");
   lines.push(`- 构建时间：${builtAt}（Asia/Hong_Kong）；源码提交：${tag}；构建 Node：${node}；Docker：${docker}。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。`);
-  lines.push(`- 冒烟记录：agent \`--self-check\` 退出码 0；execution 在 \`\`--network none\`\` 下经 volume 输出真实执行一个 job（result.json 干净完成）；acquisition 对不可达 URL 失败关闭并经 volume 写出 report.json。`);
+  if (epochNote) {
+    lines.push(`- 纪元说明：${epochNote}`);
+  }
+  if (carried.length === 0) {
+    lines.push(`- 冒烟记录：agent \`--self-check\` 退出码 0；execution 在 \`\`--network none\`\` 下经 volume 输出真实执行一个 job（result.json 干净完成）；acquisition 对不可达 URL 失败关闭并经 volume 写出 report.json。`);
+  } else {
+    const smokeBits = [];
+    if (rebuilt.includes("agent")) smokeBits.push(`agent \`--self-check\` 退出码 0（本纪元实测）`);
+    if (rebuilt.includes("execution")) smokeBits.push(`execution 在 \`\`--network none\`\` 下经 volume 输出真实执行一个 job（result.json 干净完成，本纪元实测）`);
+    if (rebuilt.includes("acquisition")) smokeBits.push(`acquisition 对不可达 URL 失败关闭并经 volume 写出 report.json（本纪元实测）`);
+    if (smokeBits.length > 0) {
+      lines.push(`- 冒烟记录（本纪元）：${smokeBits.join("；")}。`);
+    }
+    lines.push(`- 携带镜像的 tag 与冒烟列沿用其原纪元记录（同一 digest 字节未变；context 复算不一致或 manifest 不可解析即拒绝携带，必须重建）。`);
+  }
   lines.push(`- 隔离与逃逸测试必须跑在 manifest digest 上（\`docker run … ${REGISTRY}/aegispi/<name>@<digest>\`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。`);
   lines.push("");
   lines.push("机器可读块（image-gate.mjs 解析，勿手改格式）：");
   lines.push("");
   lines.push("<!-- app-image-digests v2");
-  for (const name of ["agent", "acquisition", "execution"]) {
+  for (const name of APP_IMAGE_NAMES) {
     lines.push(`${name}: ${digests[name].digest}`);
     lines.push(`${name}.config: ${digests[name].configDigest}`);
     lines.push(`${name}.context: ${digests[name].contextHash}`);
   }
   lines.push("-->");
   lines.push("");
+  if (history.length > 0) {
+    lines.push(`## 纪元 1（历史，表格与附注原样保留；其机器块已移除——本文件只保留一个现行 v2 块，完整原文见 git 历史）`);
+    lines.push("");
+    lines.push(...history);
+    lines.push("");
+  }
   writeFileSync(REPORT_PATH, lines.join("\n"), "utf8");
 }
 
@@ -299,10 +369,55 @@ async function main() {
   }
   const dockerVersion = run("docker", ["--version"], { capture: true });
   if (dockerVersion.code !== 0) die("docker is not available");
+  const onlyFlag = process.argv.find((a) => a.startsWith("--only="));
+  const rebuilt = onlyFlag
+    ? onlyFlag.slice("--only=".length).split(",").map((s) => s.trim()).filter(Boolean)
+    : [...APP_IMAGE_NAMES];
+  const unknown = rebuilt.filter((n) => !APP_IMAGE_NAMES.includes(n));
+  if (unknown.length > 0) die(`--only names unknown image(s): ${unknown.join(", ")}`);
+  const noteFlag = process.argv.find((a) => a.startsWith("--note="));
+  const epochNote = noteFlag ? noteFlag.slice("--note=".length) : "";
   const tag = `phase3-${gitShort()}`;
   await ensureRegistry();
+  const existing = readExistingReport();
   const digests = {};
-  for (const name of ["agent", "acquisition", "execution"]) {
+  const carried = [];
+  // Carry-over (selective builds): an image that is not being rebuilt must
+  // still bind to THIS tree — recompute its context hash, re-resolve its
+  // manifest at the local registry, and keep the recorded digest only when
+  // both still hold. Any drift refuses the carry (rebuild it too).
+  for (const name of APP_IMAGE_NAMES) {
+    if (rebuilt.includes(name)) continue;
+    if (!existing || !existing.fields[name] || !existing.fields[`${name}.config`] || !existing.fields[`${name}.context`]) {
+      die(`${name} is not being rebuilt but there is no complete prior binding to carry; run a full build first`);
+    }
+    const treeHash = appImageContextHash(name, REPO);
+    if (treeHash !== existing.fields[`${name}.context`]) {
+      die(
+        `${name} is not being rebuilt but its context changed on this tree (recorded ${existing.fields[`${name}.context`]}, this tree ${treeHash}); extend --only to rebuild it too`,
+      );
+    }
+    let resolved;
+    try {
+      resolved = await fetchRegistryManifest(name, existing.fields[name], { registry: REGISTRY });
+    } catch (e) {
+      die(`carried ${name} digest no longer resolves at the local registry: ${e.message}`);
+    }
+    if (resolved.configDigest !== existing.fields[`${name}.config`]) {
+      die(`carried ${name}: the registry manifest embeds config ${resolved.configDigest} but the prior record says ${existing.fields[`${name}.config`]}`);
+    }
+    digests[name] = {
+      digest: existing.fields[name],
+      configDigest: existing.fields[`${name}.config`],
+      contextHash: treeHash,
+      full: existing.rows[name]?.tag ?? `${REGISTRY}/aegispi/${name} (prior tag unrecorded)`,
+      ref: `${REGISTRY}/aegispi/${name}@${existing.fields[name]}`,
+      smoke: existing.rows[name]?.smoke ?? "prior epoch",
+    };
+    carried.push(name);
+    console.log(`== carrying ${name} (context re-verified on this tree, manifest re-resolved at ${REGISTRY})`);
+  }
+  for (const name of rebuilt) {
     console.log(`== building ${name} (tag ${tag})`);
     const built = await buildAndPush(name, tag);
     console.log(`== ${name} manifest: ${built.digest}`);
@@ -310,22 +425,33 @@ async function main() {
     console.log(`== ${name} context:  ${built.contextHash}`);
     digests[name] = { ...built, smoke: "pending" };
   }
-  // Smoke tests run AT THE DIGEST, not the tag.
-  console.log("== smoke: agent --self-check");
-  smokeAgent(digests.agent.ref);
-  digests.agent.smoke = "self-check exit 0";
-  console.log("== smoke: execution no-network job");
-  smokeExecution(digests.execution.ref);
-  digests.execution.smoke = "no-network job completed clean";
-  console.log("== smoke: acquisition fail-closed fetch");
-  smokeAcquisition(digests.acquisition.ref);
-  digests.acquisition.smoke = "fail-closed fetch + report";
+  // Smoke tests run AT THE DIGEST, not the tag, and only for images this
+  // run actually built (carried images keep their prior epoch's smoke
+  // record for the same bytes).
+  if (rebuilt.includes("agent")) {
+    console.log("== smoke: agent --self-check");
+    smokeAgent(digests.agent.ref);
+    digests.agent.smoke = "self-check exit 0";
+  }
+  if (rebuilt.includes("execution")) {
+    console.log("== smoke: execution no-network job");
+    smokeExecution(digests.execution.ref);
+    digests.execution.smoke = "no-network job completed clean";
+  }
+  if (rebuilt.includes("acquisition")) {
+    console.log("== smoke: acquisition fail-closed fetch");
+    smokeAcquisition(digests.acquisition.ref);
+    digests.acquisition.smoke = "fail-closed fetch + report";
+  }
   writeReport(digests, {
     tag: gitShort(),
-    base: BASE_DIGEST,
     builtAt: new Date().toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", hour12: false }),
     node: process.version,
     docker: dockerVersion.out.trim(),
+    rebuilt,
+    carried,
+    history: carried.length > 0 && existing ? existing.historyLines : [],
+    epochNote,
   });
   console.log(`== report written: docs/phase3/reports/image-digest.md`);
   console.log("== done");

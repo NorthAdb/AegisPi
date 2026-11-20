@@ -1,0 +1,18 @@
+(node:18524) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS  real-no-network-job-executes 鈥?event=SUCCEEDED row=SUCCEEDED/0 result.exit=0 stdout="offline ok"
+PASS  failing-job-records-exit-code-as-evidence 鈥?row=FAILED/7 evidence.exit=7
+PASS  job-namespace-has-no-network-dns-and-http-blocked 鈥?stdout="DNS_BLOCKED HTTP_BLOCKED"
+PASS  host-enforced-deadline-times-out-and-reaps-container 鈥?event=TIMED_OUT row=TIMED_OUT containers-left=""
+PASS  running-job-cancels-and-container-dies 鈥?cancel=CANCELLED row=CANCELLED containers-left=""
+PASS  agent-and-offline-job-carry-different-real-cgroup-limits 鈥?agent memory.max=1073741824 execution memory.max=2147483648 pids.max=256
+PASS  memory-and-disk-quotas-are-enforced-not-advisory 鈥?oom=FAILED(FAILED) disk=FAILED/9 stdout="DISK_BOUND_HIT:ENOSPC" 鈥?the tmpfs SIZE bound must be the killer (EACCES or any other code means the mount contract broke, not the quota)
+PASS  startup-recovery-kills-orphan-container-and-marks-lost 鈥?reaped=[{"jobId":"job:oj:recover:1:orphan","container":"9d60ab90ec017fc56ce42276d527ffeacff32b6ae6f4fd9d379e581db487adc4","killedOrphan":true}] row=LOST containers-left=""
+PASS  invalid-manifest-refused-nothing-executed 鈥?row=FAILED/126 refused=true reason="deadlineMs must be a positive integer of at most one hour"
+FAIL  daemon-tick-launches-and-reaps-queued-container-job 鈥?daemon exit=1 job=QUEUED/null containers="" job-stdout-seen=false daemon-event-seen=false daemon-stderr[0]="node:internal/modules/package_json_reader:314" scene=D:\AegisPi\aegispi-repro-11d649a\workspace-state\phase3\oj-daemon\daemon-tick-scene.txt
+FAIL  disk-warn-drill-blocks-new-job-launches 鈥?daemon exit=1 job=QUEUED warn-line=false containers="" 鈥?the watermark read a REAL (healthy) disk and the injected threshold tripped the drill daemon-stderr[0]="node:internal/modules/package_json_reader:314" scene=D:\AegisPi\aegispi-repro-11d649a\workspace-state\phase3\oj-disk-warn\daemon-diskwarn-scene.txt
+PASS  job-without-oracle-refused-nothing-executed 鈥?refused="job job:oj:nooracle:1:refused has no oracle: an offline job requires a host-auth" row=absent containers=""
+PASS  exit0-with-contradicting-oracle-is-not-success 鈥?event=FAILED(oracle_mismatch) row=FAILED/0 mismatch-audits=1 鈥?exit 0 is evidence, the bound oracle decides
+PASS  tampered-result-json-cannot-rewrite-terminal-state 鈥?timedout: state=SUCCEEDED row=SUCCEEDED/0 tamper-landed=true | cancelled: state=SUCCEEDED row=SUCCEEDED/0 tamper-landed=true | signal: state=SUCCEEDED row=SUCCEEDED/0 tamper-landed=true 鈥?the forged fields reached the host as evidence and changed nothing
+NOTE  residual-risk-recorded 鈥?瀹瑰櫒绾ч€€鍑虹爜涓?result.json 鏄瘉鎹緭鍏ワ紙02 搂5锛夛細瀹夸富宸叉寜缁戝畾 oracle 姣旇緝鍚庢墠璁?SUCCEEDED锛屼吉閫?result.json 鐨?timedOut/cancelled/signal 涓嶅啀鏀瑰啓缁堟€侊紙鏈浠剁 14 渚嬩负璇侊級銆備粛濡傚疄淇濈暀鐨勭獥鍙ｏ細瀛欒繘绋嬪湪 runner 鍐欏畬璇佹嵁銆佸鍣ㄩ€€鍑哄墠鐨勫井绉掔骇绔炴€佺悊璁轰笂鍙敼鍐?stdout.txt 棣栧瓧鑺傞泦鍚堬紙鍚屽鍣ㄥ悓 uid锛夛紝璇ョ珵鎬佷笌涓婁竴杞璁¤褰曚竴鑷淬€佹湭绋冲畾澶嶇幇锛況unner 閫€鍑虹爜绾﹀畾涓庡涓诲閽?鍙栨秷璁板綍涓嶅彈褰卞搷銆?
+=== test:offline-jobs: 12 pass, 2 fail, 14 judged ===

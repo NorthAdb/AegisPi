@@ -472,6 +472,29 @@ function jobOracle({ id, expectedStdout = undefined, expectedExitCode = 0 }) {
   db.close();
 }
 
+// The daemon subprocess's own failure mode must outlive the case (re-review
+// follow-up: an unguarded stdout read once crashed the suite and swallowed
+// the daemon's stderr). The scene file lands in the workspace BEFORE any
+// later read can throw, and the first stderr line rides in the check detail.
+function saveDaemonScene(ws, tag, argv, daemon) {
+  const scenePath = join(ws.stateDir, `daemon-${tag}-scene.txt`);
+  writeFileSync(scenePath, [
+    `argv: node ${argv.join(" ")}`,
+    `cwd: ${repoRoot}`,
+    `node: ${process.version}`,
+    `exit: ${daemon.status}`,
+    `spawn-error: ${daemon.error ? daemon.error.message : "-"}`,
+    "--- stdout ---",
+    daemon.stdout ?? "",
+    "--- stderr ---",
+    daemon.stderr ?? "",
+  ].join("\n"), "utf8");
+  return scenePath;
+}
+function firstNonEmptyLine(s) {
+  return (String(s ?? "").split("\n").find((l) => l.trim() !== "") ?? "").trim();
+}
+
 // 10. Daemon-level integration: a QUEUED job with a persisted manifest is
 // launched and reaped by the DAEMON's own tick when the operator wires the
 // execution image. This is the production path, not the direct executor API.
@@ -517,25 +540,36 @@ function jobOracle({ id, expectedStdout = undefined, expectedExitCode = 0 }) {
      VALUES (?,?,?,?,?,?,'QUEUED',?,NULL,NULL,?,NULL)`,
   ).run(jobId, task.id, attemptIdOf(db, task), task.fence, manifestObj.id, oracleObj.id, Date.now() + 30000, Date.now());
   db.close();
-  const daemon = spawnSync(process.execPath, [
+  const daemonArgv = [
     join(repoRoot, "apps", "daemon", "src", "daemon.mjs"),
     "--once", `--data-dir=${ws.stateDir}`, `--execution-image=${EXECUTION_REF}`,
-  ], { cwd: repoRoot, encoding: "utf8", timeout: 90000 });
+  ];
+  const daemon = spawnSync(process.execPath, daemonArgv, { cwd: repoRoot, encoding: "utf8", timeout: 90000 });
+  const scenePath = saveDaemonScene(ws, "tick", daemonArgv, daemon);
   const daemonOut = (daemon.stdout ?? "") + (daemon.stderr ?? "");
   const db2 = openDatabase(ws.dbPath);
   const row = db2.prepare("SELECT state, exit_code FROM execution_jobs WHERE id=?").get(jobId);
   db2.close();
-  const jobStdout = readFileSync(join(jobDir, "output", "stdout.txt"), "utf8");
+  // A missing stdout.txt is the daemon's failure VERDICT, not a reason for
+  // this process to crash and bury it: guard the read, let the check fail
+  // with the saved scene, and keep the remaining cases running.
+  const jobStdout = existsSync(join(jobDir, "output", "stdout.txt"))
+    ? readFileSync(join(jobDir, "output", "stdout.txt"), "utf8")
+    : null;
   const containersLeft = dockerJson(["ps", "-aq", "-f", `name=aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-")}`]);
+  const jobStdoutSeen = jobStdout !== null && /daemon tick job/.test(jobStdout);
+  const daemonEventSeen = /-> SUCCEEDED/.test(daemonOut);
   suite.check(
     "daemon-tick-launches-and-reaps-queued-container-job",
     daemon.status === 0 &&
       row.state === "SUCCEEDED" &&
       row.exit_code === 0 &&
       containersLeft.out === "" &&
-      /daemon tick job/.test(jobStdout) &&
-      /-> SUCCEEDED/.test(daemonOut),
-    `daemon exit=${daemon.status} job=${row.state}/${row.exit_code} containers=${JSON.stringify(containersLeft.out)} job-stdout-seen=${/daemon tick job/.test(jobStdout)} daemon-event-seen=${/-> SUCCEEDED/.test(daemonOut)}`,
+      jobStdoutSeen &&
+      daemonEventSeen,
+    `daemon exit=${daemon.status} job=${row.state}/${row.exit_code} containers=${JSON.stringify(containersLeft.out)} job-stdout-seen=${jobStdoutSeen} daemon-event-seen=${daemonEventSeen}` +
+      (daemon.status === 0 ? "" : ` daemon-stderr[0]=${JSON.stringify(firstNonEmptyLine(daemon.stderr).slice(0, 160))}`) +
+      ` scene=${scenePath}`,
   );
 }
 
@@ -584,13 +618,15 @@ function jobOracle({ id, expectedStdout = undefined, expectedExitCode = 0 }) {
      VALUES (?,?,?,?,?,?,'QUEUED',?,NULL,NULL,?,NULL)`,
   ).run(jobId, task.id, attemptIdOf(db, task), task.fence, manifestObj.id, oracleObj.id, Date.now() + 8000, Date.now());
   db.close();
-  const daemon = spawnSync(process.execPath, [
+  const daemonArgv = [
     join(repoRoot, "apps", "daemon", "src", "daemon.mjs"),
     "--once", `--data-dir=${ws.stateDir}`, `--execution-image=${EXECUTION_REF}`,
-  ], {
+  ];
+  const daemon = spawnSync(process.execPath, daemonArgv, {
     cwd: repoRoot, encoding: "utf8", timeout: 120000,
     env: { ...process.env, AEGISPI_DISK_DRILL_WARN_GIB: "1000000" },
   });
+  const scenePath = saveDaemonScene(ws, "diskwarn", daemonArgv, daemon);
   const daemonOut = (daemon.stdout ?? "") + (daemon.stderr ?? "");
   const db2 = openDatabase(ws.dbPath, { readOnly: true });
   const row = db2.prepare("SELECT state FROM execution_jobs WHERE id=?").get(jobId);
@@ -602,7 +638,9 @@ function jobOracle({ id, expectedStdout = undefined, expectedExitCode = 0 }) {
       row.state === "QUEUED" &&
       /level=warn/.test(daemonOut) &&
       containersLeft.out === "",
-    `daemon exit=${daemon.status} job=${row.state} warn-line=${/level=warn/.test(daemonOut)} containers=${JSON.stringify(containersLeft.out)} — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill`,
+    `daemon exit=${daemon.status} job=${row.state} warn-line=${/level=warn/.test(daemonOut)} containers=${JSON.stringify(containersLeft.out)} — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill` +
+      (daemon.status === 5 ? "" : ` daemon-stderr[0]=${JSON.stringify(firstNonEmptyLine(daemon.stderr).slice(0, 160))}`) +
+      ` scene=${scenePath}`,
   );
 }
 
