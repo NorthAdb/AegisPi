@@ -32,7 +32,6 @@
 
 import { spawnSync } from "node:child_process";
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -44,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import {
   appImageContextFiles,
   appImageContextHash,
+  contextFileBytes,
   fetchRegistryManifest,
 } from "../evals/phase3/lib/image-bind.mjs";
 
@@ -109,12 +109,14 @@ function stage(name) {
   const dir = join(STAGE_ROOT, name);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
-  // Stage exactly the file list image-bind.mjs hashes: the context hash and
-  // the docker build context can never drift apart.
+  // Stage exactly the file list image-bind.mjs hashes, with the SAME
+  // LF-normalized bytes the context hash reads: the hash input and the
+  // docker build context can never drift apart, and a Windows autocrlf
+  // worktree stages identical bytes to a Linux checkout (re-review F1).
   for (const f of appImageContextFiles(name, REPO)) {
     const dest = join(dir, f.rel);
     mkdirSync(dirname(dest), { recursive: true });
-    cpSync(f.abs, dest);
+    writeFileSync(dest, contextFileBytes(f.abs));
   }
   return dir;
 }
@@ -263,7 +265,7 @@ function writeReport(digests, { tag, builtAt, node, docker }) {
   lines.push("");
   lines.push(`- **manifest digest**：推送到本机构建 registry（${REGISTRY}，registry:2）后由 \`\`docker image inspect --format '{{json .RepoDigests}}'\`\` 读出的 OCI manifest 内容摘要，并经 \`\`docker pull <ref>@<digest>\`\` 回拉核验；隔离套件只跑 manifest digest。`);
   lines.push(`- **config digest**：同一 manifest 从 registry 读回的内嵌 image config 摘要（本地 image/config id 与 manifest digest 是不同命名空间，不可互换）。`);
-  lines.push(`- **context digest**：构建上下文（Dockerfile + 分台源码，见 evals/phase3/lib/image-bind.mjs 的文件清单）的确定性字节哈希；image-gate 在每条套件前重算本树哈希，漂移即拒绝（审计 F1：digest 必须绑定构建它的源码）。`);
+  lines.push(`- **context digest**：构建上下文（Dockerfile + 分台源码，见 evals/phase3/lib/image-bind.mjs 的文件清单）的确定性字节哈希；staged 路径固定 \`/\`、文件字节按 LF 规范化，摘要是提交内容的函数——同一提交在 Linux 检出与 Windows autocrlf 检出上重算一致（复审 F1）。image-gate 在每条套件前重算本树哈希，漂移即拒绝；并核验 manifest 内嵌 config blob 声明 linux/amd64，非本平台 config 拒绝。`);
   lines.push(`- 输出挂载为镜像所有的 named volume（镜像内 /job/output、/downloads 属 uid 999），宿主 umask 不再决定可写性（审计 F2）；不使用全局 chmod 777。`);
   lines.push("");
   lines.push(`| 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |`);

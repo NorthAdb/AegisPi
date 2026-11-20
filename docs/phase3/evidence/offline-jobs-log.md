@@ -1,6 +1,6 @@
 # test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）
 
-生成：2026-11-19T16:30:09.453Z；Node v22.23.5；suite `offline-jobs`。
+生成：2026-11-20T01:44:18.422Z；Node v22.23.5；suite `offline-jobs`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -11,7 +11,7 @@
 | PASS | running-job-cancels-and-container-dies | cancel=CANCELLED row=CANCELLED containers-left="" |
 | PASS | agent-and-offline-job-carry-different-real-cgroup-limits | agent memory.max=1073741824 execution memory.max=2147483648 pids.max=256 |
 | PASS | memory-and-disk-quotas-are-enforced-not-advisory | oom=FAILED(FAILED) disk=FAILED/9 stdout="DISK_BOUND_HIT:ENOSPC" — the tmpfs SIZE bound must be the killer (EACCES or any other code means the mount contract broke, not the quota) |
-| PASS | startup-recovery-kills-orphan-container-and-marks-lost | reaped=[{"jobId":"job:oj:recover:1:orphan","container":"07ad766786dd25790bc8f0e1aedc30ac43832b48e3028687c8f88927a2c5bcda","killedOrphan":true}] row=LOST containers-left="" |
+| PASS | startup-recovery-kills-orphan-container-and-marks-lost | reaped=[{"jobId":"job:oj:recover:1:orphan","container":"4ece29297957192416dc78dfdf8cae51192befccc64e8f2205f34745311e65c8","killedOrphan":true}] row=LOST containers-left="" |
 | PASS | invalid-manifest-refused-nothing-executed | row=FAILED/126 refused=true reason="deadlineMs must be a positive integer of at most one hour" |
 | PASS | daemon-tick-launches-and-reaps-queued-container-job | daemon exit=0 job=SUCCEEDED/0 containers="" job-stdout-seen=true daemon-event-seen=true |
 | PASS | disk-warn-drill-blocks-new-job-launches | daemon exit=5 job=QUEUED warn-line=true containers="" — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill |

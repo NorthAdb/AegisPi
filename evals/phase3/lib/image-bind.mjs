@@ -9,10 +9,20 @@
 //   1. CONTEXT: the recorded digest was built from THIS tree. A context
 //      hash is computed from the same file list the build stages, so a
 //      changed tree makes the recorded evidence stale and the gate red.
-//      The hash is byte-based (no mtimes), so it is engine-independent.
+//      Re-review F1 tightened what "this tree" means: the digest must be a
+//      function of the COMMITTED CONTENT alone, so
+//        a. staged paths are always "/"-separated (path.join on Windows put
+//           backslashes into the digest input: the same committed bytes
+//           hashed differently per OS and a clean Linux checkout could
+//           never pass its own gate), and
+//        b. file bytes are LF-normalized before hashing and staging — a
+//           Windows autocrlf checkout would otherwise smudge CRLF into the
+//           worktree and change the digest without any content change.
 //   2. REGISTRY: the digest actually resolves at the registry the suites
 //      pull from, and hashing the returned manifest bytes proves the value
-//      is a MANIFEST digest, not a config/image id.
+//      is a MANIFEST digest, not a config/image id. The config blob behind
+//      it must declare linux/amd64: a foreign-platform config is not a
+//      runnable isolation reference on this host.
 //   3. CONFIG: the manifest's embedded config digest matches the recorded
 //      one, so manifest/config confusion cannot slip through.
 
@@ -25,6 +35,19 @@ export class ImageBindError extends Error {}
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 export function isSha256(v) {
   return typeof v === "string" && SHA256_RE.test(v);
+}
+
+// Staged paths are "/"-separated on every OS (re-review F1): the digest input
+// must not vary with the host's path separator.
+function toPosix(p) {
+  return p.split("\\").join("/");
+}
+
+// Every file in the app-image contexts is UTF-8 text (Dockerfile, JSON, .mjs).
+// LF-normalize before hashing AND before staging so the recorded context is a
+// function of committed content, never of a checkout's autocrlf setting.
+export function contextFileBytes(abs) {
+  return Buffer.from(readFileSync(abs).toString("utf8").replace(/\r\n/g, "\n"), "utf8");
 }
 
 function walkFiles(dir, base = dir) {
@@ -52,7 +75,7 @@ function walkFiles(dir, base = dir) {
 // the SET must stay in sync with stage() in the build tool.
 export function appImageContextFiles(name, repoRoot) {
   const files = [];
-  const push = (abs, stagedRel) => files.push({ abs: join(repoRoot, abs), rel: stagedRel });
+  const push = (abs, stagedRel) => files.push({ abs: join(repoRoot, abs), rel: toPosix(stagedRel) });
   if (name === "agent") {
     push("docker/agent/Dockerfile", "Dockerfile");
     push("package.json", "package.json");
@@ -84,9 +107,11 @@ export function appImageContextFiles(name, repoRoot) {
 }
 
 // Deterministic content hash over the staged context (file list + bytes).
+// Both inputs are normalized (see contextFileBytes/toPosix): the same commit
+// hashes identically on Linux and on a Windows autocrlf checkout.
 export function appImageContextHash(name, repoRoot) {
   const files = appImageContextFiles(name, repoRoot);
-  const record = files.map((f) => ({ path: f.rel, sha256: createHash("sha256").update(readFileSync(f.abs)).digest("hex") }));
+  const record = files.map((f) => ({ path: f.rel, sha256: createHash("sha256").update(contextFileBytes(f.abs)).digest("hex") }));
   return "sha256:" + createHash("sha256").update(JSON.stringify(record)).digest("hex");
 }
 
@@ -140,4 +165,37 @@ export async function fetchRegistryManifest(appName, digest, { registry = "127.0
     throw new ImageBindError(`the manifest for ${appName}@${digest} carries no valid config digest`);
   }
   return { manifest, configDigest: manifest.config.digest, bytesSha: servedSha };
+}
+
+// Fetch the CONFIG blob a manifest embeds, verifying the registry serves the
+// exact content-addressed bytes. The gate uses this to refuse foreign-platform
+// configs (re-review F1: the pinned reference must be runnable on this host,
+// os=linux architecture=amd64 — a build result being amd64 is not the same as
+// the gate enforcing it).
+export async function fetchRegistryConfigBlob(appName, configDigest, { registry = "127.0.0.1:5000" } = {}) {
+  if (!isSha256(configDigest)) {
+    throw new ImageBindError(`config digest for ${appName} is not a sha256 content digest: ${configDigest}`);
+  }
+  const url = `http://${registry}/v2/aegispi/${appName}/blobs/${configDigest}`;
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new ImageBindError(`registry ${registry} is not reachable for the config blob (${e.message})`);
+  }
+  if (res.status !== 200) {
+    throw new ImageBindError(`registry did not serve the config blob for ${appName} (HTTP ${res.status})`);
+  }
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const servedSha = "sha256:" + createHash("sha256").update(bytes).digest("hex");
+  if (servedSha !== configDigest) {
+    throw new ImageBindError(`registry served ${servedSha} for the config blob of ${appName}; the address does not name these bytes`);
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new ImageBindError(`the config blob for ${appName} is not a JSON image config`);
+  }
+  return cfg;
 }

@@ -4,29 +4,29 @@
 
 - **manifest digest**：推送到本机构建 registry（127.0.0.1:5000，registry:2）后由 ``docker image inspect --format '{{json .RepoDigests}}'`` 读出的 OCI manifest 内容摘要，并经 ``docker pull <ref>@<digest>`` 回拉核验；隔离套件只跑 manifest digest。
 - **config digest**：同一 manifest 从 registry 读回的内嵌 image config 摘要（本地 image/config id 与 manifest digest 是不同命名空间，不可互换）。
-- **context digest**：构建上下文（Dockerfile + 分台源码，见 evals/phase3/lib/image-bind.mjs 的文件清单）的确定性字节哈希；image-gate 在每条套件前重算本树哈希，漂移即拒绝（审计 F1：digest 必须绑定构建它的源码）。
+- **context digest**：构建上下文（Dockerfile + 分台源码，见 evals/phase3/lib/image-bind.mjs 的文件清单）的确定性字节哈希；staged 路径固定 `/`、文件字节按 LF 规范化，摘要是提交内容的函数——同一提交在 Linux 检出与 Windows autocrlf 检出上重算一致（复审 F1）。image-gate 在每条套件前重算本树哈希，漂移即拒绝；并核验 manifest 内嵌 config blob 声明 linux/amd64，非本平台 config 拒绝。
 - 输出挂载为镜像所有的 named volume（镜像内 /job/output、/downloads 属 uid 999），宿主 umask 不再决定可写性（审计 F2）；不使用全局 chmod 777。
 
 | 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |
 | --- | --- | --- | --- | --- | --- |
-| agent | `127.0.0.1:5000/aegispi/agent:phase3-b3369bd05e2c` | `sha256:87e8c195145fdff304d1c3409396876ee49556855f9a1727e1f8617fc52d79b6` | `sha256:d360dd5ae7854176e570175dde83887459f4f81c3f2701dbc7c9f449dd05b26f` | `sha256:be0273e13e8ee1007d3497d25237d808c1668aa53b6723659d2b12e3a18337b9` | self-check exit 0 |
-| acquisition | `127.0.0.1:5000/aegispi/acquisition:phase3-b3369bd05e2c` | `sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658` | `sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f` | `sha256:810d2b3c2cf23af5a30aedf9353064fcca4d95593be696fd7a105131626b81d5` | fail-closed fetch + report |
-| execution | `127.0.0.1:5000/aegispi/execution:phase3-b3369bd05e2c` | `sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050` | `sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e` | `sha256:8071bb11348440956ac2428ce33d577f054c49585b399091573c29a1e6597bcb` | no-network job completed clean |
+| agent | `127.0.0.1:5000/aegispi/agent:phase3-7a5425a5ab3c` | `sha256:2b894a59dbe367f9bc0dfe5de792f07d20115012e2e1e6cee82a3c1f684dd155` | `sha256:3bc206513efc5652f36228ef8292c0c2b8aaf70c956eccdf5f9caf89b9aab761` | `sha256:32532e4525c9785814aa24cb5409e4e82728fd48a3d8bf43dffeef6c120d5364` | self-check exit 0 |
+| acquisition | `127.0.0.1:5000/aegispi/acquisition:phase3-7a5425a5ab3c` | `sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658` | `sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f` | `sha256:8abae27516f116bc0805481b5ad5b65c904303cc4dcf2b417700267edd2f7012` | fail-closed fetch + report |
+| execution | `127.0.0.1:5000/aegispi/execution:phase3-7a5425a5ab3c` | `sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050` | `sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e` | `sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab` | no-network job completed clean |
 
-- 构建时间：20/11/2026, 00:17:28（Asia/Hong_Kong）；源码提交：b3369bd05e2c；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
+- 构建时间：20/11/2026, 09:38:21（Asia/Hong_Kong）；源码提交：7a5425a5ab3c；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
 - 冒烟记录：agent `--self-check` 退出码 0；execution 在 ``--network none`` 下经 volume 输出真实执行一个 job（result.json 干净完成）；acquisition 对不可达 URL 失败关闭并经 volume 写出 report.json。
 - 隔离与逃逸测试必须跑在 manifest digest 上（`docker run … 127.0.0.1:5000/aegispi/<name>@<digest>`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。
 
 机器可读块（image-gate.mjs 解析，勿手改格式）：
 
 <!-- app-image-digests v2
-agent: sha256:87e8c195145fdff304d1c3409396876ee49556855f9a1727e1f8617fc52d79b6
-agent.config: sha256:d360dd5ae7854176e570175dde83887459f4f81c3f2701dbc7c9f449dd05b26f
-agent.context: sha256:be0273e13e8ee1007d3497d25237d808c1668aa53b6723659d2b12e3a18337b9
+agent: sha256:2b894a59dbe367f9bc0dfe5de792f07d20115012e2e1e6cee82a3c1f684dd155
+agent.config: sha256:3bc206513efc5652f36228ef8292c0c2b8aaf70c956eccdf5f9caf89b9aab761
+agent.context: sha256:32532e4525c9785814aa24cb5409e4e82728fd48a3d8bf43dffeef6c120d5364
 acquisition: sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658
 acquisition.config: sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f
-acquisition.context: sha256:810d2b3c2cf23af5a30aedf9353064fcca4d95593be696fd7a105131626b81d5
+acquisition.context: sha256:8abae27516f116bc0805481b5ad5b65c904303cc4dcf2b417700267edd2f7012
 execution: sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050
 execution.config: sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e
-execution.context: sha256:8071bb11348440956ac2428ce33d577f054c49585b399091573c29a1e6597bcb
+execution.context: sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab
 -->

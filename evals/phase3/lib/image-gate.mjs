@@ -7,12 +7,17 @@
 //   1. format      every value is a real sha256 content digest
 //   2. context     the recorded context hash equals the hash of THIS tree
 //                  (a changed tree makes the digests stale: rebuild and
-//                  commit fresh evidence before running any suite)
+//                  commit fresh evidence before running any suite). The
+//                  hash normalizes staged paths to "/" and file bytes to
+//                  LF, so it is a function of committed content and
+//                  recomputes identically on Linux and on a Windows
+//                  autocrlf checkout (re-review F1).
 //   3. registry    the digest resolves at the local build registry AND the
 //                  served bytes hash to that digest (proves it is an OCI
 //                  manifest digest, never a config/image id)
 //   4. config      the manifest's embedded config digest matches the
-//                  recorded one
+//                  recorded one, and the config blob behind it declares
+//                  linux/amd64 — a foreign-platform config is refused
 // A missing or placeholder binding is a refusal (exit 2). A gate refusal
 // is not a green suite.
 
@@ -22,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import {
   ImageBindError,
   appImageContextHash,
+  fetchRegistryConfigBlob,
   fetchRegistryManifest,
   isSha256,
 } from "./image-bind.mjs";
@@ -105,6 +111,16 @@ export async function parseAppImageDigests(
     if (resolved.configDigest !== configs[name]) {
       throw new ImageGateError(
         `the manifest for ${name} embeds config ${resolved.configDigest} but the evidence records ${configs[name]}; manifest and config digests are not interchangeable`,
+      );
+    }
+    // Platform binding (re-review F1): the config blob behind the manifest
+    // must declare linux/amd64. A digest that resolves to a foreign-platform
+    // config is not a runnable isolation reference on this host — being
+    // amd64 by build luck is not the same as the gate enforcing it.
+    const cfg = await fetchRegistryConfigBlob(name, resolved.configDigest, { registry });
+    if (cfg.os !== "linux" || cfg.architecture !== "amd64") {
+      throw new ImageGateError(
+        `${name}: the image config declares os=${cfg.os ?? "?"}/${cfg.architecture ?? "?"}; isolation suites run linux/amd64 only, a foreign-platform config blob is refused`,
       );
     }
   }

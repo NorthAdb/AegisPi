@@ -15,6 +15,9 @@
 //                                  recorded context hash
 //   M3 config-crosscheck-off    : the gate stops cross-checking the
 //                                  manifest's embedded config digest
+//   M4 platform-binding-off     : the gate stops asserting the config blob
+//                                  declares linux/amd64; a foreign-platform
+//                                  config would pass (re-review F1)
 
 import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -49,6 +52,13 @@ const MUTATIONS = [
     from: "    if (resolved.configDigest !== configs[name]) {",
     to: "    if (false) { // MUTATED",
     probe: join(here, "probes", "probe-refuses-config-as-manifest.mjs"),
+  },
+  {
+    id: "M4-platform-binding-off",
+    file: GATE,
+    from: "    if (cfg.os !== \"linux\" || cfg.architecture !== \"amd64\") {",
+    to: "    if (false) { // MUTATED",
+    probe: join(here, "probes", "probe-refuses-foreign-platform.mjs"),
   },
 ];
 
