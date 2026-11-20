@@ -7,7 +7,7 @@
 1. 根 [README](../README.md)：项目定位、已实现/未实现边界、运行前置条件。
 2. 本文：按类别找对资料，认清「现行」与「历史」身份。
 3. [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md)：现行权威状态清单（四项真实验收现状、审计归档、镜像、缺口、待办）。
-4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（方案已确认，未实施、未授权运行）。
+4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（方案已确认，未实施、未授权运行）；单元 4.1 的实施细则见 [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md)（已备待授权，不含运行授权）。
 5. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
 
 ## 现行规范（操作依据）
@@ -32,6 +32,7 @@
 | 资料 | 状态与用途 |
 | --- | --- |
 | [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**方案已确认；4.1 未授权开工；4.2 首跑另需逐项授权；方案确认不构成运行授权** |
+| [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md) | 单元 4.1 实施任务书（2026-11-20 编制，基线 `686d10b`）。**已备待授权**：开工授权下达后成为 4.1 的实施依据；分步目标与产物、端到端锚点用例、最小验收矩阵、环境/镜像/交付与停止条件在焉。编制轮零实现；4.2 与一切真实运行不在其授权内 |
 | [phase3/reports/real-acceptance-plan.md](phase3/reports/real-acceptance-plan.md) | A/B/C/D 真实验收计划。A/B/C 已执行且授权闭合（无剩余额度），D 延期——文中「待主人逐项授权」对 D 与任何重跑仍然有效，对已闭合项不提供剩余额度 |
 
 ## 状态说明（现行权威）
