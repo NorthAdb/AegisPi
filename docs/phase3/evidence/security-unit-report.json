@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-20T02:28:48.786Z",
+  "generatedAt": "2026-11-20T02:45:11.736Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-unit",
   "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
   "counts": {
-    "pass": 35,
+    "pass": 39,
     "fail": 0
   },
   "results": [
@@ -141,12 +141,12 @@
     {
       "name": "http-transport-carries-bytes-and-maps-outcomes",
       "status": "PASS",
-      "detail": "submit=succeeded(ext-1795141715208) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
+      "detail": "submit=succeeded(ext-1795142697526) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
     },
     {
       "name": "authorized-production-tick-submits-over-real-http-transport",
       "status": "PASS",
-      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795141717761 local-service-saw=true"
+      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795142700252 local-service-saw=true"
     },
     {
       "name": "unauthorized-production-tick-sends-zero-bytes-through-real-transport",
@@ -156,7 +156,7 @@
     {
       "name": "worker-reserves-before-call-and-settles-real-usage",
       "status": "PASS",
-      "detail": "daemon exit=0 reservation=SETTLED settled=100 microusd source=model-http-transport task=SUCCEEDED/not_applicable reply=string:\"model reply for the local verification s\" ordering[created=1795141720696 at=1795141721048 settled=1795141721081] ok=true — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero"
+      "detail": "daemon exit=0 reservation=SETTLED settled=100 microusd source=model-http-transport task=SUCCEEDED/not_applicable reply=string:\"model reply for the local verification s\" ordering[created=1795142703114 at=1795142703640 settled=1795142703660] ok=true — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero"
     },
     {
       "name": "worker-no-usage-keeps-reservation-held-never-zero",
@@ -174,9 +174,29 @@
       "detail": "daemon exit=0 reservations=0 task=QUEUED honest-log=true"
     },
     {
+      "name": "webhook-without-secret-fails-closed",
+      "status": "PASS",
+      "detail": "http=503 inbox-rows=0 (503 webhook_not_configured, zero processing)"
+    },
+    {
+      "name": "webhook-missing-or-wrong-secret-refused-without-processing",
+      "status": "PASS",
+      "detail": "missing=403 wrong=403 inbox-rows=0 (the constant-time guard refuses, zero queue writes)"
+    },
+    {
+      "name": "webhook-valid-signature-queues-observe-without-consuming",
+      "status": "PASS",
+      "detail": "first=202 redelivery=202 inbox=DONE/OBSERVE dedup=true tasks=0 (recorded as a read-only OBSERVE, never dispatched by the webhook itself — same semantics as the pull path)"
+    },
+    {
+      "name": "webhook-closed-in-read-only-maintenance",
+      "status": "PASS",
+      "detail": "http=503 inbox-rows=0"
+    },
+    {
       "name": "disk-watermark-critical-drill-opens-read-only",
       "status": "PASS",
-      "detail": "daemon exit=3 disk-line=disk: level=critical free=463GiB ratio=0.4968"
+      "detail": "daemon exit=3 disk-line=disk: level=critical free=463GiB ratio=0.4967"
     },
     {
       "name": "disk-watermark-alerts-once-per-level-transition",

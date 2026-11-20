@@ -7,14 +7,16 @@
 // plus update_id as the platform event id — the dedup that receiveEvent
 // already enforces.
 //
-// Webhook truth (audit F7 fixed the conflated comment): ingress-verify.mjs
-// is a GENERIC HMAC-SHA256 signed-envelope verifier, not the Telegram
-// webhook header check. The Telegram-specific part — constant-time
-// comparison of the X-Telegram-Bot-Api-Secret-Token header against the
-// configured webhook secret — is createTelegramWebhookGuard below. It is
-// implemented but NOT wired to any public endpoint: a real webhook source
-// needs a public endpoint and an owner-authorized secret, which is the
-// recorded open item; until then nothing calls it.
+// Webhook truth (re-review P1: the guard is implemented AND wired): the
+// Telegram-specific part — constant-time comparison of the
+// X-Telegram-Bot-Api-Secret-Token header against the configured secret —
+// is createTelegramWebhookGuard below, and the console route
+// POST /ingress/telegram/webhook calls it (apps/daemon/src/console/api.mjs).
+// A PUBLIC deployment and the owner-authorized secret are still open items:
+// until they exist, the endpoint answers fail-closed (503 without a
+// configured secret, 403 on a missing or wrong header) and everything
+// verified here is local-request evidence, never "verified against the
+// real webhook source".
 //
 // The fetch transport is INJECTED: the host decides how HTTP leaves this
 // machine (direct or its own proxy). No URL is ever assembled from model
@@ -30,9 +32,9 @@ const API_BASE = "https://api.telegram.org";
 
 // Telegram webhook guard (the platform's documented header check): the
 // caller presents the X-Telegram-Bot-Api-Secret-Token header and it must
-// equal the configured secret in CONSTANT TIME. Implemented, not wired: no
-// public endpoint exists in this phase, so nothing here is "verified
-// against the real webhook source" — that stays an open item on record.
+// equal the configured secret in CONSTANT TIME. Wired to the console's
+// /ingress/telegram/webhook route (re-review P1: implemented AND called);
+// a public deployment and the real secret remain owner-authorized work.
 export function createTelegramWebhookGuard({ secret }) {
   if (typeof secret !== "string" || secret.length < 16) {
     throw new TelegramWebhookSecretMissing(
@@ -52,6 +54,40 @@ export function createTelegramWebhookGuard({ secret }) {
         return { ok: false, reason: "webhook secret token mismatch; refused" };
       }
       return { ok: true };
+    },
+  };
+}
+
+// Map a Telegram update to the durable-ingress shape (06 section 3.1).
+// Shared by the pull adapter and the webhook route: the bot token (pull)
+// or the webhook secret (push) authenticates the CHANNEL; from.id maps the
+// PRINCIPAL and chat.id+type maps the scope — never nicknames or free-text.
+export function mapTelegramUpdate(update) {
+  const message = update.message ?? update.edited_message ?? update.channel_post ?? null;
+  if (!message) {
+    return { mappable: false, reason: `update ${update.update_id} carries no mappable message` };
+  }
+  const from = message.from ?? null;
+  if (!from) {
+    return { mappable: false, reason: `update ${update.update_id} has no sender identity` };
+  }
+  const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+  return {
+    mappable: true,
+    event: {
+      source: "telegram",
+      sourceEventId: String(update.update_id),
+      principal: { platform: "telegram", subject: String(from.id) },
+      scope: isGroup
+        ? { kind: "group", domainKey: `group:telegram:${message.chat.id}`, channel: "telegram", conversationId: String(message.chat.id) }
+        : { kind: "owner_dm", domainKey: `dm:telegram:${message.chat.id}`, channel: "telegram", conversationId: String(message.chat.id) },
+      threadKey: `tg:${message.chat.id}`,
+      payload: JSON.stringify({
+        update_id: update.update_id,
+        chat_type: message.chat.type,
+        text: message.text ?? null,
+        date: message.date,
+      }),
     },
   };
 }
@@ -90,37 +126,11 @@ export function createTelegramPullAdapter({ token, fetchImpl, apiBase = API_BASE
     async getUpdates({ limit = 1, timeout = 0, allowedUpdates = undefined } = {}) {
       return call("getUpdates", { limit, timeout, allowed_updates: allowedUpdates });
     },
-    // Map a Telegram update to the durable-ingress shape (06 section 3.1).
-    // The bot token authenticates the CHANNEL; from.id maps the PRINCIPAL and
-    // chat.id+type maps the scope — never nicknames or free-text.
+    // Map a Telegram update to the durable-ingress shape — the shared
+    // mapping also serves the webhook route. The bot token authenticates
+    // the CHANNEL; identities come from the update itself.
     mapUpdate(update) {
-      const message = update.message ?? update.edited_message ?? update.channel_post ?? null;
-      if (!message) {
-        return { mappable: false, reason: `update ${update.update_id} carries no mappable message` };
-      }
-      const from = message.from ?? null;
-      if (!from) {
-        return { mappable: false, reason: `update ${update.update_id} has no sender identity` };
-      }
-      const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
-      return {
-        mappable: true,
-        event: {
-          source: "telegram",
-          sourceEventId: String(update.update_id),
-          principal: { platform: "telegram", subject: String(from.id) },
-          scope: isGroup
-            ? { kind: "group", domainKey: `group:telegram:${message.chat.id}`, channel: "telegram", conversationId: String(message.chat.id) }
-            : { kind: "owner_dm", domainKey: `dm:telegram:${message.chat.id}`, channel: "telegram", conversationId: String(message.chat.id) },
-          threadKey: `tg:${message.chat.id}`,
-          payload: JSON.stringify({
-            update_id: update.update_id,
-            chat_type: message.chat.type,
-            text: message.text ?? null,
-            date: message.date,
-          }),
-        },
-      };
+      return mapTelegramUpdate(update);
     },
   };
 }

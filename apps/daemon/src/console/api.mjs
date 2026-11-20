@@ -26,6 +26,8 @@ import { Hono } from "hono";
 import { decideApproval, hasApproveGrant } from "../approvals.mjs";
 import { reviseEffect, cancelTask, reconcileUnknown } from "../effects.mjs";
 import { grantPermission, revokePermission } from "../acl.mjs";
+import { createTelegramWebhookGuard, mapTelegramUpdate } from "../ingress-telegram.mjs";
+import { receiveEvent } from "../ingress.mjs";
 
 export const CONSOLE_BIND = "127.0.0.1";
 export const CONSOLE_DEFAULT_PORT = 4310;
@@ -55,6 +57,11 @@ export function createConsoleApp(db, {
   stateDir = null,
   ownerPrincipalId = "prn:local:owner",
   sessionTtlMs = SESSION_TTL_MS,
+  // Owner-configured Telegram webhook secret (re-review P1). Null = the
+  // webhook route answers 503 fail-closed; a configured but malformed
+  // secret (<16 chars) refuses to start the console at all rather than
+  // accepting a weak guard.
+  telegramWebhookSecret = null,
 } = {}) {
   const app = new Hono();
   const allowedHosts = new Set([
@@ -667,6 +674,60 @@ export function createConsoleApp(db, {
     c.header("cache-control", "no-store");
     c.header("x-accel-buffering", "no");
     return c.body(lines.join("\n"), 200);
+  });
+
+  // Telegram webhook endpoint (re-review P1, 06 section 3.1): OUTSIDE
+  // /api/* — Telegram's servers cannot carry the console bearer — and
+  // guarded by the platform's documented constant-time secret-token header
+  // check. The fail-closed ladder, in order: read-only maintenance -> 503;
+  // no secret configured -> 503; missing/wrong header -> 403 with ZERO
+  // processing; only a valid signature maps the update into the durable
+  // queue as OBSERVE (a read, not a consume — dispatch stays a separate,
+  // audited decision, same as the pull path; the /api auth matrix does not
+  // apply, the guard IS the auth). The host/origin allowlist still binds
+  // this route: a public deployment and the owner-authorized secret are
+  // recorded open items, and until they exist everything verified here is
+  // local-request evidence.
+  const telegramGuard = telegramWebhookSecret
+    ? createTelegramWebhookGuard({ secret: telegramWebhookSecret })
+    : null;
+  app.post("/ingress/telegram/webhook", async (c) => {
+    if (mode !== "open") {
+      return c.json(
+        { code: "read_only_maintenance", message: "the daemon is read-only; the webhook accepts nothing" },
+        503,
+      );
+    }
+    if (!telegramGuard) {
+      return c.json(
+        { code: "webhook_not_configured", message: "no webhook secret is configured; the endpoint fails closed instead of guessing" },
+        503,
+      );
+    }
+    const verified = telegramGuard.verifyRequest({
+      "x-telegram-bot-api-secret-token": c.req.header("x-telegram-bot-api-secret-token") ?? "",
+    });
+    if (!verified.ok) {
+      return c.json({ code: "webhook_refused", message: verified.reason }, 403);
+    }
+    let update = null;
+    try {
+      update = await c.req.json();
+    } catch {}
+    if (!update || typeof update.update_id !== "number") {
+      return c.json({ code: "invalid_update", message: "the body is not a Telegram update" }, 400);
+    }
+    const mapped = mapTelegramUpdate(update);
+    if (!mapped.mappable) {
+      return c.json({ code: "unmappable", reason: mapped.reason }, 202);
+    }
+    receiveEvent(db, stateDir, {
+      now: Date.now(),
+      ...mapped.event,
+      policyVersion: "pv1",
+      verdict: "OBSERVE",
+    });
+    return c.json({ code: "queued", verdict: "OBSERVE", sourceEventId: mapped.event.sourceEventId }, 202);
   });
 
   // Later-phase surfaces answer explicitly-not-implemented, never fake data

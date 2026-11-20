@@ -123,6 +123,9 @@ export async function main(argv = process.argv.slice(2)) {
   // full surface, read-only mode keeps exactly the diagnostics reachable
   // and everything else answers 503.
   const { token } = ensureConsoleToken(dataDir);
+  // Owner-configured webhook secret (re-review P1): unset = the endpoint
+  // fails closed with 503; set-but-malformed (<16 chars) refuses startup.
+  const telegramWebhookSecret = process.env.AEGISPI_TELEGRAM_WEBHOOK_SECRET ?? null;
   const consoleApp = createConsoleApp(db, {
     recovery,
     mode: openMode ? "open" : recovery.mode,
@@ -130,6 +133,7 @@ export async function main(argv = process.argv.slice(2)) {
     port: consolePort,
     stateDir: dataDir,
     ownerPrincipalId: "prn:local:owner",
+    telegramWebhookSecret,
   });
   const served = await serveConsole(consoleApp, { port: consolePort });
   console.log(`console: ${served.bind}:${served.port} (auth: local bearer token; diagnostics${openMode ? "" : " only"})`);

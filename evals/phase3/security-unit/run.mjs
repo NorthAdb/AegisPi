@@ -1045,6 +1045,108 @@ function seed(tag) {
   svc.kill();
 }
 
+// ------------------------------------------- telegram webhook endpoint (re-review P1)
+// createTelegramWebhookGuard was implemented but never called. It now backs
+// a real route, OUTSIDE /api/* (Telegram's servers cannot carry the console
+// bearer), with the guard AS the auth. Fail-closed ladder verified with
+// local requests; a public deployment and the real secret stay
+// owner-authorized open items.
+{
+  const SECRET = "test-webhook-secret-0123456789abcdef";
+  const updateBody = (updateId) =>
+    JSON.stringify({
+      update_id: updateId,
+      message: { message_id: 1, chat: { id: 99, type: "private" }, from: { id: 77 }, text: "webhook case", date: 1 },
+    });
+  function makeWebhookConsole(tag, { secret, mode = "open" }) {
+    const ws = makeWorkspace(tag);
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, loadCanonicalSchema());
+    const app = createConsoleApp(db, {
+      recovery: { mode, actions: [], failedStep: null },
+      mode,
+      token: "console-token-for-webhook-tests",
+      stateDir: ws.stateDir,
+      telegramWebhookSecret: secret,
+    });
+    return { ws, db, app };
+  }
+  const post = (app, { secretToken = undefined, body = updateBody(1) } = {}) =>
+    app.request("/ingress/telegram/webhook", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:4310",
+        "content-type": "application/json",
+        ...(secretToken !== undefined ? { "x-telegram-bot-api-secret-token": secretToken } : {}),
+      },
+      body,
+    });
+
+  // (a) No secret configured: 503 fail-closed, nothing queued.
+  {
+    const { db, app } = makeWebhookConsole("su-webhook-nosecret", { secret: null });
+    const res = await post(app, { secretToken: "anything-at-all-1234" });
+    const rows = db.prepare("SELECT count(*) c FROM inbox").get().c;
+    suite.check(
+      "webhook-without-secret-fails-closed",
+      res.status === 503 && rows === 0,
+      `http=${res.status} inbox-rows=${rows} (503 webhook_not_configured, zero processing)`,
+    );
+    db.close();
+  }
+
+  // (b) Missing or wrong header: 403 with zero processing.
+  {
+    const { db, app } = makeWebhookConsole("su-webhook-badheader", { secret: SECRET });
+    const missing = await post(app, {});
+    const wrong = await post(app, { secretToken: "wrong-secret-value-0123456789" });
+    const rows = db.prepare("SELECT count(*) c FROM inbox").get().c;
+    suite.check(
+      "webhook-missing-or-wrong-secret-refused-without-processing",
+      missing.status === 403 && wrong.status === 403 && rows === 0,
+      `missing=${missing.status} wrong=${wrong.status} inbox-rows=${rows} (the constant-time guard refuses, zero queue writes)`,
+    );
+    db.close();
+  }
+
+  // (c) Valid signature: the update maps into the durable queue as OBSERVE
+  // (a read, not a consume): the inbox row is PENDING/OBSERVE, no task is
+  // dispatched, and a redelivered duplicate dedups to one row.
+  {
+    const { db, app } = makeWebhookConsole("su-webhook-valid", { secret: SECRET });
+    const first = await post(app, { secretToken: SECRET, body: updateBody(4242) });
+    const again = await post(app, { secretToken: SECRET, body: updateBody(4242) });
+    const inboxRow = db.prepare("SELECT state, verdict FROM inbox WHERE source='telegram' AND source_event_id='4242'").get();
+    const tasks = db.prepare("SELECT count(*) c FROM tasks").get().c;
+    const inboxCount = db.prepare("SELECT count(*) c FROM inbox WHERE source='telegram' AND source_event_id='4242'").get().c;
+    suite.check(
+      "webhook-valid-signature-queues-observe-without-consuming",
+      first.status === 202 &&
+        again.status === 202 &&
+        inboxRow?.state === "DONE" &&
+        inboxRow?.verdict === "OBSERVE" &&
+        tasks === 0 &&
+        inboxCount === 1,
+      `first=${first.status} redelivery=${again.status} inbox=${inboxRow?.state}/${inboxRow?.verdict} dedup=${inboxCount === 1} tasks=${tasks} (recorded as a read-only OBSERVE, never dispatched by the webhook itself — same semantics as the pull path)`,
+    );
+    db.close();
+  }
+
+  // (d) Read-only maintenance: the webhook stays closed.
+  {
+    const { db, app } = makeWebhookConsole("su-webhook-readonly", { secret: SECRET, mode: "read_only" });
+    const res = await post(app, { secretToken: SECRET });
+    const rows = db.prepare("SELECT count(*) c FROM inbox").get().c;
+    suite.check(
+      "webhook-closed-in-read-only-maintenance",
+      res.status === 503 && rows === 0,
+      `http=${res.status} inbox-rows=${rows}`,
+    );
+    db.close();
+  }
+}
+
 // ------------------------------------------- critical disk watermark drill (audit F8)
 {
   const ws = makeWorkspace("su-disk-critical");
