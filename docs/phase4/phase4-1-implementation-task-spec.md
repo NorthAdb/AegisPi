@@ -1,6 +1,6 @@
 # Phase 4.1 实施任务书（模型链路实现；已备待授权，未授权开工）
 
-生成 2026-11-20，基线 `686d10b8881e990534c60aa4e5e2889a4b6e4131`（main，工作树干净）；同日按主人指令修订一轮（T5 崩溃窗口计费更正、T7 注入方式补明、宿主目录权限有效写集合语义、defaults 键名变更与 `test:model:real` 条款澄清，见文末修订追记与决策留痕 D-77；生产代码自基线起零改动）。身份与效力：
+生成 2026-11-20，基线 `686d10b8881e990534c60aa4e5e2889a4b6e4131`（main，工作树干净）；同日按主人指令修订两轮（第一轮 D-77：T5 崩溃窗口计费更正、T7 注入方式补明、宿主目录权限有效写集合语义、defaults 键名变更与 `test:model:real` 条款澄清；第二轮 D-78：实施方预审上报的两项冲突经主人裁量落定——`model_requests` 建表改走 credential_slots 幂等先例、Windows 宿主机权限采纳账号级实例化并附强制锁定与残留登记；修订史与逐轮理由见文末修订追记；生产代码自基线起零改动）。身份与效力：
 
 - **上游依据**：设计 = [ADR-0001](../adr/0001-model-path-pi-host-execution.md)（方案已获主人确认 2026-11-20，含 `3fd81c6` 两句状态机澄清）；单元划分与许可分列 = [受限开工草案](phase4-restricted-kickoff-draft.md)（单元 4.1 / 4.2）；状态底数 = [phase3-status-and-remaining.md](../phase3/reports/phase3-status-and-remaining.md)（2026-11-20）。本文把草案单元 4.1 的 a/b/c 概要细化为可执行任务书，**不重新讨论架构，不引入新设计**；一切工程约束直接引 ADR 章节号，不复制正文（避免多副本口径漂移）。
 - **效力**：主人下达 4.1 开工授权后，本文成为实施依据；授权前它只是「已备」文本，不构成开工授权或任何运行授权。实施中发现本文与 ADR-0001 或草案口径冲突，**冲突即停止条件**（§5），不自行改设计、不自行扩大授权。
@@ -34,21 +34,21 @@ D（公网 webhook）维持主人既定延期（至首次启用 Telegram 公网�
 
 ### b) 通道与宿主处理
 
-- **模块**：`docker/agent/src/worker.mjs`（信封写入与结果指令消费）；`apps/daemon/src/model-requests.mjs`（新，或并入现有模块，ADR §9）；`apps/daemon/src/db/migrate.mjs` + `apps/daemon/config/schema-source.json`（`model_requests` DDL 落 canonical schema.sql 并同步哈希指针——漂移即红的既有门，合法迁移随指针更新）；`apps/daemon/src/daemon.mjs`（宿主处理链生产实现）；`apps/daemon/src/adapters.mjs`（`model.inference` 分派指向同一核心，门禁语义不变）。
+- **模块**：`docker/agent/src/worker.mjs`（信封写入与结果指令消费）；`apps/daemon/src/model-requests.mjs`（新，或并入现有模块，ADR §9）；`apps/daemon/src/db/migrate.mjs`（`model_requests` 表 DDL 以**独立导出的幂等扩展建表函数**落地（如 `ensureModelRequestsTable(db)`），由 daemon 启动与**需要该表的套件**在 `migrate()` 之后调用——**credential_slots 同款先例**（credentials.mjs:25 幂等建表于 createCredentialService 工厂构造处、不走迁移版本；先例真实形态即按需构造，今日调用方仅 daemon 与三个套件，durability 从不构造故其表计数门恒绿——勿把扩展建表接进不相关套件的工作区 DB）；**canonical schema.sql、`schema-source.json` 指针与 `ede73ecaa…` 指纹门、以及 sqlite-node.mjs:90 / durability run.mjs:61/93/103/116/2692 / migrate.mjs verifySchema:147 / restore run.mjs:278 的锁死断言一律原样不动**——canonical 源在库外资料包（D-01），改它即改主人规范源并废掉持原版资料包的独立复核，冲突 1 裁量：方案 A）；`apps/daemon/src/daemon.mjs`（宿主处理链生产实现）；`apps/daemon/src/adapters.mjs`（`model.inference` 分派指向同一核心，门禁语义不变）。
 - **交付物**：
   1. 容器侧：`model_request` 信封（字段封闭、无 URL 无凭据、messages 128 KiB 硬上限、requestId 为 uuid v4 且同一 attempt 内不重用，tmp+rename 原子写）；`model_result` 指令消费并按现行 receipt 模式回执（ADR §2）。
-  2. 宿主侧全链生产实现（ADR §2/§3/§4/§7）：身份四元组以 RUNNING 领取行复检 → 信封严格校验（未知字段、类型不符、超限即拒）→ `model_requests` 幂等插入（RECEIVED）→ 双白名单（purpose 同时命中账本 `PURPOSES` 与 `model.allowedPurposes`，缺省空即全拒；modelId 命中 `model.allowedModelIds`）→ 与 `ledger.reserve` 同事务进 RESERVED → EXECUTING 提交后再经 a 步核心执行 → usage 判定结清或保持 → 写 `model-result-<requestId>.json` 回传（requestId 先过 uuid 校验才进文件名；reply 回传正文本身；refusal 形态同款）。
-  3. 七态状态机与同事务边界（ADR §7 全文）：RESERVED 与 reserve 同一事务；EXECUTING 先于子进程单独提交，此后不重放、不 release、不到 FAILED；settle 与 request 行同一事务恰一次；迟到 usage 唯一入口 = 请求行 EXECUTING 且账本预留 HELD；ORPHAN 只表示交付终止，费用结局以账本行为准；FAILED 只出现在调用前。崩溃注入复用 `apps/daemon/src/testing/crashpoints.mjs`（现机制，timers/effects/scheduler 等已用同款）。
-  4. 旧客户端退役（ADR §8 三步同轮完成，不留双路径过渡期）：删除 `model-call-child.mjs`，两字段 usage 断言全部更新。**清理口径**：生产树（`apps/`、`docker/`、`evals/`、`tools/` 与根 `package*.json`）中 `model-call-child` 零出现（`git grep model-call-child -- apps docker evals tools` 为空，文件不存在）；**`docs/` 与 `.audit/` 中该文件名的全部历史提及保持原样，不为清名改写任何审计或证据字节**——ADR §8 第 3 步的 grep 验收按「生产树零出现」执行，ADR 自身与历史材料合法含此名，属史实不属清理对象。
+  2. 宿主侧全链生产实现（ADR §2/§3/§4/§7）：身份四元组以 RUNNING 领取行复检 → 信封严格校验（未知字段、类型不符、超限即拒）→ 双白名单（purpose 同时命中账本 `PURPOSES` 与 `model.allowedPurposes`，缺省空即全拒；modelId 命中 `model.allowedModelIds`）→ **校验全过才建行**：`model_requests` 幂等插入（RECEIVED，对齐 ADR §7「插入且校验通过」——身份/信封/白名单任一不过即无行、`model_request_refused` 审计、零预留）→ 与 `ledger.reserve` 同事务进 RESERVED（预算拒绝 BudgetExceeded/AccountFrozen 时行落 FAILED，仍无预留）→ EXECUTING 提交后再经 a 步核心执行（凭据经宿主槽 `model` 解析注入短命子进程——ADR §5；pi-ai 1.5.2 在任何 HTTP 前检查 apiKey/authorization 头，无槽位即建连前抛错、比旧路径更早失败关闭，环回验证的夹具槽占位见 §4 第 4 条）→ usage 判定结清或保持 → 写 `model-result-<requestId>.json` 回传（requestId 先过 uuid 校验才进文件名；reply 回传正文本身；refusal 形态同款）。
+  3. 七态状态机与同事务边界（ADR §7 全文）：RESERVED 与 reserve 同一事务；EXECUTING 先于子进程单独提交，此后不重放、不 release、不到 FAILED；settle 与 request 行同一事务恰一次；迟到 usage 唯一入口 = 请求行 EXECUTING 且账本预留 HELD；ORPHAN 只表示交付终止，费用结局以账本行为准；FAILED 只出现在调用前。崩溃注入复用 `apps/daemon/src/testing/crashpoints.mjs`（现机制，timers/effects/router/ingress/approvals 五处已用同款）。
+  4. 旧客户端退役（ADR §8 三步同轮完成，不留双路径过渡期）：删除 `model-call-child.mjs`，两字段 usage 断言全部更新。**清理口径**：生产树（`apps/`、`docker/`、`evals/`、`tools/` 与根 `package*.json`）中 `model-call-child` 零出现（`git grep model-call-child -- apps docker evals tools package.json package-lock.json` 为空，文件不存在）；**`docs/` 与 `.audit/` 中该文件名的全部历史提及保持原样，不为清名改写任何审计或证据字节**——ADR §8 第 3 步的 grep 验收按「生产树零出现」执行，ADR 自身与历史材料合法含此名，属史实不属清理对象。
 - **依赖**：a 步核心；既有 `scheduler.mjs` 租约纪律、`budget.mjs` 门禁语义、`credentials.mjs` 槽位（三者语义不动，ADR §9「不动」清单）。
-- **通过条件**：新 model-proposal 套件（ADR §9 evals 行，落 `evals/` 既有分台布局，复用 `evals/phase3/lib/harness.mjs` 与 image-gate 现机制）中 §3 矩阵 T1–T10 主干绿；套件以 docker run 驱动 agent 容器完成端到端，不经生产启动器（草案 b 句）；`model.inference` 分派已指向唯一核心。
+- **通过条件**：新 model-proposal 套件（ADR §9 evals 行，落 `evals/` 既有分台布局，复用 `evals/phase3/lib/harness.mjs` 与 image-gate 现机制）中 §3 矩阵 T1–T10 主干绿；套件以 docker run 驱动 agent 容器完成端到端，不经生产启动器（草案 b 句）；`model.inference` 分派已指向唯一核心。**开发期与验收期的门禁口径分清**：b 步开发期的 docker run 可用开发期本地构建的 agent 镜像驱动——该期 image-gate 因树已改动而拒绝属预期纪律（c 步纪元 3 重建前门禁必红），不触发停止条件、开发期构建不进纪元表；验收一律以 c 步纪元 3 重建后的 manifest digest 运行，终树门禁放行后的全绿为准。
 
 ### c) 生产接线与纪元 3
 
 - **模块**：`apps/daemon/src/daemon.mjs`（tick 集成：worker 分支改读提议全链，旧 inline 直调分支删除，终树无并行客户端——两入口自此均由唯一核心执行）；`apps/daemon/src/container-executor.mjs`（per-attempt 三目录 bind 挂载）；`tools/build-app-images.mjs`（`--only` 选择性重建，现机制）；`docs/phase3/reports/image-digest.md`（纪元 3 记录）。
 - **交付物**：
-  1. 生产 attempt 启动器：agent 镜像经与 `--execution-image` 平行的镜像解析启动 worker 容器；三目录 bind——proposals（容器可写；**宿主侧有效写集合仅限 daemon 进程与容器作业身份（uid 999），这是权限语义本身，不是照搬某一种 chmod 数值**；任意本机用户可写（1777 即一例）即违例）、host-commands（宿主写、容器 ro）、context.json（宿主写、容器 ro）；沿用挂载纪律（tmpfs noexec、ro bind、rootfs ro、`--network none`、无 socket）（ADR §2 末段）。实施环境（如 Windows 宿主机）无法忠实实现该有效写集合 → 停止并记录冲突，等待主人裁量（§5 第 6 条），不得放宽为任意本机用户可写。
-  2. bind-mount 生产形态断言用例（ADR §2 末段 + §10.7）：proposals 可写、host-commands ro、rootfs ro、无网络、**宿主 proposals 目录有效写集合恰为 daemon 与容器作业身份（断言不含任意本机用户可写，1777 即违例）**、requestId 非 uuid 拒入文件名、身份四元组以 RUNNING 行复检。
+  1. 生产 attempt 启动器：agent 镜像经与 `--execution-image` 平行的镜像解析启动 worker 容器；三目录 bind——proposals（容器可写；**宿主侧有效写集合仅限 daemon 进程与容器作业身份（uid 999），这是权限语义本身，不是照搬某一种 chmod 数值**；任意本机用户可写即违例）、host-commands（宿主写、容器 ro）、context.json（宿主写、容器 ro）；沿用挂载纪律（tmpfs noexec、ro bind、rootfs ro、`--network none`、无 socket）（ADR §2 末段）。**Windows 宿主机的平台实例化（主人 2026-11-20 裁量采纳，冲突 2 方案 A 附加条件）**：NTFS 无 Linux uid、Docker Desktop 文件共享经宿主当前账号代理（实测在案），宿主侧可达成的最严粒度为**账号级**——由启动器**自动**执行 ACL 锁定（icacls 去继承、仅授予运行 daemon 的 Windows 账号 `(OI)(CI)F`；默认继承含 Authenticated Users 可改，此洞必须程序化补掉，不得手工代替）；「daemon 与容器 uid 999 可区分」在该平台不成立，如实作为已知残留登记（§4 交付物第 5 条），完整语义在 Linux 宿主机上成立。
+  2. bind-mount 生产形态断言用例（ADR §2 末段 + §10.7）：proposals 可写、host-commands ro、rootfs ro、无网络、**宿主 proposals 目录权限断言落在宿主 ACL 上**（Windows：断言 ACL 仅含运行 daemon 的账号、不含 Authenticated Users/Users/Everyone；**不得以容器内 stat 断言**——Docker Desktop 的 Windows bind 挂载在容器内恒呈现 777 root:root，落错位置即假红）、requestId 非 uuid 拒入文件名、身份四元组以 RUNNING 行复检。
   3. 纪元 3：**先以 `appImageContextHash` 复算三镜像 context，复算之前不构建**；只重建已漂移名字（预期 agent——`apps/daemon/src` 与 `docker/agent/src/worker.mjs` 均在 agent 清单）；acquisition/execution 复算一致且 manifest 于本机 registry 复解析后方可携带（携带核验拒绝即重建）；`image-digest.md` 更新为唯一现行 v2 机器块，纪元 2 保留为历史节；构建证据（log、agent `--self-check` exit 0）入档。
 - **依赖**：b 步全链绿；Docker 29.9.2 与本机 `aegispi-build-registry`（127.0.0.1:5000）在位。
 - **通过条件**：终树三 docker 套件、新套件与按 §4 选定的回归套件全绿；image-gate 全放行（**交付树零绑定漂移**）；§5 失败关闭核对通过；收口报告成文（§4 交付物清单）。
@@ -58,7 +58,7 @@ D（公网 webhook）维持主人既定延期（至首次启用 Telegram 公网�
 **测试不能只证明 helper 可用。** 矩阵之外必须有一条**端到端锚点用例**，全链走生产实现：
 
 1. 真实 agent 容器（manifest digest 上 `docker run`，`--network none`，`PI_OFFLINE=1`，凭据 denylist 不变）内 `worker.mjs` 写出 `model_request` 提议。
-2. 宿主以真实 daemon tick 进程处理（`--once`/`--data-dir`/`--config` 测试缝，现行套件同款；`--config` 注入双白名单与环回根地址，不改生产代码路径）：身份复检、幂等插入、`ledger.reserve`（真实 budget 逻辑，任务/日双账户）。
+2. 宿主以真实 daemon tick 进程处理（`--once`/`--data-dir`/`--config` 测试缝，现行套件同款；`--config` 注入双白名单与环回根地址，并注册夹具凭据槽 `model`（占位值经宿主凭据服务解析、内容被环回服务忽略，见 §4 第 4 条），不改生产代码路径）：身份复检、校验、幂等插入、`ledger.reserve`（真实 budget 逻辑，任务/日双账户）。
 3. 唯一执行核心的短命子进程经 pi-ai（`getBuiltinModel` + `completeSimple`，`reasoning:"high"`）向**宿主本地环回模拟服务**（`model.baseUrl=http://127.0.0.1:<port>`）发出请求——环回服务为 OpenAI 形状夹具，断言 wire：`model=deepseek-flash`、`thinking.type=enabled`、请求路径恰为单段 `/chat/completions`。
 4. 宿主按回传 usage × 夹具目录价同事务结清（请求行 SETTLED，账本行 SETTLED）。
 5. 宿主写 `model-result-<requestId>.json`，容器 `serveCommands` 消费并回执，reply 正文在容器侧可读。
@@ -69,7 +69,7 @@ D（公网 webhook）维持主人既定延期（至首次启用 Telegram 公网�
 | # | 场景 | 驱动与注入 | 预期请求行 | 预期账本 | 预期费用与审计 | 环回调用 |
 | --- | --- | --- | --- | --- | --- | --- |
 | T1 | 正常返回（含 §3 锚点全链形态） | 合法提议；环回回 usage input=40 / output=13、cache 二类=0；夹具目录价 input 300000 / output 1200000 µ$/M，cache 二价 null（经 `--config` 注入，`defaults.json` 价保持 null） | RECEIVED→RESERVED→EXECUTING→SETTLED | 同事务 SETTLED **28 µ$**（40×0.3+13×1.2=27.6 进位，对齐 A 项实测口径与 ADR §10.5） | `budget_settled` 在场；reasoning 无独立计费行；reply 落 scope-ACL 证据对象（截 4000 字符）且容器 receipt 在场 | 恰 1 |
-| T2 | 拒绝输入 | 六触发逐项断言（ADR §10.1 同款）：白名单外 purpose、白名单外 modelId、scope 不匹配、fence 或 attemptId 不匹配、未知字段、messages 超 128 KiB | FAILED（调用前） | reservations=0，零预留 | `model_request_refused` 逐项在场 | 0 |
+| T2 | 拒绝输入 | 子例一：六项校验触发逐项断言（ADR §10.1 同款）——白名单外 purpose、白名单外 modelId、scope 不匹配、fence 或 attemptId 不匹配、未知字段、messages 超 128 KiB；子例二：预算拒绝（任务或日账户先占满/冻结后提交合法提议） | 子例一：**无请求行**（六触发均建行前拒绝，对齐 ADR §7「插入且校验通过」）；子例二：RECEIVED→FAILED（调用前，无预留） | 子例一：reservations=0；子例二：reserve 被拒、零预留 | 子例一 `model_request_refused` 逐项在场；子例二拒绝审计在场（BudgetExceeded/AccountFrozen 语义）；均零费用 | 0 / 0 |
 | T3 | 重复请求 | 同 requestId 二次提议 | 主键冲突回读已有状态，不插第二笔预留、不第二次调用 | 同一预留，无二次占用 | 幂等回执，重复投递丢弃并审计 | 累计仍 1 |
 | T4 | 调用前取消 | RESERVED 提交后、EXECUTING 提交前注入取消（crashpoint 式缝） | FAILED | release（仅账本 HELD 可 release），双账户 held 相应回落 | release 审计在场；零费用 | 0 |
 | T5 | 崩溃：reserve 与调用之间（pre-call 窗口，与 T4 同一） | crashpoint 注入于 RESERVED 与 EXECUTING 两提交之间，重启 | 停留 RESERVED，不自动重放（不要求断点续跑，超出 ADR 最小范围）；或在放弃该次 attempt 时转 FAILED——两种处置任一成立即过，所选处置入档 | 预留保持 HELD（重启后不自动 release、不结清，ADR §7 测试要求句「reserve 与调用间崩溃保持 HELD」即此义）；调用未发出，预留仍处 pre-call 可 release 区间（ADR §7 RESERVED 条，与 T4 同款）；随 attempt 放弃即 release | **零费用：不进 CHARGED_BOUND、不按 `callUpperMicrousd` 占额**（该保守路径只属于 T6）；崩溃前后均无第二次调用 | 0 |
@@ -87,10 +87,10 @@ D（公网 webhook）维持主人既定延期（至首次启用 Telegram 公网�
 
 1. 锁定 Node 22.23.5 显式路径调用（`D:\AegisPi\tools\node-v22.23.5\node.exe`；非锁定 Node 套件 exit 2）。
 2. `npm ci`（根 lockfile，workspaces 布局；daemon 与多数套件在 import 期要求 `node_modules` 在位）。**实现轮不新增任何依赖**。
-3. 三 docker 套件另需 Docker（在案 29.9.2，linux/amd64）与本机构建 registry 容器 `aegispi-build-registry`（127.0.0.1:5000，registry:2；勿动其他项目容器）。新套件凡跑容器一律经 image-gate 绑 manifest digest，浮动 tag 禁用（现行纪律）。
-4. 实现轮**不读 `.env`**（许可 1 明确排除；环回夹具不需凭据）。
+3. 三 docker 套件另需 Docker（在案 29.9.2，linux/amd64）与本机构建 registry 容器 `aegispi-build-registry`（127.0.0.1:5000，registry:2；勿动其他项目容器）。新套件的**验收口径**跑容器一律经 image-gate 绑 manifest digest，浮动 tag 禁用（现行纪律）；b 步开发期可用开发期本地构建驱动全链（§2b 通过条件同款口径），开发期构建不进纪元表、不作为验收证据。
+4. 实现轮**不读 `.env`**（许可 1 明确排除）。**环回验证的凭据口径（对抗审计更正）**：pi-ai 1.5.2 在任何 HTTP 前检查 apiKey 或 authorization 头（openai-completions.js:35-41，stream 与 streamSimple 同门，models.js:442-443），「环回夹具不需凭据」对旧直连子进程成立、对新核心不成立——环回用例由套件为被测进程注册**夹具凭据槽 `model`** 指向测试环境变量（占位值经宿主凭据服务正常解析、内容被环回服务忽略；不经 `.env`、宿主不代造凭据）；无槽位时新核心子进程建连前即抛错走 `model_call_failed`→HELD，比旧路径更早失败关闭。
 
-**回归范围**：按实际生产 diff 触及选定，选择依据入档（草案退出条件）。预期必跑：新 model-proposal 套件；三 docker 套件（offline-jobs、security-integration、quota-calibration——镜像绑定面）；`test:security:unit`（现行 worker 模型用例更新、ordering 与失败关闭）；`test:budget`（settle/release/CHARGED_BOUND 语义回归）；`test:contracts`（PI 契约与 SQLite 门）；hono 配对自检（`node evals/contracts/tools/verify-hono-oracle-pair.mjs`）；`test:durability` 与 `test:restore`（`db/migrate.mjs` 与 schema 触及）；`test:cancel-approval`（调用前取消语义）。预期零 diff 模块所辖套件（如 `test:acl`、`test:ingress-telegram`）可沿用 `44b3514`/`33d6361` 在案记录，沿用依据同样入档。三条 real 入口**一律不运行**（根 README 真实入口纪律）；`test:model:real` **只改接到新核心，4.1 仍不运行它**——不追加一次性守卫，该入口无守卫按现状在收口报告登记为已知残留（不为此改代码）；历史缺证不重开。
+**回归范围**：按实际生产 diff 触及选定，选择依据入档（草案退出条件）。预期必跑：新 model-proposal 套件；三 docker 套件（offline-jobs、security-integration、quota-calibration——镜像绑定面）；`test:security:unit`（现行 worker 模型用例更新、ordering 与失败关闭）；`test:budget`（settle/release/CHARGED_BOUND 语义回归）；`test:contracts`（PI 契约与 SQLite 门）；hono 配对自检（`node evals/contracts/tools/verify-hono-oracle-pair.mjs`）；`test:durability` 与 `test:restore`（`db/migrate.mjs` 触及；canonical schema 与指纹门不动，其锁死断言应原样保持绿）；`test:cancel-approval`（调用前取消语义）。预期零 diff 模块所辖套件（如 `test:acl`、`test:ingress-telegram`）可沿用 `44b3514`/`33d6361` 在案记录，沿用依据同样入档。三条 real 入口**一律不运行**（根 README 真实入口纪律）；`test:model:real` **只改接到新核心，4.1 仍不运行它**——不追加一次性守卫，该入口无守卫按现状在收口报告登记为已知残留（不为此改代码）；历史缺证不重开。
 
 **镜像与纪元**：按 §2c 执行——先复算后构建、只重建漂移名字、携带者必须复算一致且复解析、纪元 3 入 `image-digest.md`（前纪元保留为历史节，唯一现行 v2 机器块），终树交付时 image-gate 全放行（零绑定漂移）。**构建网络行为如实记档**（纪元 2 已记录形态）：digest 固定基础镜像本地在位；镜像内 `npm ci` 经公网 npm registry 取 lockfile 固定依赖；push 仅至 loopback registry。**该构建供应链行为与真实模型调用是不同的网络行为**——4.1 的「零真实调用」指推理服务零调用，npm ci 的供应链网行为不构成破例，两件事在证据里分开记。
 
@@ -100,7 +100,7 @@ D（公网 webhook）维持主人既定延期（至首次启用 Telegram 公网�
 2. 套件证据：每条命令、输出与退出码，锁定 Node 版本在案。
 3. 纪元 3 构建证据与 `image-digest.md` 更新。
 4. 回归选择依据（跑了什么、沿用什么、为什么）。
-5. 收口报告（建议 `docs/phase4/reports/phase4-1-closure.md`，实施方可定名）：逐条矩阵结果（观测状态、费用、调用次数对照本表预期）、`model-call-child` 生产树 grep 证明、defaults 失败关闭核对（键名级变更逐行对照 ADR §9、失败关闭值不变，不以「零行 diff」为通过条件）、遗留与停止记录（含 `test:model:real` 无一次性守卫的已知残留登记）；文档索引与状态清单同步登记。
+5. 收口报告（建议 `docs/phase4/reports/phase4-1-closure.md`，实施方可定名）：逐条矩阵结果（观测状态、费用、调用次数对照本表预期）、`model-call-child` 生产树 grep 证明、defaults 失败关闭核对（键名级变更逐行对照 ADR §9、失败关闭值不变，不以「零行 diff」为通过条件）、遗留与停止记录（已知残留清单至少三项：`test:model:real` 无一次性守卫；`model_requests` 为 schema_migrations 记录之外的幂等扩展表（credential_slots 同款先例点名）；Windows 宿主机 proposals 目录为账号级实例化的平台约束——daemon 与容器 uid 999 该平台不可区分、容器内呈现恒 777 root:root、常开或换宿主机时须重新裁量）；文档索引与状态清单同步登记。
 
 ## 5. 范围锁定与停止条件
 
@@ -112,20 +112,29 @@ D（公网 webhook）维持主人既定延期（至首次启用 Telegram 公网�
 
 1. 发现必须修改 ADR-0001 任何决策句（接口形态、状态机、结算规则、隔离不变量）才能继续 → **停在当前步骤**，记录具体冲突（哪一句、什么证据、为何无法在现行设计内解决），等待主人裁量，不自行改设计。
 2. 发现必须触碰上段范围外项才能继续（如需真实 key、真实端点、真实价格）→ 停在失败关闭态，报告卡点与首跑检查表状态（草案 4.1 停止条件沿用）。
-3. 任何门禁拒绝（image-gate、预算、白名单、schema 哈希门）→ 停在拒绝态，不绕过、不强行刷绿。
+3. 任何门禁拒绝（image-gate、预算、白名单、schema 哈希门）→ 停在拒绝态，不绕过、不强行刷绿。**唯一豁免**：b 步开发期的 image-gate 预期红（树已改动、纪元 3 未建，§2b 口径）——以开发期本地构建继续、不构成停止；验收期门禁拒绝照旧即停。
 4. Phase 3 已关闭的限定修复与历史缺证（A 账单、B 正文、C 次数与 T2 网络事实）不重开、不追补；不为历史文件名清改审计与证据（§2b 清理口径）。
 5. 普通范围内的实现问题自行解决：夹具形状、路径细节、命名、套件接线方式（如是否为新套件加 npm script——若加，其 agent context 漂移已由纪元 3 重建覆盖，属实现细节非范围变更）。解决过程记入决策留痕即可。
-6. 宿主 proposals 目录的有效写集合（仅 daemon 进程与容器作业身份，§2c 权限语义）在实施环境（如 Windows 宿主机）无法忠实实现 → 停止并记录冲突（已试何种实现、为何不忠实），等待主人裁量；**不得放宽为任意本机用户可写**。
+6. 宿主 proposals 目录的有效写集合（§2c 权限语义）：**Windows 宿主机的账号级实例化已经主人 2026-11-20 裁量采纳**（冲突 2 方案 A：启动器自动 ACL 锁定 + 宿主 ACL 断言 + 平台约束与已知残留登记，见 §2c 与 §4 交付物第 5 条）。此后仍触发停止的情形：锁定无法由启动器程序化落地、断言发现 ACL 含任意本机用户可写项、或常开宿主机另定平台 → 停止并记录冲突，等待主人裁量；**不得放宽为任意本机用户可写**（默认继承含 Authenticated Users 可改，此洞必须程序化补掉）。
 
-## 修订追记（2026-11-20，主人指令，决策留痕 D-77）
+## 修订追记（2026-11-20，主人指令）
+
+第一轮（决策留痕 D-77）：
 
 1. **T5 更正**：RESERVED 与 EXECUTING 之间崩溃时调用尚未发出，该窗口与 T4 同一（pre-call，ADR §7 RESERVED 条），预留可 release、请求行停留 RESERVED 或随 attempt 放弃转 FAILED；**不得进 CHARGED_BOUND、不得按 `callUpperMicrousd` 占额**——该保守路径只属于 T6（已进入 EXECUTING、调用可能已发出之后）。原表把 ADR §7 测试要求句「reserve 与调用间崩溃保持 HELD」误延拓为保守超时占额；「保持 HELD」的本义是重启后不自动 release、不结清，未授权任何费用。
 2. **T7 注入方式补明**：第一次调用已完成、usage 已取得、写回事务尚未提交；迟到结清是纯账本事务，不得再发第二次环回请求，累计调用次数仍为 1。
 3. **宿主目录权限改述**：要求是有效写集合仅限 daemon 与容器作业身份（uid 999），不是照搬某一种 chmod 数值（1777 只是一种被禁止的放宽形态）；Windows 宿主机无法忠实实现即停止记录冲突（§5 第 6 条），不得放宽为任意本机用户可写。
 4. **defaults 与 `test:model:real` 条款澄清**：实现轮允许 `defaults.json` 按 ADR §9 做键名级变更，通过条件是失败关闭值不变，不以「零行 diff」为条件；`test:model:real` 只改接到新核心且 4.1 仍不运行，无一次性守卫按现状登记为收口已知残留，不为此改代码。
 
-本轮修订零代码、零配置、零依赖、零测试脚本改动，未跑套件、未构建镜像、未读 `.env`、未触真实入口；生产代码自基线 `686d10b` 起零改动，正文代码引用仍准确；历史审计与冻结证据字节未动。
+该轮零代码、零配置、零依赖、零测试脚本改动，未跑套件、未构建镜像、未读 `.env`、未触真实入口；生产代码自基线 `686d10b` 起零改动；历史审计与冻结证据字节未动。
+
+第二轮（决策留痕 D-78，主人对实施方预审上报两项冲突的裁量落定 + 对抗审计轮）：
+
+1. **冲突 1 → 方案 A**：原 §2b「`model_requests` DDL 落 canonical schema.sql 并同步哈希指针」作废——该句超出 ADR §9（全文仅列 `migrate.mjs`）且误读 D-01 指纹门（canonical 源在库外资料包，「指针更新」即改主人规范源、废掉持原版资料包的独立复核、连带改 sqlite-node.mjs:90 / durability:61/93/103/116/2692 / verifySchema:147 / restore:278 的锁死断言）。改为 credential_slots 同款幂等扩展建表；schema.sql、schema-source.json、指纹门与全部锁死断言原样不动；扩展表在 schema_migrations 记录之外，收口报告点名登记。
+2. **冲突 2 → 方案 A 附加条件**：裁量前实测在案（仓库外临时目录 + 纪元 2 agent 镜像 docker run：默认 ACL 含 Authenticated Users 可改；icacls 锁定后宿主仅运行账号可写而容器 uid 999 经代理仍可写；容器内呈现恒 777 root:root；探测后清理）。采纳账号级实例化：锁定由启动器自动执行、断言落在宿主 ACL（不得以容器内 stat 断言）、平台约束与残留如实登记收口；「仅 daemon 与容器作业身份」完整语义在 Linux 成立，常开宿主机另定平台时重新裁量。
+3. **对抗审计轮（interrogate 三路并行；全部发现经逐条复核后同轮落修）**：审计复核了上文两项裁量落点并确认与全部门禁相容，另揪出七处同轮修复——(a) T2 建行语义：六项校验触发均建行前拒绝、**无请求行**（原矩阵误期 FAILED 行），全链顺序同步为「校验全过才建行」（ADR §7「插入且校验通过」），并补预算拒绝子例（RECEIVED→FAILED）；(b) 「环回夹具不需凭据」更正：pi-ai 1.5.2 在任何 HTTP 前检查 apiKey/authorization 头（openai-completions.js:35-41/:182/:503、models.js:442-443），环回验证改经夹具凭据槽占位、无槽位即建连前失败关闭；(c) 扩展建表调用改「需要该表的套件」按需构造（先例真实形态），锁死断言保护清单补 durability run.mjs:2692；(d) §5 第 3 条补 b 步开发期 image-gate 豁免、草案追记同步退出条件口径；(e) crashpoint 调用方举例修正（scheduler 仅 import 无调用，实为 timers/effects/router/ingress/approvals 五处）；(f) 清理 grep 命令补根 `package.json`/`package-lock.json`；(g) 修订追记、结句与本轮 D-78 决策留痕同轮落盘。审计另确认：ADR 全部章节引用、pi-ai 接口链（getBuiltinModel/completeSimple/reasoning→thinking enabled/baseURL 根地址/wire 用 `model.id`）、矩阵费用算术、镜像 context 清单、defaults 失败关闭值、npm 脚本表、环境事实与「生产代码自基线零改动」声明均核对无误。
+4. 本轮零代码、零配置、零依赖、零测试脚本改动；未跑任何套件、未构建任何镜像、未读 `.env`、未触任何真实入口（两项环境探测属裁量前事实复核，在仓库外完成并已清理）；生产代码自基线 `686d10b` 起零改动；历史审计与冻结证据字节未动。
 
 ---
 
-本文由主人 2026-11-20 指令编制（编制轮仅文档，决策留痕 D-76）；同日修订一轮（决策留痕 D-77）。授权下达前，仓库现状与待办一律以状态清单为准；下达后，本文为单元 4.1 的唯一实施依据文本。
+本文由主人 2026-11-20 指令编制（编制轮仅文档，决策留痕 D-76）；同日修订两轮（决策留痕 D-77、D-78）。授权下达前，仓库现状与待办一律以状态清单为准；下达后，本文为单元 4.1 的唯一实施依据文本。
