@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T04:55:42.436Z",
+  "generatedAt": "2026-11-20T11:01:45.151Z",
   "nodeVersion": "v22.23.5",
   "suite": "offline-jobs",
   "label": "test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）",
@@ -46,7 +46,7 @@
     {
       "name": "startup-recovery-kills-orphan-container-and-marks-lost",
       "status": "PASS",
-      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"52c466d99259d4086540e6741c601d1e9de7344f2d04125fd02fa05315643e3b\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
+      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"4af63ac814bed1148387b27ad490c61d3e5dd19a09d1e82b8b9c5d13af06f6e4\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
     },
     {
       "name": "invalid-manifest-refused-nothing-executed",
@@ -56,12 +56,12 @@
     {
       "name": "daemon-tick-launches-and-reaps-queued-container-job",
       "status": "PASS",
-      "detail": "daemon exit=0 job=SUCCEEDED/0 containers=\"\" job-stdout-seen=true daemon-event-seen=true"
+      "detail": "daemon exit=0 job=SUCCEEDED/0 containers=\"\" job-stdout-seen=true daemon-event-seen=true scene=D:\\AegisPi\\aegis-pi\\workspace-state\\phase3\\oj-daemon\\daemon-tick-scene.txt"
     },
     {
       "name": "disk-warn-drill-blocks-new-job-launches",
       "status": "PASS",
-      "detail": "daemon exit=5 job=QUEUED warn-line=true containers=\"\" — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill"
+      "detail": "daemon exit=5 job=QUEUED warn-line=true containers=\"\" — the watermark read a REAL (healthy) disk and the injected threshold tripped the drill scene=D:\\AegisPi\\aegis-pi\\workspace-state\\phase3\\oj-disk-warn\\daemon-diskwarn-scene.txt"
     },
     {
       "name": "job-without-oracle-refused-nothing-executed",
@@ -86,5 +86,5 @@
   ],
   "dataSources": "真实 docker 容器（execution/agent 镜像按记录 digest 运行，--network none，cgroup 限额）+ 本地 SQLite；无模型调用、无外部写、无凭据入容器",
   "executionImage": "127.0.0.1:5000/aegispi/execution@sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050",
-  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319"
+  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:b136e04d15b52c5be764d4560c967aa9cb52098295148667dc53bc4dd45622c0"
 }

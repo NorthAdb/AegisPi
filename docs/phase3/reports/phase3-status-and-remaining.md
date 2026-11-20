@@ -22,6 +22,8 @@
 
 三份原 OCI 归档在 `D:\AegisPi\phase3-image-archives\`。**主人 2026-11-20 决定：本机验证通过即视为该项通过，不需移交第三方。已执行**（`local-original-image-verification.md`，实施者本机实测）：身份核验 27/27（三 tar 传输哈希逐位=文档值、manifest/config blob 与全部 30 层自证、linux/amd64、manifest digest 与 config/image ID 分列）；docker load 前后镜像 ID 不变（未覆盖任何不同镜像）；loopback registry 三重绑定成立。隔离套件各恰一次：当前树被 image-gate 按设计拒绝（exit 2，`package.json` 增两行 script 后 context 漂移，未绕过未重建）；在记录上下文树 `11d649a` 上 quota-calibration **5/5 exit 0**、offline-jobs **9 PASS 后 daemon 级用例崩溃 exit 1（根因未隔离，未决；同用例 D-57 曾过）**、security-integration **28/29 exit 1（唯一 FAIL 为内嵌 offline-jobs 同根因；逃逸/滥用/配额全 PASS 且跑在原镜像上）**。原 tar 全程未改未传（结束复验哈希不变）；复核方未收到、未运行原件。
 
+**纪元 2 追记（2026-11-20 限定修复轮）**：上段两个开放残留均已闭合——daemon 级用例根因已定位并修复（无 `node_modules` 的树上 daemon 在 import 期死于 hono `ERR_MODULE_NOT_FOUND`，旧无守卫读把 stderr 掩蔽成 ENOENT；修复落测试层——现场落盘 + 守卫读，生产代码零改动），加固套件在复现面实测 12 PASS / 2 FAIL、失败现场在案；经主人授权建**纪元 2**（仅重建 agent：manifest `b136e04d…`、config `cbd20576…`、context `72ed2cae…`、tag `phase3-848eba6d539f`；acquisition/execution 证明 context 一致后沿用原 digest 与 tag），门禁在当前树恢复放行，终树三套件全绿（14/14、29/29、5/5 全 exit 0）。收口报告：`round-closure-2026-11-20-limited-fixes.md`。
+
 ## 4. 模型路径现状（`model-path-and-pi.md` §7 追记）
 
 - 缺口 C 更正为「**已发生一次真实宿主调用**（usage × 目录价结清），**供应商账单核对未做**，**Pi SDK/端到端未接通**」。
@@ -46,6 +48,8 @@
 
 **原镜像验证轮（2026-11-20 追记，同锁定 Node，零真实外联）**：归档身份核验 27/27 exit 0（`imgverify-identity-output.txt`）；docker 三套件在当前树被 image-gate 设计拒绝 exit 2 ×3（`imgverify-current-tree-refusal-*.txt`）；在 `11d649a` 记录上下文树各恰一次：quota-calibration 5/5 exit 0、offline-jobs exit 1（9 PASS 后 daemon 级用例 ENOENT 崩溃，`imgverify-11d649a-offline-jobs-output.txt`）、security-integration 28/29 exit 1（唯一 FAIL 为内嵌 offline-jobs；`imgverify-11d649a-security-integration-output.txt`）；quota 输出 `imgverify-11d649a-quota-calibration-output.txt`。不重试、不强行刷绿。
 
+**限定修复轮（2026-11-20 追记，同锁定 Node，零真实外联）**：daemon 级用例根因（无 `node_modules` 树上 daemon import 期死于 hono，旧无守卫读掩蔽 stderr）已定位修复，加固套件在复现面实测 12 PASS / 2 FAIL（`daemon-repro-*` 四件证据）；经主人授权建纪元 2（仅重建 agent，acquisition/execution 携带核验后沿用原 digest，`build-epoch2-agent-log.txt`）；终树三套件全绿：offline-jobs **14/14 exit 0**（含 daemon 级与 disk-warn 用例）、security-integration **29/29 exit 0**、quota-calibration **5/5 exit 0**（`accept-epoch2-*.txt` 三件）。回归依据：生产代码自 33d6361 全绿轮 0 行改动，非 docker 套件所测对象逐字节未变故未重跑。
+
 ## 6. 普通残留（复审原判维持，不挡出口）
 
 备份库明文 SQLite、同主机重定向换端口、备份两次读之间的替换窗口、4 GiB 全量写未做、PID 复用窗口、stdout 微秒竞态未稳定复现、短 webhook secret 未捕获异常 exit 1、模型 bearer 经短命子进程 argv。镜像复跑配方的 `docker load` 标签保留限度（确认审计标注）已写入 `image-transfer-manifest.md` §3 第 5 步。
@@ -53,7 +57,7 @@
 ## 7. 待办汇总
 
 1. 独立复核 A/B/C 后续（复核方）：**33d6361 已归档并回应**（`audit-response-rereview-33d6361.md`）；其「未闭项」清单（A 账单、B 正文、C 历史次数与 T2 网络事实）维持缺证口径，等待复核方裁量。
-2. 原镜像：**本机验证已完成（主人口径：通过即闭项）**。开放残留：offline-jobs daemon 级用例在本环境的崩溃根因未隔离（stderr 未留存，不重跑）；当前树 image-gate 恢复需主人授权的新构建纪元或另定绑定策略（见 `local-original-image-verification.md` §6）。
+2. 原镜像：**本机验证已完成（主人口径：通过即闭项）**。上轮两个开放残留已在本轮限定修复中闭合：daemon 级用例崩溃根因已定位修复（无 `node_modules` 树 + 测试层掩蔽；加固后失败现场可读，生产零改动）；当前树门禁经**纪元 2**（仅重建 agent，携带核验后沿用未受影响镜像）恢复放行，终树三套件全绿（`round-closure-2026-11-20-limited-fixes.md`）。原三 tar 与交付证据未动。
 3. D 项按主人决定**延期至首次启用公网 Telegram webhook 前**；届时按 `real-acceptance-plan.md` §D 同窗口口径另行申报。
 4. 模型缺口 A/B 归属复核（主人/ADR，复核 §7 建议已在案不实施）；价格目录与单次上限核定（主人，下次真实运行前）。
 5. Phase 4（真实仓库闭环）：**不进入**；须 Phase 3 门禁全过 + 主人批准 repo 与通知目标后另行申报。

@@ -7,6 +7,36 @@
 - **context digest**：构建上下文（Dockerfile + 分台源码，见 evals/phase3/lib/image-bind.mjs 的文件清单）的确定性字节哈希；staged 路径固定 `/`、文件字节按 LF 规范化，摘要是提交内容的函数——同一提交在 Linux 检出与 Windows autocrlf 检出上重算一致（复审 F1）。image-gate 在每条套件前重算本树哈希，漂移即拒绝；并核验 manifest 内嵌 config blob 声明 linux/amd64，非本平台 config 拒绝。
 - 输出挂载为镜像所有的 named volume（镜像内 /job/output、/downloads 属 uid 999），宿主 umask 不再决定可写性（审计 F2）；不使用全局 chmod 777。
 
+## 现行纪元（本纪元重建 agent；acquisition/execution 携带原 digest——context 已在本树复算一致、manifest 已在本地 registry 复解析）
+
+| 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |
+| --- | --- | --- | --- | --- | --- |
+| agent | `127.0.0.1:5000/aegispi/agent:phase3-848eba6d539f` | `sha256:b136e04d15b52c5be764d4560c967aa9cb52098295148667dc53bc4dd45622c0` | `sha256:cbd20576f28d2f783d530a6bcfd33578d3948197eee96f59bac1167aa2bc684c` | `sha256:72ed2caef518a3eee4c21899a478dc61bd73d9c0b3a40a2e39f7d834635104bf` | self-check exit 0 |
+| acquisition | `127.0.0.1:5000/aegispi/acquisition:phase3-52502432d21f` | `sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658` | `sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f` | `sha256:8abae27516f116bc0805481b5ad5b65c904303cc4dcf2b417700267edd2f7012` | fail-closed fetch + report |
+| execution | `127.0.0.1:5000/aegispi/execution:phase3-52502432d21f` | `sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050` | `sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e` | `sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab` | no-network job completed clean |
+
+- 构建时间：20/11/2026, 18:54:56（Asia/Hong_Kong）；源码提交：848eba6d539f；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
+- 纪元说明：本纪元仅重建 agent：ec23ef7/26929a0 为 package.json 新增两条 npm script，agent 构建上下文自纪元 1 的 0eee2b6f 漂移至本树值；acquisition/execution 的 context 在本树复算与纪元 1 逐位一致、manifest 已在本地 registry 复解析，沿用其原 digest 与 tag；原三份 OCI tar 与其交付证据保持不动。deps 阶段沿用既有 Dockerfile 的 npm ci --omit=dev --ignore-scripts（经公网 npm registry 取 lockfile 固定依赖，与纪元 1 同通道）；基础镜像按 digest 固定。
+- 冒烟记录（本纪元）：agent `--self-check` 退出码 0（本纪元实测）。
+- 携带镜像的 tag 与冒烟列沿用其原纪元记录（同一 digest 字节未变；context 复算不一致或 manifest 不可解析即拒绝携带，必须重建）。
+- 隔离与逃逸测试必须跑在 manifest digest 上（`docker run … 127.0.0.1:5000/aegispi/<name>@<digest>`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。
+
+机器可读块（image-gate.mjs 解析，勿手改格式）：
+
+<!-- app-image-digests v2
+agent: sha256:b136e04d15b52c5be764d4560c967aa9cb52098295148667dc53bc4dd45622c0
+agent.config: sha256:cbd20576f28d2f783d530a6bcfd33578d3948197eee96f59bac1167aa2bc684c
+agent.context: sha256:72ed2caef518a3eee4c21899a478dc61bd73d9c0b3a40a2e39f7d834635104bf
+acquisition: sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658
+acquisition.config: sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f
+acquisition.context: sha256:8abae27516f116bc0805481b5ad5b65c904303cc4dcf2b417700267edd2f7012
+execution: sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050
+execution.config: sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e
+execution.context: sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab
+-->
+
+## 纪元 1（历史，表格与附注原样保留；其机器块已移除——本文件只保留一个现行 v2 块，完整原文见 git 历史）
+
 | 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |
 | --- | --- | --- | --- | --- | --- |
 | agent | `127.0.0.1:5000/aegispi/agent:phase3-52502432d21f` | `sha256:1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319` | `sha256:e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5` | `sha256:0eee2b6fd6f3ff7bc1c2454390b529306e7d113c593854291900f9fdc4bb0d32` | self-check exit 0 |
@@ -18,17 +48,3 @@
 - 原镜像字节的离库交付与独立环境校验说明见 `docs/phase3/reports/image-delivery.md`（OCI layout 归档，manifest blob 内容寻址自证；审计环境的 registry 404 因原镜像从未推送到该机）。
 - 冒烟记录：agent `--self-check` 退出码 0；execution 在 ``--network none`` 下经 volume 输出真实执行一个 job（result.json 干净完成）；acquisition 对不可达 URL 失败关闭并经 volume 写出 report.json。
 - 隔离与逃逸测试必须跑在 manifest digest 上（`docker run … 127.0.0.1:5000/aegispi/<name>@<digest>`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。
-
-机器可读块（image-gate.mjs 解析，勿手改格式）：
-
-<!-- app-image-digests v2
-agent: sha256:1bed0ab1663fbd0d549ef9742b7190d582b80eb550906d1e5f3f07c7b3d35319
-agent.config: sha256:e5d9951897686e35602ae12e2583aad70fc91856e478591852ef68898ef81cd5
-agent.context: sha256:0eee2b6fd6f3ff7bc1c2454390b529306e7d113c593854291900f9fdc4bb0d32
-acquisition: sha256:3c5b4dba28b503bbb2075fd95ab0fbf0c55ecbb356d85a717e8370e300f7d658
-acquisition.config: sha256:665f9c54d5f764cafd77e91c43ffc6a8ad11464fcde01a39572fd40c1a89e83f
-acquisition.context: sha256:8abae27516f116bc0805481b5ad5b65c904303cc4dcf2b417700267edd2f7012
-execution: sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050
-execution.config: sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e
-execution.context: sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab
--->
