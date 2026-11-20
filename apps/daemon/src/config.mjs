@@ -79,7 +79,23 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       maxConcurrentAgentsPerScope: defaults.leases.maxConcurrentAgentsPerScope,
       maxOfflineJobsMachineWide: defaults.leases.maxOfflineJobsMachineWide,
     },
-    model: { ...defaults.model },
+    // Model call path (re-review P1). endpoint null = no worker path wired:
+    // the tick says so honestly, nothing is claimed, zero reservations.
+    // A loopback endpoint is the local verification seam; a non-loopback
+    // endpoint additionally needs allowRealModelCalls (owner authorization).
+    // priceCatalog null per side = prices not authorized: usage from a real
+    // response still keeps the reservation HELD, never settled as zero.
+    model: {
+      ...defaults.model,
+      endpoint: defaults.model?.endpoint ?? null,
+      allowRealModelCalls: defaults.model?.allowRealModelCalls === true,
+      callUpperMicrousd: defaults.model?.callUpperMicrousd ?? 1000,
+      callTimeoutMs: defaults.model?.callTimeoutMs ?? 60000,
+      priceCatalog: {
+        inputPerMTokMicrousd: defaults.model?.priceCatalog?.inputPerMTokMicrousd ?? null,
+        outputPerMTokMicrousd: defaults.model?.priceCatalog?.outputPerMTokMicrousd ?? null,
+      },
+    },
     timezone: defaults.time.timezoneIANA,
     sqlite: { ...defaults.sqlite },
     containerPlaceholders: { ...defaults.containerPlaceholders },

@@ -856,6 +856,195 @@ function seed(tag) {
   svc.kill();
 }
 
+// ------------------------------------------- real model worker path (re-review P1)
+// Reserve before the call, settle by the provider's own usage accounting
+// priced through the host catalog, never settle unknown usage as zero. The
+// local model service runs as its own process (same spawnSync-blocking
+// reason as the upstream service). A REAL paid model needs owner
+// authorization (allowRealModelCalls + a price catalog + a credential
+// slot) — the authorization checklist is in the re-review response; this
+// round proves the path against local services only.
+{
+  const daemonPath = join(repoRoot, "apps", "daemon", "src", "daemon.mjs");
+  const servicePath = join(repoRoot, "evals", "phase3", "security-unit", "helpers", "local-model-service.mjs");
+  const serviceWs = makeWorkspace("su-model-service");
+  const portFile = join(serviceWs.stateDir, "model-port.txt");
+  const logFile = join(serviceWs.stateDir, "model-log.jsonl");
+  const svc = spawn(process.execPath, [servicePath, portFile, logFile], { stdio: "ignore" });
+  for (let i = 0; i < 100 && !existsSync(portFile); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!existsSync(portFile)) {
+    suite.check("worker-reserves-before-call-and-settles-real-usage", false, "the local model service never came up");
+  }
+  const modelPort = readFileSync(portFile, "utf8").trim();
+  const serviceLog = () =>
+    existsSync(logFile)
+      ? readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+      : [];
+
+  function seedClaimableTask(tag) {
+    const ws = makeWorkspace(tag);
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, loadCanonicalSchema());
+    const now = Date.now();
+    const ing = receiveEvent(db, ws.stateDir, {
+      now, source: "telegram", sourceEventId: `evt-${tag}`,
+      principal: { platform: "telegram", subject: "6101" },
+      scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+      threadKey: `t-${tag}`, priority: 5, policyVersion: "pv1", payload: `model worker case ${tag}`, verdict: "ADMIT",
+    });
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    dispatchEventToTask(db, {
+      inboxId: inbox.id, dispatchKey: dispatchKeyForInbox(inbox), now, priority: 5,
+      maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "ss",
+    });
+    db.close();
+    return ws;
+  }
+
+  function writeWorkerConfig(ws, { endpoint, priceInput, priceOutput, allowReal = false }) {
+    const defaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
+    defaults.model = {
+      ...defaults.model,
+      endpoint,
+      allowRealModelCalls: allowReal,
+      callTimeoutMs: 10000,
+      priceCatalog: { inputPerMTokMicrousd: priceInput, outputPerMTokMicrousd: priceOutput },
+    };
+    delete defaults.model.priceCatalog.$comment;
+    const path = join(ws.stateDir, "test-config.json");
+    writeFileSync(path, JSON.stringify(defaults, null, 2), "utf8");
+    return path;
+  }
+
+  // (a) The full discipline against a real wire: reserve BEFORE the call
+  // (reservation created_at <= the service's receive timestamp), settle
+  // AFTER it (settled_at >= receive), settled by the token accounting x the
+  // host catalog — not the reserve upper, not zero, not the fixture 300.
+  {
+    const ws = seedClaimableTask("su-model-priced");
+    const configPath = writeWorkerConfig(ws, {
+      endpoint: `http://127.0.0.1:${modelPort}/model`,
+      priceInput: 100,
+      priceOutput: 200,
+    });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reservation = db.prepare("SELECT * FROM budget_reservations WHERE purpose='worker'").get();
+    const settledAudit = db.prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'").all();
+    const task = db.prepare("SELECT state, result_class FROM tasks ORDER BY created_at DESC LIMIT 1").get();
+    const resultObj = db.prepare("SELECT storage_ref FROM objects WHERE kind='task_result' ORDER BY observed_at DESC LIMIT 1").get();
+    db.close();
+    const seen = serviceLog();
+    const request = seen[seen.length - 1] ?? null;
+    let usageSource = null;
+    let actualMicrousd = null;
+    for (const row of settledAudit) {
+      try {
+        const d = JSON.parse(row.details_json);
+        usageSource = d.usage?.source ?? usageSource;
+        actualMicrousd = d.actual_microusd ?? actualMicrousd;
+      } catch {}
+    }
+    let reply = null;
+    if (resultObj?.storage_ref) {
+      try {
+        reply = JSON.parse(readFileSync(join(ws.stateDir, ...resultObj.storage_ref.split("/")), "utf8")).reply;
+      } catch {}
+    }
+    suite.check(
+      "worker-reserves-before-call-and-settles-real-usage",
+      r.status === 0 &&
+        Boolean(reservation) &&
+        reservation.state === "SETTLED" &&
+        usageSource === "model-http-transport" &&
+        actualMicrousd === 100 &&
+        task.state === "SUCCEEDED" &&
+        task.result_class === "not_applicable" &&
+        typeof reply === "string" &&
+        Boolean(request) &&
+        reservation.created_at <= request.at &&
+        (reservation.settled_at ?? 0) >= request.at,
+      `daemon exit=${r.status} reservation=${reservation?.state ?? "none"} settled=${actualMicrousd} microusd source=${usageSource} task=${task?.state}/${task?.result_class} reply=${typeof reply}:${JSON.stringify((reply ?? "").slice(0, 40))} ordering[created=${reservation?.created_at} at=${request?.at} settled=${reservation?.settled_at}] ok=${Boolean(request) && reservation?.created_at <= request.at && (reservation?.settled_at ?? 0) >= request.at} — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero`,
+    );
+  }
+
+  // (b) A response without usage accounting: the reservation stays HELD,
+  // no settlement, the reason is on the audit trail.
+  {
+    const ws = seedClaimableTask("su-model-nousage");
+    const configPath = writeWorkerConfig(ws, {
+      endpoint: `http://127.0.0.1:${modelPort}/no-usage`,
+      priceInput: 100,
+      priceOutput: 200,
+    });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
+    const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+    const notSettled = db.prepare("SELECT details_json FROM audit_log WHERE code='model_usage_not_settled'").all();
+    db.close();
+    const reasonOk = notSettled.some((row) => /no usage/.test(row.details_json));
+    suite.check(
+      "worker-no-usage-keeps-reservation-held-never-zero",
+      r.status === 0 && reservation?.state === "HELD" && settled === 0 && notSettled.length >= 1 && reasonOk,
+      `daemon exit=${r.status} reservation=${reservation?.state} settlements=${settled} not-settled-audits=${notSettled.length}`,
+    );
+  }
+
+  // (c) Usage present but the price catalog is NOT authorized (null rates):
+  // same HELD discipline — the host never invents a price.
+  {
+    const ws = seedClaimableTask("su-model-noprice");
+    const configPath = writeWorkerConfig(ws, {
+      endpoint: `http://127.0.0.1:${modelPort}/model`,
+      priceInput: null,
+      priceOutput: null,
+    });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
+    const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+    const notSettled = db.prepare("SELECT details_json FROM audit_log WHERE code='model_usage_not_settled'").all();
+    db.close();
+    const reasonOk = notSettled.some((row) => /price catalog/.test(row.details_json));
+    suite.check(
+      "worker-unauthorized-price-catalog-keeps-reservation-held",
+      r.status === 0 && reservation?.state === "HELD" && settled === 0 && reasonOk,
+      `daemon exit=${r.status} reservation=${reservation?.state} settlements=${settled} price-not-authorized-audits=${notSettled.length}`,
+    );
+  }
+
+  // (d) A non-loopback endpoint without allowRealModelCalls: refused
+  // BEFORE any call — zero claims, zero reservations, honest log.
+  {
+    const ws = seedClaimableTask("su-model-unauth");
+    const configPath = writeWorkerConfig(ws, {
+      endpoint: "http://10.255.255.1:9/model",
+      priceInput: 100,
+      priceOutput: 200,
+      allowReal: false,
+    });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const out = (r.stdout ?? "") + (r.stderr ?? "");
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reservations = db.prepare("SELECT count(*) c FROM budget_reservations WHERE purpose='worker'").get().c;
+    const task = db.prepare("SELECT state FROM tasks ORDER BY created_at DESC LIMIT 1").get();
+    db.close();
+    suite.check(
+      "worker-refuses-unauthorized-endpoint-before-any-call",
+      r.status === 0 &&
+        reservations === 0 &&
+        task.state === "QUEUED" &&
+        /not authorized/.test(out),
+      `daemon exit=${r.status} reservations=${reservations} task=${task.state} honest-log=${/not authorized/.test(out)}`,
+    );
+  }
+  svc.kill();
+}
+
 // ------------------------------------------- critical disk watermark drill (audit F8)
 {
   const ws = makeWorkspace("su-disk-critical");

@@ -26,6 +26,16 @@
     "provider": "deepseek",
     "modelId": "deepseek-flash",
     "thinkingLevel": "high",
+    "endpoint": null,
+    "allowRealModelCalls": false,
+    "callUpperMicrousd": 1000,
+    "callTimeoutMs": 60000,
+    "priceCatalog": {
+      "$comment": "真实价格目录（复审 P1）：input/output 每百万 token 的 microUSD 单价。null = 价格未授权：即使模型调用返回了 usage 也只保持 HELD 不结清（未知用量不得当 0）。主人授权真实模型调用时一并填入真实价格。",
+      "inputPerMTokMicrousd": null,
+      "outputPerMTokMicrousd": null
+    },
+    "$modelComment": "endpoint null = 未配置模型调用路径：worker 分支如实记录待办、不 claim、零预留零结清。配置 loopback 端点（127.0.0.1）= 本地验证缝；非 loopback 端点须 allowRealModelCalls=true（主人授权项，见回应报告授权清单）。callUpperMicrousd 为单次调用预留占位上限，随价格目录一并由主人核定。",
     "$evidence": "Pi 1.5.2 内置目录 node_modules/@earendil-works/pi-ai/dist/providers/data/deepseek.json：deepseek-flash（显示名 DeepSeek V4.1 Flash，reasoning，thinkingLevelMap 含 high）。最小推理契约待 DeepSeek API key 安全录入后执行（Phase 1 收口项）。"
   },
   "time": { "timezoneIANA": "Asia/Hong_Kong", "epochUnit": "unixMilliseconds" },

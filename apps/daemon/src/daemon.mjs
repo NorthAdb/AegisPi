@@ -7,7 +7,7 @@
 //   -> console (always; read-only mode keeps only diagnostics) -> loop.
 // Holding the lock fails -> exit non-zero immediately.
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadDaemonConfig } from "./config.mjs";
 import { acquireDaemonLock } from "./db/lock.mjs";
@@ -30,13 +30,15 @@ import {
 import { processDueTimers, cancelSatisfiedFollowUpReminders } from "./timers.mjs";
 import { expireApprovals } from "./approvals.mjs";
 import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
-import { insertObjectRow } from "./objects.mjs";
+import { insertObjectRow, putObjectContent } from "./objects.mjs";
 import { writeAudit } from "./audit.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { createHttpUpstream } from "./upstream-http.mjs";
 import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
 import { createContainerExecutor } from "./container-executor.mjs";
+import { isLoopbackModelEndpoint, callModelOnce, microusdForUsage } from "./model-call.mjs";
+import { createCredentialService } from "./credentials.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
 import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
@@ -260,12 +262,13 @@ export async function main(argv = process.argv.slice(2)) {
         skillSetHash: "skillset-phase2-default",
       });
     }
-    // 4. The ONLY resident execution path in this daemon is the Phase 2 fake
-    //    worker, and it exists EXCLUSIVELY under --fake-upstream: it is a
-    //    test fixture, so the no-authorization path never fabricates usage
-    //    (audit F6 — the constant 300 must not masquerade as a provider
-    //    bill). Its settlement is labeled fixture usage in the audit row;
-    //    real settlements need a real provider bill or stay HELD.
+    // 4. Worker paths. The fixture worker exists EXCLUSIVELY under
+    //    --fake-upstream: it is a test seam, so the no-authorization path
+    //    never fabricates usage (audit F6 — the constant 300 must not
+    //    masquerade as a provider bill). Its settlement is labeled fixture
+    //    usage in the audit row; real settlements need a real provider
+    //    bill or stay HELD. Outside the fixture, the REAL model worker runs
+    //    when the host configured an authorized endpoint (re-review P1).
     let claim = null;
     if (fakeUpstream) {
       claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
@@ -333,14 +336,182 @@ export async function main(argv = process.argv.slice(2)) {
           deliveryDone(db, { eventId: delivery.event_id, taskId: claim.taskId, now });
         }
       }
+    } else if (config.model.endpoint) {
+      // REAL model worker path (re-review P1): whenever the host configured
+      // an endpoint the worker is authorized to call, the production tick
+      // claims a task, RESERVES before the call, and settles by the
+      // response's real usage priced through the host catalog (06
+      // section 8). A loopback endpoint is the local verification seam;
+      // anything else needs allowRealModelCalls (owner authorization).
+      // Usage the provider did not account, or a price catalog the owner
+      // has not authorized, keeps the reservation HELD — never settled as
+      // zero. A failed call leaves the attempt to its lease (the reaper
+      // marks LOST and the task re-queues) and the reservation to the
+      // conservative timeout path.
+      const authorizedForModel = isLoopbackModelEndpoint(config.model.endpoint) || config.model.allowRealModelCalls;
+      const awaitingModel = db
+        .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
+        .get().c;
+      if (!authorizedForModel) {
+        if (awaitingModel > 0) {
+          console.error(
+            `worker: ${awaitingModel} task(s) await a model call but the configured endpoint is not authorized (model.allowRealModelCalls is false and the endpoint is not loopback); nothing is claimed or settled`,
+          );
+        }
+      } else if (awaitingModel > 0) {
+        claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
+        if (claim) {
+          heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
+          const taskAcc = ledger.ensureTaskAccount({ taskId: claim.taskId, now }).accountId;
+          const dayAcc = ledger.ensureDayAccount({ now }).accountId;
+          // Reserve BEFORE the call, as with every chargeable request.
+          const res = ledger.reserve({
+            requestKey: `worker:${claim.taskId}:${claim.attemptNo}`,
+            taskId: claim.taskId,
+            purpose: "worker",
+            provider: config.model.provider,
+            priceVersion: "catalog-v1",
+            upperMicrousd: config.model.callUpperMicrousd,
+            accounts: [
+              { accountId: taskAcc, amountMicrousd: Math.ceil(config.model.callUpperMicrousd / 2) },
+              { accountId: dayAcc, amountMicrousd: Math.floor(config.model.callUpperMicrousd / 2) },
+            ],
+            now,
+          });
+          workerStep(db, { ...claim, now, budgetReservationId: res.reservationId });
+          // The task's pending delivery payload is the call input, read
+          // from the durable event object the host already stored.
+          let callInput = null;
+          const delivery = db
+            .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
+            .get(claim.taskId);
+          if (delivery) {
+            const inboxRow = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(delivery.event_id);
+            const obj = inboxRow
+              ? db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(inboxRow.payload_object_id)
+              : null;
+            const payloadPath = obj?.storage_ref ? join(dataDir, ...obj.storage_ref.split("/")) : null;
+            if (payloadPath && existsSync(payloadPath)) {
+              try {
+                callInput = readFileSync(payloadPath, "utf8");
+              } catch {}
+            }
+          }
+          const key = createCredentialService(db).resolve("model");
+          const call = callModelOnce({
+            endpoint: config.model.endpoint,
+            model: config.model.modelId,
+            messages: [{ role: "user", content: callInput ?? `task ${claim.taskId}` }],
+            timeoutMs: config.model.callTimeoutMs,
+            bearer: key?.ok === true ? key.value : null,
+          });
+          if (!call.ok) {
+            writeAudit(db, {
+              code: "model_call_failed",
+              taskId: claim.taskId,
+              details: { error: (call.error ?? "").slice(0, 200), reservation: res.reservationId },
+              now: Date.now(),
+            });
+            console.error(`worker: model call failed for ${claim.taskId}: ${call.error}`);
+            // The attempt keeps its lease; the reaper owns the retry story
+            // and the HELD reservation goes to the conservative timeout.
+          } else {
+            // Operations AFTER the network call record their own wall
+            // clock, not the tick's start time: the ledger's settled_at
+            // must be able to prove the call happened in between.
+            const afterCall = Date.now();
+            const priced = microusdForUsage(call.usage, config.model.priceCatalog);
+            if (priced !== null) {
+              ledger.settle({
+                reservationId: res.reservationId,
+                usage: {
+                  actualMicrousd: priced,
+                  source: "model-http-transport",
+                  basis: "prompt/completion tokens from the provider response, priced by the host catalog",
+                },
+                now: afterCall,
+                actorId: "model-worker",
+              });
+            } else {
+              // Real response, but nothing the host may bill against:
+              // unknown usage or an unauthorized price catalog. The
+              // reservation stays HELD (never zero) and the reason is on
+              // the record.
+              writeAudit(db, {
+                code: "model_usage_not_settled",
+                taskId: claim.taskId,
+                details: {
+                  reason: call.usage ? "price catalog not authorized (null rates)" : "the response carried no usage accounting",
+                  reservation: res.reservationId,
+                  usage: call.usage,
+                },
+                now: afterCall,
+              });
+              console.error(
+                `worker: model call answered for ${claim.taskId} but usage cannot be settled (${call.usage ? "price catalog not authorized" : "no usage in the response"}); reservation stays HELD`,
+              );
+            }
+            const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(claim.taskId).scope_id;
+            // The evidence is a durable object: content-addressed bytes on
+            // disk (putObjectContent), never a hash-only row the finish path
+            // cannot read back.
+            const evidenceContent = JSON.stringify({
+              done: true,
+              at: afterCall,
+              worker: "model-http-transport",
+              model: call.model,
+              endpoint: call.endpoint,
+              reply: (call.reply ?? "").slice(0, 4000),
+              usage: call.usage,
+              settledMicrousd: priced,
+            });
+            const storedEvidence = putObjectContent(dataDir, evidenceContent);
+            const evidence = insertObjectRow(db, {
+              scopeId,
+              kind: "task_result",
+              sourceUri: `task:${claim.taskId}`,
+              sourceActor: "model-worker",
+              contentHash: storedEvidence.contentHash,
+              storageRef: storedEvidence.storageRef,
+              observedAt: afterCall,
+              requiredScopeIds: [scopeId],
+            });
+            completeTask(db, {
+              taskId: claim.taskId,
+              attemptNo: claim.attemptNo,
+              leaseOwner: claim.leaseOwner,
+              fence: claim.fence,
+              now: afterCall,
+              resultClass: "not_applicable",
+              resultObjectId: evidence.id,
+            });
+            const pending = db
+              .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
+              .get(claim.taskId);
+            if (pending) {
+              const ck = insertObjectRow(db, {
+                scopeId,
+                kind: "session_checkpoint",
+                sourceUri: `cmd:${pending.event_id}:${claim.taskId}`,
+                sourceActor: "host",
+                content: "model worker consumed the event",
+                observedAt: afterCall,
+                requiredScopeIds: [scopeId],
+              });
+              deliveryAckCheckpoint(db, { eventId: pending.event_id, taskId: claim.taskId, checkpointObjectId: ck.id, now: afterCall });
+              deliveryDone(db, { eventId: pending.event_id, taskId: claim.taskId, now: afterCall });
+            }
+          }
+        }
+      }
     } else {
-      // No execution path is wired outside the fixture: nothing is claimed,
-      // nothing settles. Say so on the record instead of pretending.
+      // No model path is configured: nothing is claimed, nothing settles.
+      // Say so on the record instead of pretending the loop is production.
       const awaiting = db
         .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
         .get().c;
       if (awaiting > 0) {
-        console.error(`worker: ${awaiting} task(s) await an execution path; the real agent worker is later wiring — nothing is claimed or settled on this path (fixture settlements require --fake-upstream)`);
+        console.error(`worker: ${awaiting} task(s) await an execution path; no model endpoint is configured (model.endpoint is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
       }
     }
     // 5. Effect dispatch through the adapter upstream whenever a transport
