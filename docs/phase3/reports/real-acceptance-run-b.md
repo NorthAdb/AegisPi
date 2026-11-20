@@ -44,3 +44,19 @@
 - 入口与复核脚本：`evals/phase3/external-write-real/run.mjs` / `postverify.mjs`（npm：`test:external-write:real`，缺库时 postverify exit 3）。
 
 本记录与证据入库后，等待主人安排独立复核。
+
+## 追记（2026-11-20）：主人端点侧见证与解读边界
+
+**主人在接收页面人工确认恰好 1 条请求**（本见证核对的是请求头，未提供 body，不构成对载荷正文的逐字段人工核对）：
+
+- 时间：香港时间 2026-11-20 17:03:51；大小 217 bytes；请求 ID `81b02edf-5369-4fc0-b559-8509d69964e1`。
+- 方法 POST；`content-type=application/json`；`x-aegispi-request-kind=submit`；所贴请求头中**未见认证头**。
+
+结合本记录的本地侧证据（`effect_submitting` 恰 1 行、`external_id=ext-b-acceptance-001`、未授权对照 `bytes_sent: 0`），B 项通过标准在双方两侧闭合。
+
+**解读边界（主人 2026-11-20 口径，一并留档）**：
+
+1. B 原始运行 **exit 1**（两个断言词汇错误）与后续只读 postverify **exit 0** 分开记录在上文；原始失败输出保留，不改写成首次全绿。
+2. 固定 `externalId` 回执证明的是**测试端点的响应契约成立**，**不**证明真实 Telegram 消息发送，**不**证明真实仓库写（两者从未发生；B 不含任何平台动作，不是 Phase 4 的开始）。
+3. 该 URL 自此停用：不再使用、不探测、不重发。B 次数 **1/1 已消耗**。
+

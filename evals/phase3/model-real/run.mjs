@@ -199,7 +199,7 @@ writeReport({
   suite,
   label: "test:model:real — 真实模型验收（DeepSeek 官方端点；单次调用；先预留后请求；目录价结清）",
   extra: {
-    dataSources: `主人 2026-11-20 授权的真实调用：完整 URL ${ENDPOINT}，供应商模型名 ${MODEL_NAME}（Phase 1 契约已实测接受），本次恰 1 次调用（授权上限 ≤5）；先 ledger.reserve 后 callModelOnce，按宿主目录价结清；不经 Pi SDK、不构成 Pi 端到端证据；输出全程脱敏；凭据值仅经本机 .env 与短命子进程环境`,
+    dataSources: `主人 2026-11-20 授权的真实调用：完整 URL ${ENDPOINT}，供应商模型名 ${MODEL_NAME}（Phase 1 契约已实测接受），本次恰 1 次调用（授权上限 ≤2，勘误见 docs/phase3/reports/errata-2026-11-20.md）；先 ledger.reserve 后 callModelOnce，按宿主目录价结清；不经 Pi SDK、不构成 Pi 端到端证据；输出全程脱敏；凭据值仅经本机 .env 与短命子进程环境`,
   },
 });
 const { pass, fail } = suite.counts;
