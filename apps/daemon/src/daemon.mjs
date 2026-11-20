@@ -33,6 +33,7 @@ import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
 import { insertObjectRow } from "./objects.mjs";
 import { writeAudit } from "./audit.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
+import { createHttpUpstream } from "./upstream-http.mjs";
 import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
 import { createContainerExecutor } from "./container-executor.mjs";
@@ -50,8 +51,15 @@ export async function main(argv = process.argv.slice(2)) {
   const dataDirFlag = argv.find((a) => a.startsWith("--data-dir="));
   const dataDir = dataDirFlag ? dataDirFlag.slice("--data-dir=".length) : join(process.cwd(), "workspace-state");
   const fakeUpstream = args.has("--fake-upstream");
+  // --config=<path>: the same channel tests use (local controllable services)
+  // and a deployment uses (real endpoints + authorizations). It only selects
+  // a JSON file the loader reads; every trust decision still lives in the
+  // adapter gates, never in this file's contents.
+  const configFlag = argv.find((a) => a.startsWith("--config="));
 
-  const config = loadDaemonConfig();
+  const config = configFlag
+    ? loadDaemonConfig({ path: configFlag.slice("--config=".length) })
+    : loadDaemonConfig();
   const portFlag = argv.find((a) => a.startsWith("--port="));
   const consolePort = portFlag ? Number(portFlag.slice("--port=".length)) : CONSOLE_DEFAULT_PORT;
 
@@ -155,16 +163,30 @@ export async function main(argv = process.argv.slice(2)) {
     warmingEnabled: config.budget.warmingEnabled,
     timeZone: config.timezone,
   });
+  // The transport layer: under --fake-upstream the declared test fixture;
+  // in production the REAL HTTP transport whenever the host configured a
+  // submit endpoint (re-review P1: the code path exists — the
+  // no-authorization default still sends zero bytes because the ADAPTER
+  // refuses before the transport sees anything). No submitUrl configured =
+  // no transport wired: READY effects stay durable with the honest log.
   const upstream = fakeUpstream ? createFakeRemote(dataDir, { label: "daemon-fake-upstream" }) : null;
+  const httpTransport =
+    !fakeUpstream && config.upstream.submitUrl
+      ? createHttpUpstream({ endpoint: config.upstream.submitUrl, timeoutMs: config.upstream.timeoutMs })
+      : null;
+  const baseUpstream = upstream ?? httpTransport;
   // The production dispatch path is the ADAPTER upstream, never the raw
   // transport: the trusted registry gates every operation (unknown operations
   // refuse; real external writes stay fail-closed; chargeable submits need a
   // live reservation; adapter-owned templates, never model-assembled URLs).
-  const adapterUpstream = upstream
+  // transportKind is declared HERE (fake exactly under --fake-upstream, real
+  // otherwise), never sniffed from a label.
+  const adapterUpstream = baseUpstream
     ? createAdapterUpstream(db, {
-        baseUpstream: upstream,
-        transportKind: "fake", // the declared test seam, set only under --fake-upstream
+        baseUpstream,
+        transportKind: fakeUpstream ? "fake" : "real",
         policy: { allowRealExternalWrites: config.policy.allowRealExternalWrites },
+        credentials: config.credentials,
         config: {
           fixedSendingIdentity: config.adapters.fixedSendingIdentity,
           allowedRecipients: config.adapters.allowedRecipients,
@@ -321,9 +343,11 @@ export async function main(argv = process.argv.slice(2)) {
         console.error(`worker: ${awaiting} task(s) await an execution path; the real agent worker is later wiring — nothing is claimed or settled on this path (fixture settlements require --fake-upstream)`);
       }
     }
-    // 5. Effect dispatch only with an explicitly fake upstream; there is no
-    //    real submitter in Phase 2 and the loop says so instead of pretending.
-    if (upstream) {
+    // 5. Effect dispatch through the adapter upstream whenever a transport
+    //    is wired (fixture under --fake-upstream, the REAL HTTP transport
+    //    when the host configured a submit endpoint); without one, READY
+    //    effects stay durable and the loop says so instead of pretending.
+    if (adapterUpstream) {
       // Per-mode reconciliation of UNKNOWN effects (06 section 6 table) runs
       // IN the daemon: IDEMPOTENCY_KEY requeues for a same-key resend,
       // LOOKUP_THEN_RETRY records a strong-consistency hit or requeues only
@@ -384,7 +408,7 @@ export async function main(argv = process.argv.slice(2)) {
         }
       }
     } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='READY'").get().c > 0) {
-      console.error("dispatcher: READY effects exist but no upstream adapter is wired (Phase 3); they stay durable and dispatched later");
+      console.error("dispatcher: READY effects exist but no submit transport is wired (upstream.submitUrl unset); they stay durable and dispatched later");
     } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c > 0) {
       // UNKNOWN without an upstream stays UNKNOWN, on the record: the daemon
       // never converts uncertainty into a success or a blind resend.

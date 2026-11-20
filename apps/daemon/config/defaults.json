@@ -31,8 +31,19 @@
   "time": { "timezoneIANA": "Asia/Hong_Kong", "epochUnit": "unixMilliseconds" },
   "sqlite": { "driver": "node:sqlite", "bundledSqlite": "3.54.1", "journalMode": "WAL", "synchronous": "FULL" },
   "policy": {
-    "$comment": "宿主策略开关（02 §4）。allowRealExternalWrites 保持 false：真实外部写在主人显式授权前失败关闭；Phase 3 的外部写测试只走 --fake-upstream 测试缝。",
+    "$comment": "宿主策略开关（02 §4）。allowRealExternalWrites 保持 false：真实外部写在主人显式授权前失败关闭；Phase 3 的外部写测试只走 --fake-upstream 测试缝或本地可控服务（经 --config 提供测试配置）。",
     "allowRealExternalWrites": false
+  },
+  "upstream": {
+    "$comment": "真实 HTTP 提交器端点（复审 P1）。null = 未接线任何传输：READY 效果保持持久并如实记录（失败关闭，零字节外发）。配置后生产 tick 经 adapter 门禁（transportKind real，需 allowRealExternalWrites=true 且凭据槽位已接线）提交；本阶段验证用 127.0.0.1 本地可控服务。真实外部端点需主人授权后写入。",
+    "submitUrl": null,
+    "timeoutMs": 30000
+  },
+  "credentials": {
+    "$comment": "宿主接线的外部凭据槽位标记（02 §4）：键名 mail/repo/im；值为槽位引用或描述，非明文密钥；null = 未接线，真实写即拒。密钥本体只经宿主凭据服务（credentials.mjs）读取。",
+    "mail": null,
+    "repo": null,
+    "im": null
   },
   "adapters": {
     "$comment": "宿主适配器部署值（02 §4）：固定发送身份与授权白名单。空数组 = 适配器层不做额外白名单限制（形状校验与审批门禁仍然生效）；主人授权真实 scope 后再填入。",

@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-19T15:17:18.520Z",
+  "generatedAt": "2026-11-20T02:06:46.999Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-unit",
   "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
   "counts": {
-    "pass": 28,
+    "pass": 31,
     "fail": 0
   },
   "results": [
@@ -101,7 +101,7 @@
     {
       "name": "frozen-refuses-and-raise-requires-approval",
       "status": "PASS",
-      "detail": "frozen -> account acct:tight is frozen; raise -> raising account acct:day:2026-11-19 limit 1000->10"
+      "detail": "frozen -> account acct:tight is frozen; raise -> raising account acct:day:2026-11-20 limit 1000->10"
     },
     {
       "name": "missing-scope-closure-filters-before-limit",
@@ -139,9 +139,24 @@
       "detail": "daemon exit=0 settlements=1 fixture-labeled=true"
     },
     {
+      "name": "http-transport-carries-bytes-and-maps-outcomes",
+      "status": "PASS",
+      "detail": "submit=succeeded(ext-1795140402032) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
+    },
+    {
+      "name": "authorized-production-tick-submits-over-real-http-transport",
+      "status": "PASS",
+      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795140404246 local-service-saw=true"
+    },
+    {
+      "name": "unauthorized-production-tick-sends-zero-bytes-through-real-transport",
+      "status": "PASS",
+      "detail": "daemon exit=0 effect=FAILED zero-bytes=true adapter-refused-audits=1"
+    },
+    {
       "name": "disk-watermark-critical-drill-opens-read-only",
       "status": "PASS",
-      "detail": "daemon exit=3 disk-line=disk: level=critical free=466GiB ratio=0.5003"
+      "detail": "daemon exit=3 disk-line=disk: level=critical free=463GiB ratio=0.4968"
     },
     {
       "name": "disk-watermark-alerts-once-per-level-transition",

@@ -7,9 +7,9 @@
 // database. Real-container isolation and escape tests live in
 // test:security:integration and test:offline-jobs.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   lockedNodeGuard,
   makeSuite,
@@ -42,6 +42,7 @@ import {
 import { createCredentialService } from "../../../apps/daemon/src/credentials.mjs";
 import { createFakeRemote } from "../../../apps/daemon/src/testing/fake-remote.mjs";
 import { createAdapterUpstream } from "../../../apps/daemon/src/adapters.mjs";
+import { createHttpUpstream } from "../../../apps/daemon/src/upstream-http.mjs";
 import { createConsoleApp, ensureConsoleToken } from "../../../apps/daemon/src/console/api.mjs";
 
 lockedNodeGuard();
@@ -668,6 +669,191 @@ function seed(tag) {
       `daemon exit=${r.status} settlements=${rows.length} fixture-labeled=${fixtureLabeled}`,
     );
   }
+}
+
+// ------------------------------------------- real HTTP submitter transport (re-review P1)
+// The transport exists and its result mapping is the dispatcher's contract;
+// the adapter gates decide what may flow through it. The local service runs
+// as its OWN process: the test blocks synchronously during spawnSync, so a
+// server held by this process could never answer. All endpoints here are
+// LOCAL controllable services — a real external endpoint additionally needs
+// policy.allowRealExternalWrites=true and wired credential slots, which
+// stay owner-authorized deployment values.
+{
+  const daemonPath = join(repoRoot, "apps", "daemon", "src", "daemon.mjs");
+  const servicePath = join(repoRoot, "evals", "phase3", "security-unit", "helpers", "local-upstream-service.mjs");
+  const serviceWs = makeWorkspace("su-upstream-service");
+  const portFile = join(serviceWs.stateDir, "service-port.txt");
+  const logFile = join(serviceWs.stateDir, "service-log.jsonl");
+  const svc = spawn(process.execPath, [servicePath, portFile, logFile], { stdio: "ignore" });
+  for (let i = 0; i < 100 && !existsSync(portFile); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!existsSync(portFile)) {
+    suite.check("http-transport-carries-bytes-and-maps-outcomes", false, "the local upstream service never came up");
+  }
+  const endpoint = `http://127.0.0.1:${readFileSync(portFile, "utf8").trim()}/submit`;
+  const slowEndpoint = `http://127.0.0.1:${readFileSync(portFile, "utf8").trim()}/slow`;
+  const serviceLog = () =>
+    existsSync(logFile)
+      ? readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+      : [];
+
+  // (a) The transport's own contract against a real wire: submit succeeds
+  // with the server-issued externalId, lookup resolves strongly, head
+  // lookup answers, a dead endpoint is failed_local before any byte, and a
+  // hanging endpoint is unknown after the deadline (never failed: bytes may
+  // have left).
+  {
+    const before = serviceLog().length;
+    const transport = createHttpUpstream({ endpoint, timeoutMs: 5000 });
+    const submit = transport.submit({
+      businessKey: "bk-transport",
+      idempotencyKey: "idem-transport",
+      operation: { operation: "im.notify", targetResource: "im:dm:6101", expectedHead: null },
+      now: Date.now(),
+    });
+    const lookup = transport.lookup({ businessKey: "bk-transport", consistency: "strong" });
+    const head = transport.lookupHead({ targetResource: "repo://x/y" });
+    const dead = createHttpUpstream({ endpoint: "http://127.0.0.1:9/dead", timeoutMs: 2000 }).submit({
+      businessKey: "bk-dead",
+      idempotencyKey: null,
+      operation: { operation: "im.notify", targetResource: "im:dm:6101", expectedHead: null },
+      now: Date.now(),
+    });
+    const slow = createHttpUpstream({ endpoint: slowEndpoint, timeoutMs: 500 }).submit({
+      businessKey: "bk-slow",
+      idempotencyKey: null,
+      operation: { operation: "im.notify", targetResource: "im:dm:6101", expectedHead: null },
+      now: Date.now(),
+    });
+    const after = serviceLog();
+    suite.check(
+      "http-transport-carries-bytes-and-maps-outcomes",
+      submit.status === "succeeded" &&
+        typeof submit.externalId === "string" &&
+        lookup.found === true &&
+        lookup.strong === true &&
+        head.ok === true &&
+        head.head === "sha512-head" &&
+        dead.status === "failed_local" &&
+        slow.status === "unknown" &&
+        after.some((s) => s.kind === "submit" && s.businessKey === "bk-transport") &&
+        !after.some((s) => s.businessKey === "bk-dead"),
+      `submit=${submit.status}(${submit.externalId ?? submit.error ?? ""}) lookup=${lookup.found}/${lookup.strong} head=${head.ok} dead=${dead.status} slow=${slow.status} wire-seen=${after.length - before} — dead is failed_local before any byte, hanging is unknown after the deadline`,
+    );
+  }
+
+  // Seed a READY im.notify effect the way the host does (proposal -> CAS
+  // approval). The daemon's own tick will dispatch it through the adapter.
+  function seedReadyEffect(tag) {
+    const ws = makeWorkspace(tag);
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, loadCanonicalSchema());
+    const now = Date.now();
+    const ing = receiveEvent(db, ws.stateDir, {
+      now, source: "telegram", sourceEventId: `evt-${tag}`,
+      principal: { platform: "telegram", subject: "6101" },
+      scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+      threadKey: `t-${tag}`, priority: 5, policyVersion: "pv1", payload: `submitter case ${tag}`, verdict: "ADMIT",
+    });
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    dispatchEventToTask(db, {
+      inboxId: inbox.id, dispatchKey: dispatchKeyForInbox(inbox), now, priority: 5,
+      maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "ss",
+    });
+    // The claim creates the ACTIVE attempt the proposal binds to (same as
+    // the offline-jobs/cancel-approval seeding).
+    const claim = claimNextTask(db, { now, leaseMs: 60000 });
+    const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(claim.taskId);
+    const attemptId = db.prepare("SELECT id FROM attempts WHERE task_id=? AND attempt_no=?").get(task.id, task.attempt_no).id;
+    const ownerId = db.prepare("SELECT id FROM principals WHERE platform='telegram' AND platform_subject='6101'").get().id;
+    grantPermission(db, { scopeId: "scp:dm%3Atelegram%3A6101", principalId: ownerId, permission: "approve", now });
+    const card = proposeEffect(db, ws.stateDir, {
+      now,
+      taskId: task.id,
+      attemptId,
+      effectType: "notify",
+      domainKey: "dm:telegram:6101",
+      naturalKey: `case-${tag}`,
+      operationIntent: { targetResource: "im:dm:6101", operation: "im.notify", contentHash: "a".repeat(64), evidenceManifestHash: "b".repeat(64), extra: { body_preview: "submitter gate" } },
+      retryMode: "AT_MOST_ONCE",
+      provider: "telegram",
+      resource: "im:dm:6101",
+      requiresApproval: true,
+      approverPrincipalId: ownerId,
+      expiresAt: now + 60 * 60 * 1000,
+    });
+    decideApproval(db, {
+      approvalId: card.approvalId,
+      decision: "approve",
+      actionHash: card.actionHash,
+      nonce: card.approvalNonce,
+      approverId: ownerId,
+      now: now + 100,
+    });
+    db.close();
+    return { ws, effectId: card.effectId, businessKey: card.businessKey };
+  }
+
+  // A test config = the repo's real 06 defaults plus ONLY the deployment
+  // values under test (endpoint, policy flag, credential slot marker). The
+  // 06 budget/quota numbers are never overridden by a scenario (AGENTS).
+  function writeTestConfig(ws, { allow }) {
+    const defaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
+    defaults.upstream = { submitUrl: endpoint, timeoutMs: 5000 };
+    defaults.policy = { allowRealExternalWrites: allow };
+    defaults.credentials = { im: allow ? "local-test-slot" : null, mail: null, repo: null };
+    const path = join(ws.stateDir, "test-config.json");
+    writeFileSync(path, JSON.stringify(defaults, null, 2), "utf8");
+    return path;
+  }
+
+  // (b) Authorized (test config flips the owner policy flag and wires the
+  // slot marker): the daemon's PRODUCTION tick (no --fake-upstream) submits
+  // through the real transport and the local service receives the bytes.
+  {
+    const { ws, effectId, businessKey } = seedReadyEffect("su-submitter-ok");
+    const configPath = writeTestConfig(ws, { allow: true });
+    const before = serviceLog().length;
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, external_id FROM effects WHERE id=?").get(effectId);
+    db.close();
+    const delivered = serviceLog().slice(before).some((s) => s.kind === "submit" && s.businessKey === businessKey);
+    suite.check(
+      "authorized-production-tick-submits-over-real-http-transport",
+      r.status === 0 && effect.state === "SUCCEEDED" && typeof effect.external_id === "string" && delivered,
+      `daemon exit=${r.status} effect=${effect.state}/${effect.external_id ?? "-"} local-service-saw=${delivered}`,
+    );
+  }
+
+  // (c) The DEFAULT stance, exactly as shipped: allowRealExternalWrites
+  // false -> the adapter refuses, ZERO request bytes leave, the effect
+  // records a requeueable local failure. Fail-closed with the transport
+  // present is a POLICY outcome now, not a missing code path.
+  {
+    const { ws, effectId } = seedReadyEffect("su-submitter-closed");
+    const configPath = writeTestConfig(ws, { allow: false });
+    const before = serviceLog().length;
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const effect = db.prepare("SELECT state, last_error FROM effects WHERE id=?").get(effectId);
+    const refused = db.prepare("SELECT details_json FROM audit_log WHERE code='adapter_refused' AND details_json LIKE ?").all(`%${effectId}%`);
+    db.close();
+    const zeroBytes = serviceLog().length === before;
+    suite.check(
+      "unauthorized-production-tick-sends-zero-bytes-through-real-transport",
+      r.status === 0 &&
+        effect.state === "FAILED" &&
+        /^local_error: adapter refused: real external writes/.test(effect.last_error ?? "") &&
+        zeroBytes &&
+        refused.length >= 1,
+      `daemon exit=${r.status} effect=${effect.state} zero-bytes=${zeroBytes} adapter-refused-audits=${refused.length}`,
+    );
+  }
+  svc.kill();
 }
 
 // ------------------------------------------- critical disk watermark drill (audit F8)

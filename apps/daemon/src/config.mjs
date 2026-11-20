@@ -95,6 +95,19 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       allowedRepos: defaults.adapters?.allowedRepos ?? [],
       allowedBranches: defaults.adapters?.allowedBranches ?? [],
     },
+    // Real submitter transport (re-review P1). submitUrl null = no transport
+    // wired: READY effects stay durable with the honest log, fail closed.
+    // Configured = the production tick submits through the adapter gates
+    // (transportKind "real"), which still refuse without
+    // policy.allowRealExternalWrites and wired credential slots.
+    upstream: {
+      submitUrl: defaults.upstream?.submitUrl ?? null,
+      timeoutMs: defaults.upstream?.timeoutMs ?? 30000,
+    },
+    // Credential SLOT markers the adapter checks (values never live here —
+    // 02 section 4: only the host credential service reads secrets). A null
+    // slot means nothing real is wired and the adapter refuses real writes.
+    credentials: defaults.credentials ?? {},
     disk: resolveDiskThresholds(defaults),
     backup: {
       windowStartHour: defaults.backup?.windowStartHour ?? 4,
