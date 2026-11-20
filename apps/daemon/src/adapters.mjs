@@ -20,8 +20,10 @@
 //     guess). Nothing here ever invents a digest, an endpoint, or a method.
 
 import { writeAudit } from "./audit.mjs";
-import { assertLiveReservation } from "./budget.mjs";
+import { assertLiveReservation, PURPOSES } from "./budget.mjs";
 import { extraFieldsOfAction } from "./effects.mjs";
+import { createCredentialService } from "./credentials.mjs";
+import { callModelOnce, isLoopbackModelEndpoint } from "./model-call.mjs";
 
 export class AdapterRefused extends Error {}
 
@@ -116,6 +118,7 @@ export function createAdapterUpstream(db, {
   policy = { allowRealExternalWrites: false },
   credentials = {}, // host-wired secrets; empty means nothing real is wired
   config = { fixedSendingIdentity: "aegispi@local", allowedRecipients: [], allowedRepos: [], allowedBranches: [] },
+  modelConfig = null, // host model config for model.inference (ADR-0001 §5)
   now = () => Date.now(),
 } = {}) {
   const auditRefusal = (operation, reason, effectId = null) => {
@@ -231,6 +234,59 @@ export function createAdapterUpstream(db, {
             error: `adapter refused: real external write for ${opName} has no wired ${needed} credentials (fail closed; no request bytes sent)`,
           };
         }
+      }
+      if (opName === "model.inference" && (modelConfig || transportKind !== "fake")) {
+        const validated = this.validateIntent(opName, intent);
+        if (!validated.ok) {
+          auditRefusal(opName, validated.reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${validated.reason}` };
+        }
+        if (!modelConfig?.baseUrl) {
+          auditRefusal(opName, "model.baseUrl is null (fail closed)", effectId);
+          return { status: "failed_local", error: "adapter refused: model.baseUrl is not configured (fail closed)" };
+        }
+        if (!isLoopbackModelEndpoint(modelConfig.baseUrl) && modelConfig.allowRealModelCalls !== true) {
+          auditRefusal(opName, "non-loopback model.baseUrl without allowRealModelCalls", effectId);
+          return { status: "failed_local", error: "adapter refused: model.baseUrl is not authorized (allowRealModelCalls is false)" };
+        }
+        const purpose = intent.extra.purpose;
+        const allowedPurposes = Array.isArray(modelConfig.allowedPurposes) ? modelConfig.allowedPurposes : [];
+        if (!PURPOSES.includes(purpose) || !allowedPurposes.includes(purpose)) {
+          auditRefusal(opName, `purpose ${purpose} not in model.allowedPurposes`, effectId);
+          return { status: "failed_local", error: `adapter refused: purpose ${purpose} is not in model.allowedPurposes` };
+        }
+        const modelKey = intent.targetResource.startsWith("model://")
+          ? intent.targetResource.slice("model://".length)
+          : intent.targetResource;
+        const allowedModels = Array.isArray(modelConfig.allowedModelIds) ? modelConfig.allowedModelIds : [];
+        if (!allowedModels.includes(modelKey)) {
+          auditRefusal(opName, `modelId ${modelKey} not in model.allowedModelIds`, effectId);
+          return { status: "failed_local", error: `adapter refused: modelId ${modelKey} is not in model.allowedModelIds` };
+        }
+        const cred = createCredentialService(db).resolve("model");
+        const bearer = cred.ok ? cred.value : (credentials.model ?? null);
+        const messages = Array.isArray(intent.extra.messages) && intent.extra.messages.length > 0
+          ? intent.extra.messages
+          : [{ role: "user", content: typeof intent.extra.prompt === "string" && intent.extra.prompt.length > 0 ? intent.extra.prompt : `effect ${effectId ?? businessKey}` }];
+        const call = callModelOnce({
+          baseUrl: modelConfig.baseUrl,
+          model: modelKey,
+          messages,
+          timeoutMs: modelConfig.callTimeoutMs ?? 60000,
+          bearer,
+        });
+        if (!call.ok) {
+          return call.kind === "timeout"
+            ? { status: "unknown", error: call.error }
+            : { status: "failed_remote", error: call.error };
+        }
+        return {
+          status: "succeeded",
+          externalId: `model:${idempotencyKey ?? businessKey}`,
+          reply: call.reply,
+          usage: call.usage,
+          model: call.model,
+        };
       }
       if (!baseUpstream) {
         auditRefusal(opName, "no transport wired", effectId);

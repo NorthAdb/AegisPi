@@ -5,8 +5,8 @@
 ## 当前位置（2026-11-20）
 
 - Phase 1（底座契约）与 Phase 2（持久化只读链路）已收口；**Phase 3 出口 MET WITH RESIDUAL RISKS**，其中 `44b3514` 两项限定修复已独立验收关闭，不重开。
-- 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已获主人方案确认**（最近两句状态机澄清在 `3fd81c6`）。**方案确认不等于实现完成，也不构成运行授权。**
-- Phase 4 拆为**单元 4.1**（模型链路实现）与**单元 4.2**（真实仓库 Observe）（[受限开工草案](docs/phase4/phase4-restricted-kickoff-draft.md)）：4.1 尚未授权开工；4.2 首跑另需逐项授权（七项首跑检查表书面确认）。
+- 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地并本机离线/容器验收通过**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)）；**4.1 收口仍不构成任何真实运行授权**。
+- Phase 4 拆为**单元 4.1**（模型链路实现：**已获授权完成实施与离线/容器验收**）与**单元 4.2**（真实仓库 Observe：[受限开工草案](docs/phase4/phase4-restricted-kickoff-draft.md)，首跑仍待七项首跑检查表逐项书面确认）。
 - **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。
 - 任务预算 $0.80、日预算 $5 已定，不重开；真实运行前的价格目录、token 约束与单次预留确认属首跑检查表核对，不是重新讨论预算。
 - 真实验收 A（模型）/B（外部写）/C（Telegram 只读）各已执行一次且授权闭合，**无剩余额度**；D（公网 webhook）延期至首次启用 Telegram 公网入站 webhook 前，且不作为全部 Phase 4 的前置条件；出站发送另需授权。历史 A/B/C 缺证按既定口径归档不追补；原镜像按主人「本机验证通过即闭项」口径处理。
@@ -34,26 +34,25 @@
 
 - **宿主 daemon**（`apps/daemon/src/daemon.mjs`，单进程 tick 驱动，`--data-dir=<dir>` 缺省 `workspace-state/`）：调度租约（fence/lease 纪律）、预算账本（先 `reserve` 后调用，缺 usage 保持 HELD，超限结算后冻结账户）、scope ACL、审批与取消、凭据槽服务（密钥只在本机 `.env`）、容器执行器（`--network none`、tmpfs noexec、只读 bind、rootfs 只读）、SQLite WAL 持久化 + 崩溃恢复 + 一致性备份窗口、hono 控制台（本机绑定）。全部外部效果（模型调用、外部写、通知）只由宿主经门禁执行。
 - **三个应用镜像**（`docker/`；构建与推送仅至本机 loopback registry `127.0.0.1:5000`，容器 `aegispi-build-registry`）：`agent`（worker：`PI_OFFLINE=1`、凭据环境 denylist、对宿主仅 propose-only 通道）、`acquisition`（fail-closed 只读获取）、`execution`（无网 job）。镜像以 context digest 绑定源码树，image-gate 在每条 docker 套件前复算本树哈希，漂移即拒（exit 2）。现行纪元表：[docs/phase3/reports/image-digest.md](docs/phase3/reports/image-digest.md)。
-- **失败关闭默认**（`apps/daemon/config/defaults.json`，git diff 始终 0 行）：`model.endpoint=null`、`allowRealModelCalls=false`、`allowRealExternalWrites=false`、`upstream.submitUrl=null`、价格目录 null、凭据槽 null——未授权即零调用、零外发。
+- **失败关闭默认**（`apps/daemon/config/defaults.json`）：`model.baseUrl=null`、`model.allowedPurposes=[]`、`model.allowedModelIds=[]`、`allowRealModelCalls=false`、`allowRealExternalWrites=false`、`upstream.submitUrl=null`、价格目录四项均 `null`、凭据槽 `null`——未授权即零调用、零外发。
 
 ## 已实现 / 未实现（防误读）
 
 **已实现并经离线套件在案验证**（最近记录见下节）：
 
-- 持久化与恢复：SQLite WAL 事务、崩溃恢复、一致性备份窗口（durability、restore 套件）。
+- 持久化与恢复：SQLite WAL 事务、崩溃恢复、一致性备份窗口（durability、restore 套件；扩展表 `model_requests` 经独立幂等建表按需启用，在 `schema_migrations` 之外）。
 - 预算账本与门禁：任务/日双账户、reserve/settle/HELD/CHARGED_BOUND/超限冻结（budget、security-unit 套件）。
 - scope ACL 与审批/取消流（acl、cancel-approval 套件）。
 - 离线 job 容器执行与磁盘水位（offline-jobs 套件；docker）。
 - Telegram 入站解析（本地夹具，零真实外联；ingress-telegram 套件）。
-- 应用镜像真实构建、digest 绑定与门禁、容器配额实测（三 docker 套件 + quota-calibration）。
-- 宿主模型调用路径：固定端点授权推理 + 预留/结清 + 缺 usage HELD（环回夹具验证；一次真实 A 项验收在案，见下）。
+- 应用镜像真实构建（现行**纪元 3**）、digest 绑定与门禁、容器配额实测（三 docker 套件 + `test:model-proposal` + `test:quota-calibration`）。
+- 容器→宿主模型提议与宿主 `pi-ai@1.5.2` 单一执行核心：`model_request` 闭信封与 `model-result-<uuid>.json` 通道、`model_requests` 七态状态机与同事务预留/结算、Windows 宿主程序化 `icacls` 锁定 `proposals` 目录（`model-proposal`、`security-unit` 套件，零真实推理调用）。
 
 **已执行过且授权已闭合的一次性真实验收**（重跑即需新的逐项书面授权）：A 真实模型 1 次（DeepSeek 官方端点，28 microUSD 结清）；B 真实外部写 1 次（可丢弃端点）；C Telegram 只读 2 次调用（历史计数缺证不闭项，按既定口径归档）。
 
-**未实现**（设计中，不得当已实现）：
+**未实现 / 未授权**（不得当已实现或已放行）：
 
-- 容器→宿主模型提议链路与 `model_requests` 状态机（ADR-0001 已确认、未实施 = 单元 4.1 的全部内容）。
-- 真实仓库 Observe 闭环（单元 4.2）。
+- 真实仓库 Observe 闭环（单元 4.2，仍受首跑检查表阻塞）。
 - Telegram 公网入站 webhook（D，延期）与一切出站通知发送。
 - 常开运行。
 
@@ -69,16 +68,17 @@
 
 `package.json` 脚本名与实际入口一致（`node evals/…`）。锁定 Node 显式路径执行：
 
-| 套件（npm 脚本） | 需 Docker | 最近在案全量记录 |
+| 套件（npm 脚本） | 需 Docker | 最近在案全量记录（单元 4.1 终树，2026-11-20） |
 | --- | --- | --- |
-| `test:contracts`（PI-01..13 契约探针 + LF 分帧 + SQLite 门禁） | 否 | 15/15，`33d6361`（2026-11-20） |
-| `test:durability` / `test:acl` / `test:budget`（Phase 2 三套件） | 否 | 164/164、15/15、20/20，同上 |
-| `test:cancel-approval` / `test:security:unit` / `test:restore` | 否 | 16/16、43/43、11/11，同上 |
-| `test:ingress-telegram`（本地夹具） | 否 | 7/7 + 1 NOTE，同上 |
-| `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，`44b3514` 终树验收（2026-11-20） |
-| hono 配对自检（非 npm 脚本）：`node evals/contracts/tools/verify-hono-oracle-pair.mjs` | 否 | lockfile sha 双核对 exit 0，`33d6361` |
+| `test:contracts`（PI-01..13 契约探针 + LF 分帧 + SQLite 门禁） | 否 | 15/15 PASS，exit 0 |
+| `test:durability` / `test:acl` / `test:budget`（Phase 2 三套件） | 否 | 164/164、15/15、20/20，exit 0 |
+| `test:cancel-approval` / `test:security:unit` / `test:restore` | 否 | 16/16、44/44、11/11，exit 0 |
+| `test:ingress-telegram`（本地夹具） | 否 | 7/7 + 1 NOTE，exit 0 |
+| `test:model-proposal`（4.1 锚点 E2E + T1–T10 + 生产启动器） | 是 | 13/13 PASS，exit 0 |
+| `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 3） |
+| hono 配对自检（非 npm 脚本）：`node evals/contracts/tools/verify-hono-oracle-pair.mjs` | 否 | lockfile sha 双核对 exit 0 |
 
-在案证据：[phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md) §5 与 [round-closure-2026-11-20-limited-fixes.md](docs/phase3/reports/round-closure-2026-11-20-limited-fixes.md)。**本文档所属的整理轮未复跑任何套件；上表为既有提交的在案记录，套件重跑会再生成带新时间戳的证据文件。**
+在案证据：[docs/phase4/reports/phase4-1-closure.md](docs/phase4/reports/phase4-1-closure.md)、[phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md) §5 与 [image-digest.md](docs/phase3/reports/image-digest.md)。以上 12 套离线/容器脚本与 Hono 预检均在本轮终树以锁定 Node v22.23.5 全量实跑通过（零真实推理调用）。
 
 ## 真实入口（不进快速开始）
 
@@ -93,7 +93,7 @@
 ```text
 apps/daemon/          宿主 daemon（config/defaults.json 唯一策略默认 + src/：scheduler、budget、acl、credentials、container-executor、console 等）
 docker/               agent / acquisition / execution 三个镜像源（构建仅推本机 loopback registry）
-evals/                分阶段离线套件与夹具（contracts、phase2 三套件、phase3 十套件、hono oracle 夹具）
+evals/                分阶段离线套件与夹具（contracts、phase2 三套件、phase3 十一条脚本含 model-proposal、hono oracle 夹具）
 docs/                 文档索引见 docs/README.md（现行规范 / 设计决策 / 阶段计划 / 状态说明 / 历史审计与证据）
 .audit/               决策留痕（decision-trail.tsv，逐轮追记）
 ```

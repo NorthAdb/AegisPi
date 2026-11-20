@@ -101,10 +101,25 @@ export function startupRecovery(db, {
 
   // 8. Budget calibration: HELD reservations whose usage never arrived past
   // the settle timeout become CHARGED_BOUND (conservative, never released).
+  // Pre-call model_requests (state='RESERVED', call not yet issued) stay
+  // HELD across restarts without entering CHARGED_BOUND (ADR-0001 §7).
   const ledger = createBudgetLedger(db, {});
-  const staleHeld = db
-    .prepare("SELECT id FROM budget_reservations WHERE state='HELD' AND created_at<=?")
-    .all(now - unknownUsageTimeoutMs);
+  const hasModelRequests =
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_requests'").get() !== undefined;
+  const staleHeld = hasModelRequests
+    ? db
+        .prepare(
+          `SELECT r.id FROM budget_reservations r
+           WHERE r.state='HELD' AND r.created_at<=?
+             AND NOT EXISTS (
+               SELECT 1 FROM model_requests mr
+               WHERE mr.reservation_id = r.id AND mr.state = 'RESERVED'
+             )`,
+        )
+        .all(now - unknownUsageTimeoutMs)
+    : db
+        .prepare("SELECT id FROM budget_reservations WHERE state='HELD' AND created_at<=?")
+        .all(now - unknownUsageTimeoutMs);
   const charged = [];
   for (const r of staleHeld) {
     ledger.chargeBound({ reservationId: r.id, now });

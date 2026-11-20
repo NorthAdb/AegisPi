@@ -152,3 +152,29 @@ export function verifySchema(db, canonical) {
   }
   return { ok: true, reason: "schema_migrations version 1 matches canonical checksum" };
 }
+
+// Idempotent extension table for ADR-0001 §7 model_requests state machine
+// (D-78 Conflict 1 option A: follows the credential_slots precedent in
+// credentials.mjs so canonical schema.sql, schema-source.json, and all
+// 27-user-table gates remain untouched). Called on demand by daemon startup
+// and suites that exercise model_requests.
+export function ensureModelRequestsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS model_requests(
+      request_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      attempt_id TEXT NOT NULL REFERENCES attempts(id),
+      fence INTEGER NOT NULL,
+      scope_domain_key TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('RECEIVED','RESERVED','EXECUTING','SETTLED','HELD','ORPHAN','FAILED')),
+      reservation_id TEXT REFERENCES budget_reservations(id),
+      reply_object_id TEXT REFERENCES objects(id),
+      error_code TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_model_requests_task ON model_requests(task_id, state);
+  `);
+}

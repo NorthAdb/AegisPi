@@ -95,21 +95,29 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       maxConcurrentAgentsPerScope: defaults.leases.maxConcurrentAgentsPerScope,
       maxOfflineJobsMachineWide: defaults.leases.maxOfflineJobsMachineWide,
     },
-    // Model call path (re-review P1). endpoint null = no worker path wired:
-    // the tick says so honestly, nothing is claimed, zero reservations.
-    // A loopback endpoint is the local verification seam; a non-loopback
-    // endpoint additionally needs allowRealModelCalls (owner authorization).
-    // priceCatalog null per side = prices not authorized: usage from a real
-    // response still keeps the reservation HELD, never settled as zero.
+    // Model call path (ADR-0001 §5/§9). baseUrl is the SDK root address
+    // (null = no worker path wired: nothing is claimed, zero reservations).
+    // A loopback baseUrl is the local verification seam; a non-loopback
+    // baseUrl additionally needs allowRealModelCalls (owner authorization).
+    // allowedPurposes and allowedModelIds default to [] (fail-closed).
+    // priceCatalog null per category = rate not authorized: any positive
+    // token count in that category keeps the reservation HELD, never zero.
     model: {
-      ...defaults.model,
-      endpoint: defaults.model?.endpoint ?? null,
+      ...(() => {
+        const { endpoint: _removed, ...rest } = defaults.model ?? {};
+        return rest;
+      })(),
+      baseUrl: defaults.model?.baseUrl ?? null,
+      allowedPurposes: Array.isArray(defaults.model?.allowedPurposes) ? [...defaults.model.allowedPurposes] : [],
+      allowedModelIds: Array.isArray(defaults.model?.allowedModelIds) ? [...defaults.model.allowedModelIds] : [],
       allowRealModelCalls: defaults.model?.allowRealModelCalls === true,
       callUpperMicrousd: defaults.model?.callUpperMicrousd ?? 1000,
       callTimeoutMs: defaults.model?.callTimeoutMs ?? 60000,
       priceCatalog: {
         inputPerMTokMicrousd: defaults.model?.priceCatalog?.inputPerMTokMicrousd ?? null,
         outputPerMTokMicrousd: defaults.model?.priceCatalog?.outputPerMTokMicrousd ?? null,
+        cacheReadPerMTokMicrousd: defaults.model?.priceCatalog?.cacheReadPerMTokMicrousd ?? null,
+        cacheWritePerMTokMicrousd: defaults.model?.priceCatalog?.cacheWritePerMTokMicrousd ?? null,
       },
     },
     timezone: defaults.time.timezoneIANA,

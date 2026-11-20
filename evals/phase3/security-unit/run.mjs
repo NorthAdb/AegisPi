@@ -929,21 +929,21 @@ function seed(tag) {
   svc.kill();
 }
 
-// ------------------------------------------- real model worker path (re-review P1)
-// Reserve before the call, settle by the provider's own usage accounting
-// priced through the host catalog, never settle unknown usage as zero. The
-// local model service runs as its own process (same spawnSync-blocking
-// reason as the upstream service). A REAL paid model needs owner
-// authorization (allowRealModelCalls + a price catalog + a credential
-// slot) — the authorization checklist is in the re-review response; this
-// round proves the path against local services only.
+// ------------------------------------------- real model worker path (ADR-0001 / Phase 4.1)
+// Reserve before the call, settle by the four-field pi-ai usage accounting
+// priced through the host catalog, never settle unknown/all-zero usage as
+// zero. The local OpenAI SSE service runs as its own process (same
+// spawnSync-blocking reason as the upstream service). Loopback tests register
+// a fixture credential slot "model" pointing to a test env var (no .env, host
+// never fabricates credentials; unwired slot fails closed before HTTP).
 {
   const daemonPath = join(repoRoot, "apps", "daemon", "src", "daemon.mjs");
   const servicePath = join(repoRoot, "evals", "phase3", "security-unit", "helpers", "local-model-service.mjs");
   const serviceWs = makeWorkspace("su-model-service");
   const portFile = join(serviceWs.stateDir, "model-port.txt");
   const logFile = join(serviceWs.stateDir, "model-log.jsonl");
-  const svc = spawn(process.execPath, [servicePath, portFile, logFile], { stdio: "ignore" });
+  const modeFile = join(serviceWs.stateDir, "model-mode.json");
+  const svc = spawn(process.execPath, [servicePath, portFile, logFile, modeFile], { stdio: "ignore" });
   for (let i = 0; i < 100 && !existsSync(portFile); i++) {
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -951,16 +951,22 @@ function seed(tag) {
     suite.check("worker-reserves-before-call-and-settles-real-usage", false, "the local model service never came up");
   }
   const modelPort = readFileSync(portFile, "utf8").trim();
+  const baseUrl = `http://127.0.0.1:${modelPort}`;
   const serviceLog = () =>
     existsSync(logFile)
       ? readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
       : [];
 
-  function seedClaimableTask(tag) {
+  const { randomUUID } = await import("node:crypto");
+  const { ensureModelRequestsTable } = await import("../../../apps/daemon/src/db/migrate.mjs");
+  const { agentWorkAttemptDir, lockHostProposalsDir } = await import("../../../apps/daemon/src/container-executor.mjs");
+
+  function seedModelProposalTask(tag, { wireSlot = true } = {}) {
     const ws = makeWorkspace(tag);
     mkdirSync(join(ws.stateDir, "db"), { recursive: true });
     const db = openDatabase(ws.dbPath);
     migrate(db, loadCanonicalSchema());
+    ensureModelRequestsTable(db);
     const now = Date.now();
     const ing = receiveEvent(db, ws.stateDir, {
       now, source: "telegram", sourceEventId: `evt-${tag}`,
@@ -973,18 +979,53 @@ function seed(tag) {
       inboxId: inbox.id, dispatchKey: dispatchKeyForInbox(inbox), now, priority: 5,
       maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "ss",
     });
+    const claim = claimNextTask(db, { now, leaseMs: 60000 });
+    if (wireSlot) {
+      createCredentialService(db).registerSlot({
+        slot: "model", purpose: "model", source: "deepseek",
+        envName: "AEGISPI_TEST_MODEL_KEY", actorId: "test-fixture", now,
+      });
+    }
+    const requestId = randomUUID();
+    const attemptDir = agentWorkAttemptDir(ws.stateDir, claim.taskId, claim.attemptNo);
+    const proposalsDir = join(attemptDir, "proposals");
+    mkdirSync(join(attemptDir, "host-commands"), { recursive: true });
+    lockHostProposalsDir(proposalsDir);
+    writeFileSync(
+      join(proposalsDir, `model-request-${requestId}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "model_request",
+        requestId,
+        taskId: claim.taskId,
+        attemptId: claim.attemptId,
+        fence: claim.fence,
+        scopeDomainKey: "dm:telegram:6101",
+        purpose: "worker",
+        modelId: "deepseek/deepseek-flash",
+        messages: [{ role: "user", content: `model worker case ${tag}` }],
+      }) + "\n",
+      "utf8",
+    );
     db.close();
-    return ws;
+    return { ws, requestId };
   }
 
-  function writeWorkerConfig(ws, { endpoint, priceInput, priceOutput, allowReal = false }) {
+  function writeWorkerConfig(ws, { baseUrl: cfgBaseUrl, priceInput, priceOutput, allowReal = false }) {
     const defaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
     defaults.model = {
       ...defaults.model,
-      endpoint,
+      baseUrl: cfgBaseUrl,
+      allowedPurposes: ["worker"],
+      allowedModelIds: ["deepseek/deepseek-flash"],
       allowRealModelCalls: allowReal,
       callTimeoutMs: 10000,
-      priceCatalog: { inputPerMTokMicrousd: priceInput, outputPerMTokMicrousd: priceOutput },
+      priceCatalog: {
+        inputPerMTokMicrousd: priceInput,
+        outputPerMTokMicrousd: priceOutput,
+        cacheReadPerMTokMicrousd: null,
+        cacheWritePerMTokMicrousd: null,
+      },
     };
     delete defaults.model.priceCatalog.$comment;
     const path = join(ws.stateDir, "test-config.json");
@@ -992,19 +1033,27 @@ function seed(tag) {
     return path;
   }
 
-  // (a) The full discipline against a real wire: reserve BEFORE the call
-  // (reservation created_at <= the service's receive timestamp), settle
-  // AFTER it (settled_at >= receive), settled by the token accounting x the
-  // host catalog — not the reserve upper, not zero, not the fixture 300.
+  // (a) The full discipline against a real pi-ai loopback wire: reserve BEFORE
+  // the call (reservation created_at <= the service's receive timestamp),
+  // settle AFTER it (settled_at >= receive), priced by the host catalog — not
+  // the reserve upper, not zero, not the fixture 300. Wire assertions: single
+  // /chat/completions segment, model=deepseek-flash, thinking.type=enabled.
   {
-    const ws = seedClaimableTask("su-model-priced");
+    writeFileSync(modeFile, JSON.stringify({ kind: "priced", promptTokens: 500000, completionTokens: 250000 }), "utf8");
+    const { ws, requestId } = seedModelProposalTask("su-model-priced");
     const configPath = writeWorkerConfig(ws, {
-      endpoint: `http://127.0.0.1:${modelPort}/model`,
+      baseUrl,
       priceInput: 100,
       priceOutput: 200,
     });
-    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 60000,
+      env: { ...process.env, AEGISPI_TEST_MODEL_KEY: "loopback-fixture-placeholder" },
+    });
     const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reqRow = db.prepare("SELECT * FROM model_requests WHERE request_id=?").get(requestId);
     const reservation = db.prepare("SELECT * FROM budget_reservations WHERE purpose='worker'").get();
     const settledAudit = db.prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'").all();
     const task = db.prepare("SELECT state, result_class FROM tasks ORDER BY created_at DESC LIMIT 1").get();
@@ -1030,89 +1079,145 @@ function seed(tag) {
     suite.check(
       "worker-reserves-before-call-and-settles-real-usage",
       r.status === 0 &&
+        reqRow?.state === "SETTLED" &&
         Boolean(reservation) &&
         reservation.state === "SETTLED" &&
-        usageSource === "model-http-transport" &&
+        usageSource === "pi-ai" &&
         actualMicrousd === 100 &&
         task.state === "SUCCEEDED" &&
         task.result_class === "not_applicable" &&
         typeof reply === "string" &&
         Boolean(request) &&
+        request.path === "/chat/completions" &&
+        request.model === "deepseek-flash" &&
+        request.thinking?.type === "enabled" &&
         reservation.created_at <= request.at &&
         (reservation.settled_at ?? 0) >= request.at,
-      `daemon exit=${r.status} reservation=${reservation?.state ?? "none"} settled=${actualMicrousd} microusd source=${usageSource} task=${task?.state}/${task?.result_class} reply=${typeof reply}:${JSON.stringify((reply ?? "").slice(0, 40))} ordering[created=${reservation?.created_at} at=${request?.at} settled=${reservation?.settled_at}] ok=${Boolean(request) && reservation?.created_at <= request.at && (reservation?.settled_at ?? 0) >= request.at} — the 500k/250k tokens priced by the host catalog are 100 microusd, not the 1000 upper and not zero`,
+      `daemon exit=${r.status} req=${reqRow?.state} reservation=${reservation?.state ?? "none"} settled=${actualMicrousd} microusd source=${usageSource} wire=${request?.path}/${request?.model}/thinking=${request?.thinking?.type} ordering[created=${reservation?.created_at} at=${request?.at} settled=${reservation?.settled_at}]`,
     );
   }
 
-  // (b) A response without usage accounting: the reservation stays HELD,
-  // no settlement, the reason is on the audit trail.
+  // (b) A response without usage accounting (no totalFromProvider key):
+  // request state = HELD, ledger reservation = HELD, audit recorded.
   {
-    const ws = seedClaimableTask("su-model-nousage");
+    writeFileSync(modeFile, JSON.stringify({ kind: "no-usage" }), "utf8");
+    const { ws, requestId } = seedModelProposalTask("su-model-nousage");
     const configPath = writeWorkerConfig(ws, {
-      endpoint: `http://127.0.0.1:${modelPort}/no-usage`,
+      baseUrl,
       priceInput: 100,
       priceOutput: 200,
     });
-    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 60000,
+      env: { ...process.env, AEGISPI_TEST_MODEL_KEY: "loopback-fixture-placeholder" },
+    });
     const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reqRow = db.prepare("SELECT state FROM model_requests WHERE request_id=?").get(requestId);
     const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
     const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
     const notSettled = db.prepare("SELECT details_json FROM audit_log WHERE code='model_usage_not_settled'").all();
     db.close();
-    const reasonOk = notSettled.some((row) => /no usage/.test(row.details_json));
+    const reasonOk = notSettled.some((row) => /no usage|missing totalFromProvider/.test(row.details_json));
     suite.check(
       "worker-no-usage-keeps-reservation-held-never-zero",
-      r.status === 0 && reservation?.state === "HELD" && settled === 0 && notSettled.length >= 1 && reasonOk,
-      `daemon exit=${r.status} reservation=${reservation?.state} settlements=${settled} not-settled-audits=${notSettled.length}`,
+      r.status === 0 && reqRow?.state === "HELD" && reservation?.state === "HELD" && settled === 0 && notSettled.length >= 1 && reasonOk,
+      `daemon exit=${r.status} req=${reqRow?.state} reservation=${reservation?.state} settlements=${settled} not-settled-audits=${notSettled.length}`,
     );
   }
 
   // (c) Usage present but the price catalog is NOT authorized (null rates):
   // same HELD discipline — the host never invents a price.
   {
-    const ws = seedClaimableTask("su-model-noprice");
+    writeFileSync(modeFile, JSON.stringify({ kind: "priced", promptTokens: 500000, completionTokens: 250000 }), "utf8");
+    const { ws, requestId } = seedModelProposalTask("su-model-noprice");
     const configPath = writeWorkerConfig(ws, {
-      endpoint: `http://127.0.0.1:${modelPort}/model`,
+      baseUrl,
       priceInput: null,
       priceOutput: null,
     });
-    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 60000,
+      env: { ...process.env, AEGISPI_TEST_MODEL_KEY: "loopback-fixture-placeholder" },
+    });
     const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reqRow = db.prepare("SELECT state FROM model_requests WHERE request_id=?").get(requestId);
     const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
     const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
     const notSettled = db.prepare("SELECT details_json FROM audit_log WHERE code='model_usage_not_settled'").all();
     db.close();
-    const reasonOk = notSettled.some((row) => /price catalog/.test(row.details_json));
+    const reasonOk = notSettled.some((row) => /category rate null/.test(row.details_json));
     suite.check(
       "worker-unauthorized-price-catalog-keeps-reservation-held",
-      r.status === 0 && reservation?.state === "HELD" && settled === 0 && reasonOk,
-      `daemon exit=${r.status} reservation=${reservation?.state} settlements=${settled} price-not-authorized-audits=${notSettled.length}`,
+      r.status === 0 && reqRow?.state === "HELD" && reservation?.state === "HELD" && settled === 0 && reasonOk,
+      `daemon exit=${r.status} req=${reqRow?.state} reservation=${reservation?.state} settlements=${settled} price-not-authorized-audits=${notSettled.length}`,
     );
   }
 
-  // (d) A non-loopback endpoint without allowRealModelCalls: refused
-  // BEFORE any call — zero claims, zero reservations, honest log.
+  // (d) A non-loopback baseUrl without allowRealModelCalls: refused
+  // BEFORE any request row, reservation, or call — honest log.
   {
-    const ws = seedClaimableTask("su-model-unauth");
+    const { ws, requestId } = seedModelProposalTask("su-model-unauth");
     const configPath = writeWorkerConfig(ws, {
-      endpoint: "http://10.255.255.1:9/model",
+      baseUrl: "http://10.255.255.1:9",
       priceInput: 100,
       priceOutput: 200,
       allowReal: false,
     });
-    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const beforeHits = serviceLog().length;
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 60000,
+      env: { ...process.env, AEGISPI_TEST_MODEL_KEY: "loopback-fixture-placeholder" },
+    });
     const out = (r.stdout ?? "") + (r.stderr ?? "");
     const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reqRow = db.prepare("SELECT state FROM model_requests WHERE request_id=?").get(requestId);
     const reservations = db.prepare("SELECT count(*) c FROM budget_reservations WHERE purpose='worker'").get().c;
-    const task = db.prepare("SELECT state FROM tasks ORDER BY created_at DESC LIMIT 1").get();
     db.close();
     suite.check(
       "worker-refuses-unauthorized-endpoint-before-any-call",
       r.status === 0 &&
+        reqRow === undefined &&
         reservations === 0 &&
-        task.state === "QUEUED" &&
+        serviceLog().length === beforeHits &&
         /not authorized/.test(out),
-      `daemon exit=${r.status} reservations=${reservations} task=${task.state} honest-log=${/not authorized/.test(out)}`,
+      `daemon exit=${r.status} reqRow=${reqRow === undefined ? "absent" : reqRow.state} reservations=${reservations} honest-log=${/not authorized/.test(out)}`,
+    );
+  }
+
+  // (e) Unwired credential slot "model": pi-ai fails closed BEFORE any HTTP byte.
+  {
+    const { ws, requestId } = seedModelProposalTask("su-model-noslot", { wireSlot: false });
+    const configPath = writeWorkerConfig(ws, {
+      baseUrl,
+      priceInput: 100,
+      priceOutput: 200,
+    });
+    const beforeHits = serviceLog().length;
+    const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`, `--config=${configPath}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 60000,
+    });
+    const db = openDatabase(ws.dbPath, { readOnly: true });
+    const reqRow = db.prepare("SELECT state FROM model_requests WHERE request_id=?").get(requestId);
+    const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
+    const failedAudit = db.prepare("SELECT details_json FROM audit_log WHERE code='model_call_failed'").all();
+    db.close();
+    const afterHits = serviceLog().length;
+    suite.check(
+      "worker-unwired-credential-slot-fails-closed-before-http",
+      r.status === 0 &&
+        reqRow?.state === "EXECUTING" &&
+        reservation?.state === "HELD" &&
+        afterHits === beforeHits &&
+        failedAudit.some((row) => /No API key/.test(row.details_json)),
+      `daemon exit=${r.status} req=${reqRow?.state} reservation=${reservation?.state} http-hits=${afterHits - beforeHits} failed-audits=${failedAudit.length}`,
     );
   }
   svc.kill();

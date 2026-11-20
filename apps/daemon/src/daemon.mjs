@@ -7,12 +7,12 @@
 //   -> console (always; read-only mode keeps only diagnostics) -> loop.
 // Holding the lock fails -> exit non-zero immediately.
 
-import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadDaemonConfig, ConfigError } from "./config.mjs";
 import { acquireDaemonLock } from "./db/lock.mjs";
 import { openDatabase, checkDatabaseIntegrity } from "./db/connect.mjs";
-import { loadCanonicalSchema, migrate } from "./db/migrate.mjs";
+import { loadCanonicalSchema, migrate, ensureModelRequestsTable } from "./db/migrate.mjs";
 import { migrationPending, preMigrationBackup } from "./db/backup.mjs";
 import { startupRecovery } from "./recovery.mjs";
 import { createBudgetLedger } from "./budget.mjs";
@@ -30,15 +30,15 @@ import {
 import { processDueTimers, cancelSatisfiedFollowUpReminders } from "./timers.mjs";
 import { expireApprovals } from "./approvals.mjs";
 import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
-import { insertObjectRow, putObjectContent } from "./objects.mjs";
+import { insertObjectRow } from "./objects.mjs";
 import { writeAudit } from "./audit.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { createHttpUpstream } from "./upstream-http.mjs";
 import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
-import { createContainerExecutor } from "./container-executor.mjs";
-import { isLoopbackModelEndpoint, callModelOnce, microusdForUsage } from "./model-call.mjs";
-import { createCredentialService } from "./credentials.mjs";
+import { createContainerExecutor, createAgentLauncher } from "./container-executor.mjs";
+import { isLoopbackModelEndpoint } from "./model-call.mjs";
+import { processPendingModelProposals } from "./model-requests.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
 import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
@@ -102,6 +102,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(`backup: pre-migration snapshot ${backup.path} (${backup.bytes} bytes, integrity ${backup.integrity})`);
   }
   migrate(db, canonical);
+  ensureModelRequestsTable(db);
 
   const recovery = startupRecovery(db, {
     stateDir: dataDir,
@@ -199,7 +200,7 @@ export async function main(argv = process.argv.slice(2)) {
   // live reservation; adapter-owned templates, never model-assembled URLs).
   // transportKind is declared HERE (fake exactly under --fake-upstream, real
   // otherwise), never sniffed from a label.
-  const adapterUpstream = baseUpstream
+  const adapterUpstream = baseUpstream || config.model.baseUrl
     ? createAdapterUpstream(db, {
         baseUpstream,
         transportKind: fakeUpstream ? "fake" : "real",
@@ -211,6 +212,7 @@ export async function main(argv = process.argv.slice(2)) {
           allowedRepos: config.adapters.allowedRepos,
           allowedBranches: config.adapters.allowedBranches,
         },
+        modelConfig: config.model,
       })
     : null;
 
@@ -237,6 +239,29 @@ export async function main(argv = process.argv.slice(2)) {
       process.exit(2);
     }
   }
+
+  // Optional production agent container launcher (Phase 4.1, ADR-0001 §2):
+  // parallel to --execution-image, requires a digest-pinned agent image ref.
+  const agentImageFlag = argv.find((a) => a.startsWith("--agent-image="));
+  let agentLauncher = null;
+  if (agentImageFlag) {
+    try {
+      agentLauncher = createAgentLauncher(db, {
+        stateDir: dataDir,
+        imageRef: agentImageFlag.slice("--agent-image=".length),
+        quotas: {
+          cpus: config.containerPlaceholders.agent.cpus,
+          memory: `${config.containerPlaceholders.agent.memoryGiB}g`,
+          pids: config.containerPlaceholders.agent.pids,
+          tmpfsSize: `${config.containerPlaceholders.agent.writableDiskGiB}g`,
+        },
+      });
+    } catch (e) {
+      console.error(`agent image flag invalid: ${e.message}`);
+      process.exit(2);
+    }
+  }
+  const activeAgentContainers = new Map();
 
   // Watermark level changes stream an alert once per transition; the backup
   // runs once per window-day when the manifest key is configured.
@@ -286,6 +311,7 @@ export async function main(argv = process.argv.slice(2)) {
     //    bill or stay HELD. Outside the fixture, the REAL model worker runs
     //    when the host configured an authorized endpoint (re-review P1).
     let claim = null;
+    let proposalProcessed = 0;
     if (fakeUpstream) {
       claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
       if (claim) {
@@ -352,173 +378,78 @@ export async function main(argv = process.argv.slice(2)) {
           deliveryDone(db, { eventId: delivery.event_id, taskId: claim.taskId, now });
         }
       }
-    } else if (config.model.endpoint) {
-      // REAL model worker path (re-review P1): whenever the host configured
-      // an endpoint the worker is authorized to call, the production tick
-      // claims a task, RESERVES before the call, and settles by the
-      // response's real usage priced through the host catalog (06
-      // section 8). A loopback endpoint is the local verification seam;
-      // anything else needs allowRealModelCalls (owner authorization).
-      // Usage the provider did not account, or a price catalog the owner
-      // has not authorized, keeps the reservation HELD — never settled as
-      // zero. A failed call leaves the attempt to its lease (the reaper
-      // marks LOST and the task re-queues) and the reservation to the
-      // conservative timeout path.
-      const authorizedForModel = isLoopbackModelEndpoint(config.model.endpoint) || config.model.allowRealModelCalls;
+    } else if (config.model.baseUrl) {
+      // Production model proposal path (ADR-0001 §2/§3/§4/§7): the host
+      // validates model_request proposals on the propose-only channel, checks
+      // identity against RUNNING claims and dual whitelists, reserves before
+      // executing the single pi-ai 1.5.2 core, settles/holds by four-field
+      // usage, and delivers model_result via host-commands. When --agent-image
+      // is wired, claimable tasks launch a networkless agent container.
+      const authorizedForModel = isLoopbackModelEndpoint(config.model.baseUrl) || config.model.allowRealModelCalls;
       const awaitingModel = db
         .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
         .get().c;
       if (!authorizedForModel) {
         if (awaitingModel > 0) {
           console.error(
-            `worker: ${awaitingModel} task(s) await a model call but the configured endpoint is not authorized (model.allowRealModelCalls is false and the endpoint is not loopback); nothing is claimed or settled`,
+            `worker: ${awaitingModel} task(s) await a model call but the configured baseUrl is not authorized (model.allowRealModelCalls is false and baseUrl is not loopback); nothing is claimed or settled`,
           );
         }
-      } else if (awaitingModel > 0) {
-        claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
-        if (claim) {
-          heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
-          const taskAcc = ledger.ensureTaskAccount({ taskId: claim.taskId, now }).accountId;
-          const dayAcc = ledger.ensureDayAccount({ now }).accountId;
-          // Reserve BEFORE the call, as with every chargeable request.
-          const res = ledger.reserve({
-            requestKey: `worker:${claim.taskId}:${claim.attemptNo}`,
-            taskId: claim.taskId,
-            purpose: "worker",
-            provider: config.model.provider,
-            priceVersion: "catalog-v1",
-            upperMicrousd: config.model.callUpperMicrousd,
-            accounts: [
-              { accountId: taskAcc, amountMicrousd: Math.ceil(config.model.callUpperMicrousd / 2) },
-              { accountId: dayAcc, amountMicrousd: Math.floor(config.model.callUpperMicrousd / 2) },
-            ],
-            now,
-          });
-          workerStep(db, { ...claim, now, budgetReservationId: res.reservationId });
-          // The task's pending delivery payload is the call input, read
-          // from the durable event object the host already stored.
-          let callInput = null;
-          const delivery = db
-            .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
-            .get(claim.taskId);
-          if (delivery) {
-            const inboxRow = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(delivery.event_id);
-            const obj = inboxRow
-              ? db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(inboxRow.payload_object_id)
-              : null;
-            const payloadPath = obj?.storage_ref ? join(dataDir, ...obj.storage_ref.split("/")) : null;
-            if (payloadPath && existsSync(payloadPath)) {
-              try {
-                callInput = readFileSync(payloadPath, "utf8");
-              } catch {}
-            }
-          }
-          const key = createCredentialService(db).resolve("model");
-          const call = callModelOnce({
-            endpoint: config.model.endpoint,
-            model: config.model.modelId,
-            messages: [{ role: "user", content: callInput ?? `task ${claim.taskId}` }],
-            timeoutMs: config.model.callTimeoutMs,
-            bearer: key?.ok === true ? key.value : null,
-          });
-          if (!call.ok) {
-            writeAudit(db, {
-              code: "model_call_failed",
-              taskId: claim.taskId,
-              details: { error: (call.error ?? "").slice(0, 200), reservation: res.reservationId },
-              now: Date.now(),
-            });
-            console.error(`worker: model call failed for ${claim.taskId}: ${call.error}`);
-            // The attempt keeps its lease; the reaper owns the retry story
-            // and the HELD reservation goes to the conservative timeout.
-          } else {
-            // Operations AFTER the network call record their own wall
-            // clock, not the tick's start time: the ledger's settled_at
-            // must be able to prove the call happened in between.
-            const afterCall = Date.now();
-            const priced = microusdForUsage(call.usage, config.model.priceCatalog);
-            if (priced !== null) {
-              ledger.settle({
-                reservationId: res.reservationId,
-                usage: {
-                  actualMicrousd: priced,
-                  source: "model-http-transport",
-                  basis: "prompt/completion tokens from the provider response, priced by the host catalog",
-                },
-                now: afterCall,
-                actorId: "model-worker",
-              });
-            } else {
-              // Real response, but nothing the host may bill against:
-              // unknown usage or an unauthorized price catalog. The
-              // reservation stays HELD (never zero) and the reason is on
-              // the record.
-              writeAudit(db, {
-                code: "model_usage_not_settled",
-                taskId: claim.taskId,
-                details: {
-                  reason: call.usage ? "price catalog not authorized (null rates)" : "the response carried no usage accounting",
-                  reservation: res.reservationId,
-                  usage: call.usage,
-                },
-                now: afterCall,
-              });
-              console.error(
-                `worker: model call answered for ${claim.taskId} but usage cannot be settled (${call.usage ? "price catalog not authorized" : "no usage in the response"}); reservation stays HELD`,
-              );
-            }
-            const scopeId = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(claim.taskId).scope_id;
-            // The evidence is a durable object: content-addressed bytes on
-            // disk (putObjectContent), never a hash-only row the finish path
-            // cannot read back.
-            const evidenceContent = JSON.stringify({
-              done: true,
-              at: afterCall,
-              worker: "model-http-transport",
-              model: call.model,
-              endpoint: call.endpoint,
-              reply: (call.reply ?? "").slice(0, 4000),
-              usage: call.usage,
-              settledMicrousd: priced,
-            });
-            const storedEvidence = putObjectContent(dataDir, evidenceContent);
-            const evidence = insertObjectRow(db, {
-              scopeId,
-              kind: "task_result",
-              sourceUri: `task:${claim.taskId}`,
-              sourceActor: "model-worker",
-              contentHash: storedEvidence.contentHash,
-              storageRef: storedEvidence.storageRef,
-              observedAt: afterCall,
-              requiredScopeIds: [scopeId],
-            });
-            completeTask(db, {
-              taskId: claim.taskId,
-              attemptNo: claim.attemptNo,
-              leaseOwner: claim.leaseOwner,
-              fence: claim.fence,
-              now: afterCall,
-              resultClass: "not_applicable",
-              resultObjectId: evidence.id,
-            });
-            const pending = db
+      } else {
+        if (agentLauncher) {
+          claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
+          if (claim) {
+            heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
+            const taskRow = db.prepare("SELECT scope_id, deadline_at FROM tasks WHERE id=?").get(claim.taskId);
+            const scopeRow = db.prepare("SELECT domain_key FROM scopes WHERE id=?").get(taskRow.scope_id);
+            let callInput = null;
+            const delivery = db
               .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
               .get(claim.taskId);
-            if (pending) {
-              const ck = insertObjectRow(db, {
-                scopeId,
-                kind: "session_checkpoint",
-                sourceUri: `cmd:${pending.event_id}:${claim.taskId}`,
-                sourceActor: "host",
-                content: "model worker consumed the event",
-                observedAt: afterCall,
-                requiredScopeIds: [scopeId],
-              });
-              deliveryAckCheckpoint(db, { eventId: pending.event_id, taskId: claim.taskId, checkpointObjectId: ck.id, now: afterCall });
-              deliveryDone(db, { eventId: pending.event_id, taskId: claim.taskId, now: afterCall });
+            if (delivery) {
+              const inboxRow = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(delivery.event_id);
+              const obj = inboxRow
+                ? db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(inboxRow.payload_object_id)
+                : null;
+              const payloadPath = obj?.storage_ref ? join(dataDir, ...obj.storage_ref.split("/")) : null;
+              if (payloadPath && existsSync(payloadPath)) {
+                try {
+                  callInput = readFileSync(payloadPath, "utf8");
+                } catch {}
+              }
             }
+            const modelKey = config.model.provider && config.model.modelId
+              ? `${config.model.provider}/${config.model.modelId}`
+              : "deepseek/deepseek-flash";
+            const launched = agentLauncher.launchAttempt({
+              taskId: claim.taskId,
+              attemptId: claim.attemptId,
+              attemptNo: claim.attemptNo,
+              fence: claim.fence,
+              scopeDomainKey: scopeRow.domain_key,
+              modelRequest: {
+                purpose: "worker",
+                modelId: modelKey,
+                messages: [{ role: "user", content: callInput ?? `task ${claim.taskId}` }],
+              },
+              now,
+            });
+            activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
+              ...launched,
+              taskId: claim.taskId,
+              attemptNo: claim.attemptNo,
+              deadlineAt: taskRow.deadline_at,
+            });
           }
         }
+        const batch = processPendingModelProposals(db, {
+          stateDir: dataDir,
+          config,
+          ledger,
+          completeActiveTask: true,
+          now,
+        });
+        proposalProcessed = batch.processed;
       }
     } else {
       // No model path is configured: nothing is claimed, nothing settles.
@@ -527,7 +458,7 @@ export async function main(argv = process.argv.slice(2)) {
         .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
         .get().c;
       if (awaiting > 0) {
-        console.error(`worker: ${awaiting} task(s) await an execution path; no model endpoint is configured (model.endpoint is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
+        console.error(`worker: ${awaiting} task(s) await an execution path; no model baseUrl is configured (model.baseUrl is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
       }
     }
     // 5. Effect dispatch through the adapter upstream whenever a transport
@@ -657,18 +588,48 @@ export async function main(argv = process.argv.slice(2)) {
         }
       }
     }
-    if (timers.fired.length > 0 || pending.length > 0 || claim || due.length > 0) {
+    if (timers.fired.length > 0 || pending.length > 0 || claim || proposalProcessed > 0 || due.length > 0) {
       console.log(
-        `tick: timers=${timers.fired.length} dispatched_pending=${pending.length} claimed=${claim ? claim.taskId : "none"} due_notifications=${due.length}`,
+        `tick: timers=${timers.fired.length} dispatched_pending=${pending.length} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} due_notifications=${due.length}`,
       );
     }
-    return timers.fired.length + pending.length + (claim ? 1 : 0) + due.length;
+    return timers.fired.length + pending.length + (claim ? 1 : 0) + proposalProcessed + due.length;
   };
 
   if (args.has("--once")) {
     let rounds = 0;
     while (tick() > 0 && rounds < 20) {
       rounds += 1;
+    }
+    if (agentLauncher && activeAgentContainers.size > 0) {
+      const waitDeadline = Date.now() + 30000;
+      while (activeAgentContainers.size > 0 && Date.now() < waitDeadline) {
+        const batch = processPendingModelProposals(db, {
+          stateDir: dataDir,
+          config,
+          ledger,
+          completeActiveTask: true,
+          now: Date.now(),
+        });
+        for (const [key, info] of activeAgentContainers.entries()) {
+          let receipts = [];
+          try {
+            receipts = readdirSync(info.proposalsDir).filter((f) => f.startsWith("receipt-model-result-") && f.endsWith(".json"));
+          } catch {}
+          const insp = agentLauncher.inspectContainer(info.containerId);
+          if (receipts.length > 0 || !insp.running || batch.results.some((r) => r.status === "refused" || r.status === "budget_refused")) {
+            agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
+            activeAgentContainers.delete(key);
+          }
+        }
+        if (activeAgentContainers.size > 0) {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      for (const [key, info] of activeAgentContainers.entries()) {
+        agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
+        activeAgentContainers.delete(key);
+      }
     }
     // Offline container jobs are async by nature: a once-run that launched
     // them WAITS for their completion, bounded by each job's host-enforced

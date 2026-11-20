@@ -23,7 +23,7 @@
 
 | 资料 | 状态与用途 |
 | --- | --- |
-| [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) | 模型链路最小方案（容器提议、宿主复用 pi-ai 1.5.2 执行）。**方案已获主人确认（2026-11-20，两句状态机澄清在提交 `3fd81c6`）；未实施、未获开工授权，不含运行授权。** 它是缺口 A/B 设计归属的定夺载体 |
+| [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) | 模型链路最小方案（容器提议、宿主复用 pi-ai 1.5.2 执行）。**单元 4.1 已获授权实施并通过本机离线/容器验收（2026-11-20，见 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)）；单元 4.2 真实运行仍未授权** |
 | [phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md](phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md) | 方案审核原稿（字节冻结，SHA-256 `685192d7…`，判定「需改后通过、4.1 可实施候选、不授权实施」） |
 | [phase4/reviews/response-review-model-adr-cde9bd3.md](phase4/reviews/response-review-model-adr-cde9bd3.md) | 对上述审核的逐项回应与追记（四项更正落点 + 两句澄清记录 + 方案确认追记） |
 
@@ -31,17 +31,18 @@
 
 | 资料 | 状态与用途 |
 | --- | --- |
-| [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**方案已确认；4.1 未授权开工；4.2 首跑另需逐项授权；方案确认不构成运行授权** |
-| [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md) | 单元 4.1 实施任务书（2026-11-20 编制，基线 `686d10b`）。**已备待授权**：开工授权下达后成为 4.1 的实施依据；分步目标与产物、端到端锚点用例、最小验收矩阵、环境/镜像/交付与停止条件在焉。编制轮零实现；4.2 与一切真实运行不在其授权内 |
+| [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**4.1 已获授权实施并本机验收通过；4.2 首跑仍待逐项书面确认，不构成任何真实运行授权** |
+| [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md) | 单元 4.1 实施任务书（基线 `52354a8`，含 D-77/D-78 修订）。**4.1 实施完成，验收依据**：分步目标与产物、端到端锚点用例、最小验收矩阵 T1–T10、环境/镜像/交付与停止条件在焉；4.2 与一切真实运行不在其授权内 |
 | [phase3/reports/real-acceptance-plan.md](phase3/reports/real-acceptance-plan.md) | A/B/C/D 真实验收计划。A/B/C 已执行且授权闭合（无剩余额度），D 延期——文中「待主人逐项授权」对 D 与任何重跑仍然有效，对已闭合项不提供剩余额度 |
 
 ## 状态说明（现行权威）
 
 | 资料 | 用途 |
 | --- | --- |
-| [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **唯一权威状态清单**（2026-11-20）：A/B/C/D 现状、审计归档与判定、原镜像口径、模型缺口归属、本地套件在案记录、待办汇总 |
+| [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-20）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 3 镜像证据、全量 12 套件 + Hono 预检通过记录、生产树 `model-call-child` 零出现证明、`defaults.json` 失败关闭核对与三项已知残留 |
+| [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**（2026-11-20）：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 实施完成）与 4.2 待办汇总 |
 | [phase3/reports/round-closure-2026-11-20-limited-fixes.md](phase3/reports/round-closure-2026-11-20-limited-fixes.md) | 限定修复收口：daemon 用例崩溃根因（测试层修复、生产零改动）与纪元 2 选择性重建；终树三 docker 套件 14/14、29/29、5/5 |
-| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（v2 机器块，image-gate 解析，勿手改）；纪元 1 保留为历史节 |
+| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（纪元 3：重建 `agent`，携带 `acquisition`/`execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
 | [phase3/reports/quota-calibration.md](phase3/reports/quota-calibration.md) | 容器配额占位值的实测依据（CPU/内存/pids/可写盘） |
 
 ## 历史收口与审计（史实身份，不作现行操作依据）
@@ -71,9 +72,9 @@
 - [telegram-call-ledger-retrospective.md](phase3/reports/telegram-call-ledger-retrospective.md)：Telegram 历史调用账本追溯（缺证如实记录，不追补）。
 - [phase3/audits/](phase3/audits)（六份原稿字节冻结，含 `AUDIT-PHASE3-REREVIEW-33d6361` 与 `AUDIT-PHASE3-LIMITED-FIXES-44b3514`）与 [phase3/evidence/](phase3/evidence)。
 
-**Phase 4（真实仓库闭环，未开工）**
+**Phase 4（单元 4.1 已收口，4.2 未授权开工）**
 
-- 设计与计划见上文「设计决策」「阶段计划」；[phase4/reviews/](phase4/reviews) 为审核往来记录。
+- 设计与计划见上文「设计决策」「阶段计划」；收口报告见 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；[phase4/reviews/](phase4/reviews) 为审核往来记录。
 
 ## 纪律速记
 

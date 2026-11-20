@@ -24,6 +24,7 @@
 // <workspace>/node_modules and <workspace>/apps/daemon next to it.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -35,6 +36,8 @@ const COMMANDS_DIR = join(WORK_ROOT, "host-commands");
 const CONTEXT_PATH = join(WORK_ROOT, "context.json");
 
 export const WORKER_VERSION = 1;
+export const MAX_MODEL_MESSAGES_BYTES = 128 * 1024;
+export const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // Env names that must NEVER be set inside the agent container: a leaked key
 // in the environment is the asset boundary tests care most about.
@@ -149,16 +152,66 @@ export function announce(context, { now = Date.now(), proposalsDir = PROPOSALS_D
   return envelope;
 }
 
+export function proposeModelRequest({
+  taskId,
+  attemptId,
+  fence,
+  scopeDomainKey,
+  purpose,
+  modelId,
+  messages,
+  requestId = randomUUID(),
+  proposalsDir = PROPOSALS_DIR,
+  usedRequestIds = null,
+}) {
+  if (typeof requestId !== "string" || !UUID_V4_RE.test(requestId)) {
+    throw new Error(`model_request requestId must be a UUID v4, got ${JSON.stringify(requestId)}`);
+  }
+  if (usedRequestIds) {
+    if (usedRequestIds.has(requestId)) {
+      throw new Error(`model_request requestId ${requestId} cannot be reused within the same attempt`);
+    }
+    usedRequestIds.add(requestId);
+  }
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("model_request requires a non-empty messages array");
+  }
+  const msgBytes = Buffer.byteLength(JSON.stringify(messages), "utf8");
+  if (msgBytes > MAX_MODEL_MESSAGES_BYTES) {
+    throw new Error(`model_request messages exceed 128 KiB (${msgBytes} > ${MAX_MODEL_MESSAGES_BYTES})`);
+  }
+  mkdirSync(proposalsDir, { recursive: true });
+  const envelope = {
+    schemaVersion: 1,
+    kind: "model_request",
+    requestId,
+    taskId,
+    attemptId,
+    fence,
+    scopeDomainKey,
+    purpose,
+    modelId,
+    messages,
+  };
+  const filename = `model-request-${requestId}.json`;
+  const tmp = join(proposalsDir, `${filename}.tmp`);
+  writeFileSync(tmp, JSON.stringify(envelope) + "\n", "utf8");
+  renameSync(tmp, join(proposalsDir, filename));
+  return { envelope, file: join(proposalsDir, filename) };
+}
+
 // Minimal host->worker command loop. The channel is deliberately boring:
 // files in a mounted dir, structured JSON, nothing executable.
 export async function serveCommands({
-  pollMs = 500,
+  pollMs = 200,
   stopFile = join(COMMANDS_DIR, "stop"),
   proposalsDir = PROPOSALS_DIR,
   commandsDir = COMMANDS_DIR,
   now = Date.now,
+  onModelResult = null,
 } = {}) {
   const handled = [];
+  const processedFiles = new Set();
   for (;;) {
     if (existsSync(stopFile)) {
       return { stopped: "stop", handled };
@@ -170,6 +223,10 @@ export async function serveCommands({
       files = [];
     }
     for (const f of files) {
+      if (processedFiles.has(f) || existsSync(join(proposalsDir, `receipt-${f}`))) {
+        processedFiles.add(f);
+        continue;
+      }
       const p = join(commandsDir, f);
       let cmd;
       try {
@@ -177,20 +234,47 @@ export async function serveCommands({
       } catch (e) {
         cmd = { kind: "invalid", parseError: e.message };
       }
+      let accepted = cmd.kind === "ping";
+      let modelResultFields = {};
+      if (cmd.kind === "model_result") {
+        const validId = typeof cmd.requestId === "string" && UUID_V4_RE.test(cmd.requestId);
+        accepted = validId && typeof cmd.ok === "boolean";
+        if (accepted) {
+          modelResultFields = {
+            requestId: cmd.requestId,
+            ok: cmd.ok,
+            ...(typeof cmd.reply === "string" ? { reply: cmd.reply } : {}),
+            ...(cmd.usage !== undefined ? { usage: cmd.usage } : {}),
+            ...(cmd.refusal !== undefined ? { refusal: cmd.refusal } : {}),
+          };
+          console.log(
+            `agent worker: model_result ${cmd.requestId} ok=${cmd.ok} reply=${typeof cmd.reply === "string" ? JSON.stringify(cmd.reply.slice(0, 120)) : "null"}`,
+          );
+          if (typeof onModelResult === "function") {
+            onModelResult(cmd);
+          }
+        }
+      }
       const response = {
         workerVersion: WORKER_VERSION,
         kind: "command_receipt",
         commandFile: f,
         command: cmd.kind,
-        accepted: cmd.kind === "ping",
+        accepted,
+        ...modelResultFields,
         at: now(),
       };
       mkdirSync(proposalsDir, { recursive: true });
       const tmp = join(proposalsDir, `receipt-${f}.tmp`);
       writeFileSync(tmp, JSON.stringify(response) + "\n", "utf8");
       renameSync(tmp, join(proposalsDir, `receipt-${f}`));
-      handled.push({ file: f, kind: cmd.kind, accepted: response.accepted });
-      rmSync(p, { force: true });
+      processedFiles.add(f);
+      handled.push({ file: f, kind: cmd.kind, accepted, ...modelResultFields });
+      try {
+        rmSync(p, { force: true });
+      } catch {
+        // host-commands is mounted read-only in production containers.
+      }
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
@@ -226,6 +310,21 @@ export async function main(argv = process.argv.slice(2)) {
   console.log(
     `agent worker: announced ${parsed.context.taskId} attempt ${parsed.context.attemptId} fence ${parsed.context.fence} on the proposals channel`,
   );
+  const usedRequestIds = new Set();
+  if (parsed.context.modelRequest) {
+    const req = parsed.context.modelRequest;
+    const { envelope } = proposeModelRequest({
+      taskId: parsed.context.taskId,
+      attemptId: parsed.context.attemptId,
+      fence: parsed.context.fence,
+      scopeDomainKey: parsed.context.scopeDomainKey,
+      purpose: req.purpose ?? "worker",
+      modelId: req.modelId ?? "deepseek/deepseek-flash",
+      messages: req.messages,
+      usedRequestIds,
+    });
+    console.log(`agent worker: proposed model_request ${envelope.requestId}`);
+  }
   const result = await serveCommands();
   console.log(`agent worker: stopped (${result.stopped}), handled ${result.handled.length} command(s)`);
   process.exit(0);

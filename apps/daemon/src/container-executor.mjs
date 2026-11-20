@@ -29,6 +29,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -483,5 +484,172 @@ export function createContainerExecutor(db, {
     pollOnce,
     tick,
     reapOrphanContainers,
+  };
+}
+
+export function safeTaskDirComponent(taskId) {
+  return String(taskId).replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+export function agentWorkAttemptDir(stateDir, taskId, attemptNo) {
+  return join(stateDir, "agent-work", safeTaskDirComponent(taskId), String(attemptNo));
+}
+
+// Host proposals directory effective write-set lockdown (ADR-0001 §2, D-78
+// Conflict 2 option A):
+// - On Windows: NTFS has no Linux uid 999 principal and Docker Desktop
+//   proxies bind-mount writes as the daemon-running Windows account; remove
+//   inherited ACLs (which otherwise include Authenticated Users Modify) and
+//   grant (OI)(CI)F exclusively to that account, failing closed if any broad
+//   principal remains.
+// - On POSIX: chmod 0770 (never 0777 / 1777).
+export function lockHostProposalsDir(proposalsDir) {
+  mkdirSync(proposalsDir, { recursive: true });
+  if (process.platform === "win32") {
+    const who = spawnSync("whoami", { encoding: "utf8", shell: false });
+    const account = who.status === 0 && who.stdout.trim()
+      ? who.stdout.trim()
+      : (process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME);
+    if (!account) {
+      throw new ExecutorError("cannot resolve current Windows account to lock host proposals directory");
+    }
+    const grant = spawnSync(
+      "icacls",
+      [proposalsDir, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`],
+      { encoding: "utf8", shell: false },
+    );
+    if (grant.status !== 0) {
+      throw new ExecutorError(`icacls lockdown failed on ${proposalsDir}: ${(grant.stderr || grant.stdout || "").trim()}`);
+    }
+    const verify = inspectHostProposalsAcl(proposalsDir);
+    if (!verify.ok) {
+      throw new ExecutorError(`host proposals directory ACL verification failed on ${proposalsDir}: ${verify.reason}`);
+    }
+    return { platform: "win32", account, aclText: verify.raw };
+  }
+  chmodSync(proposalsDir, 0o770);
+  return { platform: process.platform, mode: "0770" };
+}
+
+export function inspectHostProposalsAcl(proposalsDir) {
+  if (process.platform !== "win32") {
+    return { ok: true, platform: process.platform, raw: "" };
+  }
+  const who = spawnSync("whoami", { encoding: "utf8", shell: false });
+  const account = who.status === 0 ? who.stdout.trim().toLowerCase() : "";
+  const r = spawnSync("icacls", [proposalsDir], { encoding: "utf8", shell: false });
+  const raw = (r.stdout ?? "") + (r.stderr ?? "");
+  if (r.status !== 0) {
+    return { ok: false, reason: `icacls read failed: ${raw.trim()}`, raw };
+  }
+  const lower = raw.toLowerCase();
+  const forbidden = ["authenticated users", "builtin\\users", "\\everyone", "everyone:"];
+  for (const bad of forbidden) {
+    if (lower.includes(bad)) {
+      return { ok: false, reason: `forbidden broad principal ${bad} present in ACL`, raw };
+    }
+  }
+  if (account && !lower.includes(account)) {
+    return { ok: false, reason: `daemon account ${account} missing from ACL`, raw };
+  }
+  return { ok: true, platform: "win32", account, raw };
+}
+
+// Production agent attempt launcher (parallel to createContainerExecutor for
+// --execution-image, ADR-0001 §2 & §9): per-attempt 3-path bind mount with
+// --network none, read-only rootfs, cap-drop ALL, and locked proposals ACL.
+export function createAgentLauncher(db, {
+  stateDir,
+  imageRef,
+  quotas = { cpus: 1, memory: "1g", pids: 256, tmpfsSize: "2g" },
+  dockerBin = "docker",
+  network = "none",
+}) {
+  if (typeof imageRef !== "string" || !/@sha256:[0-9a-f]{64}$/.test(imageRef)) {
+    throw new ExecutorError(
+      `agent image must be digest-pinned, got ${imageRef}; a floating tag is never an isolation reference`,
+    );
+  }
+
+  function containerNameFor(taskId, attemptNo) {
+    return `aegispi-agent-${safeTaskDirComponent(taskId)}-${attemptNo}`.slice(0, 90);
+  }
+
+  function launchAttempt({ taskId, attemptId, attemptNo, fence, scopeDomainKey, modelRequest = null, now = Date.now() }) {
+    const attemptDir = agentWorkAttemptDir(stateDir, taskId, attemptNo);
+    const proposalsDir = join(attemptDir, "proposals");
+    const commandsDir = join(attemptDir, "host-commands");
+    const contextPath = join(attemptDir, "context.json");
+    rmSync(attemptDir, { recursive: true, force: true });
+    mkdirSync(commandsDir, { recursive: true });
+    lockHostProposalsDir(proposalsDir);
+    const context = {
+      schemaVersion: 1,
+      taskId,
+      attemptId,
+      fence,
+      scopeDomainKey,
+      ...(modelRequest ? { modelRequest } : {}),
+    };
+    writeFileSync(contextPath, JSON.stringify(context) + "\n", "utf8");
+
+    const containerName = containerNameFor(taskId, attemptNo);
+    docker(dockerBin, ["rm", "-f", containerName]);
+    const run = docker(dockerBin, [
+      "run",
+      "--detach",
+      "--name", containerName,
+      "--network", network,
+      "--init",
+      "--cpus", String(quotas.cpus),
+      "--memory", String(quotas.memory),
+      "--memory-swap", String(quotas.memory),
+      "--pids-limit", String(quotas.pids),
+      "--read-only",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges",
+      "--tmpfs", "/tmp:rw,noexec,size=64m,mode=1777",
+      "-v", `${proposalsDir}:/agent-work/proposals:rw`,
+      "-v", `${commandsDir}:/agent-work/host-commands:ro`,
+      "-v", `${contextPath}:/agent-work/context.json:ro`,
+      imageRef,
+    ], { capture: true });
+    if (run.code !== 0) {
+      throw new ExecutorError(`docker run agent failed for ${taskId}#${attemptNo}: ${run.out.slice(0, 300)}`);
+    }
+    const containerId = run.out.split("\n").pop().trim();
+    writeAudit(db, {
+      code: "agent_container_launched",
+      taskId,
+      details: { attempt_id: attemptId, attempt_no: attemptNo, fence, container: containerId, image: imageRef, network },
+      now,
+    });
+    return { containerId, containerName, attemptDir, proposalsDir, commandsDir, contextPath };
+  }
+
+  function stopAttempt({ containerId, commandsDir }) {
+    if (commandsDir && existsSync(commandsDir)) {
+      writeFileSync(join(commandsDir, "stop"), "stop\n", "utf8");
+    }
+    if (containerId) {
+      docker(dockerBin, ["stop", "--time", "3", containerId]);
+      docker(dockerBin, ["rm", "-f", containerId]);
+    }
+  }
+
+  function inspectContainer(containerId) {
+    const insp = docker(dockerBin, ["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", containerId], { capture: true });
+    if (insp.code !== 0) return { exists: false, running: false, exitCode: null };
+    const [running, exitCode] = insp.out.split(" ");
+    return { exists: true, running: running === "true", exitCode: Number(exitCode) };
+  }
+
+  return {
+    imageRef,
+    quotas,
+    network,
+    launchAttempt,
+    stopAttempt,
+    inspectContainer,
   };
 }

@@ -355,7 +355,7 @@ function writeReport(digests, { tag, builtAt, node, docker, rebuilt = [], carrie
   lines.push("-->");
   lines.push("");
   if (history.length > 0) {
-    lines.push(`## 纪元 1（历史，表格与附注原样保留；其机器块已移除——本文件只保留一个现行 v2 块，完整原文见 git 历史）`);
+    lines.push(`## 前序纪元（历史，表格与附注原样保留；其机器块已移除——本文件只保留一个现行 v2 块，完整原文见 git 历史）`);
     lines.push("");
     lines.push(...history);
     lines.push("");

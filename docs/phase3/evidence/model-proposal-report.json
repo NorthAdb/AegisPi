@@ -1,0 +1,78 @@
+{
+  "generatedAt": "2026-11-20T14:52:17.745Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "model-proposal",
+  "label": "test:model-proposal — Phase 4.1 模型提议链路全量本地闭环与 T1–T10 矩阵",
+  "counts": {
+    "pass": 13,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "core-root-baseurl-and-usage-three-states",
+      "status": "PASS",
+      "detail": "badRootRejected=true noUsageKey=false zeroPriced=null okPriced=28"
+    },
+    {
+      "name": "anchor-e2e-t1-container-daemon-pi-ledger-receipt",
+      "status": "PASS",
+      "detail": "props=1 daemon=0 aclOk=true hits=1(/chat/completions/deepseek-flash/thinking=enabled) req=SETTLED res=SETTLED/28u$ task=SUCCEEDED evReplyLen=4000 receipt=true/replyMatch=true"
+    },
+    {
+      "name": "production-agent-launcher-acl-and-bind-isolation",
+      "status": "PASS",
+      "detail": "daemon=0 task=SUCCEEDED req=SETTLED res=SETTLED/28 aclOk=true iso=\"rootfs=RO:EROFS cmds=RO:EROFS prop=RW\" nonUuidRejected=true"
+    },
+    {
+      "name": "t2-refused-inputs-and-budget-rejection",
+      "status": "PASS",
+      "detail": "triggers=bad-purpose:refused,bad-modelId:refused,bad-scope:refused,bad-fence:refused,unknown-field:refused,oversize-128kib:refused rows6=0 budgetReq=FAILED res=0 calls=0"
+    },
+    {
+      "name": "t3-duplicate-request-idempotent-single-call-single-reserve",
+      "status": "PASS",
+      "detail": "first=settled second=duplicate(SETTLED) reqCount=1 resCount=1 dupAudits=1 calls=1"
+    },
+    {
+      "name": "t4-pre-call-cancel-releases-held-zero-fee-zero-calls",
+      "status": "PASS",
+      "detail": "req=FAILED res=RELEASED taskHeld=0 dayHeld=0 releaseAudit=1 calls=0"
+    },
+    {
+      "name": "t5-crash-between-reserve-and-executing-keeps-held-never-charged-bound-releases-on-abandon",
+      "status": "PASS",
+      "detail": "marker=true restart=RESERVED/HELD abandoned=FAILED/RELEASED spent=0 calls=0"
+    },
+    {
+      "name": "t6-crash-after-executing-stays-executing-then-charged-bound-1000",
+      "status": "PASS",
+      "detail": "preTimeout=EXECUTING/HELD postTimeout=EXECUTING/CHARGED_BOUND(1000u$) taskSpent=500 releaseBlocked=true"
+    },
+    {
+      "name": "t7-late-usage-pure-ledger-settles-once-zero-second-call",
+      "status": "PASS",
+      "detail": "hitsAfterCrash=1 totalHits=1 before=EXECUTING/HELD after=SETTLED/SETTLED(28u$) lateAudits=1 dropped=1"
+    },
+    {
+      "name": "t8-missing-and-zero-usage-both-namespaces-held",
+      "status": "PASS",
+      "detail": "missing=HELD/HELD zero=HELD/HELD dupLate=dropped notSettled=2 calls=2"
+    },
+    {
+      "name": "t9-legal-zero-output-settles-3-and-missing-category-rate-held",
+      "status": "PASS",
+      "detail": "sub1=SETTLED/SETTLED(3u$) sub2=HELD/HELD calls=2"
+    },
+    {
+      "name": "t10-terminal-task-orphan-delivery-with-normal-billing",
+      "status": "PASS",
+      "detail": "sub1=ORPHAN/SETTLED(28u$) sub2=ORPHAN/CHARGED_BOUND(1000u$) orphanAudits=2 deliveredFiles=0"
+    },
+    {
+      "name": "remaining-boundaries-timeout-overcharge-and-adapter-unified-core",
+      "status": "PASS",
+      "detail": "timeout=EXECUTING/CHARGED_BOUND(1000) overchargeFrozen=1/2 adapter=succeeded/deepseek-flash//chat/completions"
+    }
+  ],
+  "dataSources": "digest 钉住 agent 容器（--network none / PI_OFFLINE=1 / 只读 rootfs / 宿主 ACL 锁定 proposals）+ 真实 daemon tick + pi-ai 1.5.2 子进程 + 本地 OpenAI SSE 环回服务 + 真实 SQLite 账本与 crashpoint 注入；零真实推理服务调用，未读 .env"
+}
