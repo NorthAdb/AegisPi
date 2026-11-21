@@ -14,7 +14,7 @@ import { piSettingsFromDefaults } from "../config/load-pi-settings.mjs";
 import { assertValidModelBaseUrl, MAX_MODEL_MESSAGES_BYTES, ModelCallError } from "./model-call.mjs";
 import { isHttpUrlWithoutCredentials, isSafeRelativeReadPath } from "./repo-observe.mjs";
 import { parseTriageConfig } from "./repo-triage.mjs";
-import { assertValidTelegramApiBase, TelegramSendError } from "./telegram-send.mjs";
+import { assertValidTelegramApiBase, parseTelegramProxyUrl, TelegramSendError } from "./telegram-send.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -198,9 +198,19 @@ function parseTelegramConfig(raw) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
     throw new ConfigError(`telegram.timeoutMs must be an integer 1000..120000, got ${JSON.stringify(timeoutMs)}`);
   }
+  const proxyRaw = raw.proxyUrl ?? null;
+  let proxyUrl = null;
+  if (proxyRaw !== null) {
+    try {
+      proxyUrl = parseTelegramProxyUrl(proxyRaw).url;
+    } catch (e) {
+      throw new ConfigError(e instanceof TelegramSendError ? e.message : String(e));
+    }
+  }
   return {
     apiBase: normalizedApiBase,
     allowRealSend: raw.allowRealSend === true,
+    proxyUrl,
     timeoutMs,
   };
 }

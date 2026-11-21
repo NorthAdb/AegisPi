@@ -1,10 +1,10 @@
 # test:restore — 一致性备份维护窗口 + 加密 manifest（含 dbSha256 字节认证）+ 删除清单 + 恢复演练 + 保留期清理
 
-生成：2026-11-21T09:00:53.796Z；Node v22.23.5；suite `restore`。
+生成：2026-11-21T09:33:03.568Z；Node v22.23.5；suite `restore`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
-| PASS | consistency-backup-seals-manifest-with-ledger | image=workspace-state\phase3\restore-drill\backups\consistency-1795251650636.db entries=1 |
+| PASS | consistency-backup-seals-manifest-with-ledger | image=workspace-state\phase3\restore-drill\backups\consistency-1795253579835.db entries=1 |
 | PASS | manifest-is-encrypted-at-rest | alg=aes-256-gcm; plaintext fields absent=true |
 | PASS | backup-outside-window-refused | -> OutsideMaintenanceWindow |
 | PASS | backup-without-manifest-key-refused | -> ManifestKeyMissing |
@@ -13,8 +13,8 @@
 | PASS | restore-applies-deletion-ledger-forgotten-stays-forgotten | applied deletions=["obj:scp:dm%3Atelegram%3A6101:089bf8e6a9b4be200625fa24a023dc6f5a09cdb4910f9b9b0b65b45cea835202"] |
 | PASS | restored-work-is-actionable-again | decide=true effect=READY dispatch=SUCCEEDED/SUCCEEDED timers fired=1 inbox_events=1 |
 | PASS | restored-db-migration-idempotent | schema_migrations rows=1 (a restored database is not re-applied) |
-| PASS | restore-rejects-equal-length-db-tampering | tampered image size unchanged=true -> backup image bytes hash to sha256:a7277785431b7f7bc84c0fdb6aa110691b4671d8d07ffb |
-| PASS | backup-retention-prunes-expired-pairs | before=2 pruned=["consistency-1793523653792.db"] fresh-kept=true |
+| PASS | restore-rejects-equal-length-db-tampering | tampered image size unchanged=true -> backup image bytes hash to sha256:7b5bd2e4800aba2fb06830fed3fbdf819984d53b12799b |
+| PASS | backup-retention-prunes-expired-pairs | before=2 pruned=["consistency-1793525583562.db"] fresh-kept=true |
 
 合计：11 PASS / 0 FAIL。
 

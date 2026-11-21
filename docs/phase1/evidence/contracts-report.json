@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T08:59:13.440Z",
+  "generatedAt": "2026-11-21T09:31:19.238Z",
   "nodeVersion": "v22.23.5",
   "results": [
     {
@@ -299,7 +299,7 @@
         {
           "name": "physical-model-in-catalog",
           "status": "PASS",
-          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:54281"
+          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:54045"
         },
         {
           "name": "dts-two-route-signatures",
@@ -574,7 +574,7 @@
         {
           "name": "entries-cursor",
           "status": "PASS",
-          "detail": "entries=8 leafId=8361d9f4 after-cursor=0"
+          "detail": "entries=8 leafId=9ecc4406 after-cursor=0"
         },
         {
           "name": "new_session",
@@ -657,7 +657,7 @@
         {
           "name": "compact-response-usage",
           "status": "PASS",
-          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"726b4eca\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
+          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"f4def41d\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
         }
       ]
     },
@@ -673,17 +673,17 @@
           "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
         },
         {
-          "name": "confirm-request:9a24f7cd",
+          "name": "confirm-request:31ea7460",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe confirm\",\"message\":\"Allow?\",\"timeout\":8000}"
         },
         {
-          "name": "select-request:472b1720",
+          "name": "select-request:31840860",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe select\",\"options\":[\"A\",\"B\"],\"timeout\":8000}"
         },
         {
-          "name": "editor-request:22c38f3a",
+          "name": "editor-request:bd23fbc5",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe editor\",\"prefill\":\"draft\"}"
         },
@@ -743,32 +743,32 @@
         {
           "name": "persistent-session-created",
           "status": "PASS",
-          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-nxFlmE\\2026-11-21T08-59-06-842Z_01a1fd54-aad9-73c6-8343-243339121575.jsonl"
+          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-ZxNdnh\\2026-11-21T09-31-12-869Z_01a1fd72-0e65-773f-bce6-e88b6eb69c96.jsonl"
         },
         {
           "name": "original-dir-removed",
           "status": "PASS",
-          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-nxFlmE\\2026-11-21T08-59-06-842Z_01a1fd54-aad9-73c6-8343-243339121575.jsonl"
+          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-ZxNdnh\\2026-11-21T09-31-12-869Z_01a1fd72-0e65-773f-bce6-e88b6eb69c96.jsonl"
         },
         {
           "name": "rpc-resume-with-gone-dir-errors",
           "status": "PASS",
-          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-yEQVVP\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-nxFlmE\\2026-11-21T08-59-06-842Z_01a1fd54-aad9-73c6-8343-2433"
+          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-KJ0sM3\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-ZxNdnh\\2026-11-21T09-31-12-869Z_01a1fd72-0e65-773f-bce6-e88b"
         },
         {
           "name": "fork-into-new-dir-works",
           "status": "PASS",
-          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-nxFlmE\\2026-11-21T08-59-08-287Z_01a1fd54-b07d-7570-9a3d-2d3a010b8cbc.jsonl"
+          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-ZxNdnh\\2026-11-21T09-31-14-305Z_01a1fd72-1401-72b2-9fc4-6c49c317d110.jsonl"
         },
         {
           "name": "fork-preserves-conversation",
           "status": "PASS",
-          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"49e41381\",\"parentId\":null,\"timestamp\":\"2026-11-21T08:59:06.843Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"d3f3321a\",\"parentId\":"
+          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"7ee9668e\",\"parentId\":null,\"timestamp\":\"2026-11-21T09:31:12.871Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"cfe515f9\",\"parentId\":"
         },
         {
           "name": "fork-header-parent-session",
           "status": "PASS",
-          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-nxFlmE\\2026-11-21T08-59-06-842Z_01a1fd54-aad9-73c6-8343-243339121575.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-BWdcPk"
+          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-ZxNdnh\\2026-11-21T09-31-12-869Z_01a1fd72-0e65-773f-bce6-e88b6eb69c96.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-1plWth"
         }
       ]
     },
@@ -781,7 +781,7 @@
         {
           "name": "catalog-metadata-preserved-under-override",
           "status": "PASS",
-          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:61227"
+          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:62022"
         },
         {
           "name": "env-var-makes-provider-available",
@@ -920,7 +920,7 @@
         {
           "name": "codemode-executes-with-nested-read",
           "status": "PASS",
-          "detail": "result 1: {\"isError\":false,\"content\":\"[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"Script completed\\\\nWall time 0.2 seconds\\\\nOutput:\\\\n\\\"},{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"saw:300 chars\\\"}]\",\"calls\":[{\"name\":\"read\",\"status\":\"ok\",\"id\":\"call_probe_1/1\"}]}"
+          "detail": "result 1: {\"isError\":false,\"content\":\"[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"Script completed\\\\nWall time 0.1 seconds\\\\nOutput:\\\\n\\\"},{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"saw:300 chars\\\"}]\",\"calls\":[{\"name\":\"read\",\"status\":\"ok\",\"id\":\"call_probe_1/1\"}]}"
         },
         {
           "name": "codemode-details-nested-calls",

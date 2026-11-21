@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-21T08:58:37.782Z",
+  "generatedAt": "2026-11-21T09:30:43.235Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-unit",
   "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
   "counts": {
-    "pass": 45,
+    "pass": 46,
     "fail": 0
   },
   "results": [
@@ -141,12 +141,12 @@
     {
       "name": "http-transport-carries-bytes-and-maps-outcomes",
       "status": "PASS",
-      "detail": "submit=succeeded(ext-1795251476776) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
+      "detail": "submit=succeeded(ext-1795253396519) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
     },
     {
       "name": "authorized-production-tick-submits-over-real-http-transport",
       "status": "PASS",
-      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795251479505 local-service-saw=true"
+      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795253399068 local-service-saw=true"
     },
     {
       "name": "unauthorized-production-tick-sends-zero-bytes-through-real-transport",
@@ -156,7 +156,7 @@
     {
       "name": "not-yet-due-effect-is-not-dispatched-even-when-authorized",
       "status": "PASS",
-      "detail": "daemon exit=0 effect=READY due-in=58466ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing)"
+      "detail": "daemon exit=0 effect=READY due-in=58595ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing)"
     },
     {
       "name": "dispatcher-refuses-before-due-time-and-commits-at-it",
@@ -169,9 +169,14 @@
       "detail": "ok=SUCCEEDED(tg:6101:9001) group=SUCCEEDED(tg:-100999:9001) empty=FAILED mismatch=FAILED policyOff=FAILED realBlocked=FAILED revoked=FAILED slow=UNKNOWN remote=FAILED leakFree=true"
     },
     {
+      "name": "telegram-outbound-connect-proxy-and-fail-closed",
+      "status": "PASS",
+      "detail": "proxy=SUCCEEDED(connects=1) badCfgExit=2 deadProxy=FAILED(local_error: connect ECONNREFUSED 127.0.0.1:55630 ) leakFree=true"
+    },
+    {
       "name": "worker-reserves-before-call-and-settles-real-usage",
       "status": "PASS",
-      "detail": "daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795251503643 at=1795251504425 settled=1795251504460]"
+      "detail": "daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795253427825 at=1795253428686 settled=1795253428718]"
     },
     {
       "name": "worker-no-usage-keeps-reservation-held-never-zero",

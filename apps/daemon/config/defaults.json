@@ -59,6 +59,7 @@
     "$comment": "真实 Telegram Bot 出站传输（Unit 4.3）：apiBase null 且 allowRealSend false 时失败关闭，零出站字节。仅作用于 dm:telegram:<id> / group:telegram:<id> / telegram:<id> 目标，并强制要求 adapters.allowedRecipients 非空与宿主凭据槽位 im 接线。",
     "apiBase": null,
     "allowRealSend": false,
+    "proxyUrl": null,
     "timeoutMs": 15000
   },
   "credentials": {

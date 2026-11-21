@@ -210,6 +210,7 @@ export async function main(argv = process.argv.slice(2)) {
           stateDir: dataDir,
           apiBase: config.telegram.apiBase,
           allowRealSend: config.telegram.allowRealSend,
+          proxyUrl: config.telegram.proxyUrl ?? null,
           timeoutMs: config.telegram.timeoutMs,
           allowedRecipients: config.adapters.allowedRecipients,
         })

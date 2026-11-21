@@ -92,6 +92,88 @@ export function resolveVerifiedNotificationText({ stateDir, contentHash, extra =
   return { ok: false, error: "telegram refused: no sha256-verified notification text found in stateDir or intent extra" };
 }
 
+export function parseTelegramProxyUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || rawUrl.trim().length === 0 || /\s/.test(rawUrl.trim())) {
+    throw new TelegramSendError(`telegram.proxyUrl must be null or a whitespace-free URL string, got ${JSON.stringify(rawUrl)}`);
+  }
+  const trimmed = rawUrl.trim();
+  const normalizedInput = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `http://${trimmed}`;
+  let u;
+  try {
+    u = new URL(normalizedInput);
+  } catch {
+    throw new TelegramSendError(`telegram.proxyUrl is not a valid URL: ${JSON.stringify(rawUrl)}`);
+  }
+  if (u.protocol !== "http:") {
+    throw new TelegramSendError(`telegram.proxyUrl must use http: for HTTP CONNECT tunneling, got ${u.protocol}`);
+  }
+  if (u.username || u.password || u.search || u.hash || (u.pathname !== "" && u.pathname !== "/")) {
+    throw new TelegramSendError(`telegram.proxyUrl must be a pathless root URL without credentials, got ${JSON.stringify(rawUrl)}`);
+  }
+  const port = Number(u.port || 80);
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !u.hostname) {
+    throw new TelegramSendError(`telegram.proxyUrl has invalid host or port: ${JSON.stringify(rawUrl)}`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  return { url: u.origin, host, port };
+}
+
+function isLoopbackProxyHost(host) {
+  const clean = String(host ?? "").toLowerCase();
+  return clean === "127.0.0.1" || clean === "::1" || clean === "localhost";
+}
+
+function readWindowsLoopbackProxy() {
+  if (process.platform !== "win32") return null;
+  try {
+    const reg = (value) =>
+      spawnSync(
+        "reg",
+        ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", "/v", value],
+        { encoding: "utf8", timeout: 3000 },
+      );
+    const enable = reg("ProxyEnable");
+    if (enable.status !== 0 || !/ProxyEnable\s+REG_DWORD\s+0x1\b/.test(enable.stdout ?? "")) return null;
+    const server = reg("ProxyServer");
+    const m = (server.stdout ?? "").match(/ProxyServer\s+REG_SZ\s+(.+)/);
+    if (!m) return null;
+    const raw = m[1].trim();
+    const parts = raw.split(";").map((s) => s.trim()).filter(Boolean);
+    const httpsEntry = parts.find((p) => /^https=/i.test(p)) ?? parts.find((p) => /^http=/i.test(p)) ?? parts[0];
+    const addr = httpsEntry ? httpsEntry.replace(/^(?:https?|socks)=/i, "").trim() : "";
+    if (!addr) return null;
+    const parsed = parseTelegramProxyUrl(addr);
+    return isLoopbackProxyHost(parsed.host) ? { host: parsed.host, port: parsed.port } : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveTelegramProxy({ normalizedBase, allowRealSend, parsedExplicitProxy }) {
+  if (parsedExplicitProxy) {
+    return { ok: true, proxy: { host: parsedExplicitProxy.host, port: parsedExplicitProxy.port } };
+  }
+  if (isLoopbackEndpoint(normalizedBase) || allowRealSend !== true) {
+    return { ok: true, proxy: null };
+  }
+  const envProxy =
+    process.env.AEGISPI_TG_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    "";
+  if (envProxy.trim().length > 0) {
+    try {
+      const parsed = parseTelegramProxyUrl(envProxy.trim());
+      return { ok: true, proxy: { host: parsed.host, port: parsed.port } };
+    } catch (e) {
+      return { ok: false, error: `telegram refused: invalid proxy configuration (${e.message})` };
+    }
+  }
+  return { ok: true, proxy: readWindowsLoopbackProxy() };
+}
+
 export function createTelegramSendTransport({
   db,
   stateDir,
@@ -99,8 +181,10 @@ export function createTelegramSendTransport({
   allowRealSend = false,
   timeoutMs = 15000,
   allowedRecipients = [],
+  proxyUrl = null,
 }) {
   const normalizedBase = assertValidTelegramApiBase(apiBase);
+  const parsedExplicitProxy = proxyUrl !== null && proxyUrl !== undefined ? parseTelegramProxyUrl(proxyUrl) : null;
   const recipientAllowlist = Array.isArray(allowedRecipients) ? [...allowedRecipients] : [];
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
     throw new TelegramSendError(`telegram.timeoutMs must be an integer 1000..120000, got ${JSON.stringify(timeoutMs)}`);
@@ -156,6 +240,14 @@ export function createTelegramSendTransport({
       if (!resolved.ok) {
         return { status: "failed_local", error: resolved.error };
       }
+      const proxyRes = resolveTelegramProxy({
+        normalizedBase,
+        allowRealSend: allowRealSend === true,
+        parsedExplicitProxy,
+      });
+      if (!proxyRes.ok) {
+        return { status: "failed_local", error: proxyRes.error };
+      }
 
       const r = spawnSync(process.execPath, [TELEGRAM_CHILD], {
         input: JSON.stringify({
@@ -164,6 +256,7 @@ export function createTelegramSendTransport({
           chatId,
           text: resolved.text,
           timeoutMs,
+          proxy: proxyRes.proxy,
         }),
         env: buildSafeChildEnv(),
         encoding: "utf8",

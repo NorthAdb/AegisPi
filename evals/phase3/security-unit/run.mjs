@@ -8,6 +8,7 @@
 // test:security:integration and test:offline-jobs.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -1013,12 +1014,12 @@ function seed(tag) {
     return { ws, effectId: card.effectId };
   }
 
-  function writeTgConfig(ws, { apiBase = tgEndpoint, allowRealSend = false, allowExternal = true, imSlot = "tg-test-slot", allowedRecipients = ["dm:telegram:6101"], timeoutMs = 5000 } = {}) {
+  function writeTgConfig(ws, { apiBase = tgEndpoint, allowRealSend = false, allowExternal = true, imSlot = "tg-test-slot", allowedRecipients = ["dm:telegram:6101"], proxyUrl = null, timeoutMs = 5000 } = {}) {
     const defaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
     defaults.policy = { allowRealExternalWrites: allowExternal };
     defaults.credentials = { im: imSlot, mail: null, repo: null };
     defaults.adapters = { ...defaults.adapters, allowedRecipients };
-    defaults.telegram = { apiBase, allowRealSend, timeoutMs };
+    defaults.telegram = { apiBase, allowRealSend, proxyUrl, timeoutMs };
     const cfgPath = join(ws.stateDir, "tg-config.json");
     writeFileSync(cfgPath, JSON.stringify(defaults, null, 2), "utf8");
     return cfgPath;
@@ -1156,6 +1157,64 @@ function seed(tag) {
         noTokenLeak,
       `ok=${efOk?.state}(${efOk?.external_id}) group=${efGroupOk?.state}(${efGroupOk?.external_id}) empty=${efEmpty?.state} mismatch=${efMismatch?.state} policyOff=${efPolicyOff?.state} realBlocked=${efRealBlocked?.state} revoked=${efRevoked?.state} slow=${efSlow?.state} remote=${efRemote?.state} leakFree=${noTokenLeak}`,
     );
+
+    const proxyHelperPath = join(repoRoot, "evals", "phase3", "security-unit", "helpers", "local-connect-proxy.mjs");
+    const proxyPortFile = join(tgWs.stateDir, "proxy-port.txt");
+    const proxyLogFile = join(tgWs.stateDir, "proxy-log.jsonl");
+    const proxySvc = spawn(process.execPath, [proxyHelperPath, proxyPortFile, proxyLogFile], { stdio: "ignore" });
+    for (let i = 0; i < 100 && !existsSync(proxyPortFile); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const readProxyLogs = () =>
+      existsSync(proxyLogFile)
+        ? readFileSync(proxyLogFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l))
+        : [];
+    try {
+      const localProxyUrl = `http://127.0.0.1:${readFileSync(proxyPortFile, "utf8").trim()}`;
+      const cProxyOk = seedTelegramEffect("su-tg-proxy-ok", { text: "Unit 4.5 CONNECT proxy ok" });
+      const cfgProxyOk = writeTgConfig(cProxyOk.ws, { proxyUrl: localProxyUrl });
+      const beforeProxy = tgLog().length;
+      const rProxyOk = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cProxyOk.ws.stateDir}`, `--config=${cfgProxyOk}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+      const sentProxy = tgLog().slice(beforeProxy).at(0);
+      const dbProxyOk = openDatabase(cProxyOk.ws.dbPath, { readOnly: true });
+      const efProxyOk = dbProxyOk.prepare("SELECT state, external_id FROM effects WHERE id=?").get(cProxyOk.effectId);
+      dbProxyOk.close();
+      const connectCount = readProxyLogs().length;
+
+      const cBadProxyCfg = seedTelegramEffect("su-tg-bad-proxy-cfg", { text: "bad proxy scheme" });
+      const cfgBadProxy = writeTgConfig(cBadProxyCfg.ws, { proxyUrl: "socks5://127.0.0.1:7897" });
+      const rBadProxy = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cBadProxyCfg.ws.stateDir}`, `--config=${cfgBadProxy}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+
+      const deadSock = createHttpServer();
+      await new Promise((r) => deadSock.listen(0, "127.0.0.1", r));
+      const unusedPort = deadSock.address().port;
+      await new Promise((r) => deadSock.close(r));
+      const cDeadProxy = seedTelegramEffect("su-tg-dead-proxy", { text: "dead proxy fails local" });
+      const cfgDeadProxy = writeTgConfig(cDeadProxy.ws, { proxyUrl: `http://127.0.0.1:${unusedPort}`, timeoutMs: 2000 });
+      const rDeadProxy = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cDeadProxy.ws.stateDir}`, `--config=${cfgDeadProxy}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+      const dbDeadProxy = openDatabase(cDeadProxy.ws.dbPath, { readOnly: true });
+      const efDeadProxy = dbDeadProxy.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cDeadProxy.effectId);
+      dbDeadProxy.close();
+      const proxyLeakFree = ![rProxyOk.stdout, rProxyOk.stderr, rDeadProxy.stderr, efDeadProxy?.last_error ?? ""].join("\n").includes(fakeToken);
+
+      suite.check(
+        "telegram-outbound-connect-proxy-and-fail-closed",
+        rProxyOk.status === 0 &&
+          efProxyOk?.state === "SUCCEEDED" &&
+          efProxyOk?.external_id === "tg:6101:9001" &&
+          sentProxy?.text === "Unit 4.5 CONNECT proxy ok" &&
+          connectCount === 1 &&
+          rBadProxy.status !== 0 &&
+          /telegram\.proxyUrl/.test(rBadProxy.stderr ?? "") &&
+          rDeadProxy.status === 0 &&
+          efDeadProxy?.state === "FAILED" &&
+          /^local_error:/.test(efDeadProxy?.last_error ?? "") &&
+          proxyLeakFree,
+        `proxy=${efProxyOk?.state}(connects=${connectCount}) badCfgExit=${rBadProxy.status} deadProxy=${efDeadProxy?.state}(${String(efDeadProxy?.last_error ?? "").slice(0, 50)}) leakFree=${proxyLeakFree}`,
+      );
+    } finally {
+      proxySvc.kill();
+    }
   } finally {
     tgSvc.kill();
     if (prevTgToken === undefined) delete process.env.AEGISPI_TEST_TG_BOT_TOKEN;

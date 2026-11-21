@@ -82,6 +82,7 @@ const defaultsFailClosedPreserved =
   defaults.upstream?.submitUrl === null &&
   defaults.telegram?.apiBase === null &&
   defaults.telegram?.allowRealSend === false &&
+  defaults.telegram?.proxyUrl === null &&
   Array.isArray(defaults.adapters?.allowedRecipients) &&
   defaults.adapters.allowedRecipients.length === 0 &&
   defaults.credentials?.mail === null &&
