@@ -95,5 +95,11 @@
     "maxExcerptBytes": 32768,
     "maxFiles": 32,
     "timeoutMs": 30000
+  },
+  "triage": {
+    "$comment": "Scenario 4 仓库影响判定策略（03 §2 / 04 §6，Unit 4.4）：allowRealTriage 默认 false，presets 默认为空；仅允许执行宿主预配置与核准的安全只读采集+无网对比预设，AI 仅产 bounded 建议文本，4 类裁定（affected/unaffected/unknown/infra_error）完全由宿主基于容器退出码与 oracle 事实作出。",
+    "allowRealTriage": false,
+    "allowModelObserve": true,
+    "presets": {}
   }
 }

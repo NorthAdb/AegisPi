@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-21T09:08:24.730Z",
+  "ok": true,
+  "summary": {
+    "passed": 125,
+    "failed": 0,
+    "judged": 125,
+    "taskBudgetCapMicrousd": 800000,
+    "dayBudgetCapMicrousd": 5000000,
+    "defaultsFailClosedPreserved": true
+  },
+  "suites": [
+    {
+      "id": "triage",
+      "file": "docs/phase3/evidence/triage-report.json",
+      "scope": "Scenario 4 offline baseline/target triage, oracle verdict, and outbox notify",
+      "present": true,
+      "generatedAt": "2026-11-21T08:55:13.703Z",
+      "passed": 7,
+      "failed": 0,
+      "judged": 7,
+      "exitCode": 0
+    },
+    {
+      "id": "repo-observe",
+      "file": "docs/phase3/evidence/repo-observe-report.json",
+      "scope": "Read-only repo observe acquisition, KV prefix ordering, and HELD stop",
+      "present": true,
+      "generatedAt": "2026-11-21T08:56:46.385Z",
+      "passed": 7,
+      "failed": 0,
+      "judged": 7,
+      "exitCode": 0
+    },
+    {
+      "id": "model-proposal",
+      "file": "docs/phase3/evidence/model-proposal-report.json",
+      "scope": "Agent->Host pi-ai 1.5.2 state machine T1-T10 and empty reply block",
+      "present": true,
+      "generatedAt": "2026-11-21T08:57:44.909Z",
+      "passed": 15,
+      "failed": 0,
+      "judged": 15,
+      "exitCode": 0
+    },
+    {
+      "id": "security-unit",
+      "file": "docs/phase3/evidence/security-unit-report.json",
+      "scope": "Fail-closed credentials, ACL, budget, and Telegram outbound guards",
+      "present": true,
+      "generatedAt": "2026-11-21T08:58:37.782Z",
+      "passed": 45,
+      "failed": 0,
+      "judged": 45,
+      "exitCode": 0
+    },
+    {
+      "id": "offline-jobs",
+      "file": "docs/phase3/evidence/offline-jobs-report.json",
+      "scope": "Offline container execution, deadlines, cancellation, and oracle gates",
+      "present": true,
+      "generatedAt": "2026-11-21T09:07:23.756Z",
+      "passed": 14,
+      "failed": 0,
+      "judged": 14,
+      "exitCode": 0
+    },
+    {
+      "id": "security-integration",
+      "file": "docs/phase3/evidence/security-integration-report.json",
+      "scope": "Container network, rootfs, symlink, and escape integration matrix",
+      "present": true,
+      "generatedAt": "2026-11-21T09:07:23.792Z",
+      "passed": 29,
+      "failed": 0,
+      "judged": 29,
+      "exitCode": 0
+    },
+    {
+      "id": "repo-observe-real",
+      "file": "docs/phase3/evidence/repo-observe-real-report.json",
+      "scope": "Unit 4.2 live GitHub + DeepSeek acceptance (if present)",
+      "present": true,
+      "generatedAt": "2026-11-21T05:28:45.388Z",
+      "passed": 8,
+      "failed": 0,
+      "judged": 8,
+      "exitCode": 0
+    }
+  ],
+  "realCostSummary": {
+    "sourceFile": "docs/phase3/evidence/repo-observe-real-report.json",
+    "generatedAt": "2026-11-21T05:28:45.388Z",
+    "passed": 8,
+    "failed": 0,
+    "taskBudgetCapMicrousd": 800000,
+    "dayBudgetCapMicrousd": 5000000
+  }
+}

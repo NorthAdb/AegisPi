@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { piSettingsFromDefaults } from "../config/load-pi-settings.mjs";
 import { assertValidModelBaseUrl, MAX_MODEL_MESSAGES_BYTES, ModelCallError } from "./model-call.mjs";
 import { isHttpUrlWithoutCredentials, isSafeRelativeReadPath } from "./repo-observe.mjs";
+import { parseTriageConfig } from "./repo-triage.mjs";
 import { assertValidTelegramApiBase, TelegramSendError } from "./telegram-send.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -102,7 +103,13 @@ function parseAcquisitionTarget(targetId, spec) {
       throw new ConfigError(`acquisition.targets.${targetId}.readPaths contains unsafe path ${JSON.stringify(p)}`);
     }
   }
-  const allowedRedirectHosts = Array.isArray(spec.allowedRedirectHosts) ? spec.allowedRedirectHosts.map((h) => String(h).toLowerCase()) : [];
+  let allowedRedirectHosts = [];
+  if (spec.allowedRedirectHosts !== undefined) {
+    if (!Array.isArray(spec.allowedRedirectHosts) || !spec.allowedRedirectHosts.every((h) => typeof h === "string")) {
+      throw new ConfigError(`acquisition.targets.${targetId}.allowedRedirectHosts must be an array of strings`);
+    }
+    allowedRedirectHosts = spec.allowedRedirectHosts.map((h) => h.toLowerCase());
+  }
   for (const h of allowedRedirectHosts) {
     if (!HOSTNAME_RE.test(h)) {
       throw new ConfigError(`acquisition.targets.${targetId}.allowedRedirectHosts invalid host ${JSON.stringify(h)}`);
@@ -249,6 +256,12 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
   });
   const acquisition = parseAcquisitionConfig(defaults.acquisition ?? {});
   const telegram = parseTelegramConfig(defaults.telegram ?? {});
+  let triage;
+  try {
+    triage = parseTriageConfig(defaults.triage ?? {});
+  } catch (e) {
+    throw new ConfigError(e.message);
+  }
 
   return {
     defaultsPath: path,
@@ -279,7 +292,7 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     // token count in that category keeps the reservation HELD, never zero.
     model: {
       ...(() => {
-        const { endpoint: _removed, ...rest } = modelRaw;
+        const { endpoint: _removed, $modelComment: _mc, $evidence: _ev, $comment: _c, ...rest } = modelRaw;
         return rest;
       })(),
       baseUrl,
@@ -334,5 +347,6 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       timeZone: defaults.time?.timezoneIANA ?? "Asia/Hong_Kong",
     },
     acquisition,
+    triage,
   };
 }

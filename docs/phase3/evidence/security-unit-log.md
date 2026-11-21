@@ -1,6 +1,6 @@
 # test:security:unit — 确定性安全门禁（02 §8 第一组）
 
-生成：2026-11-21T07:36:46.146Z；Node v22.23.5；suite `security-unit`。
+生成：2026-11-21T08:58:37.782Z；Node v22.23.5；suite `security-unit`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -30,13 +30,13 @@
 | PASS | sse-filters-to-caller-scopes-until-granted | own-visible=true foreign-before-grant=false foreign-after-grant=true |
 | PASS | no-flag-daemon-tick-settles-no-fabricated-usage | daemon exit=0 settlements=0 worker-reservations=0 (nothing is claimed or settled without the declared fixture flag) |
 | PASS | fixture-daemon-tick-settlement-is-labeled-fixture | daemon exit=0 settlements=1 fixture-labeled=true |
-| PASS | http-transport-carries-bytes-and-maps-outcomes | submit=succeeded(ext-1795246564680) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline |
-| PASS | authorized-production-tick-submits-over-real-http-transport | daemon exit=0 effect=SUCCEEDED/ext-1795246567659 local-service-saw=true |
+| PASS | http-transport-carries-bytes-and-maps-outcomes | submit=succeeded(ext-1795251476776) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline |
+| PASS | authorized-production-tick-submits-over-real-http-transport | daemon exit=0 effect=SUCCEEDED/ext-1795251479505 local-service-saw=true |
 | PASS | unauthorized-production-tick-sends-zero-bytes-through-real-transport | daemon exit=0 effect=FAILED zero-bytes=true adapter-refused-audits=1 |
-| PASS | not-yet-due-effect-is-not-dispatched-even-when-authorized | daemon exit=0 effect=READY due-in=58218ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing) |
+| PASS | not-yet-due-effect-is-not-dispatched-even-when-authorized | daemon exit=0 effect=READY due-in=58466ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing) |
 | PASS | dispatcher-refuses-before-due-time-and-commits-at-it | early -> effect efx:notify%3Adm%253atelegram%253a6101%3Acase-su-dispa still=READY submitting-audits-before=true due -> SUCCEEDED/SUCCEEDED deliveries=1 |
 | PASS | telegram-outbound-transport-fail-closed-and-secret-hygiene | ok=SUCCEEDED(tg:6101:9001) group=SUCCEEDED(tg:-100999:9001) empty=FAILED mismatch=FAILED policyOff=FAILED realBlocked=FAILED revoked=FAILED slow=UNKNOWN remote=FAILED leakFree=true |
-| PASS | worker-reserves-before-call-and-settles-real-usage | daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795246591356 at=1795246592107 settled=1795246592139] |
+| PASS | worker-reserves-before-call-and-settles-real-usage | daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795251503643 at=1795251504425 settled=1795251504460] |
 | PASS | worker-no-usage-keeps-reservation-held-never-zero | daemon exit=0 req=HELD reservation=HELD settlements=0 not-settled-audits=1 |
 | PASS | worker-unauthorized-price-catalog-keeps-reservation-held | daemon exit=0 req=HELD reservation=HELD settlements=0 price-not-authorized-audits=1 |
 | PASS | worker-refuses-unauthorized-endpoint-before-any-call | daemon exit=0 reqRow=absent reservations=0 honest-log=true |
@@ -47,7 +47,7 @@
 | PASS | webhook-closed-in-read-only-maintenance | http=503 inbox-rows=0 |
 | PASS | disk-drill-seam-may-only-tighten-never-loosen | warn 0.001 -> refused; critical 5 -> refused; critical 25 alone -> refused; warn 25 + critical 12 -> accepted |
 | PASS | daemon-refuses-to-start-on-loosened-drill-seam | daemon exit=2 line=config: refusing to start — AEGISPI_DISK_DRILL_WARN_GIB may only tighten the watermark (production warn is 20  |
-| PASS | disk-watermark-critical-drill-opens-read-only | daemon exit=3 disk-line=disk: level=critical free=441GiB ratio=0.4738 |
+| PASS | disk-watermark-critical-drill-opens-read-only | daemon exit=3 disk-line=disk: level=critical free=441GiB ratio=0.4735 |
 | PASS | disk-watermark-alerts-once-per-level-transition | transition-alert=true steady-repeat=false audit-rows=1 stream-events=1 |
 
 合计：45 PASS / 0 FAIL。

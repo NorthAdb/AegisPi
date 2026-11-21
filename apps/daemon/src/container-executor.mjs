@@ -31,18 +31,22 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { withTx } from "./db/tx.mjs";
 import { writeAudit } from "./audit.mjs";
 import { insertObjectRow, putObjectContent } from "./objects.mjs";
 import { evaluateJobOracle, loadJobOracleContent, validateJobOracle } from "./job-oracle.mjs";
+import { isSafeRelativeReadPath } from "./repo-observe.mjs";
 import {
   createJob,
   finishJob,
@@ -79,8 +83,102 @@ export function createContainerExecutor(db, {
   }
   const jobsDir = join(stateDir, "jobs");
 
+  function safeJobDirName(jobId) {
+    if (typeof jobId !== "string" || jobId.length === 0) {
+      throw new ExecutorError("jobId must be a non-empty string");
+    }
+    const sanitized = jobId.replace(/[^A-Za-z0-9._-]/g, "_");
+    if (sanitized === "." || sanitized === "..") {
+      throw new ExecutorError(`jobId ${JSON.stringify(jobId)} resolves to invalid directory component`);
+    }
+    return sanitized;
+  }
+
   function jobDir(jobId) {
-    return join(jobsDir, jobId.replace(/[^A-Za-z0-9._-]/g, "_"));
+    const resolvedJobs = resolve(jobsDir);
+    const target = resolve(resolvedJobs, safeJobDirName(jobId));
+    if (!target.startsWith(resolvedJobs + sep)) {
+      throw new ExecutorError(`jobDir escaped jobs root for ${JSON.stringify(jobId)}`);
+    }
+    return target;
+  }
+
+  function stagedInputDir(jobId) {
+    const inputsRoot = resolve(stateDir, "job-inputs");
+    const target = resolve(inputsRoot, safeTaskDirComponent(jobId));
+    if (!target.startsWith(inputsRoot + sep)) {
+      throw new ExecutorError(`stagedInputDir escaped staging root for ${JSON.stringify(jobId)}`);
+    }
+    return target;
+  }
+
+  function prepareStagedInputFiles(jobId, inputFiles) {
+    if (inputFiles === null || inputFiles === undefined) return null;
+    if (typeof inputFiles !== "object" || Array.isArray(inputFiles)) {
+      throw new ExecutorError(`job ${jobId} inputFiles must be a plain object mapping safe paths to contents`);
+    }
+    const entries = Object.entries(inputFiles);
+    if (entries.length > 4096) {
+      throw new ExecutorError(`job ${jobId} inputFiles exceeds max entry count (4096)`);
+    }
+    const prepared = [];
+    let totalBytes = 0;
+    const seenPaths = new Set();
+    for (const [relPath, content] of entries) {
+      if (!isSafeRelativeReadPath(relPath) || relPath.toLowerCase() === "manifest.json") {
+        throw new ExecutorError(`job ${jobId} invalid staged input path ${JSON.stringify(relPath)}`);
+      }
+      if (typeof content !== "string" && !Buffer.isBuffer(content)) {
+        throw new ExecutorError(`job ${jobId} staged input ${relPath} must be string or Buffer`);
+      }
+      if (seenPaths.has(relPath)) {
+        throw new ExecutorError(`job ${jobId} duplicate staged input path ${relPath}`);
+      }
+      seenPaths.add(relPath);
+      const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
+      totalBytes += buf.byteLength;
+      if (totalBytes > 16 * 1024 * 1024) {
+        throw new ExecutorError(`job ${jobId} staged inputFiles exceed 16 MiB bound`);
+      }
+      prepared.push({ relPath, buf });
+    }
+    return prepared;
+  }
+
+  function writePreparedStagedFiles(jobId, prepared) {
+    const stageRoot = stagedInputDir(jobId);
+    rmSync(stageRoot, { recursive: true, force: true });
+    if (!prepared || prepared.length === 0) return;
+    const inputsRoot = resolve(stateDir, "job-inputs");
+    mkdirSync(inputsRoot, { recursive: true });
+    const stageTmp = `${stageRoot}.tmp.${process.pid}.${Date.now()}`;
+    rmSync(stageTmp, { recursive: true, force: true });
+    try {
+      mkdirSync(stageTmp, { recursive: true });
+      const realTmpRoot = realpathSync(stageTmp);
+      for (const { relPath, buf } of prepared) {
+        const dest = resolve(stageTmp, relPath);
+        if (!dest.startsWith(resolve(stageTmp) + sep)) {
+          throw new ExecutorError(`job ${jobId} staged input escaped staging boundary`);
+        }
+        const parent = dirname(dest);
+        mkdirSync(parent, { recursive: true });
+        const realParent = realpathSync(parent);
+        if (realParent !== realTmpRoot && !realParent.startsWith(realTmpRoot + sep)) {
+          throw new ExecutorError(`job ${jobId} staged input parent resolved outside staging directory`);
+        }
+        writeFileSync(dest, buf);
+      }
+      renameSync(stageTmp, stageRoot);
+    } catch (e) {
+      rmSync(stageTmp, { recursive: true, force: true });
+      if (e instanceof ExecutorError) throw e;
+      throw new ExecutorError(`job ${jobId} failed staging input files (${e.code ?? "fs"}): ${e.message}`);
+    }
+  }
+
+  function removeStagedInputDir(jobId) {
+    rmSync(stagedInputDir(jobId), { recursive: true, force: true });
   }
 
   // One disposable, image-owned output volume per job attempt: a fresh volume
@@ -108,6 +206,10 @@ export function createContainerExecutor(db, {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(join(dir, "input"), { recursive: true });
     mkdirSync(join(dir, "output"), { recursive: true });
+    const stageRoot = stagedInputDir(jobId);
+    if (existsSync(stageRoot)) {
+      cpSync(stageRoot, join(dir, "input"), { recursive: true, dereference: false });
+    }
     writeFileSync(join(dir, "input", "manifest.json"), JSON.stringify(manifest) + "\n", "utf8");
     const containerName = `aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 80)}`;
     const volume = outputVolumeName(jobId);
@@ -181,7 +283,7 @@ export function createContainerExecutor(db, {
   // success against and is refused before anything runs. The definition is
   // validated at this boundary and stored as a content-addressed object the
   // job can never touch.
-  function submitJob({ jobId, taskId, attemptId, fence, manifest, oracle, deadlineAt, now }) {
+  function submitJob({ jobId, taskId, attemptId, fence, manifest, oracle, deadlineAt, now, inputFiles = null }) {
     const task = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(taskId);
     if (!task) {
       throw new ExecutorError(`task ${taskId} not found; an offline job belongs to a task`);
@@ -196,6 +298,9 @@ export function createContainerExecutor(db, {
     } catch (e) {
       throw new ExecutorError(`job ${jobId} oracle is not a valid acceptance definition: ${e.message}`);
     }
+    safeJobDirName(jobId);
+    stagedInputDir(jobId);
+    const preparedInputs = prepareStagedInputFiles(jobId, inputFiles);
     const manifestObject = insertObjectRow(db, {
       scopeId: task.scope_id,
       kind: "job_manifest",
@@ -229,6 +334,7 @@ export function createContainerExecutor(db, {
       deadlineAt,
       now,
     });
+    writePreparedStagedFiles(jobId, preparedInputs);
     const launched = launchExisting({ jobId, taskId, attemptId, fence, manifest, now });
     return { jobId, state: "RUNNING", ...launched };
   }
@@ -262,10 +368,16 @@ export function createContainerExecutor(db, {
       // cancellation; the -f fallback is for jobs that trap SIGTERM.
       docker(dockerBin, ["stop", "--time", "5", containerId]);
       docker(dockerBin, ["rm", "-f", containerId]);
-      removeOutputVolume(jobId);
-      rmSync(join(jobsDir, jobPidFileName(jobId)), { force: true });
     }
+    cleanupTerminalJobArtifacts(jobId);
     return out;
+  }
+
+  function cleanupTerminalJobArtifacts(jobId) {
+    removeOutputVolume(jobId);
+    removeStagedInputDir(jobId);
+    rmSync(join(jobDir(jobId), "input"), { recursive: true, force: true });
+    rmSync(join(jobsDir, jobPidFileName(jobId)), { force: true });
   }
 
   // Poll RUNNING jobs once: collect finished ones, enforce host-side
@@ -291,8 +403,7 @@ export function createContainerExecutor(db, {
             writeAudit(db, { code: "container_job_lost", details: { job_id: job.id, container: containerId }, now });
           }
         });
-        rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
-        removeOutputVolume(job.id);
+        cleanupTerminalJobArtifacts(job.id);
         events.push({ jobId: job.id, state: "LOST" });
         continue;
       }
@@ -306,8 +417,7 @@ export function createContainerExecutor(db, {
           markTimedOutJob(db, { jobId: job.id, now });
           collectOutput(containerId, join(jobDir(job.id), "output"));
           docker(dockerBin, ["rm", "-f", containerId]);
-          removeOutputVolume(job.id);
-          rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
+          cleanupTerminalJobArtifacts(job.id);
           events.push({ jobId: job.id, state: "TIMED_OUT", hostEnforced: true });
         }
         continue;
@@ -324,8 +434,7 @@ export function createContainerExecutor(db, {
       const exitCode = Number(exitCodeStr);
       collectOutput(containerId, join(jobDir(job.id), "output"));
       docker(dockerBin, ["rm", "-f", containerId]);
-      removeOutputVolume(job.id);
-      rmSync(join(jobsDir, jobPidFileName(job.id)), { force: true });
+      cleanupTerminalJobArtifacts(job.id);
       if (exitCode === 124) {
         markTimedOutJob(db, { jobId: job.id, now });
         events.push({ jobId: job.id, state: "TIMED_OUT", exitCode });
@@ -458,8 +567,7 @@ export function createContainerExecutor(db, {
         killed = k.code === 0;
         docker(dockerBin, ["rm", "-f", containerId]);
       }
-      removeOutputVolume(r.id);
-      rmSync(join(jobsDir, jobPidFileName(r.id)), { force: true });
+      cleanupTerminalJobArtifacts(r.id);
       withTx(db, () => {
         const changed = db
           .prepare("UPDATE execution_jobs SET state='LOST', ended_at=?, exit_code=NULL WHERE id=? AND state='RUNNING'")
@@ -831,7 +939,13 @@ export function createAcquisitionLauncher(db, {
           lastProgressAt = Date.now();
           try {
             onProgress();
-          } catch {}
+          } catch (e) {
+            if (e?.name === "StaleWorker") {
+              docker(dockerBin, ["kill", containerId]);
+              exitCode = 125;
+              break;
+            }
+          }
         }
         await new Promise((r) => setTimeout(r, 150));
       }

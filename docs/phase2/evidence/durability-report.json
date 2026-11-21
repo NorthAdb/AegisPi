@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T08:04:55.415Z",
+  "generatedAt": "2026-11-21T09:00:13.527Z",
   "nodeVersion": "v22.23.5",
   "suite": "durability",
   "label": "Phase 2 test:durability — 迁移器/排他锁/连接初始化/键编码（步骤 2）",
@@ -16,7 +16,7 @@
     {
       "name": "fresh-migrate-applies-version-1",
       "status": "PASS",
-      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795248246961}]"
+      "detail": "applied [{\"version\":1,\"checksum\":\"ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995\",\"appliedAt\":1795251561786}]"
     },
     {
       "name": "reference-ddl-shape-27-user-2-fts-8-shadow",
@@ -76,12 +76,12 @@
     {
       "name": "lock-first-acquire-ok",
       "status": "PASS",
-      "detail": "pid 15988 holds d:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
+      "detail": "pid 42300 holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\durability-lock\\daemon.lock"
     },
     {
       "name": "lock-second-acquire-refused",
       "status": "PASS",
-      "detail": "second acquire refused, heldBy=15988"
+      "detail": "second acquire refused, heldBy=42300"
     },
     {
       "name": "dead-pid-probe-says-dead",
@@ -91,7 +91,7 @@
     {
       "name": "lock-stolen-after-crash-holder",
       "status": "PASS",
-      "detail": "stolen, new pid 15988"
+      "detail": "stolen, new pid 42300"
     },
     {
       "name": "lock-released-and-reacquired",
@@ -226,7 +226,7 @@
     {
       "name": "claim-mints-fence-and-active-attempt",
       "status": "PASS",
-      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:15988:1795100010000"
+      "detail": "claimed task=tsk:inb%3Atelegram%3Aevt-life-1-1:telegram%3Aevt-life-1-1 attempt=1 fence=1 owner=wkr:42300:1795100010000"
     },
     {
       "name": "attempt-row-active-with-lease-window",
@@ -641,12 +641,12 @@
     {
       "name": "job-orphan-outlived-killed-daemon",
       "status": "PASS",
-      "detail": "fake job pid 24852 alive after daemon kill"
+      "detail": "fake job pid 32284 alive after daemon kill"
     },
     {
       "name": "recovery-kills-orphan-and-losts-job",
       "status": "PASS",
-      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 24852 killed)"
+      "detail": "job LOST, orphan killed=true; job:crash-sim:1->LOST (orphan pid 32284 killed)"
     },
     {
       "name": "outbox-crash-child-died-before-send",
@@ -701,12 +701,12 @@
     {
       "name": "daemon-first-instance-opens",
       "status": "PASS",
-      "detail": "first daemon reached open (pid line: daemon: open (pid 18344) on d:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
+      "detail": "first daemon reached open (pid line: daemon: open (pid 29020) on D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\db\\aegis.db; fake upstream=false; loop every 10000ms)"
     },
     {
       "name": "daemon-second-instance-refuses-lock-exits",
       "status": "PASS",
-      "detail": "second exit=1: another daemon (pid 18344) holds d:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
+      "detail": "second exit=1: another daemon (pid 29020) holds D:\\AegisPi\\aegis-pi\\workspace-state\\phase2\\daemon-double-start\\daemon.lock; refusing to start"
     },
     {
       "name": "daemon-once-smoke-timer-to-settled-task",

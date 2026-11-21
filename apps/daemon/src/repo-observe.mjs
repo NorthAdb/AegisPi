@@ -8,7 +8,7 @@ import { insertObjectRow, putObjectContent } from "./objects.mjs";
 const DEFAULT_OBSERVE_QUESTION =
   "Summarize the observed repository files read-only and highlight configuration, dependency, or security observations.";
 
-function scrubSensitiveText(text) {
+export function scrubSensitiveText(text) {
   return String(text)
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_KEY]")
     .replace(/\bghp_[A-Za-z0-9]{16,}\b/g, "[REDACTED_GH_TOKEN]")
@@ -44,7 +44,7 @@ export function isSafeRelativeReadPath(relPath) {
   return !relPath.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
 }
 
-function trimUtf8ToBytes(text, maxBytes) {
+export function trimUtf8ToBytes(text, maxBytes) {
   const buf = Buffer.from(text, "utf8");
   if (buf.byteLength <= maxBytes) {
     return { text, truncated: false };
@@ -56,7 +56,7 @@ function trimUtf8ToBytes(text, maxBytes) {
   return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
 }
 
-function fitPromptToMaxInputBytes(excerptText, maxInputBytes, suffix = "") {
+export function fitPromptToMaxInputBytes(excerptText, maxInputBytes, suffix = "") {
   const envelopeBytes = (s) => Buffer.byteLength(JSON.stringify([{ role: "user", content: s }]), "utf8");
   const combined = `${excerptText}${suffix}`;
   if (envelopeBytes(combined) <= maxInputBytes) {
@@ -192,7 +192,10 @@ export function authorizeAcquisitionTarget({ config, targetId, hasAcquisitionLau
   return { ok: true, target };
 }
 
-function readContainedRegularFile(rootDir, relPath) {
+export function readContainedRegularFile(rootDir, relPath) {
+  if (!isSafeRelativeReadPath(relPath)) {
+    return { ok: false, code: "acquisition_invalid_read_paths", reason: `unsafe readPath ${JSON.stringify(relPath)}` };
+  }
   const resolvedRoot = resolve(rootDir);
   const parts = relPath.split("/");
   let cur = resolvedRoot;
@@ -344,6 +347,7 @@ export async function executeRepoObserveAcquisition(db, {
     plan,
     timeoutMs: config.acquisition.timeoutMs,
     onProgress,
+    progressIntervalMs: Math.max(500, Math.min(5000, Math.floor((config.leases?.leaseMs ?? 45000) / 3))),
   });
   const finishedAt = Math.max(now, Date.now());
 

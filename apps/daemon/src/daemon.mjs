@@ -41,6 +41,7 @@ import { createContainerExecutor, createAgentLauncher, createAcquisitionLauncher
 import { isLoopbackModelEndpoint } from "./model-call.mjs";
 import { processPendingModelProposalsAsync } from "./model-requests.mjs";
 import { parseRepoObservePayload, executeRepoObserveAcquisition } from "./repo-observe.mjs";
+import { parseRepoTriagePayload, executeRepoTriageTask } from "./repo-triage.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
 import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
@@ -512,7 +513,37 @@ export async function main(argv = process.argv.slice(2)) {
             }
             let launchInput = callInput;
             let skipLaunch = false;
-            const parsedObserve = parseRepoObservePayload(callInput);
+            const parsedTriage = parseRepoTriagePayload(callInput);
+            if (parsedTriage.isTriage) {
+              try {
+                await executeRepoTriageTask(db, {
+                  stateDir: dataDir,
+                  config,
+                  ledger,
+                  acquisitionLauncher,
+                  agentLauncher,
+                  executor,
+                  diskLevel: disk.level,
+                  claim,
+                  taskRow,
+                  scopeRow,
+                  parsed: parsedTriage,
+                  now,
+                });
+              } catch (err) {
+                console.error(`triage failed unexpectedly on ${claim.taskId}: ${err.message}`);
+                try {
+                  completeTask(db, {
+                    ...claim,
+                    now: Date.now(),
+                    resultClass: "infra_error",
+                    errorCode: "triage_unexpected_error",
+                  });
+                } catch {}
+              }
+              skipLaunch = true;
+            }
+            const parsedObserve = skipLaunch ? { isObserve: false } : parseRepoObservePayload(callInput);
             if (parsedObserve.isObserve) {
               if (!parsedObserve.valid) {
                 writeAudit(db, {
