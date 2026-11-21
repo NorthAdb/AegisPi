@@ -1,0 +1,170 @@
+{
+  "generatedAt": "2026-11-21T05:28:45.388Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "repo-observe-real",
+  "label": "phase4:repo-observe-real — Phase 4.2 许可 2 广度真实仓库 Observe 与 DeepSeek 实测验收",
+  "counts": {
+    "pass": 8,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "real-aegispi-302-codeload-and-chinese-summary",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED req=SETTLED actual=1088u$(offPeak~544u$) in=141 out=817 cache=10880 totalFromProvider=false replyLen=304"
+    },
+    {
+      "name": "real-hono-v4-13-19-third-party-tar-observe",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED actual=930u$(offPeak~465u$) in=229 out=675 cache=8448"
+    },
+    {
+      "name": "real-pi-agent-north-monorepo-and-sequential-ledger",
+      "status": "PASS",
+      "detail": "call1=1798u$(in=249,out=1409,cache=5376) call2=559u$(in=242,out=378,cache=5376) daySpent=1178u$ taskSum=1179u$"
+    },
+    {
+      "name": "real-openpi-input-cap-truncation-settles-cleanly",
+      "status": "PASS",
+      "detail": "exit=0 truncated=true actual=2515u$ in=145 out=2048 replyLen=3672"
+    },
+    {
+      "name": "real-hermes-and-piper-single-file-observe",
+      "status": "PASS",
+      "detail": "hermes=501u$(in=221,out=350) piper=6557u$(in=249,out=5395)"
+    },
+    {
+      "name": "real-failclosed-redirect-and-oversize-tar-stop-before-model",
+      "status": "PASS",
+      "detail": "redir=FAILED/acquisition_failed(req=none) hermesBig=FAILED/acquisition_failed(req=none)"
+    },
+    {
+      "name": "real-missing-price-keeps-held-and-stops-observe-task",
+      "status": "PASS",
+      "detail": "req=HELD res=HELD task=FAILED/settlement_held_uncompleted heldAudit=1"
+    },
+    {
+      "name": "defaults-untouched-fail-closed-and-zero-key-leakage",
+      "status": "PASS",
+      "detail": "defaultsClosed=true telemetryLeak=false"
+    }
+  ],
+  "dataSources": "真实公网 GitHub 目标（NorthAdb/AegisPi、honojs/hono、NorthAdb/pi-agent-north、NorthAdb/openpi、NorthAdb/hermes-agent、NorthAdb/Piper）经 Epoch 6 acquisition 容器拉取 + 真实 https://api.deepseek.com（deepseek-flash, reasoning:high）+ 本地 .env 临时读取（不入库、defaults.json 保持失败关闭）",
+  "telemetry": [
+    {
+      "case": "aegispi-self-observe",
+      "repo": "NorthAdb/AegisPi@8943a108",
+      "mode": "tar (302->codeload)",
+      "usage": {
+        "inputTokens": 141,
+        "outputTokens": 817,
+        "cacheReadTokens": 10880,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 1088,
+      "estimatedOffPeakMicrousd": 544,
+      "replyPreview": "1) `model_requests` 的七态状态名为：`RECEIVED`、`RESERVED`、`EXECUTING`、`SETTLED`、`HELD`、`ORPHAN`、`FAILED`。  \n2) 本次提供的 `model-requests.mjs` 中未出现 `CHARGED_BOUND`，七态中也不包含它；因此仅凭本次材料无法确定“在哪个节点进入 `CHARGED_BOUND`”。  \n3) 本次过程未发生仓库写入：提取为 `readOnly=true`，仅读取了"
+    },
+    {
+      "case": "hono-v4.13.19",
+      "repo": "honojs/hono@676c8f80",
+      "mode": "tar (302->codeload)",
+      "usage": {
+        "inputTokens": 229,
+        "outputTokens": 675,
+        "cacheReadTokens": 8448,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 930,
+      "estimatedOffPeakMicrousd": 465,
+      "replyPreview": "- **Version:** `4.13.19` (from `package.json`)\n- **Primary entry exports** (`src/index.ts`, exposed via `package.json` `\".\"`):\n  - Value exports: `Hono`, `Context`\n  - Type exports: `Env`, `ErrorHandler`, `Handler`, `MiddlewareHandler`, `Ne"
+    },
+    {
+      "case": "pi-agent-north-call1",
+      "repo": "NorthAdb/pi-agent-north@ce950d78",
+      "mode": "tar (23MB monorepo)",
+      "usage": {
+        "inputTokens": 249,
+        "outputTokens": 1409,
+        "cacheReadTokens": 5376,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 1798,
+      "estimatedOffPeakMicrousd": 899
+    },
+    {
+      "case": "pi-agent-north-call2",
+      "repo": "NorthAdb/pi-agent-north@ce950d78",
+      "mode": "tar (sequential cache probe)",
+      "usage": {
+        "inputTokens": 242,
+        "outputTokens": 378,
+        "cacheReadTokens": 5376,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 559,
+      "estimatedOffPeakMicrousd": 280
+    },
+    {
+      "case": "openpi-max-input-truncation",
+      "repo": "NorthAdb/openpi@6c43f927",
+      "mode": "tar (maxInputBytes=8192)",
+      "usage": {
+        "inputTokens": 145,
+        "outputTokens": 2048,
+        "cacheReadTokens": 2176,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 2515,
+      "estimatedOffPeakMicrousd": 1258,
+      "someFileTruncated": true
+    },
+    {
+      "case": "hermes-agent-raw-file",
+      "repo": "NorthAdb/hermes-agent@ddb56d0a (agent/AGENTS.md)",
+      "mode": "file (raw.githubusercontent.com)",
+      "usage": {
+        "inputTokens": 221,
+        "outputTokens": 350,
+        "cacheReadTokens": 2432,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 501,
+      "estimatedOffPeakMicrousd": 251
+    },
+    {
+      "case": "piper-durable-raw-file",
+      "repo": "NorthAdb/Piper@4484231e (packages/durable/src/index.ts)",
+      "mode": "file (raw.githubusercontent.com)",
+      "usage": {
+        "inputTokens": 249,
+        "outputTokens": 5395,
+        "cacheReadTokens": 1280,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 6557,
+      "estimatedOffPeakMicrousd": 3279
+    },
+    {
+      "case": "real-held-stop-openpi",
+      "repo": "NorthAdb/openpi@6c43f927",
+      "mode": "tar (null output rate)",
+      "usage": {
+        "inputTokens": 179,
+        "outputTokens": 134,
+        "cacheReadTokens": 11392,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": null,
+      "reservationState": "HELD"
+    }
+  ]
+}

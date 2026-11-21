@@ -7,7 +7,7 @@
 1. 根 [README](../README.md)：项目定位、已实现/未实现边界、运行前置条件。
 2. 本文：按类别找对资料，认清「现行」与「历史」身份。
 3. [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md)：现行权威状态清单（四项真实验收现状、审计归档、镜像、缺口、待办）。
-4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（单元 4.1 已通过独立对抗审计并按路线 A 冻结；单元 4.2 许可 1 离线链路已准备完成、真实运行仍未授权）；单元 4.1 细则与收口见 [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md)、[phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) 与 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)；单元 4.2 许可 1 细则与离线收口见 [phase4/phase4-2-offline-task-spec.md](phase4/phase4-2-offline-task-spec.md) 与 [phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md)。
+4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（单元 4.1 已通过独立对抗审计并按路线 A 冻结；单元 4.2 许可 1 离线与许可 2 广度真实验收已完成）；单元 4.1 见 [phase4-1-closure.md](phase4/reports/phase4-1-closure.md) 与 [AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)；单元 4.2 见 [phase4-2-offline-task-spec.md](phase4/phase4-2-offline-task-spec.md)、[phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)。
 5. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
 
 ## 现行规范（操作依据）
@@ -31,7 +31,7 @@
 
 | 资料 | 状态与用途 |
 | --- | --- |
-| [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**4.1 已通过独立审计冻结；4.2 许可 1 离线闭环已完成；4.2 真实运行仍待七项书面确认** |
+| [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**4.1 已通过独立审计冻结；4.2 许可 1 与许可 2 广度真实验收均已完成** |
 | [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md) | 单元 4.1 实施任务书（基线 `52354a8`，含 D-77/D-78 修订）。**4.1 实施并审计冻结，验收依据**：分步目标与产物、锚点用例、矩阵 T1–T10 与停止条件 |
 | [phase4/phase4-2-offline-task-spec.md](phase4/phase4-2-offline-task-spec.md) | **单元 4.2 许可 1 离线任务书**：只读 Repo Observe 离线编排、业务级 `maxInputBytes`/`maxOutputTokens` 硬上限、`HELD` 停机语义、4.1 延后 P2 项与 `model:real` opt-in 守卫（不含任何真实运行授权） |
 | [phase3/reports/real-acceptance-plan.md](phase3/reports/real-acceptance-plan.md) | A/B/C/D 真实验收计划。A/B/C 已执行且授权闭合（无剩余额度），D 延期——文中「待主人逐项授权」对 D 与任何重跑仍然有效，对已闭合项不提供剩余额度 |
@@ -40,6 +40,7 @@
 
 | 资料 | 用途 |
 | --- | --- |
+| [phase4/reports/phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md) | **单元 4.2 许可 2 广度真实 Repo Observe 验收报告**（2026-11-21）：6 个锁定 commit 公开 GitHub 仓库 + 真实 `api.deepseek.com` 8/8 PASS（含 `cacheRead` 命中结算、截断、`file` 模式、`302->codeload` 拦阻、`182 MB` tar 截停与欠价 `HELD` 停机）及 `4096` 输出耗尽实证记录 |
 | [phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) | **单元 4.2 许可 1 离线收口报告**（2026-11-21 纪元 6 终版）：只读 Repo Observe 离线闭环、`downloader.mjs` 双摘要修复、4.1 路线 A 延后加固闭合、`model-real` exit 4 护栏、纪元 6 镜像与全量 13 套件 + Hono 预检通过记录及待签许可 2 检查表 |
 | [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-21 纪元 5 终版）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 5 镜像证据与自审计 19 项加固整改汇总 |
 | [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 审计冻结、4.2 许可 1 离线就绪）与 4.2 首跑待办汇总 |
@@ -74,9 +75,9 @@
 - [telegram-call-ledger-retrospective.md](phase3/reports/telegram-call-ledger-retrospective.md)：Telegram 历史调用账本追溯（缺证如实记录，不追补）。
 - [phase3/audits/](phase3/audits)（六份原稿字节冻结，含 `AUDIT-PHASE3-REREVIEW-33d6361` 与 `AUDIT-PHASE3-LIMITED-FIXES-44b3514`）与 [phase3/evidence/](phase3/evidence)。
 
-**Phase 4（单元 4.1 审计冻结于 8943a10，单元 4.2 许可 1 离线闭环就绪于纪元 6，4.2 真实运行未授权）**
+**Phase 4（单元 4.1 审计冻结于 8943a10；单元 4.2 许可 1 纪元 6 全绿，许可 2 广度真实 Repo Observe 验收 8/8 通过）**
 
-- 设计与计划见上文「设计决策」「阶段计划」；收口报告见 [phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；独立对抗审计原稿见 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)（`PASS WITH RESIDUALS`，路线 A 冻结）；[phase4/reviews/](phase4/reviews) 为方案审核往来记录。
+- 设计与计划见上文「设计决策」「阶段计划」；收口与实测报告见 [phase4/reports/phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)、[phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；独立对抗审计原稿见 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)（`PASS WITH RESIDUALS`，路线 A 冻结）；[phase4/reviews/](phase4/reviews) 为方案审核往来记录。
 
 ## 纪律速记
 
