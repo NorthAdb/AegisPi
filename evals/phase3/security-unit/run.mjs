@@ -929,6 +929,240 @@ function seed(tag) {
   svc.kill();
 }
 
+{
+  const daemonPath = join(repoRoot, "apps", "daemon", "src", "daemon.mjs");
+  const tgServicePath = join(repoRoot, "evals", "phase3", "security-unit", "helpers", "local-telegram-service.mjs");
+  const tgWs = makeWorkspace("su-telegram-service");
+  const tgPortFile = join(tgWs.stateDir, "tg-port.txt");
+  const tgLogFile = join(tgWs.stateDir, "tg-log.jsonl");
+  const tgSvc = spawn(process.execPath, [tgServicePath, tgPortFile, tgLogFile], { stdio: "ignore" });
+  for (let i = 0; i < 100 && !existsSync(tgPortFile); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const tgEndpoint = existsSync(tgPortFile)
+    ? `http://127.0.0.1:${readFileSync(tgPortFile, "utf8").trim()}`
+    : null;
+  const tgLog = () =>
+    existsSync(tgLogFile)
+      ? readFileSync(tgLogFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+      : [];
+  const prevTgToken = process.env.AEGISPI_TEST_TG_BOT_TOKEN;
+  const fakeToken = "123456:TEST_BOT_SECRET_NEVER_LOG";
+  process.env.AEGISPI_TEST_TG_BOT_TOKEN = fakeToken;
+
+  function seedTelegramEffect(tag, { text, target = "dm:telegram:6101", registerSlot = true, revokeSlot = false } = {}) {
+    const ws = makeWorkspace(tag);
+    mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+    const db = openDatabase(ws.dbPath);
+    migrate(db, loadCanonicalSchema());
+    const now = Date.now();
+    const ing = receiveEvent(db, ws.stateDir, {
+      now, source: "telegram", sourceEventId: `evt-${tag}`,
+      principal: { platform: "telegram", subject: "6101" },
+      scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+      threadKey: `tg-${tag}`, priority: 5, policyVersion: "pv1", payload: `telegram notify ${tag}`, verdict: "ADMIT",
+    });
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    dispatchEventToTask(db, {
+      inboxId: inbox.id, dispatchKey: dispatchKeyForInbox(inbox), now, priority: 5,
+      maxSteps: 25, deadlineAt: now + 15 * 60 * 1000, skillSetHash: "ss",
+    });
+    const claim = claimNextTask(db, { now, leaseMs: 60000 });
+    const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(claim.taskId);
+    const attemptId = db.prepare("SELECT id FROM attempts WHERE task_id=? AND attempt_no=?").get(task.id, task.attempt_no).id;
+    const ownerId = db.prepare("SELECT id FROM principals WHERE platform='telegram' AND platform_subject='6101'").get().id;
+    grantPermission(db, { scopeId: "scp:dm%3Atelegram%3A6101", principalId: ownerId, permission: "approve", now });
+    if (registerSlot) {
+      createCredentialService(db).registerSlot({
+        slot: "im", purpose: "im", source: "telegram", envName: "AEGISPI_TEST_TG_BOT_TOKEN", actorId: "test-fixture", now,
+      });
+      if (revokeSlot) {
+        createCredentialService(db).revokeSlot({ slot: "im", actorId: "test-revoke", now: now + 1 });
+      }
+    }
+    const storedMsg = putObjectContent(ws.stateDir, text);
+    const card = proposeEffect(db, ws.stateDir, {
+      now,
+      taskId: task.id,
+      attemptId,
+      effectType: "notify",
+      domainKey: "dm:telegram:6101",
+      naturalKey: `tg-${tag}`,
+      operationIntent: {
+        targetResource: target,
+        operation: "im.notify",
+        contentHash: storedMsg.contentHash,
+        evidenceManifestHash: "b".repeat(64),
+      },
+      retryMode: "AT_MOST_ONCE",
+      provider: "telegram",
+      resource: target,
+      requiresApproval: true,
+      approverPrincipalId: ownerId,
+      expiresAt: now + 60 * 60 * 1000,
+    });
+    decideApproval(db, {
+      approvalId: card.approvalId,
+      decision: "approve",
+      actionHash: card.actionHash,
+      nonce: card.approvalNonce,
+      approverId: ownerId,
+      now,
+    });
+    db.close();
+    return { ws, effectId: card.effectId };
+  }
+
+  function writeTgConfig(ws, { apiBase = tgEndpoint, allowRealSend = false, allowExternal = true, imSlot = "tg-test-slot", allowedRecipients = ["dm:telegram:6101"], timeoutMs = 5000 } = {}) {
+    const defaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
+    defaults.policy = { allowRealExternalWrites: allowExternal };
+    defaults.credentials = { im: imSlot, mail: null, repo: null };
+    defaults.adapters = { ...defaults.adapters, allowedRecipients };
+    defaults.telegram = { apiBase, allowRealSend, timeoutMs };
+    const cfgPath = join(ws.stateDir, "tg-config.json");
+    writeFileSync(cfgPath, JSON.stringify(defaults, null, 2), "utf8");
+    return cfgPath;
+  }
+
+  try {
+    const cOk = seedTelegramEffect("su-tg-ok", { text: "Unit 4.3 telegram check ok" });
+    const cfgOk = writeTgConfig(cOk.ws);
+    const beforeOk = tgLog().length;
+    const rOk = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cOk.ws.stateDir}`, `--config=${cfgOk}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const dbOk = openDatabase(cOk.ws.dbPath, { readOnly: true });
+    const efOk = dbOk.prepare("SELECT state, external_id, last_error FROM effects WHERE id=?").get(cOk.effectId);
+    const auditTextOk = dbOk.prepare("SELECT group_concat(details_json) d FROM audit_log").get().d ?? "";
+    dbOk.close();
+    const afterOkLogs = tgLog().slice(beforeOk);
+    const sentEntry = afterOkLogs.at(0);
+
+    const cEmpty = seedTelegramEffect("su-tg-empty-allowlist", { text: "must block empty allowlist" });
+    const cfgEmpty = writeTgConfig(cEmpty.ws, { allowedRecipients: [] });
+    const beforeEmpty = tgLog().length;
+    const rEmpty = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cEmpty.ws.stateDir}`, `--config=${cfgEmpty}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const afterEmpty = tgLog().length;
+    const dbEmpty = openDatabase(cEmpty.ws.dbPath, { readOnly: true });
+    const efEmpty = dbEmpty.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cEmpty.effectId);
+    dbEmpty.close();
+
+    const cRealBlocked = seedTelegramEffect("su-tg-real-blocked", { text: "must block real send false" });
+    const cfgRealBlocked = writeTgConfig(cRealBlocked.ws, { apiBase: "https://api.telegram.org", allowRealSend: false });
+    const beforeRealBlocked = tgLog().length;
+    const rRealBlocked = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cRealBlocked.ws.stateDir}`, `--config=${cfgRealBlocked}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const afterRealBlocked = tgLog().length;
+    const dbRealBlocked = openDatabase(cRealBlocked.ws.dbPath, { readOnly: true });
+    const efRealBlocked = dbRealBlocked.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cRealBlocked.effectId);
+    dbRealBlocked.close();
+
+    const cRevoked = seedTelegramEffect("su-tg-revoked", { text: "must block revoked slot", revokeSlot: true });
+    const cfgRevoked = writeTgConfig(cRevoked.ws);
+    const beforeRevoked = tgLog().length;
+    const rRevoked = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cRevoked.ws.stateDir}`, `--config=${cfgRevoked}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const afterRevoked = tgLog().length;
+    const dbRevoked = openDatabase(cRevoked.ws.dbPath, { readOnly: true });
+    const efRevoked = dbRevoked.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cRevoked.effectId);
+    dbRevoked.close();
+
+    const cSlow = seedTelegramEffect("su-tg-slow", { text: "slow __SLOW__" });
+    const cfgSlow = writeTgConfig(cSlow.ws, { timeoutMs: 1000 });
+    const rSlow = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cSlow.ws.stateDir}`, `--config=${cfgSlow}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const dbSlow = openDatabase(cSlow.ws.dbPath, { readOnly: true });
+    const efSlow = dbSlow.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cSlow.effectId);
+    const slowAudits = dbSlow.prepare("SELECT group_concat(details_json) d FROM audit_log").get().d ?? "";
+    dbSlow.close();
+
+    const cRemote = seedTelegramEffect("su-tg-remote-err", { text: "remote __REMOTE_ERR__" });
+    const cfgRemote = writeTgConfig(cRemote.ws);
+    const rRemote = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cRemote.ws.stateDir}`, `--config=${cfgRemote}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const dbRemote = openDatabase(cRemote.ws.dbPath, { readOnly: true });
+    const efRemote = dbRemote.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cRemote.effectId);
+    dbRemote.close();
+
+    const cGroupOk = seedTelegramEffect("su-tg-group-ok", { text: "group notify ok", target: "group:telegram:-100999" });
+    const cfgGroupOk = writeTgConfig(cGroupOk.ws, { allowedRecipients: ["group:telegram:-100999"] });
+    const beforeGroupOk = tgLog().length;
+    const rGroupOk = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cGroupOk.ws.stateDir}`, `--config=${cfgGroupOk}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const sentGroupEntry = tgLog().slice(beforeGroupOk).at(0);
+    const dbGroupOk = openDatabase(cGroupOk.ws.dbPath, { readOnly: true });
+    const efGroupOk = dbGroupOk.prepare("SELECT state, external_id FROM effects WHERE id=?").get(cGroupOk.effectId);
+    dbGroupOk.close();
+
+    const cMismatch = seedTelegramEffect("su-tg-mismatch", { text: "must block allowlist mismatch", target: "dm:telegram:9999" });
+    const cfgMismatch = writeTgConfig(cMismatch.ws, { allowedRecipients: ["dm:telegram:6101"] });
+    const beforeMismatch = tgLog().length;
+    const rMismatch = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cMismatch.ws.stateDir}`, `--config=${cfgMismatch}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const afterMismatch = tgLog().length;
+    const dbMismatch = openDatabase(cMismatch.ws.dbPath, { readOnly: true });
+    const efMismatch = dbMismatch.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cMismatch.effectId);
+    dbMismatch.close();
+
+    const cPolicyOff = seedTelegramEffect("su-tg-policy-off", { text: "must block policy off" });
+    const cfgPolicyOff = writeTgConfig(cPolicyOff.ws, { allowExternal: false });
+    const beforePolicyOff = tgLog().length;
+    const rPolicyOff = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${cPolicyOff.ws.stateDir}`, `--config=${cfgPolicyOff}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
+    const afterPolicyOff = tgLog().length;
+    const dbPolicyOff = openDatabase(cPolicyOff.ws.dbPath, { readOnly: true });
+    const efPolicyOff = dbPolicyOff.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cPolicyOff.effectId);
+    dbPolicyOff.close();
+
+    const noTokenLeak =
+      ![
+        rOk.stdout, rOk.stderr,
+        rSlow.stdout, rSlow.stderr,
+        rRemote.stdout, rRemote.stderr,
+        rGroupOk.stdout, rGroupOk.stderr,
+        auditTextOk, efOk?.last_error ?? "", efSlow?.last_error ?? "", slowAudits, efRemote?.last_error ?? "",
+      ]
+        .join("\n")
+        .includes(fakeToken);
+
+    suite.check(
+      "telegram-outbound-transport-fail-closed-and-secret-hygiene",
+      Boolean(tgEndpoint) &&
+        rOk.status === 0 &&
+        efOk?.state === "SUCCEEDED" &&
+        efOk?.external_id === "tg:6101:9001" &&
+        sentEntry?.chat_id === "6101" &&
+        sentEntry?.text === "Unit 4.3 telegram check ok" &&
+        rGroupOk.status === 0 &&
+        efGroupOk?.state === "SUCCEEDED" &&
+        efGroupOk?.external_id === "tg:-100999:9001" &&
+        sentGroupEntry?.chat_id === "-100999" &&
+        rEmpty.status === 0 &&
+        efEmpty?.state === "FAILED" &&
+        /^local_error: adapter refused:/.test(efEmpty?.last_error ?? "") &&
+        afterEmpty === beforeEmpty &&
+        rMismatch.status === 0 &&
+        efMismatch?.state === "FAILED" &&
+        /^local_error: adapter refused:/.test(efMismatch?.last_error ?? "") &&
+        afterMismatch === beforeMismatch &&
+        rPolicyOff.status === 0 &&
+        efPolicyOff?.state === "FAILED" &&
+        /real external writes are not authorized/.test(efPolicyOff?.last_error ?? "") &&
+        afterPolicyOff === beforePolicyOff &&
+        rRealBlocked.status === 0 &&
+        efRealBlocked?.state === "FAILED" &&
+        /allowRealSend=true/.test(efRealBlocked?.last_error ?? "") &&
+        afterRealBlocked === beforeRealBlocked &&
+        rRevoked.status === 0 &&
+        efRevoked?.state === "FAILED" &&
+        /missing, malformed, or revoked/.test(efRevoked?.last_error ?? "") &&
+        afterRevoked === beforeRevoked &&
+        rSlow.status === 4 &&
+        efSlow?.state === "UNKNOWN" &&
+        rRemote.status === 0 &&
+        efRemote?.state === "FAILED" &&
+        !/^local_error:/.test(efRemote?.last_error ?? "") &&
+        noTokenLeak,
+      `ok=${efOk?.state}(${efOk?.external_id}) group=${efGroupOk?.state}(${efGroupOk?.external_id}) empty=${efEmpty?.state} mismatch=${efMismatch?.state} policyOff=${efPolicyOff?.state} realBlocked=${efRealBlocked?.state} revoked=${efRevoked?.state} slow=${efSlow?.state} remote=${efRemote?.state} leakFree=${noTokenLeak}`,
+    );
+  } finally {
+    tgSvc.kill();
+    if (prevTgToken === undefined) delete process.env.AEGISPI_TEST_TG_BOT_TOKEN;
+    else process.env.AEGISPI_TEST_TG_BOT_TOKEN = prevTgToken;
+  }
+}
+
 // ------------------------------------------- real model worker path (ADR-0001 / Phase 4.1)
 // Reserve before the call, settle by the four-field pi-ai usage accounting
 // priced through the host catalog, never settle unknown/all-zero usage as

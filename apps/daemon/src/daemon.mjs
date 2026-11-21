@@ -34,6 +34,7 @@ import { insertObjectRow } from "./objects.mjs";
 import { writeAudit } from "./audit.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { createHttpUpstream } from "./upstream-http.mjs";
+import { createTelegramSendTransport } from "./telegram-send.mjs";
 import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
 import { createContainerExecutor, createAgentLauncher, createAcquisitionLauncher } from "./container-executor.mjs";
@@ -201,9 +202,21 @@ export async function main(argv = process.argv.slice(2)) {
   // live reservation; adapter-owned templates, never model-assembled URLs).
   // transportKind is declared HERE (fake exactly under --fake-upstream, real
   // otherwise), never sniffed from a label.
-  const adapterUpstream = baseUpstream || config.model.baseUrl
+  const telegramUpstream =
+    !fakeUpstream && config.telegram?.apiBase
+      ? createTelegramSendTransport({
+          db,
+          stateDir: dataDir,
+          apiBase: config.telegram.apiBase,
+          allowRealSend: config.telegram.allowRealSend,
+          timeoutMs: config.telegram.timeoutMs,
+          allowedRecipients: config.adapters.allowedRecipients,
+        })
+      : null;
+  const adapterUpstream = baseUpstream || telegramUpstream || config.model.baseUrl
     ? createAdapterUpstream(db, {
         baseUpstream,
+        telegramUpstream,
         transportKind: fakeUpstream ? "fake" : "real",
         policy: { allowRealExternalWrites: config.policy.allowRealExternalWrites },
         credentials: config.credentials,
@@ -602,11 +615,17 @@ export async function main(argv = process.argv.slice(2)) {
         console.error(`worker: ${awaiting} task(s) await an execution path; no model baseUrl is configured (model.baseUrl is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
       }
     }
+    const canDispatchEffectRow = (row) =>
+      Boolean(
+        baseUpstream ||
+          row.operation === "model.inference" ||
+          (telegramUpstream &&
+            (row.operation === "im.notify" || row.operation === "send_message") &&
+            telegramUpstream.canHandle(row.resource)),
+      );
     // 5. Effect dispatch & UNKNOWN reconciler (non-model READY/UNKNOWN stay durable when baseUpstream is null).
     if (adapterUpstream) {
-      const unknowns = baseUpstream
-        ? db.prepare("SELECT id, retry_mode FROM effects WHERE state='UNKNOWN'").all()
-        : db.prepare("SELECT id, retry_mode FROM effects WHERE state='UNKNOWN' AND operation='model.inference'").all();
+      const unknowns = db.prepare("SELECT id, retry_mode, operation, resource FROM effects WHERE state='UNKNOWN'").all().filter(canDispatchEffectRow);
       for (const u of unknowns) {
         try {
           const action = autoRecoverUnknown(db, adapterUpstream, { effectId: u.id, now, backoffMs: 0 });
@@ -617,9 +636,7 @@ export async function main(argv = process.argv.slice(2)) {
           console.error(`reconcile refused ${u.id}: ${err.message}`);
         }
       }
-      const ready = baseUpstream
-        ? db.prepare("SELECT id FROM effects WHERE state='READY' AND next_attempt_at<=? ORDER BY next_attempt_at").all(now)
-        : db.prepare("SELECT id FROM effects WHERE state='READY' AND operation='model.inference' AND next_attempt_at<=? ORDER BY next_attempt_at").all(now);
+      const ready = db.prepare("SELECT id, operation, resource FROM effects WHERE state='READY' AND next_attempt_at<=? ORDER BY next_attempt_at").all(now).filter(canDispatchEffectRow);
       for (const e of ready) {
         try {
           const row = db.prepare("SELECT * FROM effects WHERE id=?").get(e.id);
@@ -659,9 +676,11 @@ export async function main(argv = process.argv.slice(2)) {
       }
     }
     if (!baseUpstream) {
-      if (db.prepare("SELECT count(*) c FROM effects WHERE state='READY' AND operation!='model.inference'").get().c > 0) {
+      const unservedReady = db.prepare("SELECT resource, operation FROM effects WHERE state='READY' AND operation!='model.inference'").all().filter((r) => !canDispatchEffectRow(r));
+      const unservedUnknown = db.prepare("SELECT resource, operation FROM effects WHERE state='UNKNOWN' AND operation!='model.inference'").all().filter((r) => !canDispatchEffectRow(r));
+      if (unservedReady.length > 0) {
         console.error("dispatcher: READY effects exist but no submit transport is wired (upstream.submitUrl unset); they stay durable and dispatched later");
-      } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN' AND operation!='model.inference'").get().c > 0) {
+      } else if (unservedUnknown.length > 0) {
         // UNKNOWN without an upstream stays UNKNOWN, on the record: the daemon
         // never converts uncertainty into a success or a blind resend.
         console.error("reconcile: UNKNOWN effects present but no upstream adapter is wired; they stay UNKNOWN for a human or a later phase");

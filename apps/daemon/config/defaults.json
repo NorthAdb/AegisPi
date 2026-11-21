@@ -55,6 +55,12 @@
     "submitUrl": null,
     "timeoutMs": 30000
   },
+  "telegram": {
+    "$comment": "真实 Telegram Bot 出站传输（Unit 4.3）：apiBase null 且 allowRealSend false 时失败关闭，零出站字节。仅作用于 dm:telegram:<id> / group:telegram:<id> / telegram:<id> 目标，并强制要求 adapters.allowedRecipients 非空与宿主凭据槽位 im 接线。",
+    "apiBase": null,
+    "allowRealSend": false,
+    "timeoutMs": 15000
+  },
   "credentials": {
     "$comment": "宿主接线的外部凭据槽位标记（02 §4）：键名 mail/repo/im；值为槽位引用或描述，非明文密钥；null = 未接线，真实写即拒。密钥本体只经宿主凭据服务（credentials.mjs）读取。",
     "mail": null,
@@ -62,7 +68,7 @@
     "im": null
   },
   "adapters": {
-    "$comment": "宿主适配器部署值（02 §4）：固定发送身份与授权白名单。空数组 = 适配器层不做额外白名单限制（形状校验与审批门禁仍然生效）；主人授权真实 scope 后再填入。",
+    "$comment": "宿主适配器部署值（02 §4）：固定发送身份与授权白名单。allowedRecipients 对 mail.send 与 Telegram 出站（dm:telegram:* / group:telegram:* / telegram:*）空数组时失败关闭；allowedRepos / allowedBranches 在主人授权真实 scope 前留空，外部写仍由 policy.allowRealExternalWrites=false 阻断。",
     "fixedSendingIdentity": "aegispi@local",
     "allowedRecipients": [],
     "allowedRepos": [],

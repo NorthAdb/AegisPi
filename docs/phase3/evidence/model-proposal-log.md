@@ -1,6 +1,6 @@
 # test:model-proposal — Phase 4.1 模型提议链路全量本地闭环与 T1–T10 矩阵
 
-生成：2026-11-21T04:38:48.561Z；Node v22.23.5；suite `model-proposal`。
+生成：2026-11-21T07:37:42.668Z；Node v22.23.5；suite `model-proposal`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -18,7 +18,8 @@
 | PASS | t10-terminal-task-orphan-delivery-with-normal-billing | sub1=ORPHAN/SETTLED(28u$) sub2=ORPHAN/CHARGED_BOUND(1000u$) orphanAudits=2 deliveredFiles=0 |
 | PASS | remaining-boundaries-timeout-overcharge-and-adapter-unified-core | timeout=EXECUTING/CHARGED_BOUND(1000) overchargeFrozen=1/2 adapter=succeeded/deepseek-flash//chat/completions |
 | PASS | adversarial-hardening-invariants | revoked=call_failed warm=warming_disabled upper=invalid_request_id leaseExp=ORPHAN/SETTLED(28) compsUnique=true explicitAclCleaned=true workerOverwriteGuarded=true |
+| PASS | empty-reply-settles-ledger-and-refuses-succeeded | len=FAILED/model_output_truncated_empty/SETTLED(28) ws=FAILED/model_empty_reply |
 
-合计：14 PASS / 0 FAIL。
+合计：15 PASS / 0 FAIL。
 
 数据源：digest 钉住 agent 容器（--network none / PI_OFFLINE=1 / 只读 rootfs / 宿主 ACL 锁定 proposals）+ 真实 daemon tick + pi-ai 1.5.2 子进程 + 本地 OpenAI SSE 环回服务 + 真实 SQLite 账本与 crashpoint 注入；零真实推理服务调用，未读 .env。

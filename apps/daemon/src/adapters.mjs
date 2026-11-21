@@ -23,6 +23,7 @@ import { writeAudit } from "./audit.mjs";
 import { assertLiveReservation, PURPOSES } from "./budget.mjs";
 import { extraFieldsOfAction } from "./effects.mjs";
 import { createCredentialService } from "./credentials.mjs";
+import { isRecipientAllowed, parseTelegramTargetResource } from "./telegram-send.mjs";
 import {
   assertValidModelBaseUrl,
   callModelOnce,
@@ -124,6 +125,7 @@ export function operationSpec(operation) {
 // is data, not a trust decision.
 export function createAdapterUpstream(db, {
   baseUpstream, // the wired transport (fake remote in tests) or null
+  telegramUpstream = null,
   transportKind = "fake", // "fake" (test seam) | "real"
   policy = { allowRealExternalWrites: false },
   credentials = {}, // host-wired secrets; empty means nothing real is wired
@@ -144,7 +146,7 @@ export function createAdapterUpstream(db, {
   };
 
   return {
-    label: `adapter-upstream(${baseUpstream?.label ?? "none"})`,
+    label: `adapter-upstream(${baseUpstream?.label ?? (telegramUpstream ? telegramUpstream.label : "none")})`,
     // CP4 target validation, run before a single request byte is built.
     validateIntent(operation, intent) {
       const spec = operationSpec(operation);
@@ -317,6 +319,12 @@ export function createAdapterUpstream(db, {
           if (call.kind === "local") return { status: "failed_local", error: call.error };
           return { status: "failed_remote", error: call.error };
         }
+        if (typeof call.reply !== "string" || call.reply.trim().length === 0) {
+          return {
+            status: "failed_remote",
+            error: call.stopReason === "length" ? "model_output_truncated_empty" : "model_empty_reply",
+          };
+        }
         return {
           status: "succeeded",
           externalId: `model:${idempotencyKey ?? businessKey}`,
@@ -324,6 +332,35 @@ export function createAdapterUpstream(db, {
           usage: call.usage,
           model: call.model,
         };
+      }
+      if ((opName === "im.notify" || opName === "send_message") && transportKind !== "fake" && telegramUpstream && telegramUpstream.canHandle(intent.targetResource)) {
+        const validated = this.validateIntent(opName, intent);
+        if (!validated.ok) {
+          auditRefusal(opName, validated.reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${validated.reason}` };
+        }
+        if (!isRecipientAllowed(config.allowedRecipients, intent.targetResource)) {
+          const reason = `recipient ${intent.targetResource} is not on non-empty allowedRecipients`;
+          auditRefusal(opName, reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${reason}` };
+        }
+        const out = telegramUpstream.submit({
+          businessKey,
+          idempotencyKey,
+          operation: opRow,
+          intent,
+          now: submitNow,
+          mode,
+        });
+        if (out.status === "failed_local" && /^telegram refused:/.test(out.error ?? "")) {
+          auditRefusal(opName, out.error, effectId);
+        }
+        return out;
+      }
+      if ((opName === "im.notify" || opName === "send_message") && transportKind !== "fake" && parseTelegramTargetResource(intent.targetResource) !== null && !isRecipientAllowed(config.allowedRecipients, intent.targetResource)) {
+        const reason = `recipient ${intent.targetResource} is not on non-empty allowedRecipients`;
+        auditRefusal(opName, reason, effectId);
+        return { status: "failed_local", error: `adapter refused: ${reason}` };
       }
       if (!baseUpstream) {
         auditRefusal(opName, "no transport wired", effectId);
@@ -345,8 +382,18 @@ export function createAdapterUpstream(db, {
       });
     },
     lookup({ businessKey, consistency = "strong" }) {
-      if (!baseUpstream) return { found: false, strong: false };
-      return baseUpstream.lookup({ businessKey, consistency });
+      const effectRow = db.prepare("SELECT operation, resource FROM effects WHERE business_key=?").get(businessKey);
+      if (
+        telegramUpstream &&
+        effectRow &&
+        (effectRow.operation === "im.notify" || effectRow.operation === "send_message") &&
+        telegramUpstream.canHandle(effectRow.resource)
+      ) {
+        return telegramUpstream.lookup({ businessKey, consistency });
+      }
+      if (baseUpstream) return baseUpstream.lookup({ businessKey, consistency });
+      if (telegramUpstream) return telegramUpstream.lookup({ businessKey, consistency });
+      return { found: false, strong: false };
     },
     // Head precondition source for the dispatcher (06 section 6: the CAS
     // transaction re-checks the target resource precondition).

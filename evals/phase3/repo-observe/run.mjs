@@ -22,8 +22,8 @@ import { claimNextTask, heartbeat } from "../../../apps/daemon/src/scheduler.mjs
 import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
 import { createCredentialService } from "../../../apps/daemon/src/credentials.mjs";
 import { processModelRequest, processModelRequestAsync } from "../../../apps/daemon/src/model-requests.mjs";
-import { authorizeAcquisitionTarget, buildSafeRepoExcerpt } from "../../../apps/daemon/src/repo-observe.mjs";
-import { agentWorkAttemptDir, lockHostProposalsDir, safeTaskDirComponent } from "../../../apps/daemon/src/container-executor.mjs";
+import { authorizeAcquisitionTarget, buildSafeRepoExcerpt, executeRepoObserveAcquisition } from "../../../apps/daemon/src/repo-observe.mjs";
+import { agentWorkAttemptDir, createAcquisitionLauncher, lockHostProposalsDir, safeTaskDirComponent } from "../../../apps/daemon/src/container-executor.mjs";
 
 lockedNodeGuard();
 
@@ -333,6 +333,10 @@ try {
     const volName = `aegispi-acq-out-${safeTaskDirComponent(`${taskId}:1`)}`.slice(0, 90);
     const leftoverVol = spawnSync("docker", ["volume", "ls", "-q", "--filter", `name=${volName}`], { encoding: "utf8" });
 
+    const firstPrompt = hits[0]?.input ?? "";
+    const excerptIdx = firstPrompt.indexOf("Sanitized Read-Only Excerpts:");
+    const questionIdx = firstPrompt.indexOf("\n\nTask Question: Check app.mjs and lockfile");
+
     suite.check(
       "repo-observe-e2e-acquisition-to-settled-28",
       dRun.status === 0 &&
@@ -340,6 +344,8 @@ try {
         hits.length === 1 &&
         hits[0].max_tokens === 128 &&
         hits[0].thinking?.type === "enabled" &&
+        excerptIdx >= 0 &&
+        questionIdx > excerptIdx &&
         task?.state === "SUCCEEDED" &&
         req?.state === "SETTLED" &&
         resRow?.state === "SETTLED" &&
@@ -355,7 +361,7 @@ try {
         leftAcqWorkDirs.length === 0 &&
         leftoverContainers.stdout.trim() === "" &&
         leftoverVol.stdout.trim() === "",
-      `exit=${dRun.status} task=${task?.state} req=${req?.state} res=${resRow?.state}(${resRow?.actual_microusd}) maxTok=${hits[0]?.max_tokens} redacted=${excerptContent.includes("[REDACTED_KEY]")} edge=${edgeRow?.relation} leftDirs=${leftAcqWorkDirs.length} err=${dRun.stderr.slice(0, 200)}`,
+      `exit=${dRun.status} task=${task?.state} req=${req?.state} res=${resRow?.state}(${resRow?.actual_microusd}) maxTok=${hits[0]?.max_tokens} prefixBeforeQ=${excerptIdx < questionIdx} redacted=${excerptContent.includes("[REDACTED_KEY]")} edge=${edgeRow?.relation} leftDirs=${leftAcqWorkDirs.length} err=${dRun.stderr.slice(0, 200)}`,
     );
   }
 
@@ -682,6 +688,86 @@ try {
         realGuard.status === 4 &&
         /AEGISPI_ALLOW_REAL_MODEL_ACCEPTANCE=1/.test(realGuard.stderr),
       `status=${out.status} req=${req?.state} orphan=${out.orphan} task=${afterTask?.state} leaseDelta=${Number(afterTask?.lease_expires_at) - Number(beforeTask?.lease_expires_at)} realGuardExit=${realGuard.status}`,
+    );
+  }
+
+  {
+    const { ws: wsQ1, db: dbQ1, claim: c1, now: n1 } = seedObserveWorkspace("ro-kv-q1", {
+      payload: { kind: "repo_observe", targetId: "fixture-alpha", question: "First KV question" },
+      claimLeaseMs: 120000,
+    });
+    const { ws: wsQ2, db: dbQ2, claim: c2, now: n2 } = seedObserveWorkspace("ro-kv-q2", {
+      payload: { kind: "repo_observe", targetId: "fixture-alpha", question: "Second slightly longer KV question" },
+      claimLeaseMs: 120000,
+    });
+    const cfg1 = loadDaemonConfig({ path: writeObserveConfig(wsQ1, { maxInputBytes: 512, maxOutputTokens: 128, targets: { "fixture-alpha": GOOD_TARGET } }) });
+    const cfg2 = loadDaemonConfig({ path: writeObserveConfig(wsQ2, { maxInputBytes: 512, maxOutputTokens: 128, targets: { "fixture-alpha": GOOD_TARGET } }) });
+    const launcher1 = createAcquisitionLauncher(dbQ1, { stateDir: wsQ1.stateDir, imageRef: ACQUISITION_REF, enableHostGateway: true });
+    const launcher2 = createAcquisitionLauncher(dbQ2, { stateDir: wsQ2.stateDir, imageRef: ACQUISITION_REF, enableHostGateway: true });
+    const acq1 = await executeRepoObserveAcquisition(dbQ1, {
+      stateDir: wsQ1.stateDir,
+      config: cfg1,
+      acquisitionLauncher: launcher1,
+      taskId: c1.taskId,
+      attemptId: c1.attemptId,
+      attemptNo: c1.attemptNo,
+      fence: c1.fence,
+      scopeId: "scp:dm%3Atelegram%3A6101",
+      targetId: "fixture-alpha",
+      question: "First KV question",
+      now: n1,
+    });
+    const acq2 = await executeRepoObserveAcquisition(dbQ2, {
+      stateDir: wsQ2.stateDir,
+      config: cfg2,
+      acquisitionLauncher: launcher2,
+      taskId: c2.taskId,
+      attemptId: c2.attemptId,
+      attemptNo: c2.attemptNo,
+      fence: c2.fence,
+      scopeId: "scp:dm%3Atelegram%3A6101",
+      targetId: "fixture-alpha",
+      question: "Second slightly longer KV question",
+      now: n2,
+    });
+    const cfgTooSmall = loadDaemonConfig({ path: writeObserveConfig(wsQ1, { maxInputBytes: 64, maxOutputTokens: 128, targets: { "fixture-alpha": GOOD_TARGET } }) });
+    const acqBeforeTooSmall = acqHits.length;
+    const acqTooSmall = await executeRepoObserveAcquisition(dbQ1, {
+      stateDir: wsQ1.stateDir,
+      config: cfgTooSmall,
+      acquisitionLauncher: launcher1,
+      taskId: c1.taskId,
+      attemptId: c1.attemptId,
+      attemptNo: c1.attemptNo,
+      fence: c1.fence,
+      scopeId: "scp:dm%3Atelegram%3A6101",
+      targetId: "fixture-alpha",
+      question: "Too tiny cap",
+      now: n1 + 1,
+    });
+    const acqTooSmallHits = acqHits.length - acqBeforeTooSmall;
+    dbQ1.close();
+    dbQ2.close();
+    const tail1 = "\n\nTask Question: First KV question";
+    const tail2 = "\n\nTask Question: Second slightly longer KV question";
+    const prefix1 = acq1.ok && acq1.promptText.endsWith(tail1) ? acq1.promptText.slice(0, -tail1.length) : null;
+    const prefix2 = acq2.ok && acq2.promptText.endsWith(tail2) ? acq2.promptText.slice(0, -tail2.length) : null;
+    const envBytes1 = acq1.ok ? Buffer.byteLength(JSON.stringify([{ role: "user", content: acq1.promptText }]), "utf8") : -1;
+
+    suite.check(
+      "repo-observe-kv-prefix-stable-and-question-survives-cap",
+      acq1.ok &&
+        acq2.ok &&
+        typeof prefix1 === "string" &&
+        prefix1.length > 0 &&
+        prefix1 === prefix2 &&
+        envBytes1 <= 512 &&
+        acq1.promptText.indexOf("Observe Repo:") === 0 &&
+        acq1.promptText.indexOf("Sanitized Read-Only Excerpts:") < acq1.promptText.indexOf(tail1) &&
+        acqTooSmall.ok === false &&
+        acqTooSmall.code === "input_bytes_exceeded" &&
+        acqTooSmallHits === 0,
+      `prefixEqual=${prefix1 === prefix2} prefixLen=${prefix1?.length ?? 0} envBytes=${envBytes1} tooSmall=${acqTooSmall.code}/hits=${acqTooSmallHits}`,
     );
   }
 } finally {

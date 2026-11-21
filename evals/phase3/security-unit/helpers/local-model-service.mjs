@@ -93,7 +93,7 @@ const server = createServer((req, res) => {
       object: "chat.completion.chunk",
       created: 0,
       model: "deepseek-flash",
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      choices: [{ index: 0, delta: {}, finish_reason: cfg.finishReason ?? "stop" }],
     };
     if (cfg.kind !== "no-usage") {
       const promptTokens = cfg.promptTokens ?? 500000;

@@ -40,7 +40,7 @@ const CHILD_SAFE_ENV_KEYS = [
   "NODE_EXTRA_CA_CERTS",
 ];
 
-function buildSafeChildEnv() {
+export function buildSafeChildEnv() {
   const out = {};
   for (const key of CHILD_SAFE_ENV_KEYS) {
     if (typeof process.env[key] === "string") {

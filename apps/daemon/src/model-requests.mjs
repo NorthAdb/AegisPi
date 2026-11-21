@@ -297,6 +297,7 @@ export function commitModelCallWriteback(db, {
     model: call.model ?? reqRowPre.model_id,
     endpoint: call.endpoint ?? null,
     reply: replyTrimmed,
+    stopReason: call.stopReason ?? null,
     usage: call.usage ?? null,
     settledMicrousd: priced,
   });
@@ -408,10 +409,14 @@ export function commitModelCallWriteback(db, {
       ).run(finalRequestState, evidence?.id ?? null, priced === null ? "usage_not_settled" : null, now, requestId);
     }
 
+    const emptyReply = typeof call.reply !== "string" || call.reply.trim().length === 0;
+    const emptyErrorCode = call.stopReason === "length" ? "model_output_truncated_empty" : "model_empty_reply";
+    let taskFailed = false;
     if (!nowStatus.terminal && completeActiveTask && evidence?.id) {
       const effectiveLeaseOwner = leaseOwner ?? taskNow.lease_owner;
       if (effectiveLeaseOwner) {
         if (mustSettleToComplete && !settled) {
+          taskFailed = true;
           completeTaskInTx(db, {
             taskId: reqNow.task_id,
             attemptNo: taskNow.attempt_no,
@@ -429,6 +434,29 @@ export function commitModelCallWriteback(db, {
               request_id: requestId,
               reservation_id: reqNow.reservation_id,
               reason: "settlement remained HELD; repo-observe loop refused to mark succeeded",
+            },
+            now,
+          });
+        } else if (emptyReply) {
+          taskFailed = true;
+          completeTaskInTx(db, {
+            taskId: reqNow.task_id,
+            attemptNo: taskNow.attempt_no,
+            leaseOwner: effectiveLeaseOwner,
+            fence: taskNow.fence,
+            now,
+            resultClass: "infra_error",
+            resultObjectId: evidence.id,
+            errorCode: emptyErrorCode,
+          });
+          writeAudit(db, {
+            code: "model_empty_reply_uncompleted",
+            taskId: reqNow.task_id,
+            details: {
+              request_id: requestId,
+              reservation_id: reqNow.reservation_id,
+              stop_reason: call.stopReason ?? null,
+              error_code: emptyErrorCode,
             },
             now,
           });
@@ -455,10 +483,13 @@ export function commitModelCallWriteback(db, {
       replyObjectId: evidence?.id ?? null,
       settled,
       orphan: nowStatus.terminal,
+      taskFailed,
+      emptyReply,
+      emptyErrorCode,
     };
   });
 
-  if (txOut.status !== "dropped" && !txOut.orphan && completeActiveTask && taskPre) {
+  if (txOut.status !== "dropped" && !txOut.orphan && completeActiveTask && !txOut.taskFailed && taskPre) {
     const pending = db
       .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
       .get(reqRowPre.task_id);
@@ -478,13 +509,25 @@ export function commitModelCallWriteback(db, {
   }
 
   if (txOut.status !== "dropped" && !txOut.orphan && hostCommandsDir) {
-    writeAtomicJson(hostCommandsDir, modelResultFileName(requestId), {
-      kind: "model_result",
-      requestId,
-      ok: true,
-      reply: call.reply ?? "",
-      usage: call.usage ?? null,
-    });
+    writeAtomicJson(
+      hostCommandsDir,
+      modelResultFileName(requestId),
+      txOut.emptyReply
+        ? {
+            kind: "model_result",
+            requestId,
+            ok: false,
+            refusal: { code: txOut.emptyErrorCode, reason: "model returned an empty reply" },
+            usage: call.usage ?? null,
+          }
+        : {
+            kind: "model_result",
+            requestId,
+            ok: true,
+            reply: call.reply ?? "",
+            usage: call.usage ?? null,
+          },
+    );
   }
 
   return txOut;

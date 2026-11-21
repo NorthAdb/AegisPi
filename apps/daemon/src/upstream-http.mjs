@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 export class HttpUpstreamError extends Error {}
 
 const CHILD = join(dirname(fileURLToPath(import.meta.url)), "upstream-http-child.mjs");
-const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 export function isLoopbackEndpoint(rawUrl) {
   let u;

@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-21T04:38:48.561Z",
+  "generatedAt": "2026-11-21T07:37:42.668Z",
   "nodeVersion": "v22.23.5",
   "suite": "model-proposal",
   "label": "test:model-proposal — Phase 4.1 模型提议链路全量本地闭环与 T1–T10 矩阵",
   "counts": {
-    "pass": 14,
+    "pass": 15,
     "fail": 0
   },
   "results": [
@@ -77,6 +77,11 @@
       "name": "adversarial-hardening-invariants",
       "status": "PASS",
       "detail": "revoked=call_failed warm=warming_disabled upper=invalid_request_id leaseExp=ORPHAN/SETTLED(28) compsUnique=true explicitAclCleaned=true workerOverwriteGuarded=true"
+    },
+    {
+      "name": "empty-reply-settles-ledger-and-refuses-succeeded",
+      "status": "PASS",
+      "detail": "len=FAILED/model_output_truncated_empty/SETTLED(28) ws=FAILED/model_empty_reply"
     }
   ],
   "dataSources": "digest 钉住 agent 容器（--network none / PI_OFFLINE=1 / 只读 rootfs / 宿主 ACL 锁定 proposals）+ 真实 daemon tick + pi-ai 1.5.2 子进程 + 本地 OpenAI SSE 环回服务 + 真实 SQLite 账本与 crashpoint 注入；零真实推理服务调用，未读 .env"

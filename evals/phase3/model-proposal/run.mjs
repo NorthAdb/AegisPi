@@ -1279,6 +1279,62 @@ rmSync(crashHelperPath, { force: true });
   );
 }
 
+// ---------------------------------------------------------------------------
+// 11. Empty model reply settles usage cleanly and refuses task SUCCEEDED
+{
+  const { ws: wsLen, db: dbLen, ledger: ledgerLen, claim: claimLen, commandsDir: cmdLen, now: nowLen } = seedRunningClaim("mp-empty-len");
+  const cfgLen = loadConfigObj(writeTestConfig(wsLen));
+  setServiceMode({ kind: "priced", promptTokens: 40, completionTokens: 13, finishReason: "length", reply: "" });
+  const outLen = processModelRequest(dbLen, {
+    stateDir: wsLen.stateDir,
+    config: cfgLen,
+    ledger: ledgerLen,
+    envelope: makeEnvelope(claimLen, { requestId: randomUUID() }),
+    hostCommandsDir: cmdLen,
+    completeActiveTask: true,
+    now: nowLen,
+  });
+  const tLen = dbLen
+    .prepare("SELECT t.state, t.result_class, a.error_code FROM tasks t LEFT JOIN attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no WHERE t.id=?")
+    .get(claimLen.taskId);
+  const resLen = dbLen.prepare("SELECT state, actual_microusd FROM budget_reservations WHERE task_id=?").get(claimLen.taskId);
+  const auditLen = dbLen.prepare("SELECT count(*) c FROM audit_log WHERE code='model_empty_reply_uncompleted' AND task_id=?").get(claimLen.taskId).c;
+  dbLen.close();
+
+  const { ws: wsWs, db: dbWs, ledger: ledgerWs, claim: claimWs, commandsDir: cmdWs, now: nowWs } = seedRunningClaim("mp-empty-ws");
+  const cfgWs = loadConfigObj(writeTestConfig(wsWs));
+  setServiceMode({ kind: "priced", promptTokens: 40, completionTokens: 13, finishReason: "stop", reply: "   \n\t  " });
+  const outWs = processModelRequest(dbWs, {
+    stateDir: wsWs.stateDir,
+    config: cfgWs,
+    ledger: ledgerWs,
+    envelope: makeEnvelope(claimWs, { requestId: randomUUID() }),
+    hostCommandsDir: cmdWs,
+    completeActiveTask: true,
+    now: nowWs,
+  });
+  const tWs = dbWs
+    .prepare("SELECT t.state, t.result_class, a.error_code FROM tasks t LEFT JOIN attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no WHERE t.id=?")
+    .get(claimWs.taskId);
+  dbWs.close();
+
+  suite.check(
+    "empty-reply-settles-ledger-and-refuses-succeeded",
+    outLen.state === "SETTLED" &&
+      outLen.settled === true &&
+      resLen?.state === "SETTLED" &&
+      resLen?.actual_microusd === 28 &&
+      tLen?.state === "FAILED" &&
+      tLen?.result_class === "infra_error" &&
+      tLen?.error_code === "model_output_truncated_empty" &&
+      auditLen === 1 &&
+      outWs.state === "SETTLED" &&
+      tWs?.state === "FAILED" &&
+      tWs?.error_code === "model_empty_reply",
+    `len=${tLen?.state}/${tLen?.error_code}/${resLen?.state}(${resLen?.actual_microusd}) ws=${tWs?.state}/${tWs?.error_code}`,
+  );
+}
+
 svc.kill();
 
 writeReport({

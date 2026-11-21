@@ -56,25 +56,42 @@ function trimUtf8ToBytes(text, maxBytes) {
   return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
 }
 
-function fitPromptToMaxInputBytes(promptText, maxInputBytes) {
+function fitPromptToMaxInputBytes(excerptText, maxInputBytes, suffix = "") {
   const envelopeBytes = (s) => Buffer.byteLength(JSON.stringify([{ role: "user", content: s }]), "utf8");
-  if (envelopeBytes(promptText) <= maxInputBytes) {
-    return promptText;
+  const combined = `${excerptText}${suffix}`;
+  if (envelopeBytes(combined) <= maxInputBytes) {
+    return combined;
+  }
+  if (envelopeBytes(suffix) > maxInputBytes) {
+    let lo = 0;
+    let hi = Buffer.byteLength(suffix, "utf8");
+    let bestSuffix = "";
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const candidate = trimUtf8ToBytes(suffix, mid).text;
+      if (envelopeBytes(candidate) <= maxInputBytes) {
+        bestSuffix = candidate;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return bestSuffix;
   }
   let lo = 0;
-  let hi = Buffer.byteLength(promptText, "utf8");
+  let hi = Buffer.byteLength(excerptText, "utf8");
   let best = "";
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    const candidate = trimUtf8ToBytes(promptText, mid).text;
-    if (envelopeBytes(candidate) <= maxInputBytes) {
+    const candidate = trimUtf8ToBytes(excerptText, mid).text;
+    if (envelopeBytes(`${candidate}${suffix}`) <= maxInputBytes) {
       best = candidate;
       lo = mid + 1;
     } else {
       hi = mid - 1;
     }
   }
-  return best;
+  return `${best}${suffix}`;
 }
 
 export function parseRepoObservePayload(rawPayload) {
@@ -271,6 +288,27 @@ export async function executeRepoObserveAcquisition(db, {
   }
 
   const target = auth.target;
+  const questionTail = `\n\nTask Question: ${question}`;
+  const buildObserveHeader = (archiveLabel) =>
+    [
+      `Observe Repo: ${target.repo} (ref=${target.ref}, archive=${archiveLabel}, readOnly=true)`,
+      "Sanitized Read-Only Excerpts:",
+    ].join("\n");
+  const hasInputCap = config.model.maxInputBytes !== null && config.model.maxInputBytes !== undefined;
+  const minEnvelopeBytes = Buffer.byteLength(
+    JSON.stringify([{ role: "user", content: `${buildObserveHeader(target.sha256 ? `sha256:${target.sha256}` : "unpinned")}\n${questionTail}` }]),
+    "utf8",
+  );
+  if (hasInputCap && minEnvelopeBytes > config.model.maxInputBytes) {
+    const reason = `repo-observe envelope (${minEnvelopeBytes}B) exceeds model.maxInputBytes (${config.model.maxInputBytes}B)`;
+    writeAudit(db, {
+      code: "acquisition_refused",
+      taskId,
+      details: { target_id: targetId, reason_code: "input_bytes_exceeded", reason, attempt_id: attemptId, fence },
+      now,
+    });
+    return { ok: false, code: "input_bytes_exceeded", reason };
+  }
   const maxDownloadBytes = target.maxDownloadBytes ?? config.acquisition.maxDownloadBytes;
   const plan = {
     schemaVersion: 1,
@@ -347,19 +385,23 @@ export async function executeRepoObserveAcquisition(db, {
     }
 
     const archiveSha256 = firstResult.sha256 ? `sha256:${firstResult.sha256}` : null;
-    const header = [
-      `Observe Repo: ${target.repo} (ref=${target.ref}, archive=${archiveSha256 ?? "unpinned"}, readOnly=true)`,
-      `Question: ${question}`,
-      "Sanitized Read-Only Excerpts:",
-    ].join("\n");
-    const fixedEnvelopeBytes = Buffer.byteLength(JSON.stringify([{ role: "user", content: `${header}\n` }]), "utf8");
+    const header = buildObserveHeader(archiveSha256 ?? "unpinned");
+    const questionReserveBytes = Math.max(256, Buffer.byteLength(questionTail, "utf8"));
+    const headerEnvelopeBytes = Buffer.byteLength(JSON.stringify([{ role: "user", content: `${header}\n` }]), "utf8");
+    const fixedEnvelopeBytes = Buffer.byteLength(JSON.stringify([{ role: "user", content: `${header}\n${questionTail}` }]), "utf8");
     const perFileHeaderBytes = target.readPaths.reduce(
       (sum, p) => sum + Buffer.byteLength(`--- ${p} (sha256:${"0".repeat(64)}, bytes=9999999, truncated=true) ---\n\n`, "utf8"),
       0,
     );
-    const hasInputCap = config.model.maxInputBytes !== null && config.model.maxInputBytes !== undefined;
+    if (hasInputCap && fixedEnvelopeBytes > config.model.maxInputBytes) {
+      return {
+        ok: false,
+        code: "input_bytes_exceeded",
+        reason: `repo-observe envelope (${fixedEnvelopeBytes}B) exceeds model.maxInputBytes (${config.model.maxInputBytes}B)`,
+      };
+    }
     const capLimit = hasInputCap
-      ? Math.max(0, Math.min(config.acquisition.maxExcerptBytes, config.model.maxInputBytes - fixedEnvelopeBytes - perFileHeaderBytes - 32))
+      ? Math.max(0, Math.min(config.acquisition.maxExcerptBytes, config.model.maxInputBytes - headerEnvelopeBytes - questionReserveBytes - perFileHeaderBytes - 32))
       : config.acquisition.maxExcerptBytes;
 
     const excerpt = buildSafeRepoExcerpt({
@@ -433,10 +475,10 @@ export async function executeRepoObserveAcquisition(db, {
     const body = excerpt.files
       .map((f) => `--- ${f.path} (${f.sha256}, bytes=${f.bytes}, truncated=${f.truncated}) ---\n${f.excerpt}`)
       .join("\n");
-    let promptText = `${header}\n${body}`;
-    if (hasInputCap) {
-      promptText = fitPromptToMaxInputBytes(promptText, config.model.maxInputBytes);
-    }
+    const promptPrefix = `${header}\n${body}`;
+    const promptText = hasInputCap
+      ? fitPromptToMaxInputBytes(promptPrefix, config.model.maxInputBytes, questionTail)
+      : `${promptPrefix}${questionTail}`;
 
     return { ok: true, manifestObjectId: manifestRow.id, promptText };
   } finally {

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { piSettingsFromDefaults } from "../config/load-pi-settings.mjs";
 import { assertValidModelBaseUrl, MAX_MODEL_MESSAGES_BYTES, ModelCallError } from "./model-call.mjs";
 import { isHttpUrlWithoutCredentials, isSafeRelativeReadPath } from "./repo-observe.mjs";
+import { assertValidTelegramApiBase, TelegramSendError } from "./telegram-send.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -173,6 +174,38 @@ function parseAcquisitionConfig(raw = {}) {
   };
 }
 
+function parseTelegramConfig(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ConfigError("telegram config must be an object");
+  }
+  const apiBase = raw.apiBase ?? null;
+  let normalizedApiBase = null;
+  if (apiBase !== null) {
+    try {
+      normalizedApiBase = assertValidTelegramApiBase(apiBase);
+    } catch (e) {
+      throw new ConfigError(e instanceof TelegramSendError ? e.message : String(e));
+    }
+  }
+  const timeoutMs = raw.timeoutMs ?? 15000;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
+    throw new ConfigError(`telegram.timeoutMs must be an integer 1000..120000, got ${JSON.stringify(timeoutMs)}`);
+  }
+  return {
+    apiBase: normalizedApiBase,
+    allowRealSend: raw.allowRealSend === true,
+    timeoutMs,
+  };
+}
+
+function parseStringAllowlist(rawValue, name) {
+  if (rawValue === undefined) return [];
+  if (!Array.isArray(rawValue) || !rawValue.every((item) => typeof item === "string")) {
+    throw new ConfigError(`${name} must be an array of strings`);
+  }
+  return [...rawValue];
+}
+
 export function defaultsJsonPath() {
   return join(here, "..", "config", "defaults.json");
 }
@@ -215,6 +248,7 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     max: 1_000_000,
   });
   const acquisition = parseAcquisitionConfig(defaults.acquisition ?? {});
+  const telegram = parseTelegramConfig(defaults.telegram ?? {});
 
   return {
     defaultsPath: path,
@@ -274,9 +308,9 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     },
     adapters: {
       fixedSendingIdentity: defaults.adapters?.fixedSendingIdentity ?? "aegispi@local",
-      allowedRecipients: defaults.adapters?.allowedRecipients ?? [],
-      allowedRepos: defaults.adapters?.allowedRepos ?? [],
-      allowedBranches: defaults.adapters?.allowedBranches ?? [],
+      allowedRecipients: parseStringAllowlist(defaults.adapters?.allowedRecipients, "adapters.allowedRecipients"),
+      allowedRepos: parseStringAllowlist(defaults.adapters?.allowedRepos, "adapters.allowedRepos"),
+      allowedBranches: parseStringAllowlist(defaults.adapters?.allowedBranches, "adapters.allowedBranches"),
     },
     // Real submitter transport (re-review P1). submitUrl null = no transport
     // wired: READY effects stay durable with the honest log, fail closed.
@@ -287,6 +321,7 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       submitUrl: defaults.upstream?.submitUrl ?? null,
       timeoutMs: defaults.upstream?.timeoutMs ?? 30000,
     },
+    telegram,
     // Credential SLOT markers the adapter checks (values never live here —
     // 02 section 4: only the host credential service reads secrets). A null
     // slot means nothing real is wired and the adapter refuses real writes.
