@@ -36,9 +36,10 @@ import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { createHttpUpstream } from "./upstream-http.mjs";
 import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effects.mjs";
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
-import { createContainerExecutor, createAgentLauncher } from "./container-executor.mjs";
+import { createContainerExecutor, createAgentLauncher, createAcquisitionLauncher } from "./container-executor.mjs";
 import { isLoopbackModelEndpoint } from "./model-call.mjs";
 import { processPendingModelProposalsAsync } from "./model-requests.mjs";
+import { parseRepoObservePayload, executeRepoObserveAcquisition } from "./repo-observe.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
 import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
@@ -216,55 +217,67 @@ export async function main(argv = process.argv.slice(2)) {
       })
     : null;
 
-  // Optional REAL container execution (Phase 3): the executor only exists
-  // when the operator passes a digest-pinned image reference. Without the
-  // flag the daemon says so honestly — QUEUED jobs stay durable.
-  const executionImageFlag = argv.find((a) => a.startsWith("--execution-image="));
-  let executor = null;
-  if (executionImageFlag) {
+  function parseImageLauncher(flagPrefix, label, createFn, { reapOnStart = false } = {}) {
+    const flag = argv.find((a) => a.startsWith(flagPrefix));
+    if (!flag) return null;
     try {
-      executor = createContainerExecutor(db, {
-        stateDir: dataDir,
-        imageRef: executionImageFlag.slice("--execution-image=".length),
-        quotas: {
-          cpus: config.containerPlaceholders.execution.cpus,
-          memory: `${config.containerPlaceholders.execution.memoryGiB}g`,
-          pids: config.containerPlaceholders.execution.pids,
-          tmpfsSize: `${config.containerPlaceholders.execution.writableDiskGiB}g`,
-        },
-        machineWideMax: config.leases.maxOfflineJobsMachineWide,
-      });
+      const launcher = createFn(flag.slice(flagPrefix.length));
+      if (reapOnStart) launcher.reapOrphanContainers();
+      return launcher;
     } catch (e) {
-      console.error(`execution image flag invalid: ${e.message}`);
+      console.error(`${label} image flag invalid: ${e.message}`);
       process.exit(2);
     }
   }
 
+  // Optional REAL container execution (Phase 3): the executor only exists
+  // when the operator passes a digest-pinned image reference. Without the
+  // flag the daemon says so honestly — QUEUED jobs stay durable.
+  const executor = parseImageLauncher("--execution-image=", "execution", (imageRef) =>
+    createContainerExecutor(db, {
+      stateDir: dataDir,
+      imageRef,
+      quotas: {
+        cpus: config.containerPlaceholders.execution.cpus,
+        memory: `${config.containerPlaceholders.execution.memoryGiB}g`,
+        pids: config.containerPlaceholders.execution.pids,
+        tmpfsSize: `${config.containerPlaceholders.execution.writableDiskGiB}g`,
+      },
+      machineWideMax: config.leases.maxOfflineJobsMachineWide,
+    }),
+  );
+
   // Optional production agent container launcher (Phase 4.1, ADR-0001 §2):
   // parallel to --execution-image, requires a digest-pinned agent image ref.
-  const agentImageFlag = argv.find((a) => a.startsWith("--agent-image="));
-  let agentLauncher = null;
-  if (agentImageFlag) {
-    try {
-      agentLauncher = createAgentLauncher(db, {
+  const agentLauncher = parseImageLauncher(
+    "--agent-image=",
+    "agent",
+    (imageRef) =>
+      createAgentLauncher(db, {
         stateDir: dataDir,
-        imageRef: agentImageFlag.slice("--agent-image=".length),
+        imageRef,
         quotas: {
           cpus: config.containerPlaceholders.agent.cpus,
           memory: `${config.containerPlaceholders.agent.memoryGiB}g`,
           pids: config.containerPlaceholders.agent.pids,
           tmpfsSize: `${config.containerPlaceholders.agent.writableDiskGiB}g`,
         },
-      });
-    } catch (e) {
-      console.error(`agent image flag invalid: ${e.message}`);
-      process.exit(2);
-    }
-  }
+      }),
+    { reapOnStart: true },
+  );
   const activeAgentContainers = new Map();
-  if (agentLauncher) {
-    agentLauncher.reapOrphanContainers();
-  }
+
+  const acquisitionLauncher = parseImageLauncher(
+    "--acquisition-image=",
+    "acquisition",
+    (imageRef) =>
+      createAcquisitionLauncher(db, {
+        stateDir: dataDir,
+        imageRef,
+        enableHostGateway: config.acquisition.enableHostGateway,
+      }),
+    { reapOnStart: true },
+  );
 
   function reclaimFinishedAgentContainers() {
     if (!agentLauncher) return 0;
@@ -279,7 +292,8 @@ export async function main(argv = process.argv.slice(2)) {
         .prepare("SELECT state, error_code FROM model_requests WHERE attempt_id=? ORDER BY updated_at DESC LIMIT 1")
         .get(info.attemptId);
       const insp = agentLauncher.inspectContainer(info.containerId);
-      if (insp.running && taskRow?.state === "RUNNING") {
+      const deadlineExpired = Boolean(info.deadlineAt && Date.now() >= info.deadlineAt);
+      if (insp.running && taskRow?.state === "RUNNING" && !deadlineExpired) {
         try {
           heartbeat(db, {
             taskId: info.taskId,
@@ -311,7 +325,7 @@ export async function main(argv = process.argv.slice(2)) {
       }
       const graceExpired = Boolean(info.settledSeenAt && Date.now() - info.settledSeenAt > 1500);
       const nonSuccessTerminal = postTask && postTask.state !== "RUNNING" && postTask.state !== "SUCCEEDED";
-      if (receipts.length > 0 || !insp.running || graceExpired || nonSuccessTerminal) {
+      if (receipts.length > 0 || !insp.running || graceExpired || nonSuccessTerminal || deadlineExpired) {
         agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
         activeAgentContainers.delete(key);
         reclaimed += 1;
@@ -483,34 +497,86 @@ export async function main(argv = process.argv.slice(2)) {
                 } catch {}
               }
             }
-            const modelKey = config.model.provider && config.model.modelId
-              ? `${config.model.provider}/${config.model.modelId}`
-              : "deepseek/deepseek-flash";
-            const launched = agentLauncher.launchAttempt({
-              taskId: claim.taskId,
-              attemptId: claim.attemptId,
-              attemptNo: claim.attemptNo,
-              fence: claim.fence,
-              scopeDomainKey: scopeRow.domain_key,
-              modelRequest: {
-                purpose: "worker",
-                modelId: modelKey,
-                messages: [{ role: "user", content: callInput ?? `task ${claim.taskId}` }],
-              },
-              now,
-            });
-            try {
-              heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
-            } catch {}
-            activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
-              ...launched,
-              taskId: claim.taskId,
-              attemptId: claim.attemptId,
-              attemptNo: claim.attemptNo,
-              fence: claim.fence,
-              leaseOwner: claim.leaseOwner,
-              deadlineAt: taskRow.deadline_at,
-            });
+            let launchInput = callInput;
+            let skipLaunch = false;
+            const parsedObserve = parseRepoObservePayload(callInput);
+            if (parsedObserve.isObserve) {
+              if (!parsedObserve.valid) {
+                writeAudit(db, {
+                  code: "acquisition_refused",
+                  taskId: claim.taskId,
+                  details: { reason_code: parsedObserve.code, reason: parsedObserve.reason },
+                  now: Date.now(),
+                });
+                completeTask(db, {
+                  ...claim,
+                  now: Date.now(),
+                  resultClass: "infra_error",
+                  errorCode: parsedObserve.code,
+                });
+                skipLaunch = true;
+              } else {
+                const acqOut = await executeRepoObserveAcquisition(db, {
+                  stateDir: dataDir,
+                  config,
+                  acquisitionLauncher,
+                  taskId: claim.taskId,
+                  attemptId: claim.attemptId,
+                  attemptNo: claim.attemptNo,
+                  fence: claim.fence,
+                  scopeId: taskRow.scope_id,
+                  targetId: parsedObserve.targetId,
+                  question: parsedObserve.question,
+                  now,
+                  onProgress: () => heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs }),
+                });
+                try {
+                  heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
+                } catch {}
+                if (!acqOut.ok) {
+                  completeTask(db, {
+                    ...claim,
+                    now: Date.now(),
+                    resultClass: "infra_error",
+                    resultObjectId: acqOut.reportObjectId ?? null,
+                    errorCode: acqOut.code,
+                  });
+                  skipLaunch = true;
+                } else {
+                  launchInput = acqOut.promptText;
+                }
+              }
+            }
+            if (!skipLaunch) {
+              const modelKey = config.model.provider && config.model.modelId
+                ? `${config.model.provider}/${config.model.modelId}`
+                : "deepseek/deepseek-flash";
+              const launched = agentLauncher.launchAttempt({
+                taskId: claim.taskId,
+                attemptId: claim.attemptId,
+                attemptNo: claim.attemptNo,
+                fence: claim.fence,
+                scopeDomainKey: scopeRow.domain_key,
+                modelRequest: {
+                  purpose: "worker",
+                  modelId: modelKey,
+                  messages: [{ role: "user", content: launchInput ?? `task ${claim.taskId}` }],
+                },
+                now,
+              });
+              try {
+                heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
+              } catch {}
+              activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
+                ...launched,
+                taskId: claim.taskId,
+                attemptId: claim.attemptId,
+                attemptNo: claim.attemptNo,
+                fence: claim.fence,
+                leaseOwner: claim.leaseOwner,
+                deadlineAt: taskRow.deadline_at,
+              });
+            }
           }
         }
         const batch = await processPendingModelProposalsAsync(db, {
@@ -518,6 +584,7 @@ export async function main(argv = process.argv.slice(2)) {
           config,
           ledger,
           leaseMs: config.leases.leaseMs,
+          heartbeatMs: config.leases.heartbeatMs,
           completeActiveTask: true,
           now,
           useWallClockAfterCall: true,
@@ -681,6 +748,7 @@ export async function main(argv = process.argv.slice(2)) {
               config,
               ledger,
               leaseMs: config.leases.leaseMs,
+              heartbeatMs: config.leases.heartbeatMs,
               completeActiveTask: true,
               now: Date.now(),
               useWallClockAfterCall: true,

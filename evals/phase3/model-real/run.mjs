@@ -45,6 +45,16 @@ const PROMPT = "Reply with exactly the word OK and nothing else.";
 
 const suite = makeSuite("model-real");
 
+if (process.env.AEGISPI_ALLOW_REAL_MODEL_ACCEPTANCE !== "1") {
+  console.error("");
+  console.error("=== test:model:real — REFUSED (exit 4) ===");
+  console.error(
+    "真实模型验收入口已锁定：必须由主人逐项书面授权并显式设置 AEGISPI_ALLOW_REAL_MODEL_ACCEPTANCE=1 后才允许读取 .env 并发起真实调用。",
+  );
+  console.error("");
+  process.exit(4);
+}
+
 function readEnv(name) {
   try {
     const txt = readFileSync(join(repoRoot, ".env"), "utf8");
@@ -123,6 +133,8 @@ defaults.model = {
   allowRealModelCalls: true,
   callTimeoutMs: 60000,
   callUpperMicrousd: CALL_UPPER_MICROUSD,
+  maxInputBytes: 8192,
+  maxOutputTokens: 64,
   modelId: WIRE_MODEL_ID,
   priceCatalog: {
     inputPerMTokMicrousd: PRICE_INPUT_PER_MTOK_MICROUSD,

@@ -167,12 +167,6 @@ export function proposeModelRequest({
   if (typeof requestId !== "string" || !UUID_V4_RE.test(requestId)) {
     throw new Error(`model_request requestId must be a UUID v4, got ${JSON.stringify(requestId)}`);
   }
-  if (usedRequestIds) {
-    if (usedRequestIds.has(requestId)) {
-      throw new Error(`model_request requestId ${requestId} cannot be reused within the same attempt`);
-    }
-    usedRequestIds.add(requestId);
-  }
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error("model_request requires a non-empty messages array");
   }
@@ -180,7 +174,18 @@ export function proposeModelRequest({
   if (msgBytes > MAX_MODEL_MESSAGES_BYTES) {
     throw new Error(`model_request messages exceed 128 KiB (${msgBytes} > ${MAX_MODEL_MESSAGES_BYTES})`);
   }
+  if (usedRequestIds && usedRequestIds.has(requestId)) {
+    throw new Error(`model_request requestId ${requestId} cannot be reused within the same attempt`);
+  }
   mkdirSync(proposalsDir, { recursive: true });
+  const filename = `model-request-${requestId}.json`;
+  const destPath = join(proposalsDir, filename);
+  if (existsSync(destPath)) {
+    throw new Error(`model_request file ${filename} already exists in this attempt`);
+  }
+  if (usedRequestIds) {
+    usedRequestIds.add(requestId);
+  }
   const envelope = {
     schemaVersion: 1,
     kind: "model_request",
@@ -193,11 +198,10 @@ export function proposeModelRequest({
     modelId,
     messages,
   };
-  const filename = `model-request-${requestId}.json`;
   const tmp = join(proposalsDir, `${filename}.tmp`);
   writeFileSync(tmp, JSON.stringify(envelope) + "\n", "utf8");
-  renameSync(tmp, join(proposalsDir, filename));
-  return { envelope, file: join(proposalsDir, filename) };
+  renameSync(tmp, destPath);
+  return { envelope, file: destPath };
 }
 
 // Minimal host->worker command loop. The channel is deliberately boring:

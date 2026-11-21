@@ -2,11 +2,11 @@
 
 自托管、事件驱动的个人常驻 Agent 系统（实现仓库）。边界原则：宿主 daemon 单点持有 ACL、预算、审批、凭据与外部提交器；模型文本与工具结果从不授予权限（`AGENTS.md` §5）。本仓库公开，密钥与人工判断标注一律不入库。
 
-## 当前位置（2026-11-20）
+## 当前位置（2026-11-21）
 
 - Phase 1（底座契约）与 Phase 2（持久化只读链路）已收口；**Phase 3 出口 MET WITH RESIDUAL RISKS**，其中 `44b3514` 两项限定修复已独立验收关闭，不重开。
-- 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地、通过独立对抗审计并按路线 A 冻结于 `8943a10`（纪元 5）**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)、[独立审计报告](docs/phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）；**4.1 收口与审计通过仍不构成任何真实运行授权**。
-- Phase 4 拆为**单元 4.1**（模型链路实现：**已通过独立对抗审计 `PASS WITH RESIDUALS`**）与**单元 4.2**（真实仓库 Observe：[受限开工草案](docs/phase4/phase4-restricted-kickoff-draft.md)，首跑仍待七项首跑检查表逐项书面确认）。
+- 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地、通过独立对抗审计并按路线 A 冻结于 `8943a10`（纪元 5）**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)、[独立审计报告](docs/phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）。
+- Phase 4 单元 4.2 **许可 1 离线 Repo Observe 闭环及 4.1 延后加固项已完成并经全量 13 套件 + Hono 预检通过（纪元 6）**（[4.2 离线任务书](docs/phase4/phase4-2-offline-task-spec.md)、[4.2 离线收口报告](docs/phase4/reports/phase4-2-offline-closure.md)）；**单元 4.2 真实首次运行仍严格阻塞于《[受限开工草案](docs/phase4/phase4-restricted-kickoff-draft.md)》许可 2 首跑检查表七项逐项书面确认——4.1 审计与 4.2 离线验收均不构成任何真实运行授权。**
 - **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。
 - 任务预算 $0.80、日预算 $5 已定，不重开；真实运行前的价格目录、token 约束与单次预留确认属首跑检查表核对，不是重新讨论预算。
 - 真实验收 A（模型）/B（外部写）/C（Telegram 只读）各已执行一次且授权闭合，**无剩余额度**；D（公网 webhook）延期至首次启用 Telegram 公网入站 webhook 前，且不作为全部 Phase 4 的前置条件；出站发送另需授权。历史 A/B/C 缺证按既定口径归档不追补；原镜像按主人「本机验证通过即闭项」口径处理。
@@ -45,14 +45,15 @@
 - scope ACL 与审批/取消流（acl、cancel-approval 套件）。
 - 离线 job 容器执行与磁盘水位（offline-jobs 套件；docker）。
 - Telegram 入站解析（本地夹具，零真实外联；ingress-telegram 套件）。
-- 应用镜像真实构建（现行**纪元 5**）、digest 绑定与门禁、容器配额实测（三 docker 套件 + `test:model-proposal` + `test:quota-calibration`）。
-- 容器→宿主模型提议与宿主 `pi-ai@1.5.2` 单一执行核心：`model_request` 闭信封与 `model-result-<uuid>.json` 通道、`model_requests` 七态状态机与同事务预留/结算、Windows 宿主程序化 `icacls` 锁定 `proposals` 目录（`model-proposal`、`security-unit` 套件，零真实推理调用）。
+- 应用镜像真实构建（现行**纪元 6**）、digest 绑定与门禁、容器配额实测（三 docker 套件 + `test:model-proposal` + `test:repo-observe` + `test:quota-calibration`）。
+- 容器→宿主模型提议与宿主 `pi-ai@1.5.2` 单一执行核心：`model_request` 闭信封与 `model-result-<uuid>.json` 通道、`model_requests` 七态状态机与同事务预留/结算、Windows 宿主程序化 `icacls` 锁定 `proposals` 目录及 POSIX 权能拒绝校验（`model-proposal`、`security-unit` 套件，零真实推理调用）。
+- 只读 Repo Observe 离线编排（许可 1）：`--acquisition-image=<digest>` 启动器、`sha256` 钉住归档下载与脱敏有界 `repo_observe_manifest` + `derived_from` 溯源、`maxInputBytes`/`maxOutputTokens` 门禁与 Observe `HELD` 停机语义（`test:repo-observe` 6/6，零真实仓库拉取与模型调用）。
 
 **已执行过且授权已闭合的一次性真实验收**（重跑即需新的逐项书面授权）：A 真实模型 1 次（DeepSeek 官方端点，28 microUSD 结清）；B 真实外部写 1 次（可丢弃端点）；C Telegram 只读 2 次调用（历史计数缺证不闭项，按既定口径归档）。
 
 **未实现 / 未授权**（不得当已实现或已放行）：
 
-- 真实仓库 Observe 闭环（单元 4.2，仍受首跑检查表阻塞）。
+- 真实仓库 Observe 真实首次运行（单元 4.2 许可 2，仍受首跑检查表七项书面确认阻塞）。
 - Telegram 公网入站 webhook（D，延期）与一切出站通知发送。
 - 常开运行。
 
@@ -68,17 +69,18 @@
 
 `package.json` 脚本名与实际入口一致（`node evals/…`）。锁定 Node 显式路径执行：
 
-| 套件（npm 脚本） | 需 Docker | 最近在案全量记录（单元 4.1 纪元 5 终树，2026-11-21） |
+| 套件（npm 脚本） | 需 Docker | 最近在案全量记录（单元 4.2 许可 1 纪元 6 终树，2026-11-21） |
 | --- | --- | --- |
 | `test:contracts`（PI-01..13 契约探针 + LF 分帧 + SQLite 门禁） | 否 | 15/15 PASS，exit 0 |
 | `test:durability` / `test:acl` / `test:budget`（Phase 2 三套件） | 否 | 164/164、15/15、20/20，exit 0 |
 | `test:cancel-approval` / `test:security:unit` / `test:restore` | 否 | 16/16、44/44、11/11，exit 0 |
 | `test:ingress-telegram`（本地夹具） | 否 | 7/7 + 1 NOTE，exit 0 |
 | `test:model-proposal`（4.1 锚点 E2E + T1–T10 + 生产启动器 + 对抗加固） | 是 | 14/14 PASS，exit 0 |
-| `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 5） |
+| `test:repo-observe`（4.2 许可 1 离线 Observe 闭环 + fail-closed + `model:real` 护栏） | 是 | 6/6 PASS，exit 0 |
+| `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 6） |
 | hono 配对自检（非 npm 脚本）：`node evals/contracts/tools/verify-hono-oracle-pair.mjs` | 否 | lockfile sha 双核对 exit 0 |
 
-在案证据：[docs/phase4/reports/phase4-1-closure.md](docs/phase4/reports/phase4-1-closure.md)、[phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md) §5 与 [image-digest.md](docs/phase3/reports/image-digest.md)。以上 12 套离线/容器脚本与 Hono 预检均在本轮终树以锁定 Node v22.23.5 全量实跑通过（零真实推理调用）。
+在案证据：[docs/phase4/reports/phase4-2-offline-closure.md](docs/phase4/reports/phase4-2-offline-closure.md)、[docs/phase4/reports/phase4-1-closure.md](docs/phase4/reports/phase4-1-closure.md)、[phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md) §5 与 [image-digest.md](docs/phase3/reports/image-digest.md)。以上 13 套离线/容器脚本与 Hono 预检均在本轮纪元 6 终树以锁定 Node v22.23.5 全量实跑通过（零真实推理调用、零真实仓库拉取）。
 
 ## 真实入口（不进快速开始）
 

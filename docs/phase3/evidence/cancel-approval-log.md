@@ -1,6 +1,6 @@
 # test:cancel-approval — 审批/取消线性化（生产路径，fake 远端）
 
-生成：2026-11-21T01:01:35.533Z；Node v22.23.5；suite `cancel-approval`。
+生成：2026-11-21T04:48:58.947Z；Node v22.23.5；suite `cancel-approval`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |

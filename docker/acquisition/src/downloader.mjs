@@ -193,12 +193,13 @@ export async function fetchTo(url, destPath, { maxSizeBytes, sha256, allowedRedi
       rmSync(tmpPath, { force: true });
       return { ok: false, reason: `size cap exceeded: >${maxSizeBytes} bytes` };
     }
-    if (sha256 && hash.digest("hex") !== sha256) {
+    const actualSha256 = hash.digest("hex");
+    if (sha256 && actualSha256 !== sha256) {
       rmSync(tmpPath, { force: true });
       return { ok: false, reason: `sha256 mismatch: expected ${sha256}` };
     }
     renameSync(tmpPath, destPath);
-    return { ok: true, bytes, sha256: hash.digest("hex") };
+    return { ok: true, bytes, sha256: actualSha256 };
   }
   return { ok: false, reason: `more than ${MAX_REDIRECTS} redirects` };
 }

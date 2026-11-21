@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T00:52:07.853Z",
+  "generatedAt": "2026-11-21T04:38:48.561Z",
   "nodeVersion": "v22.23.5",
   "suite": "model-proposal",
   "label": "test:model-proposal — Phase 4.1 模型提议链路全量本地闭环与 T1–T10 矩阵",
@@ -46,7 +46,7 @@
     {
       "name": "t6-crash-after-executing-stays-executing-then-charged-bound-1000",
       "status": "PASS",
-      "detail": "preTimeout=EXECUTING/HELD postTimeout=EXECUTING/CHARGED_BOUND(1000u$) taskSpent=500 releaseBlocked=true"
+      "detail": "preTimeout=EXECUTING/HELD postTimeout=EXECUTING/CHARGED_BOUND(1000u$) taskSpent=500 releaseBlocked=true postCallHits=1/1 postReplayDup=true"
     },
     {
       "name": "t7-late-usage-pure-ledger-settles-once-zero-second-call",
@@ -76,7 +76,7 @@
     {
       "name": "adversarial-hardening-invariants",
       "status": "PASS",
-      "detail": "revoked=call_failed warm=warming_disabled upper=invalid_request_id leaseExp=ORPHAN/SETTLED(28) compsUnique=true explicitAclCleaned=true"
+      "detail": "revoked=call_failed warm=warming_disabled upper=invalid_request_id leaseExp=ORPHAN/SETTLED(28) compsUnique=true explicitAclCleaned=true workerOverwriteGuarded=true"
     }
   ],
   "dataSources": "digest 钉住 agent 容器（--network none / PI_OFFLINE=1 / 只读 rootfs / 宿主 ACL 锁定 proposals）+ 真实 daemon tick + pi-ai 1.5.2 子进程 + 本地 OpenAI SSE 环回服务 + 真实 SQLite 账本与 crashpoint 注入；零真实推理服务调用，未读 .env"

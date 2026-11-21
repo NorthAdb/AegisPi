@@ -82,6 +82,31 @@ export function validateModelMessages(messages) {
   return { ok: true };
 }
 
+export function validateModelTokenCaps(modelConfig, messages) {
+  if (!isLoopbackModelEndpoint(modelConfig?.baseUrl)) {
+    const hasIn = Number.isInteger(modelConfig?.maxInputBytes) && modelConfig.maxInputBytes > 0;
+    const hasOut = Number.isInteger(modelConfig?.maxOutputTokens) && modelConfig.maxOutputTokens > 0;
+    if (!hasIn || !hasOut) {
+      return {
+        ok: false,
+        code: "token_caps_not_configured",
+        reason: "non-loopback model calls require explicit model.maxInputBytes and model.maxOutputTokens",
+      };
+    }
+  }
+  if (modelConfig?.maxInputBytes !== null && modelConfig?.maxInputBytes !== undefined) {
+    const msgBytes = Buffer.byteLength(JSON.stringify(messages), "utf8");
+    if (msgBytes > modelConfig.maxInputBytes) {
+      return {
+        ok: false,
+        code: "input_bytes_exceeded",
+        reason: `messages exceed configured model.maxInputBytes (${msgBytes} > ${modelConfig.maxInputBytes})`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 export function isLoopbackModelEndpoint(rawUrl) {
   let u;
   try {
@@ -284,10 +309,6 @@ export function callModelOnceAsync({
 //      tokens are already included in outputTokens and never billed separately.
 export function microusdForUsage(usage, catalog, { stopReason = "stop" } = {}) {
   if (!usage || typeof usage !== "object") return null;
-  if (stopReason === "error" || stopReason === "aborted") {
-    // Only settle if a complete, valid usage block was parsed; callers normally
-    // keep failed/aborted calls HELD without settling anyway.
-  }
   if (
     !Object.prototype.hasOwnProperty.call(usage, "totalFromProvider") ||
     typeof usage.totalFromProvider !== "boolean"

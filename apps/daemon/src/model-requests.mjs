@@ -13,6 +13,7 @@ import { writeAudit } from "./audit.mjs";
 import { PURPOSES } from "./budget.mjs";
 import { createCredentialService } from "./credentials.mjs";
 import { putObjectContent, insertObjectRow } from "./objects.mjs";
+import { observeManifestObjectIdForAttempt } from "./repo-observe.mjs";
 import { completeTaskInTx, deliveryAckCheckpoint, deliveryDone, heartbeat } from "./scheduler.mjs";
 import {
   assertValidModelBaseUrl,
@@ -23,6 +24,7 @@ import {
   microusdForUsage,
   parseModelWhitelistKey,
   validateModelMessages,
+  validateModelTokenCaps,
 } from "./model-call.mjs";
 import { crashpoint } from "./testing/crashpoints.mjs";
 
@@ -218,6 +220,8 @@ export function commitModelCallWriteback(db, {
   priceCatalog,
   hostCommandsDir = null,
   completeActiveTask = false,
+  requireSettledForCompletion = false,
+  parentObjectIds = [],
   leaseOwner = null,
   now = Date.now(),
   auditCodeOnSettle = null,
@@ -319,6 +323,10 @@ export function commitModelCallWriteback(db, {
     const taskNow = db.prepare("SELECT * FROM tasks WHERE id=?").get(reqNow.task_id);
     const attemptNow = db.prepare("SELECT * FROM attempts WHERE id=?").get(reqNow.attempt_id);
     const nowStatus = isClaimExpiredOrTerminal(taskNow, attemptNow, reqNow.fence, now);
+    const observeManifestId = observeManifestObjectIdForAttempt(db, reqNow.attempt_id);
+    const effectiveParents =
+      parentObjectIds.length > 0 ? parentObjectIds : observeManifestId ? [observeManifestId] : [];
+    const mustSettleToComplete = requireSettledForCompletion || Boolean(observeManifestId);
 
     const scopeId =
       taskNow?.scope_id ??
@@ -334,6 +342,7 @@ export function commitModelCallWriteback(db, {
           storageRef: storedEvidence.storageRef,
           observedAt: now,
           requiredScopeIds: [scopeId],
+          parents: effectiveParents.map((id) => ({ parentId: id, relation: "derived_from" })),
         })
       : null;
 
@@ -402,15 +411,38 @@ export function commitModelCallWriteback(db, {
     if (!nowStatus.terminal && completeActiveTask && evidence?.id) {
       const effectiveLeaseOwner = leaseOwner ?? taskNow.lease_owner;
       if (effectiveLeaseOwner) {
-        completeTaskInTx(db, {
-          taskId: reqNow.task_id,
-          attemptNo: taskNow.attempt_no,
-          leaseOwner: effectiveLeaseOwner,
-          fence: taskNow.fence,
-          now,
-          resultClass: "not_applicable",
-          resultObjectId: evidence.id,
-        });
+        if (mustSettleToComplete && !settled) {
+          completeTaskInTx(db, {
+            taskId: reqNow.task_id,
+            attemptNo: taskNow.attempt_no,
+            leaseOwner: effectiveLeaseOwner,
+            fence: taskNow.fence,
+            now,
+            resultClass: "infra_error",
+            resultObjectId: evidence.id,
+            errorCode: "settlement_held_uncompleted",
+          });
+          writeAudit(db, {
+            code: "observe_stopped_settlement_held",
+            taskId: reqNow.task_id,
+            details: {
+              request_id: requestId,
+              reservation_id: reqNow.reservation_id,
+              reason: "settlement remained HELD; repo-observe loop refused to mark succeeded",
+            },
+            now,
+          });
+        } else {
+          completeTaskInTx(db, {
+            taskId: reqNow.task_id,
+            attemptNo: taskNow.attempt_no,
+            leaseOwner: effectiveLeaseOwner,
+            fence: taskNow.fence,
+            now,
+            resultClass: "not_applicable",
+            resultObjectId: evidence.id,
+          });
+        }
       }
     }
 
@@ -516,6 +548,18 @@ function validateAndAuthorizeModelProposal(db, { config, envelope, hostCommandsD
       now,
     });
     return { ok: false, result: { accepted: false, status: "refused", code: "invalid_model_config", reason: e.message, rowCreated: false } };
+  }
+  const capCheck = validateModelTokenCaps(config.model, envelope.messages);
+  if (!capCheck.ok) {
+    recordRefusal(db, {
+      taskId: envelope.taskId,
+      requestId: envelope.requestId,
+      code: capCheck.code,
+      reason: capCheck.reason,
+      hostCommandsDir,
+      now,
+    });
+    return { ok: false, result: { accepted: false, status: "refused", code: capCheck.code, reason: capCheck.reason, rowCreated: false } };
   }
   return { ok: true };
 }
@@ -787,6 +831,7 @@ export function processModelRequest(db, opts = {}) {
       messages: prep.envelope.messages,
       timeoutMs: prep.config.model.callTimeoutMs ?? 60000,
       bearer: prep.bearer,
+      maxTokens: prep.config.model.maxOutputTokens ?? undefined,
     });
   } catch (e) {
     call = { ok: false, kind: "local", stopReason: "error", error: e.message, usage: null };
@@ -799,8 +844,11 @@ export async function processModelRequestAsync(db, opts = {}) {
   if (started.done) return started.result;
   const { prep } = started;
   const leaseMs = opts.leaseMs ?? 45000;
-  const hbEveryMs = Math.max(250, Math.floor(leaseMs / 3));
-  const timer = setInterval(() => {
+  const hbFloor = Math.max(250, Math.floor(leaseMs / 3));
+  const hbEveryMs = Number.isInteger(opts.heartbeatMs) && opts.heartbeatMs > 0
+    ? Math.max(250, Math.min(opts.heartbeatMs, hbFloor))
+    : hbFloor;
+  const refreshHeartbeat = () => {
     try {
       heartbeat(db, {
         taskId: prep.idCheck.task.id,
@@ -811,7 +859,9 @@ export async function processModelRequestAsync(db, opts = {}) {
         leaseMs,
       });
     } catch {}
-  }, hbEveryMs);
+  };
+  refreshHeartbeat();
+  const timer = setInterval(refreshHeartbeat, hbEveryMs);
   let call;
   try {
     call = await callModelOnceAsync({
@@ -820,6 +870,7 @@ export async function processModelRequestAsync(db, opts = {}) {
       messages: prep.envelope.messages,
       timeoutMs: prep.config.model.callTimeoutMs ?? 60000,
       bearer: prep.bearer,
+      maxTokens: prep.config.model.maxOutputTokens ?? undefined,
     });
   } catch (e) {
     call = { ok: false, kind: "local", stopReason: "error", error: e.message, usage: null };
@@ -993,6 +1044,15 @@ function scanPendingProposals(db, { stateDir, now = Date.now() }) {
   return { results, tasksToVisit };
 }
 
+function recordScannedProposalOutcome(scan, entry, item, outcome) {
+  scan.results.push({ file: item.f, taskId: item.envelope?.taskId ?? null, proposalsDir: entry.proposalsDir, ...outcome });
+  if (outcome.status !== "pending_no_base_url") {
+    entry.consumed[item.f] = { mtimeMs: item.st.mtimeMs, size: item.st.size };
+    return true;
+  }
+  return false;
+}
+
 export function processPendingModelProposals(db, {
   stateDir,
   config,
@@ -1016,9 +1076,7 @@ export function processPendingModelProposals(db, {
         now,
         useWallClockAfterCall,
       });
-      scan.results.push({ file: item.f, taskId: item.envelope?.taskId ?? null, proposalsDir: entry.proposalsDir, ...outcome });
-      if (outcome.status !== "pending_no_base_url") {
-        entry.consumed[item.f] = { mtimeMs: item.st.mtimeMs, size: item.st.size };
+      if (recordScannedProposalOutcome(scan, entry, item, outcome)) {
         dirty = true;
       }
     }
@@ -1034,6 +1092,7 @@ export async function processPendingModelProposalsAsync(db, {
   config,
   ledger,
   leaseMs = 45000,
+  heartbeatMs = 10000,
   completeActiveTask = true,
   now,
   useWallClockAfterCall = true,
@@ -1048,15 +1107,14 @@ export async function processPendingModelProposalsAsync(db, {
         config,
         ledger,
         leaseMs,
+        heartbeatMs,
         envelope: item.envelope,
         hostCommandsDir: entry.commandsDir,
         completeActiveTask,
         now,
         useWallClockAfterCall,
       });
-      scan.results.push({ file: item.f, taskId: item.envelope?.taskId ?? null, proposalsDir: entry.proposalsDir, ...outcome });
-      if (outcome.status !== "pending_no_base_url") {
-        entry.consumed[item.f] = { mtimeMs: item.st.mtimeMs, size: item.st.size };
+      if (recordScannedProposalOutcome(scan, entry, item, outcome)) {
         dirty = true;
       }
     }

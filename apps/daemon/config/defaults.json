@@ -32,6 +32,8 @@
     "allowRealModelCalls": false,
     "callUpperMicrousd": 1000,
     "callTimeoutMs": 60000,
+    "maxInputBytes": null,
+    "maxOutputTokens": null,
     "priceCatalog": {
       "$comment": "真实价格目录（复审 P1 / ADR §6）：input/output/cacheRead/cacheWrite 每百万 token 的 microUSD 单价。null = 价格未授权：即使模型调用返回了 usage，对应 token>0 类别价格非非负整数时仍保持 HELD 不结清（未知用量不得当 0）。主人授权真实模型调用时逐项核定。",
       "inputPerMTokMicrousd": null,
@@ -76,5 +78,16 @@
     "windowStartHour": 4,
     "windowEndHour": 5,
     "retentionDays": 14
+  },
+  "acquisition": {
+    "$comment": "只读仓库获取策略（02 §1/§4，Unit 4.2）：allowRealRepoFetch 默认 false（非环回源拒绝执行）；allowedHosts 与 targets 缺省为空（未授权目标零容器启动、零网络外发）；enableHostGateway 默认 false（仅本地环回测试夹具开启 host.docker.internal 网关）；模型不得拼接 URL 或读取路径。",
+    "allowRealRepoFetch": false,
+    "enableHostGateway": false,
+    "allowedHosts": [],
+    "targets": {},
+    "maxDownloadBytes": 8388608,
+    "maxExcerptBytes": 32768,
+    "maxFiles": 32,
+    "timeoutMs": 30000
   }
 }

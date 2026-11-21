@@ -700,6 +700,45 @@ processModelRequest(db, { stateDir, config: { model: rawCfg.model }, ledger, env
   }
   db2.close();
 
+  const t6Post = seedRunningClaim("mp-t6-postcall");
+  const cfgPostPath = writeTestConfig(t6Post.ws);
+  const postReqId = randomUUID();
+  const postEnvPath = join(t6Post.ws.stateDir, "env.json");
+  const postEnv = makeEnvelope(t6Post.claim, { requestId: postReqId });
+  writeFileSync(postEnvPath, JSON.stringify(postEnv), "utf8");
+  t6Post.db.close();
+  setServiceMode({ kind: "priced", promptTokens: 40, completionTokens: 13, reply: "t6-postcall-reply" });
+  const beforePostHits = readServiceLog().length;
+  const postMarker = join(t6Post.ws.stateDir, "crash-post.marker");
+  const postChild = spawnSync(
+    process.execPath,
+    [crashHelperPath, t6Post.ws.dbPath, t6Post.ws.stateDir, cfgPostPath, postEnvPath, t6Post.commandsDir],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AEGISPI_CRASH_POINT: "model_requests:after-call-before-writeback",
+        AEGISPI_CRASH_MARKER: postMarker,
+      },
+    },
+  );
+  const hitsAfterPostCrash = readServiceLog().length - beforePostHits;
+  const dbPost = openDatabase(t6Post.ws.dbPath);
+  startupRecovery(dbPost, { stateDir: t6Post.ws.stateDir, canonical, now: t6Post.now + 20 * 60 * 1000, unknownUsageTimeoutMs: 15 * 60 * 1000 });
+  const postLedger = createBudgetLedger(dbPost, { taskLimitMicrousd: 800000, dayLimitMicrousd: 5000000, warmingEnabled: false, timeZone: "Asia/Hong_Kong" });
+  const postReplay = processModelRequest(dbPost, {
+    stateDir: t6Post.ws.stateDir,
+    config: loadConfigObj(cfgPostPath),
+    ledger: postLedger,
+    envelope: postEnv,
+    hostCommandsDir: t6Post.commandsDir,
+    now: t6Post.now + 21 * 60 * 1000,
+  });
+  const postReqRow = dbPost.prepare("SELECT state FROM model_requests WHERE request_id=?").get(postReqId);
+  const postResRow = dbPost.prepare("SELECT state, actual_microusd FROM budget_reservations WHERE request_key=?").get(`model:${postReqId}`);
+  const totalPostHits = readServiceLog().length - beforePostHits;
+  dbPost.close();
+
   suite.check(
     "t6-crash-after-executing-stays-executing-then-charged-bound-1000",
     markerOk &&
@@ -711,8 +750,15 @@ processModelRequest(db, { stateDir, config: { model: rawCfg.model }, ledger, env
       resPostTimeout?.actual_microusd === 1000 &&
       taskAcc?.spent_microusd === 500 &&
       taskAcc?.held_microusd === 0 &&
-      releaseBlocked,
-    `preTimeout=${reqPreTimeout?.state}/${resPreTimeout?.state} postTimeout=${reqPostTimeout?.state}/${resPostTimeout?.state}(${resPostTimeout?.actual_microusd}u$) taskSpent=${taskAcc?.spent_microusd} releaseBlocked=${releaseBlocked}`,
+      releaseBlocked &&
+      postChild.status !== 0 &&
+      hitsAfterPostCrash === 1 &&
+      totalPostHits === 1 &&
+      postReplay.duplicate === true &&
+      postReqRow?.state === "EXECUTING" &&
+      postResRow?.state === "CHARGED_BOUND" &&
+      postResRow?.actual_microusd === 1000,
+    `preTimeout=${reqPreTimeout?.state}/${resPreTimeout?.state} postTimeout=${reqPostTimeout?.state}/${resPostTimeout?.state}(${resPostTimeout?.actual_microusd}u$) taskSpent=${taskAcc?.spent_microusd} releaseBlocked=${releaseBlocked} postCallHits=${hitsAfterPostCrash}/${totalPostHits} postReplayDup=${postReplay.duplicate}`,
   );
 }
 
@@ -1152,6 +1198,58 @@ rmSync(crashHelperPath, { force: true });
   lockHostProposalsDir(aclExplicitDir);
   const aclExplicitVerified = inspectHostProposalsAcl(aclExplicitDir);
 
+  process.env.AEGISPI_AGENT_WORKER_IMPORT_ONLY = "1";
+  const { proposeModelRequest } = await import("../../../docker/agent/src/worker.mjs");
+  const workerPropDir = join(ws.stateDir, "worker-prop-guard");
+  const usedSet = new Set();
+  const guardId = randomUUID();
+  let emptyMsgRejected = false;
+  try {
+    proposeModelRequest({
+      taskId: claim.taskId,
+      attemptId: claim.attemptId,
+      fence: claim.fence,
+      scopeDomainKey: "dm:telegram:6101",
+      purpose: "worker",
+      modelId: "deepseek/deepseek-flash",
+      messages: [],
+      requestId: guardId,
+      proposalsDir: workerPropDir,
+      usedRequestIds: usedSet,
+    });
+  } catch {
+    emptyMsgRejected = true;
+  }
+  const canStillUseIdAfterValidationFail = !usedSet.has(guardId);
+  proposeModelRequest({
+    taskId: claim.taskId,
+    attemptId: claim.attemptId,
+    fence: claim.fence,
+    scopeDomainKey: "dm:telegram:6101",
+    purpose: "worker",
+    modelId: "deepseek/deepseek-flash",
+    messages: [{ role: "user", content: "ok" }],
+    requestId: guardId,
+    proposalsDir: workerPropDir,
+    usedRequestIds: usedSet,
+  });
+  let overwriteRefusedWithoutSet = false;
+  try {
+    proposeModelRequest({
+      taskId: claim.taskId,
+      attemptId: claim.attemptId,
+      fence: claim.fence,
+      scopeDomainKey: "dm:telegram:6101",
+      purpose: "worker",
+      modelId: "deepseek/deepseek-flash",
+      messages: [{ role: "user", content: "overwrite attempt" }],
+      requestId: guardId,
+      proposalsDir: workerPropDir,
+    });
+  } catch {
+    overwriteRefusedWithoutSet = true;
+  }
+
   const hitsAfter = readServiceLog().length;
   db.close();
   if (prevAmbientKey === undefined) delete process.env.DEEPSEEK_API_KEY;
@@ -1173,8 +1271,11 @@ rmSync(crashHelperPath, { force: true });
       compA !== compB &&
       compSlash !== compColon &&
       compA.length <= 45 &&
-      aclExplicitVerified.ok === true,
-    `revoked=${revOut.status} warm=${warmOut.code} upper=${upperOut.code} leaseExp=${expReq?.state}/${expRes?.state}(${expRes?.actual_microusd}) compsUnique=${compA !== compB && compSlash !== compColon} explicitAclCleaned=${aclExplicitVerified.ok}`,
+      aclExplicitVerified.ok === true &&
+      emptyMsgRejected &&
+      canStillUseIdAfterValidationFail &&
+      overwriteRefusedWithoutSet,
+    `revoked=${revOut.status} warm=${warmOut.code} upper=${upperOut.code} leaseExp=${expReq?.state}/${expRes?.state}(${expRes?.actual_microusd}) compsUnique=${compA !== compB && compSlash !== compColon} explicitAclCleaned=${aclExplicitVerified.ok} workerOverwriteGuarded=${overwriteRefusedWithoutSet}`,
   );
 }
 

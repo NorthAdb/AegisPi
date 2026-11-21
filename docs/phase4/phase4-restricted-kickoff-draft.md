@@ -25,6 +25,8 @@
 
 ### 单元 4.2 真实仓库 Observe（首个仓库闭环；进入前须 4.1 验收通过 + 主人对首跑检查表的逐项书面确认）
 
+2026-11-21 追记：单元 4.1 已通过独立对抗审计并冻结于 `8943a10` / 纪元 5（[AUDIT-PHASE4-UNIT4-1-8943a10.md](audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）。许可 1 范围内的 4.2 离线链路实施（宿主 `acquisition` 启动器、业务级 `maxInputBytes`/`maxOutputTokens` 门禁与 4.1 延后加固项）依据见 [phase4-2-offline-task-spec.md](phase4-2-offline-task-spec.md)；本节许可 2 首跑检查表七项继续严格阻塞单元 4.2 的一切真实运行。
+
 形态：一个经授权的 claimed task → agent attempt（4.1 链路）→ 对**主人指定仓库**的只读获取（acquisition 镜像；读取范围由宿主侧 plan 固定，模型不得拼接 URL/范围，02 §4「不由模型拼接」同纪律）→ 基于真实仓库内容的模型轮次（经 4.1 核心结算）→ 结果存 scope-ACL 证据对象 →（可选，另授权）通知发送。
 
 产物：闭环执行记录（命令/输出/退出码/镜像身份）、结算记录（usage × 核定目录价）、证据对象与脱敏入库件。

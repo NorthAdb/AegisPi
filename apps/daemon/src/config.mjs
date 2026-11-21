@@ -11,7 +11,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piSettingsFromDefaults } from "../config/load-pi-settings.mjs";
-import { assertValidModelBaseUrl, ModelCallError } from "./model-call.mjs";
+import { assertValidModelBaseUrl, MAX_MODEL_MESSAGES_BYTES, ModelCallError } from "./model-call.mjs";
+import { isHttpUrlWithoutCredentials, isSafeRelativeReadPath } from "./repo-observe.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -63,6 +64,115 @@ export function resolveDiskThresholds(defaults) {
   return base;
 }
 
+const HOSTNAME_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i;
+
+function parseOptionalPositiveInt(value, { name, max }) {
+  if (value === null || value === undefined) return null;
+  if (!Number.isInteger(value) || value <= 0 || value > max) {
+    throw new ConfigError(`${name} must be null or a positive integer <= ${max}, got ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function parseAcquisitionTarget(targetId, spec) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+    throw new ConfigError(`acquisition.targets.${targetId} must be an object`);
+  }
+  for (const k of ["repo", "url", "ref"]) {
+    if (typeof spec[k] !== "string" || spec[k].trim().length === 0) {
+      throw new ConfigError(`acquisition.targets.${targetId}.${k} must be a non-empty string`);
+    }
+  }
+  if (!isHttpUrlWithoutCredentials(spec.url)) {
+    throw new ConfigError(`acquisition.targets.${targetId}.url must be http(s) without embedded credentials`);
+  }
+  if (spec.sha256 !== undefined && spec.sha256 !== null && !/^[0-9a-f]{64}$/.test(spec.sha256)) {
+    throw new ConfigError(`acquisition.targets.${targetId}.sha256 must be 64 lowercase hex chars`);
+  }
+  const mode = spec.mode ?? "tar";
+  if (mode !== "tar" && mode !== "file") {
+    throw new ConfigError(`acquisition.targets.${targetId}.mode must be "tar" or "file"`);
+  }
+  if (!Array.isArray(spec.readPaths) || spec.readPaths.length === 0) {
+    throw new ConfigError(`acquisition.targets.${targetId}.readPaths must be a non-empty array`);
+  }
+  for (const p of spec.readPaths) {
+    if (!isSafeRelativeReadPath(p)) {
+      throw new ConfigError(`acquisition.targets.${targetId}.readPaths contains unsafe path ${JSON.stringify(p)}`);
+    }
+  }
+  const allowedRedirectHosts = Array.isArray(spec.allowedRedirectHosts) ? spec.allowedRedirectHosts.map((h) => String(h).toLowerCase()) : [];
+  for (const h of allowedRedirectHosts) {
+    if (!HOSTNAME_RE.test(h)) {
+      throw new ConfigError(`acquisition.targets.${targetId}.allowedRedirectHosts invalid host ${JSON.stringify(h)}`);
+    }
+  }
+  const maxDownloadBytes = parseOptionalPositiveInt(spec.maxDownloadBytes ?? null, {
+    name: `acquisition.targets.${targetId}.maxDownloadBytes`,
+    max: 1024 * 1024 * 1024,
+  });
+  return {
+    repo: spec.repo.trim(),
+    url: spec.url,
+    ref: spec.ref.trim(),
+    sha256: spec.sha256 ?? null,
+    mode,
+    readPaths: [...spec.readPaths],
+    allowedRedirectHosts,
+    maxDownloadBytes,
+  };
+}
+
+function parseAcquisitionConfig(raw = {}) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ConfigError("acquisition config must be an object");
+  }
+  const allowedHostsRaw = raw.allowedHosts ?? [];
+  if (!Array.isArray(allowedHostsRaw)) {
+    throw new ConfigError("acquisition.allowedHosts must be an array");
+  }
+  const allowedHosts = allowedHostsRaw.map((h) => {
+    if (typeof h !== "string" || !HOSTNAME_RE.test(h)) {
+      throw new ConfigError(`acquisition.allowedHosts entry invalid: ${JSON.stringify(h)}`);
+    }
+    return h.toLowerCase();
+  });
+  const targetsRaw = raw.targets ?? {};
+  if (!targetsRaw || typeof targetsRaw !== "object" || Array.isArray(targetsRaw)) {
+    throw new ConfigError("acquisition.targets must be a plain object");
+  }
+  const targets = {};
+  for (const [id, spec] of Object.entries(targetsRaw)) {
+    targets[id] = parseAcquisitionTarget(id, spec);
+  }
+  const maxDownloadBytes = raw.maxDownloadBytes ?? 8 * 1024 * 1024;
+  if (!Number.isInteger(maxDownloadBytes) || maxDownloadBytes <= 0 || maxDownloadBytes > 1024 * 1024 * 1024) {
+    throw new ConfigError(`acquisition.maxDownloadBytes invalid: ${JSON.stringify(maxDownloadBytes)}`);
+  }
+  const maxExcerptBytes = raw.maxExcerptBytes ?? 32768;
+  if (!Number.isInteger(maxExcerptBytes) || maxExcerptBytes <= 0 || maxExcerptBytes > MAX_MODEL_MESSAGES_BYTES) {
+    throw new ConfigError(`acquisition.maxExcerptBytes invalid: ${JSON.stringify(maxExcerptBytes)}`);
+  }
+  const maxFiles = raw.maxFiles ?? 32;
+  if (!Number.isInteger(maxFiles) || maxFiles <= 0 || maxFiles > 256) {
+    throw new ConfigError(`acquisition.maxFiles invalid: ${JSON.stringify(maxFiles)}`);
+  }
+  const timeoutMs = raw.timeoutMs ?? 30000;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 600_000) {
+    throw new ConfigError(`acquisition.timeoutMs invalid: ${JSON.stringify(timeoutMs)}`);
+  }
+  return {
+    allowRealRepoFetch: raw.allowRealRepoFetch === true,
+    enableHostGateway: raw.enableHostGateway === true,
+    allowedHosts,
+    targets,
+    maxDownloadBytes,
+    maxExcerptBytes,
+    maxFiles,
+    timeoutMs,
+  };
+}
+
 export function defaultsJsonPath() {
   return join(here, "..", "config", "defaults.json");
 }
@@ -96,6 +206,15 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
   if (!Number.isInteger(callTimeoutMs) || callTimeoutMs <= 0 || callTimeoutMs > 2_147_000_000) {
     throw new ConfigError(`model.callTimeoutMs must be a positive integer <= 2147000000, got ${JSON.stringify(callTimeoutMs)}`);
   }
+  const maxInputBytes = parseOptionalPositiveInt(modelRaw.maxInputBytes ?? null, {
+    name: "model.maxInputBytes",
+    max: MAX_MODEL_MESSAGES_BYTES,
+  });
+  const maxOutputTokens = parseOptionalPositiveInt(modelRaw.maxOutputTokens ?? null, {
+    name: "model.maxOutputTokens",
+    max: 1_000_000,
+  });
+  const acquisition = parseAcquisitionConfig(defaults.acquisition ?? {});
 
   return {
     defaultsPath: path,
@@ -135,6 +254,8 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       allowRealModelCalls: modelRaw.allowRealModelCalls === true,
       callUpperMicrousd,
       callTimeoutMs,
+      maxInputBytes,
+      maxOutputTokens,
       priceCatalog: {
         inputPerMTokMicrousd: modelRaw.priceCatalog?.inputPerMTokMicrousd ?? null,
         outputPerMTokMicrousd: modelRaw.priceCatalog?.outputPerMTokMicrousd ?? null,
@@ -177,5 +298,6 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       retentionDays: defaults.backup?.retentionDays ?? 14,
       timeZone: defaults.time?.timezoneIANA ?? "Asia/Hong_Kong",
     },
+    acquisition,
   };
 }

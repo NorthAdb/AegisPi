@@ -35,6 +35,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -582,7 +583,20 @@ export function lockHostProposalsDir(proposalsDir) {
 
 export function inspectHostProposalsAcl(proposalsDir) {
   if (process.platform !== "win32") {
-    return { ok: true, platform: process.platform, raw: "" };
+    try {
+      const mode = statSync(proposalsDir).mode & 0o1777;
+      if ((mode & 0o007) !== 0) {
+        return {
+          ok: false,
+          platform: process.platform,
+          reason: `proposals dir mode ${mode.toString(8)} grants other-user access`,
+          raw: mode.toString(8),
+        };
+      }
+      return { ok: true, platform: process.platform, raw: mode.toString(8) };
+    } catch (e) {
+      return { ok: false, platform: process.platform, reason: `stat failed: ${e.message}`, raw: "" };
+    }
   }
   const account = currentWindowsAccount();
   const r = spawnSync("icacls", [proposalsDir], { encoding: "utf8", shell: false });
@@ -735,4 +749,122 @@ export function createAgentLauncher(db, {
     inspectContainer,
     reapOrphanContainers,
   };
+}
+
+export function createAcquisitionLauncher(db, {
+  stateDir,
+  imageRef,
+  quotas = { cpus: 1, memory: "512m", pids: 128 },
+  dockerBin = "docker",
+  network = "bridge",
+  enableHostGateway = false,
+}) {
+  if (typeof imageRef !== "string" || !/@sha256:[0-9a-f]{64}$/.test(imageRef)) {
+    throw new ExecutorError(
+      `acquisition image must be digest-pinned, got ${imageRef}; a floating tag is never an isolation reference`,
+    );
+  }
+
+  async function runPlan({ jobKey, taskId, plan, timeoutMs = 30000, onProgress = null, progressIntervalMs = 5000 }) {
+    const safeKey = safeTaskDirComponent(jobKey);
+    const workDir = join(stateDir, "acquisitions", safeKey);
+    const planDir = join(workDir, "plan");
+    const downloadsDir = join(workDir, "downloads");
+    rmSync(workDir, { recursive: true, force: true });
+    mkdirSync(planDir, { recursive: true });
+    mkdirSync(downloadsDir, { recursive: true });
+    writeFileSync(join(planDir, "plan.json"), JSON.stringify(plan) + "\n", "utf8");
+
+    const containerName = `aegispi-acq-${safeKey}`.slice(0, 90);
+    const volume = `aegispi-acq-out-${safeKey}`.slice(0, 90);
+    docker(dockerBin, ["rm", "-f", containerName]);
+    docker(dockerBin, ["volume", "rm", "-f", volume]);
+
+    const args = [
+      "run",
+      "--detach",
+      "--name", containerName,
+      "--label", "aegispi.role=acquisition",
+      "--label", `aegispi.state_dir=${resolve(stateDir)}`,
+      "--label", `aegispi.task_id=${taskId}`,
+      "--network", network,
+      ...(enableHostGateway ? ["--add-host", "host.docker.internal:host-gateway"] : []),
+      "--init",
+      "--cpus", String(quotas.cpus),
+      "--memory", String(quotas.memory),
+      "--memory-swap", String(quotas.memory),
+      "--pids-limit", String(quotas.pids),
+      "--read-only",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges",
+      "-v", `${planDir}:/plan:ro`,
+      "--mount", `type=volume,src=${volume},dst=/downloads`,
+      imageRef,
+    ];
+    const launched = docker(dockerBin, args, { capture: true });
+    if (launched.code !== 0) {
+      docker(dockerBin, ["volume", "rm", "-f", volume]);
+      rmSync(workDir, { recursive: true, force: true });
+      throw new ExecutorError(`docker run acquisition failed for ${jobKey}: ${launched.out.slice(0, 300)}`);
+    }
+    const containerId = launched.out.split("\n").pop().trim();
+    let exitCode = null;
+    let timedOut = false;
+    let lastProgressAt = Date.now();
+    try {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const insp = docker(dockerBin, ["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", containerId], { capture: true });
+        if (insp.code !== 0) break;
+        const [running, codeStr] = insp.out.split(" ");
+        if (running !== "true") {
+          exitCode = Number(codeStr);
+          break;
+        }
+        if (Date.now() >= deadline) {
+          timedOut = true;
+          docker(dockerBin, ["kill", containerId]);
+          exitCode = 124;
+          break;
+        }
+        if (onProgress && Date.now() - lastProgressAt >= progressIntervalMs) {
+          lastProgressAt = Date.now();
+          try {
+            onProgress();
+          } catch {}
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      docker(dockerBin, ["cp", `${containerId}:/downloads/.`, downloadsDir], { capture: true });
+    } finally {
+      docker(dockerBin, ["rm", "-f", containerId]);
+      docker(dockerBin, ["volume", "rm", "-f", volume]);
+    }
+    let report = null;
+    const reportPath = join(downloadsDir, "report.json");
+    if (existsSync(reportPath)) {
+      try {
+        report = JSON.parse(readFileSync(reportPath, "utf8"));
+      } catch {}
+    }
+    return { exitCode, timedOut, report, downloadsDir, workDir };
+  }
+
+  function reapOrphanContainers() {
+    const listed = docker(dockerBin, [
+      "ps", "-aq",
+      "--filter", "label=aegispi.role=acquisition",
+      "--filter", `label=aegispi.state_dir=${resolve(stateDir)}`,
+    ], { capture: true });
+    if (listed.code !== 0 || !listed.out) return [];
+    const reaped = [];
+    for (const id of listed.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+      docker(dockerBin, ["kill", id]);
+      docker(dockerBin, ["rm", "-f", id]);
+      reaped.push(id);
+    }
+    return reaped;
+  }
+
+  return { imageRef, quotas, network, runPlan, reapOrphanContainers };
 }

@@ -21,7 +21,7 @@ function readMode() {
 const server = createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
-  req.on("end", () => {
+  req.on("end", async () => {
     let body = null;
     try {
       body = JSON.parse(raw);
@@ -50,6 +50,7 @@ const server = createServer((req, res) => {
           model: body?.model ?? null,
           thinking: body?.thinking ?? null,
           reasoning_effort: body?.reasoning_effort ?? null,
+          max_tokens: body?.max_tokens ?? null,
           input: body?.messages?.[0]?.content ?? null,
         }) + "\n",
       );
@@ -65,6 +66,9 @@ const server = createServer((req, res) => {
       }, cfg.delayMs ?? 10000);
       res.on("close", () => clearTimeout(timer));
       return;
+    }
+    if (cfg.delayMs && cfg.delayMs > 0) {
+      await new Promise((r) => setTimeout(r, cfg.delayMs));
     }
     if (cfg.kind === "http_error") {
       res.writeHead(cfg.status ?? 500, { "content-type": "application/json" });

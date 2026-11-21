@@ -28,6 +28,7 @@ import {
   callModelOnce,
   isLoopbackModelEndpoint,
   validateModelMessages,
+  validateModelTokenCaps,
 } from "./model-call.mjs";
 
 export class AdapterRefused extends Error {}
@@ -292,6 +293,11 @@ export function createAdapterUpstream(db, {
           auditRefusal(opName, msgCheck.reason, effectId);
           return { status: "failed_local", error: `adapter refused: ${msgCheck.reason}` };
         }
+        const capCheck = validateModelTokenCaps(modelConfig, messages);
+        if (!capCheck.ok) {
+          auditRefusal(opName, capCheck.reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${capCheck.reason}` };
+        }
         let call;
         try {
           call = callModelOnce({
@@ -300,6 +306,7 @@ export function createAdapterUpstream(db, {
             messages,
             timeoutMs: modelConfig.callTimeoutMs ?? 60000,
             bearer,
+            maxTokens: modelConfig.maxOutputTokens ?? undefined,
           });
         } catch (e) {
           auditRefusal(opName, e.message, effectId);

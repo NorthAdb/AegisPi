@@ -18,6 +18,7 @@
     "test:restore": "node evals/phase3/restore/run.mjs",
     "test:security:integration": "node evals/phase3/security-integration/run.mjs",
     "test:model-proposal": "node evals/phase3/model-proposal/run.mjs",
+    "test:repo-observe": "node evals/phase3/repo-observe/run.mjs",
     "test:ingress-telegram": "node evals/phase3/ingress-telegram/run.mjs",
     "test:ingress-telegram:real": "node evals/phase3/ingress-telegram/real.mjs",
     "test:model:real": "node evals/phase3/model-real/run.mjs",
