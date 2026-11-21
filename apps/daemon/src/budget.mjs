@@ -291,16 +291,24 @@ export function createBudgetLedger(db, {
     const rows = db
       .prepare("SELECT account_id, amount_microusd FROM reservation_accounts WHERE reservation_id=? ORDER BY account_id")
       .all(reservationId);
-    const total = rows.reduce((s, r) => s + r.amount_microusd, 0);
-    const out = rows.map((r, i) => ({
-      accountId: r.account_id,
-      heldDrop: r.amount_microusd,
-      spentRise:
-        i === rows.length - 1
-          ? actualMicrousd - Math.floor((actualMicrousd * (total - r.amount_microusd)) / Math.max(total, 1))
-          : Math.floor((actualMicrousd * r.amount_microusd) / Math.max(total, 1)),
-    }));
-    return out;
+    const total = rows.reduce((s, r) => s + BigInt(r.amount_microusd), 0n);
+    const actual = BigInt(actualMicrousd);
+    let allocated = 0n;
+    return rows.map((r, i) => {
+      let spentRise;
+      if (i === rows.length - 1) {
+        spentRise = Number(actual - allocated);
+      } else {
+        const share = total > 0n ? (actual * BigInt(r.amount_microusd)) / total : 0n;
+        allocated += share;
+        spentRise = Number(share);
+      }
+      return {
+        accountId: r.account_id,
+        heldDrop: r.amount_microusd,
+        spentRise,
+      };
+    });
   }
 
   // Settlement requires a trusted usage. "usage未知则先保持HELD" and a missing
@@ -428,7 +436,7 @@ export function createBudgetLedger(db, {
   // A CHARGED_BOUND reservation can be corrected only against trusted bill
   // evidence, with an actor recorded; the delta moves spent both ways.
   function correctChargedBound({ reservationId, newActualMicrousd, evidence, actorId, now }) {
-    if (!Number.isInteger(newActualMicrousd) || newActualMicrousd < 0) {
+    if (!Number.isSafeInteger(newActualMicrousd) || newActualMicrousd < 0) {
       throw new BudgetError("newActualMicrousd must be a non-negative integer");
     }
     if (!evidence || !actorId) {

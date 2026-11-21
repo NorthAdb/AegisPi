@@ -1,9 +1,10 @@
-import { appendFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 
-const [, , portFile, logFile] = process.argv;
+const [, , portFile, logFile, certFile, keyFile] = process.argv;
 
-const server = createServer((req, res) => {
+const handler = (req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
   req.on("end", () => {
@@ -46,7 +47,11 @@ const server = createServer((req, res) => {
       sendOk();
     }
   });
-});
+};
+
+const server = certFile && keyFile
+  ? createHttpsServer({ cert: readFileSync(certFile), key: readFileSync(keyFile) }, handler)
+  : createHttpServer(handler);
 
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 writeFileSync(portFile, String(server.address().port), "utf8");

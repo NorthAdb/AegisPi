@@ -19,10 +19,10 @@ export function openDatabase(dbPath, { readOnly = false } = {}) {
 }
 
 export function applyConnectionPragmas(db) {
+  db.exec("PRAGMA busy_timeout=5000");
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA synchronous=FULL");
   db.exec("PRAGMA foreign_keys=ON");
-  db.exec("PRAGMA busy_timeout=5000");
   const journal = db.prepare("PRAGMA journal_mode").get();
   const sync = db.prepare("PRAGMA synchronous").get();
   const fk = db.prepare("PRAGMA foreign_keys").get();

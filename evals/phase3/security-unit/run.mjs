@@ -43,6 +43,7 @@ import {
 import { createCredentialService } from "../../../apps/daemon/src/credentials.mjs";
 import { createFakeRemote } from "../../../apps/daemon/src/testing/fake-remote.mjs";
 import { createAdapterUpstream } from "../../../apps/daemon/src/adapters.mjs";
+import { fetchTo, parsePlan } from "../../../docker/acquisition/src/downloader.mjs";
 import { createHttpUpstream } from "../../../apps/daemon/src/upstream-http.mjs";
 import { createConsoleApp, ensureConsoleToken } from "../../../apps/daemon/src/console/api.mjs";
 
@@ -691,7 +692,9 @@ function seed(tag) {
     await new Promise((r) => setTimeout(r, 100));
   }
   if (!existsSync(portFile)) {
+    svc.kill();
     suite.check("http-transport-carries-bytes-and-maps-outcomes", false, "the local upstream service never came up");
+    process.exit(1);
   }
   const endpoint = `http://127.0.0.1:${readFileSync(portFile, "utf8").trim()}/submit`;
   const slowEndpoint = `http://127.0.0.1:${readFileSync(portFile, "utf8").trim()}/slow`;
@@ -1212,6 +1215,154 @@ function seed(tag) {
           proxyLeakFree,
         `proxy=${efProxyOk?.state}(connects=${connectCount}) badCfgExit=${rBadProxy.status} deadProxy=${efDeadProxy?.state}(${String(efDeadProxy?.last_error ?? "").slice(0, 50)}) leakFree=${proxyLeakFree}`,
       );
+
+      // TLS + HTTP CONNECT tunnel regression (Unit 4.5): virtual unresolvable
+      // DNS host (.invalid) mapped only inside local-connect-proxy proves traffic
+      // traverses the CONNECT tunnel with real TLS handshake + cert check, and
+      // TLS/proxy pre-HTTP failures stay failed_local (never UNKNOWN exit 4).
+      const { generateSelfSignedCert } = await import("./helpers/test-cert.mjs");
+      const { certPem, keyPem } = generateSelfSignedCert({
+        cn: "tg-proxy-only.invalid",
+        dnsNames: ["tg-proxy-only.invalid", "localhost"],
+        ips: [[127, 0, 0, 1]],
+      });
+      const tlsDir = join(tgWs.stateDir, "tls");
+      mkdirSync(tlsDir, { recursive: true });
+      const certFile = join(tlsDir, "tg.cert.pem");
+      const keyFile = join(tlsDir, "tg.key.pem");
+      writeFileSync(certFile, certPem, "utf8");
+      writeFileSync(keyFile, keyPem, "utf8");
+      const tlsPortFile = join(tlsDir, "https-port.txt");
+      const tlsLogFile = join(tlsDir, "https-log.jsonl");
+      const tlsProxyPortFile = join(tlsDir, "proxy-port.txt");
+      const tlsProxyLogFile = join(tlsDir, "proxy-log.jsonl");
+      const tlsProxyModeFile = join(tlsDir, "proxy-mode.txt");
+      writeFileSync(tlsProxyModeFile, "normal", "utf8");
+      const httpsTgSvc = spawn(process.execPath, [tgServicePath, tlsPortFile, tlsLogFile, certFile, keyFile], { stdio: "ignore" });
+      const tlsProxySvc = spawn(
+        process.execPath,
+        [proxyHelperPath, tlsProxyPortFile, tlsProxyLogFile, JSON.stringify({ "tg-proxy-only.invalid": "127.0.0.1" }), tlsProxyModeFile],
+        { stdio: "ignore" },
+      );
+      for (let i = 0; i < 100 && (!existsSync(tlsPortFile) || !existsSync(tlsProxyPortFile)); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      try {
+        const httpsBase = `https://tg-proxy-only.invalid:${readFileSync(tlsPortFile, "utf8").trim()}`;
+        const tlsProxyUrl = `http://127.0.0.1:${readFileSync(tlsProxyPortFile, "utf8").trim()}`;
+        const readTlsTg = () =>
+          existsSync(tlsLogFile)
+            ? readFileSync(tlsLogFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l))
+            : [];
+        const readTlsProxy = () =>
+          existsSync(tlsProxyLogFile)
+            ? readFileSync(tlsProxyLogFile, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l))
+            : [];
+
+        const cTlsOk = seedTelegramEffect("su-tg-tls-proxy-ok", { text: "Unit 4.5 TLS+CONNECT proxy ok" });
+        const cfgTlsOk = writeTgConfig(cTlsOk.ws, { apiBase: httpsBase, allowRealSend: true, proxyUrl: tlsProxyUrl, timeoutMs: 5000 });
+        const rTlsOk = spawnSync(
+          process.execPath,
+          [daemonPath, "--once", `--data-dir=${cTlsOk.ws.stateDir}`, `--config=${cfgTlsOk}`],
+          { cwd: repoRoot, encoding: "utf8", timeout: 60000, env: { ...process.env, NODE_EXTRA_CA_CERTS: certFile } },
+        );
+        const dbTlsOk = openDatabase(cTlsOk.ws.dbPath, { readOnly: true });
+        const efTlsOk = dbTlsOk.prepare("SELECT state, external_id FROM effects WHERE id=?").get(cTlsOk.effectId);
+        dbTlsOk.close();
+        const tlsSent = readTlsTg();
+        const tlsProxyAfterOk = readTlsProxy();
+
+        // Untrusted CA (no NODE_EXTRA_CA_CERTS): must fail closed pre-HTTP as local_error, zero HTTPS hits.
+        const cTlsBadCert = seedTelegramEffect("su-tg-tls-untrusted", { text: "untrusted tls cert must fail local" });
+        const cfgTlsBadCert = writeTgConfig(cTlsBadCert.ws, { apiBase: httpsBase, allowRealSend: true, proxyUrl: tlsProxyUrl, timeoutMs: 5000 });
+        const rTlsBadCert = spawnSync(
+          process.execPath,
+          [daemonPath, "--once", `--data-dir=${cTlsBadCert.ws.stateDir}`, `--config=${cfgTlsBadCert}`],
+          { cwd: repoRoot, encoding: "utf8", timeout: 60000 },
+        );
+        const dbTlsBadCert = openDatabase(cTlsBadCert.ws.dbPath, { readOnly: true });
+        const efTlsBadCert = dbTlsBadCert.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cTlsBadCert.effectId);
+        dbTlsBadCert.close();
+
+        // Proxy premature EOF before CONNECT 200: immediate local_error, never timeout->UNKNOWN.
+        writeFileSync(tlsProxyModeFile, "eof-before-200", "utf8");
+        const cTlsEof = seedTelegramEffect("su-tg-tls-eof", { text: "proxy eof before 200" });
+        const cfgTlsEof = writeTgConfig(cTlsEof.ws, { apiBase: httpsBase, allowRealSend: true, proxyUrl: tlsProxyUrl, timeoutMs: 5000 });
+        const tEof0 = Date.now();
+        const rTlsEof = spawnSync(
+          process.execPath,
+          [daemonPath, "--once", `--data-dir=${cTlsEof.ws.stateDir}`, `--config=${cfgTlsEof}`],
+          { cwd: repoRoot, encoding: "utf8", timeout: 60000, env: { ...process.env, NODE_EXTRA_CA_CERTS: certFile } },
+        );
+        const eofElapsedMs = Date.now() - tEof0;
+        const dbTlsEof = openDatabase(cTlsEof.ws.dbPath, { readOnly: true });
+        const efTlsEof = dbTlsEof.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cTlsEof.effectId);
+        dbTlsEof.close();
+
+        writeFileSync(tlsProxyModeFile, "reject-407-spoof-200", "utf8");
+        const cTls407 = seedTelegramEffect("su-tg-tls-407", { text: "proxy 407 refusal" });
+        const cfgTls407 = writeTgConfig(cTls407.ws, { apiBase: httpsBase, allowRealSend: true, proxyUrl: tlsProxyUrl, timeoutMs: 5000 });
+        const rTls407 = spawnSync(
+          process.execPath,
+          [daemonPath, "--once", `--data-dir=${cTls407.ws.stateDir}`, `--config=${cfgTls407}`],
+          { cwd: repoRoot, encoding: "utf8", timeout: 60000, env: { ...process.env, NODE_EXTRA_CA_CERTS: certFile } },
+        );
+        const dbTls407 = openDatabase(cTls407.ws.dbPath, { readOnly: true });
+        const efTls407 = dbTls407.prepare("SELECT state, last_error FROM effects WHERE id=?").get(cTls407.effectId);
+        dbTls407.close();
+
+        writeFileSync(tlsProxyModeFile, "normal", "utf8");
+        const httpsIpBase = `https://127.0.0.1:${new URL(httpsBase).port}`;
+        const cTlsIpOk = seedTelegramEffect("su-tg-tls-ip-san", { text: "Unit 4.5 TLS+CONNECT IP SAN ok" });
+        const cfgTlsIpOk = writeTgConfig(cTlsIpOk.ws, { apiBase: httpsIpBase, allowRealSend: true, proxyUrl: tlsProxyUrl, timeoutMs: 10000 });
+        const rTlsIpOk = spawnSync(
+          process.execPath,
+          [daemonPath, "--once", `--data-dir=${cTlsIpOk.ws.stateDir}`, `--config=${cfgTlsIpOk}`],
+          { cwd: repoRoot, encoding: "utf8", timeout: 60000, env: { ...process.env, NODE_EXTRA_CA_CERTS: certFile } },
+        );
+        const dbTlsIpOk = openDatabase(cTlsIpOk.ws.dbPath, { readOnly: true });
+        const efTlsIpOk = dbTlsIpOk.prepare("SELECT state, external_id FROM effects WHERE id=?").get(cTlsIpOk.effectId);
+        dbTlsIpOk.close();
+
+        const tlsLeakFree = ![
+          rTlsOk.stdout, rTlsOk.stderr,
+          rTlsBadCert.stdout, rTlsBadCert.stderr, efTlsBadCert?.last_error ?? "",
+          rTlsEof.stderr, efTlsEof?.last_error ?? "",
+          rTls407.stderr, efTls407?.last_error ?? "",
+          rTlsIpOk.stdout, rTlsIpOk.stderr,
+        ].join("\n").includes(fakeToken);
+
+        const tlsProxyAll = readTlsProxy();
+        suite.check(
+          "telegram-outbound-tls-connect-proxy-and-pre-http-fail-closed",
+          rTlsOk.status === 0 &&
+            efTlsOk?.state === "SUCCEEDED" &&
+            efTlsOk?.external_id === "tg:6101:9001" &&
+            tlsSent.length === 1 &&
+            tlsSent[0]?.text === "Unit 4.5 TLS+CONNECT proxy ok" &&
+            tlsProxyAfterOk.length === 1 &&
+            rTlsIpOk.status === 0 &&
+            efTlsIpOk?.state === "SUCCEEDED" &&
+            efTlsIpOk?.external_id === "tg:6101:9001" &&
+            tlsProxyAll.length === 5 &&
+            rTlsBadCert.status === 0 &&
+            efTlsBadCert?.state === "FAILED" &&
+            /^local_error:/.test(efTlsBadCert?.last_error ?? "") &&
+            readTlsTg().length === 2 &&
+            rTlsEof.status === 0 &&
+            efTlsEof?.state === "FAILED" &&
+            /^local_error:/.test(efTlsEof?.last_error ?? "") &&
+            eofElapsedMs < 4000 &&
+            rTls407.status === 0 &&
+            efTls407?.state === "FAILED" &&
+            /^local_error:.*407/.test(efTls407?.last_error ?? "") &&
+            tlsLeakFree,
+          `tlsOk=${efTlsOk?.state} ipSan=${efTlsIpOk?.state}(httpsHits=${tlsSent.length},proxyHits=${tlsProxyAfterOk.length}/${tlsProxyAll.length}) badCert=${efTlsBadCert?.state}(${String(efTlsBadCert?.last_error ?? "").slice(0, 45)}) eof=${efTlsEof?.state}(${eofElapsedMs}ms) p407=${efTls407?.state} leakFree=${tlsLeakFree}`,
+        );
+      } finally {
+        httpsTgSvc.kill();
+        tlsProxySvc.kill();
+      }
     } finally {
       proxySvc.kill();
     }
@@ -1241,7 +1392,9 @@ function seed(tag) {
     await new Promise((r) => setTimeout(r, 100));
   }
   if (!existsSync(portFile)) {
+    svc.kill();
     suite.check("worker-reserves-before-call-and-settles-real-usage", false, "the local model service never came up");
+    process.exit(1);
   }
   const modelPort = readFileSync(portFile, "utf8").trim();
   const baseUrl = `http://127.0.0.1:${modelPort}`;
@@ -1728,6 +1881,36 @@ function seed(tag) {
     `transition-alert=${first.alerted} steady-repeat=${steady.alerted} audit-rows=${alerts} stream-events=${streamAlerts}`,
   );
   db.close();
+}
+
+// ------------------------------------------- downloader SSRF IP-literal + path traversal guard
+{
+  const ws = makeWorkspace("su-dl-ssrf");
+  const blockedUrls = [
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.0.0.1/internal",
+    "https://127.0.0.1/loopback-https",
+    "http://[::ffff:169.254.169.254]/v4mapped",
+    "http://[fe80::1]/link-local",
+  ];
+  const results = [];
+  for (const url of blockedUrls) {
+    results.push(await fetchTo(url, join(ws.stateDir, "out.bin"), { maxSizeBytes: 1024 }));
+  }
+  const dotPlan = parsePlan(JSON.stringify({
+    schemaVersion: 1,
+    entries: [{ url: "https://example.com/a", destRelPath: "a/./b", maxSizeBytes: 100, mode: "file" }],
+  }));
+  const emptySegPlan = parsePlan(JSON.stringify({
+    schemaVersion: 1,
+    entries: [{ url: "https://example.com/a", destRelPath: "a//b", maxSizeBytes: 100, mode: "file" }],
+  }));
+  suite.check(
+    "downloader-ssrf-ip-literal-and-dot-relpath-refused",
+    results.every((r) => r.ok === false && /refused non-public IP/i.test(r.reason))
+      && dotPlan.ok === false && emptySegPlan.ok === false,
+    `blocked=${results.length} reasons=${results.map((r) => r.reason).join(" | ")}`,
+  );
 }
 
 writeReport({

@@ -15,6 +15,7 @@ const REQUIRED_SUITES = [
 
 const OPTIONAL_SUITES = [
   { id: "repo-observe-real", file: "docs/phase3/evidence/repo-observe-real-report.json", scope: "Unit 4.2 live GitHub + DeepSeek acceptance (if present)" },
+  { id: "triage-real", file: "docs/phase3/evidence/triage-real-report.json", scope: "Unit 4.5 live GitHub + DeepSeek + container execution + @aegispibot DM acceptance (if present)" },
 ];
 
 const defaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
@@ -51,21 +52,25 @@ function loadSuiteReport(spec, required) {
 for (const s of REQUIRED_SUITES) loadSuiteReport(s, true);
 for (const s of OPTIONAL_SUITES) loadSuiteReport(s, false);
 
-const realObserveReportPath = join(repoRoot, "docs/phase3/evidence/repo-observe-real-report.json");
-let realCostSummary = null;
-if (existsSync(realObserveReportPath)) {
-  const rawReal = JSON.parse(readFileSync(realObserveReportPath, "utf8"));
-  const passedReal = Number(rawReal.counts?.pass ?? rawReal.passed ?? rawReal.pass ?? 0);
-  const failedReal = Number(rawReal.counts?.fail ?? rawReal.failed ?? rawReal.fail ?? 0);
-  realCostSummary = {
-    sourceFile: "docs/phase3/evidence/repo-observe-real-report.json",
+const realSummaries = [];
+for (const [id, relPath] of [
+  ["repo-observe-real", "docs/phase3/evidence/repo-observe-real-report.json"],
+  ["triage-real", "docs/phase3/evidence/triage-real-report.json"],
+]) {
+  const abs = join(repoRoot, relPath);
+  if (!existsSync(abs)) continue;
+  const rawReal = JSON.parse(readFileSync(abs, "utf8"));
+  realSummaries.push({
+    id,
+    sourceFile: relPath,
     generatedAt: rawReal.generatedAt ?? null,
-    passed: passedReal,
-    failed: failedReal,
+    passed: Number(rawReal.counts?.pass ?? rawReal.passed ?? rawReal.pass ?? 0),
+    failed: Number(rawReal.counts?.fail ?? rawReal.failed ?? rawReal.fail ?? 0),
     taskBudgetCapMicrousd: defaults.budget.taskMicroUsd,
     dayBudgetCapMicrousd: defaults.budget.dayMicroUsd,
-  };
+  });
 }
+const realCostSummary = realSummaries.length > 0 ? realSummaries[realSummaries.length - 1] : null;
 
 const defaultsFailClosedPreserved =
   defaults.model?.baseUrl === null &&
@@ -89,6 +94,7 @@ const defaultsFailClosedPreserved =
   defaults.credentials?.repo === null &&
   defaults.credentials?.im === null &&
   defaults.acquisition?.allowRealRepoFetch === false &&
+  defaults.acquisition?.enableHostGateway === false &&
   Array.isArray(defaults.acquisition?.allowedHosts) &&
   defaults.acquisition.allowedHosts.length === 0 &&
   Object.keys(defaults.acquisition?.targets ?? {}).length === 0 &&
@@ -116,6 +122,7 @@ const jsonOut = {
   },
   suites: records,
   realCostSummary,
+  realSummaries,
 };
 
 mkdirSync(join(repoRoot, "docs", "phase3", "evidence"), { recursive: true });
@@ -139,14 +146,11 @@ const lines = [
   ...records.map((r) => `| ${r.id} | ${r.present} | ${r.passed} | ${r.failed} | ${r.judged} | ${r.scope} |`),
 ];
 
-if (realCostSummary) {
-  lines.push(
-    "",
-    "## Recorded real acceptance summary",
-    "",
-    `- source: \`${realCostSummary.sourceFile}\` (${realCostSummary.generatedAt ?? "unknown time"})`,
-    `- counts: ${realCostSummary.passed} pass, ${realCostSummary.failed} fail`,
-  );
+if (realSummaries.length > 0) {
+  lines.push("", "## Recorded real acceptance summary", "");
+  for (const rs of realSummaries) {
+    lines.push(`- ${rs.id}: \`${rs.sourceFile}\` (${rs.generatedAt ?? "unknown time"}) — ${rs.passed} pass, ${rs.failed} fail`);
+  }
 }
 
 writeFileSync(join(repoRoot, "docs", "phase4", "reports", "user-value-report.md"), lines.join("\n") + "\n", "utf8");

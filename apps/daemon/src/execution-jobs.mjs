@@ -4,6 +4,7 @@
 // no trusted completion record is LOST and its orphan process is killed;
 // the owning task re-does any read-only verification it needs.
 
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { withTx } from "./db/tx.mjs";
@@ -106,13 +107,24 @@ export function reapLostJobs(db, { stateDir, now, killOrphans = true }) {
     let pid = null;
     let killed = false;
     if (existsSync(pidFile)) {
-      pid = Number(readFileSync(pidFile, "utf8").trim());
-      if (killOrphans && isPidAlive(pid)) {
-        try {
-          process.kill(pid, "SIGKILL");
-          killed = true;
-        } catch {
-          killed = false; // Died between probe and kill: already gone.
+      const rawSidecar = readFileSync(pidFile, "utf8").trim();
+      if (rawSidecar.startsWith("container:")) {
+        const containerId = rawSidecar.slice("container:".length);
+        pid = containerId;
+        if (killOrphans && containerId) {
+          const k = spawnSync("docker", ["kill", containerId], { encoding: "utf8", shell: false });
+          killed = k.status === 0;
+          spawnSync("docker", ["rm", "-f", containerId], { encoding: "utf8", shell: false });
+        }
+      } else {
+        pid = Number(rawSidecar);
+        if (killOrphans && isPidAlive(pid)) {
+          try {
+            process.kill(pid, "SIGKILL");
+            killed = true;
+          } catch {
+            killed = false; // Died between probe and kill: already gone.
+          }
         }
       }
       rmSync(pidFile, { force: true });

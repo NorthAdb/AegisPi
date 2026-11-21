@@ -28,7 +28,7 @@
 // pid-based reaper ignores them and this module owns their lifecycle.
 
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -64,6 +64,73 @@ function docker(dockerBin, args, { capture = false } = {}) {
     shell: false,
   });
   return { code: r.status, out: ((r.stdout ?? "") + (r.stderr ?? "")).trim() };
+}
+
+function dockerAsync(dockerBin, args, { capture = false, timeoutMs = 120000, maxOutputBytes = 1024 * 1024, signal = null } = {}) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(dockerBin, args, {
+      stdio: capture ? ["ignore", "pipe", "pipe"] : "ignore",
+      shell: false,
+    });
+    let out = "";
+    let err = "";
+    let done = false;
+    const appendCapped = (cur, chunk) => (cur.length >= maxOutputBytes ? cur : (cur + chunk.toString("utf8")).slice(0, maxOutputBytes));
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }, timeoutMs)
+      : null;
+    const onAbort = () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (capture) {
+      child.stdout.on("data", (d) => (out = appendCapped(out, d)));
+      child.stderr.on("data", (d) => (err = appendCapped(err, d)));
+    }
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolvePromise(res);
+    };
+    child.on("error", (e) => finish({ code: 1, out: e.message }));
+    child.on("close", (code) => finish({ code: code ?? 1, out: (out + err).trim() }));
+  });
+}
+
+function reapLabeledContainers(dockerBin, { role, stateDir, activeIds = new Set(), stopGraceSec = 0 } = {}) {
+  const listed = docker(dockerBin, [
+    "ps", "-aq",
+    "--filter", `label=aegispi.role=${role}`,
+    "--filter", `label=aegispi.state_dir=${resolve(stateDir)}`,
+  ], { capture: true });
+  if (listed.code !== 0 || !listed.out) return [];
+  const reaped = [];
+  for (const id of listed.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+    if (activeIds.has(id)) continue;
+    if (stopGraceSec > 0) docker(dockerBin, ["stop", "--time", String(stopGraceSec), id]);
+    else docker(dockerBin, ["kill", id]);
+    docker(dockerBin, ["rm", "-f", id]);
+    reaped.push(id);
+  }
+  return reaped;
+}
+
+function safeDockerToken(prefix, rawKey, maxBodyLen = 72) {
+  const sanitized = String(rawKey).replace(/[^A-Za-z0-9._-]/g, "-");
+  if (sanitized.length <= maxBodyLen) return `${prefix}${sanitized}`;
+  const hash = createHash("sha256").update(String(rawKey), "utf8").digest("hex").slice(0, 12);
+  return `${prefix}${sanitized.slice(0, Math.max(16, maxBodyLen - 13))}-${hash}`;
 }
 
 export function createContainerExecutor(db, {
@@ -124,6 +191,7 @@ export function createContainerExecutor(db, {
     const prepared = [];
     let totalBytes = 0;
     const seenPaths = new Set();
+    const seenPathsLower = new Set();
     for (const [relPath, content] of entries) {
       if (!isSafeRelativeReadPath(relPath) || relPath.toLowerCase() === "manifest.json") {
         throw new ExecutorError(`job ${jobId} invalid staged input path ${JSON.stringify(relPath)}`);
@@ -131,10 +199,12 @@ export function createContainerExecutor(db, {
       if (typeof content !== "string" && !Buffer.isBuffer(content)) {
         throw new ExecutorError(`job ${jobId} staged input ${relPath} must be string or Buffer`);
       }
-      if (seenPaths.has(relPath)) {
-        throw new ExecutorError(`job ${jobId} duplicate staged input path ${relPath}`);
+      const lower = relPath.toLowerCase();
+      if (seenPaths.has(relPath) || seenPathsLower.has(lower)) {
+        throw new ExecutorError(`job ${jobId} duplicate or case-colliding staged input path ${relPath}`);
       }
       seenPaths.add(relPath);
+      seenPathsLower.add(lower);
       const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
       totalBytes += buf.byteLength;
       if (totalBytes > 16 * 1024 * 1024) {
@@ -184,7 +254,7 @@ export function createContainerExecutor(db, {
   // One disposable, image-owned output volume per job attempt: a fresh volume
   // mounts over the image's /job/output and initializes from it (uid 999).
   function outputVolumeName(jobId) {
-    return `aegispi-job-out-${jobId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 72)}`;
+    return safeDockerToken("aegispi-job-out-", jobId, 72);
   }
 
   // Copy the container's evidence out BEFORE the container is removed; the
@@ -211,7 +281,7 @@ export function createContainerExecutor(db, {
       cpSync(stageRoot, join(dir, "input"), { recursive: true, dereference: false });
     }
     writeFileSync(join(dir, "input", "manifest.json"), JSON.stringify(manifest) + "\n", "utf8");
-    const containerName = `aegispi-job-${jobId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 80)}`;
+    const containerName = safeDockerToken("aegispi-job-", jobId, 72);
     const volume = outputVolumeName(jobId);
     // A retry must not inherit a previous attempt's evidence directory.
     docker(dockerBin, ["volume", "rm", "-f", volume]);
@@ -219,6 +289,9 @@ export function createContainerExecutor(db, {
       "run",
       "--detach",
       "--name", containerName,
+      "--label", "aegispi.role=execution",
+      "--label", `aegispi.state_dir=${resolve(stateDir)}`,
+      "--label", `aegispi.job_id=${jobId}`,
       "--network", network,
       // --init: tini becomes PID 1 and reaps orphaned zombies + forwards
       // signals. Without it the runner-as-PID-1 cannot wait() for children
@@ -334,9 +407,28 @@ export function createContainerExecutor(db, {
       deadlineAt,
       now,
     });
-    writePreparedStagedFiles(jobId, preparedInputs);
-    const launched = launchExisting({ jobId, taskId, attemptId, fence, manifest, now });
-    return { jobId, state: "RUNNING", ...launched };
+    try {
+      writePreparedStagedFiles(jobId, preparedInputs);
+      const launched = launchExisting({ jobId, taskId, attemptId, fence, manifest, now });
+      return { jobId, state: "RUNNING", ...launched };
+    } catch (e) {
+      cleanupTerminalJobArtifacts(jobId);
+      rmSync(jobDir(jobId), { recursive: true, force: true });
+      withTx(db, () => {
+        const changed = db
+          .prepare("UPDATE execution_jobs SET state='FAILED', ended_at=?, exit_code=NULL WHERE id=? AND state='QUEUED'")
+          .run(now, jobId).changes;
+        if (changed === 1) {
+          writeAudit(db, {
+            code: "container_job_launch_failed",
+            taskId,
+            details: { job_id: jobId, error: String(e?.message ?? e).slice(0, 200) },
+            now,
+          });
+        }
+      });
+      throw e;
+    }
   }
 
   function containerIdOf(jobId) {
@@ -555,7 +647,7 @@ export function createContainerExecutor(db, {
   // Startup: every RUNNING container job has no trusted completion record —
   // kill the container, mark LOST (06 section 9: "无可信完成记录置LOST；杀孤
   // 儿容器"). Only rows this executor owns (container sidecars).
-  function reapOrphanContainers({ now, kill = true }) {
+  function reapOrphanContainers({ now = Date.now(), kill = true } = {}) {
     const rows = db.prepare("SELECT id FROM execution_jobs WHERE state='RUNNING'").all();
     const reaped = [];
     for (const r of rows) {
@@ -581,6 +673,9 @@ export function createContainerExecutor(db, {
           reaped.push({ jobId: r.id, container: containerId, killedOrphan: killed });
         }
       });
+    }
+    if (kill) {
+      reapLabeledContainers(dockerBin, { role: "execution", stateDir, stopGraceSec: 0 });
     }
     return reaped;
   }
@@ -738,7 +833,7 @@ export function inspectHostProposalsAcl(proposalsDir) {
 export function createAgentLauncher(db, {
   stateDir,
   imageRef,
-  quotas = { cpus: 1, memory: "1g", pids: 256, tmpfsSize: "2g" },
+  quotas = { cpus: 1, memory: "1g", pids: 256 },
   dockerBin = "docker",
   network = "none",
 }) {
@@ -832,20 +927,7 @@ export function createAgentLauncher(db, {
   }
 
   function reapOrphanContainers({ activeIds = new Set() } = {}) {
-    const listed = docker(dockerBin, [
-      "ps", "-aq",
-      "--filter", "label=aegispi.role=agent",
-      "--filter", `label=aegispi.state_dir=${resolve(stateDir)}`,
-    ], { capture: true });
-    if (listed.code !== 0 || !listed.out) return [];
-    const reaped = [];
-    for (const id of listed.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
-      if (activeIds.has(id)) continue;
-      docker(dockerBin, ["stop", "--time", "2", id]);
-      docker(dockerBin, ["rm", "-f", id]);
-      reaped.push(id);
-    }
-    return reaped;
+    return reapLabeledContainers(dockerBin, { role: "agent", stateDir, activeIds, stopGraceSec: 2 });
   }
 
   return {
@@ -949,7 +1031,44 @@ export function createAcquisitionLauncher(db, {
         }
         await new Promise((r) => setTimeout(r, 150));
       }
-      docker(dockerBin, ["cp", `${containerId}:/downloads/.`, downloadsDir], { capture: true });
+      if (exitCode !== 124 && exitCode !== 125) {
+        const cpAbort = new AbortController();
+        let cpTimer = null;
+        if (onProgress) {
+          try {
+            onProgress();
+          } catch (e) {
+            if (e?.name === "StaleWorker") {
+              exitCode = 125;
+              cpAbort.abort();
+            }
+          }
+          if (!cpAbort.signal.aborted) {
+            cpTimer = setInterval(() => {
+              try {
+                onProgress();
+              } catch (e) {
+                if (e?.name === "StaleWorker") {
+                  exitCode = 125;
+                  cpAbort.abort();
+                  clearInterval(cpTimer);
+                }
+              }
+            }, progressIntervalMs);
+          }
+        }
+        try {
+          if (!cpAbort.signal.aborted) {
+            await dockerAsync(dockerBin, ["cp", `${containerId}:/downloads/.`, downloadsDir], {
+              capture: true,
+              timeoutMs: Math.max(30000, timeoutMs),
+              signal: cpAbort.signal,
+            });
+          }
+        } finally {
+          if (cpTimer) clearInterval(cpTimer);
+        }
+      }
     } finally {
       docker(dockerBin, ["rm", "-f", containerId]);
       docker(dockerBin, ["volume", "rm", "-f", volume]);
@@ -965,19 +1084,7 @@ export function createAcquisitionLauncher(db, {
   }
 
   function reapOrphanContainers() {
-    const listed = docker(dockerBin, [
-      "ps", "-aq",
-      "--filter", "label=aegispi.role=acquisition",
-      "--filter", `label=aegispi.state_dir=${resolve(stateDir)}`,
-    ], { capture: true });
-    if (listed.code !== 0 || !listed.out) return [];
-    const reaped = [];
-    for (const id of listed.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
-      docker(dockerBin, ["kill", id]);
-      docker(dockerBin, ["rm", "-f", id]);
-      reaped.push(id);
-    }
-    return reaped;
+    return reapLabeledContainers(dockerBin, { role: "acquisition", stateDir, stopGraceSec: 0 });
   }
 
   return { imageRef, quotas, network, runPlan, reapOrphanContainers };

@@ -22,7 +22,9 @@
 // any symlink whose target escapes the extraction root.
 
 import { spawn } from "node:child_process";
+import { lookup as dnsLookup } from "node:dns/promises";
 import {
+  chmodSync,
   createReadStream,
   createWriteStream,
   existsSync,
@@ -35,6 +37,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 import { createGunzip } from "node:zlib";
 import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
@@ -83,7 +88,8 @@ export function parsePlan(raw) {
     if (typeof e.destRelPath !== "string" || e.destRelPath.length === 0) {
       return { ok: false, reason: "destRelPath must be a non-empty string" };
     }
-    if (isAbsolute(e.destRelPath) || e.destRelPath.split(/[\\/]/).includes("..")) {
+    const pathSegments = e.destRelPath.split(/[\\/]/);
+    if (isAbsolute(e.destRelPath) || pathSegments.some((s) => s === "" || s === "." || s === "..")) {
       return { ok: false, reason: `destRelPath ${JSON.stringify(e.destRelPath)} escapes the downloads root` };
     }
     if (e.mode !== "file" && e.mode !== "tar") {
@@ -119,64 +125,209 @@ export function inside(root, path) {
   return rel === r || rel.startsWith(r + sep);
 }
 
-// Follows redirects manually so every hop stays http/https, is counted, and
-// stays on an ALLOWED host: the original entry host by default, plus any
-// hostname the host-generated plan explicitly listed in
-// allowedRedirectHosts. A redirect to any other host is refused (audit F4:
-// a malicious source must not be able to aim the fetch elsewhere).
-export async function fetchTo(url, destPath, { maxSizeBytes, sha256, allowedRedirectHosts = [] } = {}) {
+function parseIpv4Int(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let val = 0;
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) return null;
+    const n = Number(p);
+    if (n < 0 || n > 255) return null;
+    val = (val * 256 + n) >>> 0;
+  }
+  return val;
+}
+
+function isDisallowedIp(rawIp) {
+  const ip = String(rawIp ?? "").replace(/^\[|\]$/g, "").split("%")[0].toLowerCase();
+  const ver = isIP(ip);
+  if (ver === 4) {
+    const n = parseIpv4Int(ip);
+    if (n === null) return true;
+    const a = (n >>> 24) & 0xff;
+    const b = (n >>> 16) & 0xff;
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  if (ver === 6) {
+    if (ip === "::" || ip === "::1") return true;
+    if (ip.startsWith("::ffff:")) {
+      const rest = ip.slice("::ffff:".length);
+      if (isIP(rest) === 4) return isDisallowedIp(rest);
+      const hexParts = rest.split(":");
+      if (hexParts.length === 2) {
+        const hi = parseInt(hexParts[0], 16);
+        const lo = parseInt(hexParts[1], 16);
+        if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+          return isDisallowedIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+        }
+      }
+      return true;
+    }
+    const firstWord = parseInt(ip.split(":")[0] || "0", 16);
+    if ((firstWord & 0xfe00) === 0xfc00) return true;
+    if ((firstWord & 0xffc0) === 0xfe80) return true;
+    if ((firstWord & 0xff00) === 0xff00) return true;
+    return false;
+  }
+  return true;
+}
+
+function isLocalGatewayHttpTarget(u) {
+  if (u.protocol !== "http:") return false;
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    host === "host.docker.internal" ||
+    host.endsWith(".host-gateway.local") ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "localhost"
+  );
+}
+
+function requestWithPinnedLookup(u, { timeoutMs = 30000 } = {}) {
+  return new Promise((resolveReq, rejectReq) => {
+    const isHttps = u.protocol === "https:";
+    const allowPrivate = isLocalGatewayHttpTarget(u);
+    const fn = isHttps ? httpsRequest : httpRequest;
+    const hostClean = u.hostname.replace(/^\[|\]$/g, "");
+    if (isIP(hostClean) !== 0 && !allowPrivate && isDisallowedIp(hostClean)) {
+      const err = new Error(`refused non-public IP address ${hostClean}`);
+      err.isPolicyBlock = true;
+      rejectReq(err);
+      return;
+    }
+    const safeLookup = (hostname, opts, cb) => {
+      if (typeof opts === "function") {
+        cb = opts;
+        opts = {};
+      }
+      if (isIP(hostname) !== 0) {
+        if (!allowPrivate && isDisallowedIp(hostname)) {
+          const err = new Error(`refused non-public IP address ${hostname}`);
+          err.isPolicyBlock = true;
+          cb(err);
+          return;
+        }
+        if (opts?.all) cb(null, [{ address: hostname, family: isIP(hostname) }]);
+        else cb(null, hostname, isIP(hostname));
+        return;
+      }
+      dnsLookup(hostname, { all: true })
+        .then((addrs) => {
+          if (!addrs || addrs.length === 0) {
+            cb(Object.assign(new Error(`DNS returned no addresses for ${hostname}`), { code: "ENOTFOUND" }));
+            return;
+          }
+          if (!allowPrivate) {
+            const bad = addrs.find((a) => isDisallowedIp(a.address));
+            if (bad) {
+              const err = new Error(`refused non-public IP ${bad.address} resolved for ${hostname}`);
+              err.isPolicyBlock = true;
+              cb(err);
+              return;
+            }
+          }
+          if (opts?.all) cb(null, addrs);
+          else cb(null, addrs[0].address, addrs[0].family);
+        })
+        .catch((err) => cb(err));
+    };
+
+    const req = fn(
+      {
+        protocol: u.protocol,
+        hostname: hostClean,
+        port: u.port || (isHttps ? 443 : 80),
+        path: `${u.pathname}${u.search}`,
+        method: "GET",
+        lookup: safeLookup,
+        timeout: timeoutMs,
+      },
+      (res) => resolveReq(res),
+    );
+    req.on("timeout", () => {
+      req.destroy(new Error(`request timed out after ${timeoutMs}ms`));
+    });
+    req.on("error", rejectReq);
+    req.end();
+  });
+}
+
+// Follows redirects manually so every hop stays http/https, prevents https->http
+// downgrade and same-host cross-port jumps, blocks non-public IPs atomically in
+// socket lookup, and restricts redirects to explicit allowedRedirectHosts.
+export async function fetchTo(url, destPath, { maxSizeBytes, sha256, allowedRedirectHosts = [], timeoutMs = 60000 } = {}) {
   const original = new URL(url);
-  // Allowed targets: the planned host's own name (any port — the plan
-  // already trusts that operator for outbound HTTP; ports on the same
-  // name are not a third party) plus any bare hostname the host-generated
-  // plan listed in allowedRedirectHosts. Every other host is refused.
-  const allowedHostPorts = new Set([original.host]);
-  const allowedNames = new Set([original.hostname, ...allowedRedirectHosts.map((h) => String(h).toLowerCase())]);
+  const allowedNames = new Set(allowedRedirectHosts.map((h) => String(h).toLowerCase()));
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     const u = new URL(current);
     if (u.protocol !== "http:" && u.protocol !== "https:") {
       return { ok: false, reason: `redirect changed scheme to ${u.protocol}` };
     }
+    if (original.protocol === "https:" && u.protocol !== "https:") {
+      return { ok: false, reason: `redirect downgraded scheme from https: to ${u.protocol}` };
+    }
     if (u.username !== "" || u.password !== "") {
       return { ok: false, reason: "redirect target embeds credentials; the downloader never carries credentials" };
     }
-    if (!allowedHostPorts.has(u.host) && !allowedNames.has(u.hostname)) {
+    const sameOriginHost = u.host === original.host;
+    const sameHostnameOtherPort = u.hostname === original.hostname && u.host !== original.host;
+    if (sameHostnameOtherPort || (!sameOriginHost && !allowedNames.has(u.hostname.toLowerCase()))) {
       return {
         ok: false,
         reason: `redirect host ${u.host} is not in the allowed host set (original ${original.host}${allowedRedirectHosts.length > 0 ? ` + ${allowedRedirectHosts.join(",")}` : ""})`,
       };
     }
-    const res = await fetch(u, { redirect: "manual" });
-    if (res.status >= 300 && res.status < 400) {
-      const loc = res.headers.get("location");
-      if (!loc) return { ok: false, reason: `redirect ${res.status} without Location` };
+    let res;
+    try {
+      res = await requestWithPinnedLookup(u, { timeoutMs });
+    } catch (e) {
+      return {
+        ok: false,
+        reason: e?.isPolicyBlock ? e.message : `fetch failed (${e?.code ?? e?.message ?? e})`,
+      };
+    }
+    const status = res.statusCode ?? 0;
+    if (status >= 300 && status < 400) {
+      const loc = res.headers.location;
+      res.destroy();
+      if (!loc) return { ok: false, reason: `redirect ${status} without Location` };
       let next;
       try {
-        next = new URL(loc, u);
+        next = new URL(Array.isArray(loc) ? loc[0] : loc, u);
       } catch {
         return { ok: false, reason: `redirect Location ${JSON.stringify(loc)} is not a URL` };
       }
       current = next.href;
       continue;
     }
-    if (!res.ok || !res.body) {
-      return { ok: false, reason: `HTTP ${res.status} fetching ${u.href}` };
+    if (status < 200 || status >= 300) {
+      res.destroy();
+      return { ok: false, reason: `HTTP ${status} fetching ${u.href}` };
     }
     mkdirSync(dirname(destPath), { recursive: true });
     const tmpPath = `${destPath}.part`;
     const hash = createHash("sha256");
     let bytes = 0;
     let capped = false;
+    let streamErr = null;
     const out = createWriteStream(tmpPath);
-    const reader = res.body.getReader();
+    out.on("error", (err) => {
+      streamErr = err;
+    });
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      for await (const value of res) {
+        if (streamErr) break;
         bytes += value.byteLength;
         if (bytes > maxSizeBytes) {
           capped = true;
+          res.destroy();
           break;
         }
         hash.update(value);
@@ -184,14 +335,22 @@ export async function fetchTo(url, destPath, { maxSizeBytes, sha256, allowedRedi
           await new Promise((r) => out.once("drain", r));
         }
       }
+      if (!capped && !streamErr && !res.complete) {
+        streamErr = new Error("response truncated before HTTP completion");
+      }
+    } catch (err) {
+      streamErr = err;
     } finally {
-      await reader.cancel().catch(() => {});
       out.end();
       await new Promise((r) => out.on("close", r));
     }
     if (capped) {
       rmSync(tmpPath, { force: true });
       return { ok: false, reason: `size cap exceeded: >${maxSizeBytes} bytes` };
+    }
+    if (streamErr) {
+      rmSync(tmpPath, { force: true });
+      return { ok: false, reason: `fetch failed (${streamErr.message})` };
     }
     const actualSha256 = hash.digest("hex");
     if (sha256 && actualSha256 !== sha256) {
@@ -281,6 +440,7 @@ export function walkVerify(root, { maxEntries, maxDepth, maxTotalBytes }) {
           continue;
         }
         visit(p, depth + 1);
+        if (entries > maxEntries) return;
       } else if (st.isFile()) {
         totalBytes += st.size;
         if (totalBytes > maxTotalBytes) {
@@ -303,7 +463,7 @@ function runTar(args) {
       stderr += c.toString();
       if (stderr.length > 4096) stderr = stderr.slice(-4096);
     });
-    child.on("exit", (code) => resolveRun({ code, stderr }));
+    child.on("close", (code) => resolveRun({ code, stderr }));
     child.on("error", (e) => resolveRun({ code: 127, stderr: e.message }));
   });
 }

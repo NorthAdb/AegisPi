@@ -40,7 +40,7 @@ export function enqueueNotificationInTx(db, { effectId, channel, destination, no
 // together or not at all. The effect here is already-approved notification
 // machinery owned by the host, so it is created READY via the caller's
 // pre-approved routine reference.
-export function finalizeTaskWithNotification(db, {
+export function finalizeTaskWithNotificationInTx(db, {
   now,
   taskId,
   attemptNo,
@@ -51,20 +51,22 @@ export function finalizeTaskWithNotification(db, {
   errorCode = null,
   notification, // {effectId, channel, destination, notBefore, notifyReason}
 }) {
-  return withTx(db, () => {
-    const result = completeTaskInTx(db, {
-      taskId, attemptNo, leaseOwner, fence, now, resultClass, resultObjectId, errorCode,
-    });
-    const box = enqueueNotificationInTx(db, {
-      effectId: notification.effectId,
-      channel: notification.channel,
-      destination: notification.destination,
-      notBefore: notification.notBefore,
-      notifyReason: notification.notifyReason,
-      now,
-    });
-    return { taskState: result.state, outboxId: box.outboxId, outboxDuplicate: box.duplicate };
+  const result = completeTaskInTx(db, {
+    taskId, attemptNo, leaseOwner, fence, now, resultClass, resultObjectId, errorCode,
   });
+  const box = enqueueNotificationInTx(db, {
+    effectId: notification.effectId,
+    channel: notification.channel,
+    destination: notification.destination,
+    notBefore: notification.notBefore,
+    notifyReason: notification.notifyReason,
+    now,
+  });
+  return { taskState: result.state, outboxId: box.outboxId, outboxDuplicate: box.duplicate };
+}
+
+export function finalizeTaskWithNotification(db, opts) {
+  return withTx(db, () => finalizeTaskWithNotificationInTx(db, opts));
 }
 
 // Digest merge: a newer summary supersedes a pending older one. The new

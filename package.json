@@ -25,6 +25,7 @@
     "test:external-write:real": "node evals/phase3/external-write-real/run.mjs",
     "test:quota-calibration": "node evals/phase3/quota-calibration/run.mjs",
     "eval:triage": "node evals/phase4/triage/run.mjs",
+    "eval:triage:real": "node evals/phase4/triage-real/run.mjs",
     "report:user-value": "node evals/phase4/report-user-value/run.mjs"
   }
 }

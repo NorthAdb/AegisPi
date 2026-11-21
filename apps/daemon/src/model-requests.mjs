@@ -6,15 +6,21 @@
 // write-back (SETTLED / HELD / ORPHAN), late-usage reconciliation (only from
 // request-row EXECUTING + ledger-row HELD), and UUID-validated result delivery.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { withTx } from "./db/tx.mjs";
 import { writeAudit } from "./audit.mjs";
 import { PURPOSES } from "./budget.mjs";
+import { safeTaskDirComponent } from "./container-executor.mjs";
 import { createCredentialService } from "./credentials.mjs";
 import { putObjectContent, insertObjectRow } from "./objects.mjs";
 import { observeManifestObjectIdForAttempt } from "./repo-observe.mjs";
-import { completeTaskInTx, deliveryAckCheckpoint, deliveryDone, heartbeat } from "./scheduler.mjs";
+import {
+  completePendingDeliveryCheckpointInTx,
+  completeTaskInTx,
+  deliveryReturnedInTx,
+  heartbeat,
+} from "./scheduler.mjs";
 import {
   assertValidModelBaseUrl,
   callModelOnce,
@@ -269,6 +275,10 @@ export function commitModelCallWriteback(db, {
           details: { request_id: requestId, reservation: reqNow.reservation_id, task_state: taskPre?.state ?? "missing", call_ok: false },
           now,
         });
+      } else {
+        const errCode = call.kind === "timeout" ? "model_timeout" : (call.kind ?? "model_call_failed");
+        db.prepare("UPDATE model_requests SET error_code=?, updated_at=? WHERE request_id=? AND state='EXECUTING'")
+          .run(errCode, now, requestId);
       }
     });
     if (!preStatus.terminal && hostCommandsDir && isUuidV4(requestId)) {
@@ -287,7 +297,7 @@ export function commitModelCallWriteback(db, {
     };
   }
 
-  const priced = microusdForUsage(call.usage, priceCatalog, { stopReason: call.stopReason });
+  const priced = microusdForUsage(call.usage, priceCatalog);
   const replyTrimmed = (call.reply ?? "").slice(0, 4000);
   const evidencePayload = JSON.stringify({
     done: true,
@@ -471,6 +481,27 @@ export function commitModelCallWriteback(db, {
             resultObjectId: evidence.id,
           });
         }
+        if (taskFailed) {
+          const openDelivery = db
+            .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state IN ('PENDING','ACKED')")
+            .get(reqNow.task_id);
+          if (openDelivery) {
+            deliveryReturnedInTx(db, {
+              eventId: openDelivery.event_id,
+              taskId: reqNow.task_id,
+              now,
+              reason: mustSettleToComplete && !settled ? "settlement_held_uncompleted" : emptyErrorCode,
+            });
+          }
+        } else {
+          completePendingDeliveryCheckpointInTx(db, {
+            taskId: reqNow.task_id,
+            scopeId: taskNow.scope_id,
+            content: "model worker consumed the event",
+            insertObjectRowFn: insertObjectRow,
+            now,
+          });
+        }
       }
     }
 
@@ -488,25 +519,6 @@ export function commitModelCallWriteback(db, {
       emptyErrorCode,
     };
   });
-
-  if (txOut.status !== "dropped" && !txOut.orphan && completeActiveTask && !txOut.taskFailed && taskPre) {
-    const pending = db
-      .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
-      .get(reqRowPre.task_id);
-    if (pending) {
-      const ck = insertObjectRow(db, {
-        scopeId: taskPre.scope_id,
-        kind: "session_checkpoint",
-        sourceUri: `cmd:${pending.event_id}:${reqRowPre.task_id}`,
-        sourceActor: "host",
-        content: "model worker consumed the event",
-        observedAt: now,
-        requiredScopeIds: [taskPre.scope_id],
-      });
-      deliveryAckCheckpoint(db, { eventId: pending.event_id, taskId: reqRowPre.task_id, checkpointObjectId: ck.id, now });
-      deliveryDone(db, { eventId: pending.event_id, taskId: reqRowPre.task_id, now });
-    }
-  }
 
   if (txOut.status !== "dropped" && !txOut.orphan && hostCommandsDir) {
     writeAtomicJson(
@@ -990,20 +1002,24 @@ export function settleLateModelUsage(db, {
   });
 }
 
-// Scan <stateDir>/agent-work/<safeTask>/<attemptNo>/proposals/ for pending
-// model-request-*.json files and drive each through processModelRequest.
-function scanPendingProposals(db, { stateDir, now = Date.now() }) {
+function scanPendingProposals(db, { stateDir, now = Date.now(), onlyTaskId = null, excludeTaskIds = null }) {
   const workRoot = join(stateDir, "agent-work");
-  if (!existsSync(workRoot)) return { processed: 0, results: [], tasksToVisit: [] };
+  if (!existsSync(workRoot)) return { results: [], tasksToVisit: [] };
+  const onlyDir = onlyTaskId ? safeTaskDirComponent(onlyTaskId) : null;
+  const excludeDirs = excludeTaskIds && excludeTaskIds.size > 0
+    ? new Set([...excludeTaskIds].map((id) => safeTaskDirComponent(id)))
+    : null;
   const results = [];
   const tasksToVisit = [];
   let taskDirs = [];
   try {
     taskDirs = readdirSync(workRoot, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
   } catch {
-    return { processed: 0, results: [], tasksToVisit: [] };
+    return { results: [], tasksToVisit: [] };
   }
   for (const tDir of taskDirs) {
+    if (onlyDir && tDir !== onlyDir) continue;
+    if (excludeDirs && excludeDirs.has(tDir)) continue;
     const tPath = join(workRoot, tDir);
     let attemptDirs = [];
     try {
@@ -1039,7 +1055,19 @@ function scanPendingProposals(db, { stateDir, now = Date.now() }) {
         const fPath = join(proposalsDir, f);
         let st;
         try {
-          st = statSync(fPath);
+          st = lstatSync(fPath);
+          if (st.isSymbolicLink()) {
+            recordRefusal(db, {
+              taskId: null,
+              requestId: null,
+              code: "proposal_symlink_rejected",
+              reason: `proposal ${f} is a symbolic link`,
+              hostCommandsDir: null,
+              now,
+            });
+            results.push({ file: f, status: "refused", code: "proposal_symlink_rejected" });
+            continue;
+          }
           if (!st.isFile()) continue;
         } catch {
           continue;
@@ -1079,12 +1107,59 @@ function scanPendingProposals(db, { stateDir, now = Date.now() }) {
           results.push({ file: f, status: "refused", code: "invalid_json" });
           continue;
         }
+        if (onlyTaskId && envelope?.taskId !== onlyTaskId) continue;
+        if (excludeTaskIds && excludeTaskIds.has(envelope?.taskId)) continue;
+        if (typeof envelope?.taskId === "string" && envelope.taskId.length > 0 && tDir !== safeTaskDirComponent(envelope.taskId)) {
+          recordRefusal(db, {
+            taskId: envelope.taskId,
+            requestId: isUuidV4(envelope.requestId) ? envelope.requestId : null,
+            code: "proposal_dir_mismatch",
+            reason: `proposal ${f} taskId does not match container work directory`,
+            hostCommandsDir: commandsDir,
+            now,
+          });
+          consumed[f] = { mtimeMs: st.mtimeMs, size: st.size };
+          dirty = true;
+          results.push({ file: f, taskId: envelope.taskId, status: "refused", code: "proposal_dir_mismatch" });
+          continue;
+        }
         pendingItems.push({ f, st, envelope, proposalsDir });
       }
       tasksToVisit.push({ consumedPath, consumed, dirty, commandsDir, proposalsDir, pendingItems });
     }
   }
   return { results, tasksToVisit };
+}
+
+export function fenceAttemptProposals(attemptDir, reason = "triageStopped") {
+  try {
+    const proposalsDir = join(attemptDir, "proposals");
+    if (!existsSync(proposalsDir)) return 0;
+    const consumedPath = join(attemptDir, ".daemon-consumed.json");
+    let consumed = {};
+    if (existsSync(consumedPath)) {
+      try {
+        consumed = JSON.parse(readFileSync(consumedPath, "utf8")) ?? {};
+      } catch {
+        consumed = {};
+      }
+    }
+    let fenced = 0;
+    for (const f of readdirSync(proposalsDir)) {
+      if (!f.startsWith("model-request-") || !f.endsWith(".json") || f.includes(".tmp")) continue;
+      if (!consumed[f]) {
+        const st = lstatSync(join(proposalsDir, f));
+        consumed[f] = { mtimeMs: st.mtimeMs, size: st.size, [reason]: true };
+        fenced += 1;
+      }
+    }
+    if (fenced > 0) {
+      writeFileSync(consumedPath, JSON.stringify(consumed, null, 2) + "\n", "utf8");
+    }
+    return fenced;
+  } catch {
+    return 0;
+  }
 }
 
 function recordScannedProposalOutcome(scan, entry, item, outcome) {
@@ -1096,16 +1171,36 @@ function recordScannedProposalOutcome(scan, entry, item, outcome) {
   return false;
 }
 
+async function runPendingBatches(db, { stateDir, config, ledger, completeActiveTask, onlyTaskId, excludeTaskIds, now, runner }) {
+  const effectiveNow = now ?? Date.now();
+  const scan = scanPendingProposals(db, { stateDir, now: effectiveNow, onlyTaskId, excludeTaskIds });
+  for (const entry of scan.tasksToVisit) {
+    let dirty = entry.dirty;
+    for (const item of entry.pendingItems) {
+      const outcome = await runner(entry, item);
+      if (recordScannedProposalOutcome(scan, entry, item, outcome)) {
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      writeFileSync(entry.consumedPath, JSON.stringify(entry.consumed, null, 2) + "\n", "utf8");
+    }
+  }
+  return { processed: scan.results.length, results: scan.results };
+}
+
 export function processPendingModelProposals(db, {
   stateDir,
   config,
   ledger,
   completeActiveTask = true,
+  onlyTaskId = null,
+  excludeTaskIds = null,
   now,
   useWallClockAfterCall = false,
 }) {
   const effectiveNow = now ?? Date.now();
-  const scan = scanPendingProposals(db, { stateDir, now: effectiveNow });
+  const scan = scanPendingProposals(db, { stateDir, now: effectiveNow, onlyTaskId, excludeTaskIds });
   for (const entry of scan.tasksToVisit) {
     let dirty = entry.dirty;
     for (const item of entry.pendingItems) {
@@ -1137,15 +1232,21 @@ export async function processPendingModelProposalsAsync(db, {
   leaseMs = 45000,
   heartbeatMs = 10000,
   completeActiveTask = true,
+  onlyTaskId = null,
+  excludeTaskIds = null,
   now,
   useWallClockAfterCall = true,
 }) {
-  const effectiveNow = now ?? Date.now();
-  const scan = scanPendingProposals(db, { stateDir, now: effectiveNow });
-  for (const entry of scan.tasksToVisit) {
-    let dirty = entry.dirty;
-    for (const item of entry.pendingItems) {
-      const outcome = await processModelRequestAsync(db, {
+  return runPendingBatches(db, {
+    stateDir,
+    config,
+    ledger,
+    completeActiveTask,
+    onlyTaskId,
+    excludeTaskIds,
+    now,
+    runner: (entry, item) =>
+      processModelRequestAsync(db, {
         stateDir,
         config,
         ledger,
@@ -1156,14 +1257,6 @@ export async function processPendingModelProposalsAsync(db, {
         completeActiveTask,
         now,
         useWallClockAfterCall,
-      });
-      if (recordScannedProposalOutcome(scan, entry, item, outcome)) {
-        dirty = true;
-      }
-    }
-    if (dirty) {
-      writeFileSync(entry.consumedPath, JSON.stringify(entry.consumed, null, 2) + "\n", "utf8");
-    }
-  }
-  return { processed: scan.results.length, results: scan.results };
+      }),
+  });
 }

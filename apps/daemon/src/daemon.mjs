@@ -18,9 +18,12 @@ import { startupRecovery } from "./recovery.mjs";
 import { createBudgetLedger } from "./budget.mjs";
 import { dispatchEventToTask } from "./router.mjs";
 import { dispatchKeyForInbox } from "./ingress.mjs";
+import { withTx } from "./db/tx.mjs";
 import {
   claimNextTask,
+  completePendingDeliveryCheckpointInTx,
   completeTask,
+  completeTaskInTx,
   heartbeat,
   workerStep,
   reapExpiredLeases,
@@ -39,7 +42,7 @@ import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effe
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
 import { createContainerExecutor, createAgentLauncher, createAcquisitionLauncher } from "./container-executor.mjs";
 import { isLoopbackModelEndpoint } from "./model-call.mjs";
-import { processPendingModelProposalsAsync } from "./model-requests.mjs";
+import { cancelPreCallModelRequest, processPendingModelProposalsAsync } from "./model-requests.mjs";
 import { parseRepoObservePayload, executeRepoObserveAcquisition } from "./repo-observe.mjs";
 import { parseRepoTriagePayload, executeRepoTriageTask } from "./repo-triage.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
@@ -248,18 +251,22 @@ export async function main(argv = process.argv.slice(2)) {
   // Optional REAL container execution (Phase 3): the executor only exists
   // when the operator passes a digest-pinned image reference. Without the
   // flag the daemon says so honestly — QUEUED jobs stay durable.
-  const executor = parseImageLauncher("--execution-image=", "execution", (imageRef) =>
-    createContainerExecutor(db, {
-      stateDir: dataDir,
-      imageRef,
-      quotas: {
-        cpus: config.containerPlaceholders.execution.cpus,
-        memory: `${config.containerPlaceholders.execution.memoryGiB}g`,
-        pids: config.containerPlaceholders.execution.pids,
-        tmpfsSize: `${config.containerPlaceholders.execution.writableDiskGiB}g`,
-      },
-      machineWideMax: config.leases.maxOfflineJobsMachineWide,
-    }),
+  const executor = parseImageLauncher(
+    "--execution-image=",
+    "execution",
+    (imageRef) =>
+      createContainerExecutor(db, {
+        stateDir: dataDir,
+        imageRef,
+        quotas: {
+          cpus: config.containerPlaceholders.execution.cpus,
+          memory: `${config.containerPlaceholders.execution.memoryGiB}g`,
+          pids: config.containerPlaceholders.execution.pids,
+          tmpfsSize: `${config.containerPlaceholders.execution.writableDiskGiB}g`,
+        },
+        machineWideMax: config.leases.maxOfflineJobsMachineWide,
+      }),
+    { reapOnStart: true },
   );
 
   // Optional production agent container launcher (Phase 4.1, ADR-0001 §2):
@@ -275,7 +282,6 @@ export async function main(argv = process.argv.slice(2)) {
           cpus: config.containerPlaceholders.agent.cpus,
           memory: `${config.containerPlaceholders.agent.memoryGiB}g`,
           pids: config.containerPlaceholders.agent.pids,
-          tmpfsSize: `${config.containerPlaceholders.agent.writableDiskGiB}g`,
         },
       }),
     { reapOnStart: true },
@@ -320,17 +326,22 @@ export async function main(argv = process.argv.slice(2)) {
           });
         } catch {}
       }
-      const proposalFailed = mrRow?.state === "FAILED" || mrRow?.state === "ORPHAN";
+      const proposalFailed =
+        mrRow?.state === "FAILED" ||
+        mrRow?.state === "ORPHAN" ||
+        (mrRow?.state === "EXECUTING" && Boolean(mrRow?.error_code));
       if (taskRow?.state === "RUNNING" && proposalFailed && (receipts.length > 0 || !insp.running)) {
         try {
-          completeTask(db, {
-            taskId: info.taskId,
-            attemptNo: info.attemptNo,
-            leaseOwner: info.leaseOwner,
-            fence: info.fence,
-            now: Date.now(),
-            resultClass: "infra_error",
-            errorCode: mrRow?.error_code ?? "model_request_failed",
+          withTx(db, () => {
+            completeTaskInTx(db, {
+              taskId: info.taskId,
+              attemptNo: info.attemptNo,
+              leaseOwner: info.leaseOwner,
+              fence: info.fence,
+              now: Date.now(),
+              resultClass: "infra_error",
+              errorCode: mrRow?.error_code ?? "model_request_failed",
+            });
           });
         } catch {}
       }
@@ -364,7 +375,7 @@ export async function main(argv = process.argv.slice(2)) {
   const backupKey = process.env.AEGISPI_BACKUP_MANIFEST_KEY ?? null;
 
   const tick = async () => {
-    const now = Date.now();
+    let now = Date.now();
     // 0. Disk watermark: warn blocks NEW job launches; critical never reaches
     //    here (startup already opened read-only).
     const disk = diskWatermark(dataDir, {
@@ -376,8 +387,22 @@ export async function main(argv = process.argv.slice(2)) {
       console.error(`disk: watermark ${lastDiskLevel} -> ${disk.level}`);
       lastDiskLevel = disk.level;
     }
-    // 1. Sweeps: leases, approvals, stale reminders, expired notifications.
+    // 1. Sweeps: leases, abandoned pre-call RESERVED reservations, approvals, stale reminders, expired notifications.
     reapExpiredLeases(db, { now, maxAttempts: 3 });
+    const abandonedReserved = db
+      .prepare(
+        `SELECT mr.request_id
+         FROM model_requests mr
+         JOIN attempts a ON a.id = mr.attempt_id
+         JOIN tasks t ON t.id = mr.task_id
+         WHERE mr.state='RESERVED' AND (a.state != 'ACTIVE' OR t.state != 'RUNNING')`,
+      )
+      .all();
+    for (const r of abandonedReserved) {
+      try {
+        cancelPreCallModelRequest(db, { ledger, requestId: r.request_id, reason: "attempt_lost_pre_call", now });
+      } catch {}
+    }
     expireApprovals(db, { now });
     cancelSatisfiedFollowUpReminders(db, { now });
     expireStaleNotifications(db, { now });
@@ -406,6 +431,7 @@ export async function main(argv = process.argv.slice(2)) {
     //    when the host configured an authorized endpoint (re-review P1).
     let claim = null;
     let proposalProcessed = 0;
+    const excludeTriageTaskIds = new Set();
     if (fakeUpstream) {
       claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
       if (claim) {
@@ -472,25 +498,46 @@ export async function main(argv = process.argv.slice(2)) {
           deliveryDone(db, { eventId: delivery.event_id, taskId: claim.taskId, now });
         }
       }
-    } else if (config.model.baseUrl) {
-      // Production model proposal path (ADR-0001 §2/§3/§4/§7): the host
-      // validates model_request proposals on the propose-only channel, checks
-      // identity against RUNNING claims and dual whitelists, reserves before
-      // executing the single pi-ai 1.5.2 core, settles/holds by four-field
-      // usage, and delivers model_result via host-commands. When --agent-image
-      // is wired, claimable tasks launch a networkless agent container.
-      const authorizedForModel = isLoopbackModelEndpoint(config.model.baseUrl) || config.model.allowRealModelCalls;
+    } else if (config.model.baseUrl || (executor && acquisitionLauncher && config.triage?.allowModelObserve === false)) {
+      const canRunModel = Boolean(config.model.baseUrl) && (isLoopbackModelEndpoint(config.model.baseUrl) || config.model.allowRealModelCalls);
+      const canRunModelFreeTriage = Boolean(executor && acquisitionLauncher && config.triage?.allowModelObserve === false);
+      const peekNextClaimableIsTriage = () => {
+        const cand = db
+          .prepare(
+            `SELECT t.id, s.paused AS scope_paused, s.epoch AS scope_epoch_now, t.scope_epoch,
+               (SELECT count(*) FROM tasks t2 WHERE t2.scope_id=t.scope_id AND t2.state='RUNNING') AS running_in_scope
+             FROM tasks t JOIN scopes s ON s.id=t.scope_id
+             WHERE t.state IN ('QUEUED','RETRY_WAIT') AND t.available_at<=?
+             ORDER BY t.priority DESC, t.available_at ASC, t.created_at ASC`,
+          )
+          .all(now);
+        for (const row of cand) {
+          if (row.scope_paused || row.scope_epoch_now !== row.scope_epoch || row.running_in_scope >= 1) continue;
+          const del = db.prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'").get(row.id);
+          if (!del) return false;
+          const inb = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(del.event_id);
+          const obj = inb ? db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(inb.payload_object_id) : null;
+          if (!obj?.storage_ref) return false;
+          try {
+            const p = JSON.parse(readFileSync(join(dataDir, ...obj.storage_ref.split("/")), "utf8"));
+            return p?.kind === "repo_triage";
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      };
       const awaitingModel = db
         .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
         .get().c;
-      if (!authorizedForModel) {
+      if (!canRunModel && !(canRunModelFreeTriage && peekNextClaimableIsTriage())) {
         if (awaitingModel > 0) {
           console.error(
             `worker: ${awaitingModel} task(s) await a model call but the configured baseUrl is not authorized (model.allowRealModelCalls is false and baseUrl is not loopback); nothing is claimed or settled`,
           );
         }
       } else {
-        if (agentLauncher) {
+        if (agentLauncher || canRunModelFreeTriage) {
           claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
           if (claim) {
             heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
@@ -516,6 +563,7 @@ export async function main(argv = process.argv.slice(2)) {
             let skipLaunch = false;
             const parsedTriage = parseRepoTriagePayload(callInput);
             if (parsedTriage.isTriage) {
+              excludeTriageTaskIds.add(claim.taskId);
               try {
                 await executeRepoTriageTask(db, {
                   stateDir: dataDir,
@@ -534,18 +582,30 @@ export async function main(argv = process.argv.slice(2)) {
               } catch (err) {
                 console.error(`triage failed unexpectedly on ${claim.taskId}: ${err.message}`);
                 try {
-                  completeTask(db, {
-                    ...claim,
-                    now: Date.now(),
-                    resultClass: "infra_error",
-                    errorCode: "triage_unexpected_error",
+                  withTx(db, () => {
+                    completeTaskInTx(db, {
+                      ...claim,
+                      now: Date.now(),
+                      resultClass: "infra_error",
+                      errorCode: "triage_unexpected_error",
+                    });
+                    completePendingDeliveryCheckpointInTx(db, {
+                      taskId: claim.taskId,
+                      scopeId: taskRow.scope_id,
+                      content: "repo_triage failed unexpectedly",
+                      insertObjectRowFn: insertObjectRow,
+                      now: Date.now(),
+                    });
                   });
                 } catch {}
               }
               skipLaunch = true;
             }
             const parsedObserve = skipLaunch ? { isObserve: false } : parseRepoObservePayload(callInput);
-            if (parsedObserve.isObserve) {
+            if (!skipLaunch && !canRunModel) {
+              skipLaunch = true;
+            }
+            if (parsedObserve.isObserve && !skipLaunch) {
               if (!parsedObserve.valid) {
                 writeAudit(db, {
                   code: "acquisition_refused",
@@ -624,18 +684,24 @@ export async function main(argv = process.argv.slice(2)) {
             }
           }
         }
-        const batch = await processPendingModelProposalsAsync(db, {
-          stateDir: dataDir,
-          config,
-          ledger,
-          leaseMs: config.leases.leaseMs,
-          heartbeatMs: config.leases.heartbeatMs,
-          completeActiveTask: true,
-          now,
-          useWallClockAfterCall: true,
-        });
-        proposalProcessed = batch.processed;
+        // Refresh wall clock after awaiting acquisition/triage so lease checks in model proposal processing never evaluate against stale tick start time.
+        now = Date.now();
+        if (canRunModel) {
+          const batch = await processPendingModelProposalsAsync(db, {
+            stateDir: dataDir,
+            config,
+            ledger,
+            leaseMs: config.leases.leaseMs,
+            heartbeatMs: config.leases.heartbeatMs,
+            completeActiveTask: true,
+            excludeTaskIds: excludeTriageTaskIds,
+            now,
+            useWallClockAfterCall: true,
+          });
+          proposalProcessed = batch.processed;
+        }
       }
+      now = Date.now();
       reclaimFinishedAgentContainers();
     } else {
       // No model path is configured: nothing is claimed, nothing settles.
@@ -786,10 +852,10 @@ export async function main(argv = process.argv.slice(2)) {
     let exitCode = 0;
     try {
       let rounds = 0;
-      const waitDeadline = Date.now() + Math.max(30000, (config.model.callTimeoutMs ?? 60000) + 15000);
       while (rounds < 20) {
         const work = await tick();
         rounds += 1;
+        const waitDeadline = Date.now() + Math.max(30000, (config.model.callTimeoutMs ?? 60000) + 15000);
         if (agentLauncher && activeAgentContainers.size > 0) {
           while (activeAgentContainers.size > 0 && Date.now() < waitDeadline) {
             reclaimFinishedAgentContainers();
@@ -869,15 +935,27 @@ export async function main(argv = process.argv.slice(2)) {
   // Continuous mode: drain until idle, then keep a slow heartbeat loop.
   console.log(`daemon: open (pid ${process.pid}) on ${dbPath}; fake upstream=${fakeUpstream}; loop every ${Math.max(config.leases.heartbeatMs, 1000)}ms`);
   let running = true;
-  process.on("SIGINT", () => {
+  let loopTimer = null;
+  const shutdownNow = () => {
+    console.log("daemon: shutting down, stopping active agent containers & releasing lock");
+    stopAllActiveAgentContainers();
+    lock.release();
+    process.exit(0);
+  };
+  const onSignal = () => {
     running = false;
-  });
+    if (loopTimer) {
+      clearTimeout(loopTimer);
+      loopTimer = null;
+      shutdownNow();
+    }
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   const loop = async () => {
     if (!running) {
-      console.log("daemon: shutting down, stopping active agent containers & releasing lock");
-      stopAllActiveAgentContainers();
-      lock.release();
-      process.exit(0);
+      shutdownNow();
+      return;
     }
     try {
       await tick();
@@ -885,11 +963,10 @@ export async function main(argv = process.argv.slice(2)) {
       console.error(`tick error: ${e.message}`);
     }
     if (!running) {
-      stopAllActiveAgentContainers();
-      lock.release();
-      process.exit(0);
+      shutdownNow();
+      return;
     }
-    setTimeout(loop, Math.max(config.leases.heartbeatMs, 1000));
+    loopTimer = setTimeout(loop, Math.max(config.leases.heartbeatMs, 1000));
   };
   loop();
   return 0;

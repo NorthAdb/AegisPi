@@ -46,7 +46,7 @@ export const OPERATIONS = {
     requiresReservation: true,
     validate: (intent) => {
       if (!STRING(intent.targetResource)) return "model.inference needs a purpose-bound target resource";
-      if (!intent.extra || !["router", "worker", "summary", "classify", "rsi", "replay", "warming", "watchdog"].includes(intent.extra.purpose)) {
+      if (!intent.extra || !PURPOSES.includes(intent.extra.purpose)) {
         return "model.inference needs a known chargeable purpose in extra.purpose";
       }
       if (intent.extra.messages !== undefined) {
@@ -333,34 +333,31 @@ export function createAdapterUpstream(db, {
           model: call.model,
         };
       }
-      if ((opName === "im.notify" || opName === "send_message") && transportKind !== "fake" && telegramUpstream && telegramUpstream.canHandle(intent.targetResource)) {
-        const validated = this.validateIntent(opName, intent);
-        if (!validated.ok) {
-          auditRefusal(opName, validated.reason, effectId);
-          return { status: "failed_local", error: `adapter refused: ${validated.reason}` };
-        }
+      if ((opName === "im.notify" || opName === "send_message") && transportKind !== "fake" && parseTelegramTargetResource(intent.targetResource) !== null) {
         if (!isRecipientAllowed(config.allowedRecipients, intent.targetResource)) {
           const reason = `recipient ${intent.targetResource} is not on non-empty allowedRecipients`;
           auditRefusal(opName, reason, effectId);
           return { status: "failed_local", error: `adapter refused: ${reason}` };
         }
-        const out = telegramUpstream.submit({
-          businessKey,
-          idempotencyKey,
-          operation: opRow,
-          intent,
-          now: submitNow,
-          mode,
-        });
-        if (out.status === "failed_local" && /^telegram refused:/.test(out.error ?? "")) {
-          auditRefusal(opName, out.error, effectId);
+        if (telegramUpstream && telegramUpstream.canHandle(intent.targetResource)) {
+          const validated = this.validateIntent(opName, intent);
+          if (!validated.ok) {
+            auditRefusal(opName, validated.reason, effectId);
+            return { status: "failed_local", error: `adapter refused: ${validated.reason}` };
+          }
+          const out = telegramUpstream.submit({
+            businessKey,
+            idempotencyKey,
+            operation: opRow,
+            intent,
+            now: submitNow,
+            mode,
+          });
+          if (out.status === "failed_local" && /^telegram refused:/.test(out.error ?? "")) {
+            auditRefusal(opName, out.error, effectId);
+          }
+          return out;
         }
-        return out;
-      }
-      if ((opName === "im.notify" || opName === "send_message") && transportKind !== "fake" && parseTelegramTargetResource(intent.targetResource) !== null && !isRecipientAllowed(config.allowedRecipients, intent.targetResource)) {
-        const reason = `recipient ${intent.targetResource} is not on non-empty allowedRecipients`;
-        auditRefusal(opName, reason, effectId);
-        return { status: "failed_local", error: `adapter refused: ${reason}` };
       }
       if (!baseUpstream) {
         auditRefusal(opName, "no transport wired", effectId);

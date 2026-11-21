@@ -307,7 +307,7 @@ export function callModelOnceAsync({
 //      integer catalog rate; categories with 0 tokens tolerate null.
 //   3. Host sums and rounds up (ceil) to integer microUSD itself; reasoning
 //      tokens are already included in outputTokens and never billed separately.
-export function microusdForUsage(usage, catalog, { stopReason = "stop" } = {}) {
+export function microusdForUsage(usage, catalog) {
   if (!usage || typeof usage !== "object") return null;
   if (
     !Object.prototype.hasOwnProperty.call(usage, "totalFromProvider") ||

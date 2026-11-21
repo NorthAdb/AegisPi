@@ -74,7 +74,7 @@ export function canonicalActionJson({
   });
 }
 
-export function proposeEffect(db, stateDir, {
+export function proposeEffectInTx(db, _stateDir, {
   now,
   taskId,
   attemptId,
@@ -121,151 +121,146 @@ export function proposeEffect(db, stateDir, {
     extra: operationIntent.extra ?? {},
   });
   const actionHash = createHash("sha256").update(Buffer.from(actionJson, "utf8")).digest("hex");
-  return withTx(db, () => {
-    const existing = db.prepare("SELECT id FROM effects WHERE business_key=?").get(bkey);
-    if (existing) {
-      throw new EffectConflict(
-        `business_key ${bkey} already exists (${existing.id}); edit the intent and mint a new natural_key version`,
-      );
-    }
-    // The effect's own payload object (schema: effects.payload_object_id is
-    // NOT NULL and FK-bound): the immutable draft content of the action.
-    const payloadObject = insertObjectRow(db, {
-      scopeId: task.scope_id,
-      kind: "effect_payload",
-      sourceUri: `task:${taskId}`,
-      sourceActor: task.principal_id,
-      content: operationIntent.payloadContent ?? actionJson,
-      observedAt: now,
-      requiredScopeIds: [task.scope_id],
-    });
-    const effectId = `efx:${escapeComponent(bkey, { allowSlash: true })}`;
-    const state = requiresApproval ? "WAITING_APPROVAL" : "DRAFT";
-    db.prepare(
-      `INSERT INTO effects(id, task_id, attempt_id, proposal_fence, scope_id, principal_id, scope_epoch,
-        authorization_revision, policy_version, action_json, action_hash, payload_object_id,
-        provider, resource, operation, expires_at, retry_mode, idempotency_key, business_key,
-        state, attempt_count, max_attempts, next_attempt_at, submit_owner, submit_started_at,
-        external_id, response_object_id, last_error, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,3,?, NULL, NULL, NULL, NULL, NULL, ?,?)`,
-    ).run(
-      effectId,
-      taskId,
-      attemptId,
-      task.fence,
-      task.scope_id,
-      task.principal_id,
-      scope.epoch,
-      authorizationRevision(db),
-      scope.policy_version,
-      actionJson,
-      actionHash,
-      payloadObject.id,
-      provider,
-      resource,
-      operationIntent.operation,
-      expiresAt,
-      retryMode,
-      retryMode === "IDEMPOTENCY_KEY" ? `idem:${bkey}` : null,
-      bkey,
-      state,
-      now,
-      now,
-      now,
+  const existing = db.prepare("SELECT id FROM effects WHERE business_key=?").get(bkey);
+  if (existing) {
+    throw new EffectConflict(
+      `business_key ${bkey} already exists (${existing.id}); edit the intent and mint a new natural_key version`,
     );
-    let approval = null;
-    if (requiresApproval) {
-      approval = createApprovalRow(db, {
-        effectId,
-        actionHash,
-        approverId: approverPrincipalId,
-        attemptId,
-        proposalFence: task.fence,
-        scopeEpoch: scope.epoch,
-        authorizationRevisionValue: authorizationRevision(db),
-        policyVersion: scope.policy_version,
-        expiresAt,
-        now,
-      });
-    }
-    // RUNNING -> WAITING_APPROVAL parks the attempt WITHOUT bumping the
-    // fence, clears the lease, and saves the checkpoint (06 section 4). This
-    // happens only for approval-requiring proposals: a pre-approved routine
-    // DRAFT does not park the worker.
-    if (requiresApproval && task.state === "RUNNING") {
-      let checkpointObjectId = null;
-      if (checkpointContent !== null) {
-        const ck = insertObjectRow(db, {
-          scopeId: task.scope_id,
-          kind: "attempt_checkpoint",
-          sourceUri: `attempt:${attemptId}`,
-          sourceActor: "host",
-          content: checkpointContent,
-          observedAt: now,
-          requiredScopeIds: [task.scope_id],
-        });
-        checkpointObjectId = ck.id;
-        db.prepare("UPDATE attempts SET checkpoint_object_id=?, state='PARKED' WHERE id=? AND state='ACTIVE'")
-          .run(checkpointObjectId, attemptId);
-      } else {
-        db.prepare("UPDATE attempts SET state='PARKED' WHERE id=? AND state='ACTIVE'").run(attemptId);
-      }
-      db.prepare(
-        "UPDATE tasks SET state='WAITING_APPROVAL', lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=? AND state='RUNNING'",
-      ).run(now, taskId);
-      writeAudit(db, {
-        code: "task_parked_for_approval",
-        taskId,
-        details: { attempt_id: attemptId, effect_id: effectId, checkpoint: checkpointObjectId },
-        now,
-      });
-    }
-    writeAudit(db, {
-      code: "effect_proposed",
-      taskId,
-      details: { effect_id: effectId, state, retry_mode: retryMode, business_key: bkey, approval: approval?.approvalId ?? null },
-      now,
-    });
-    writeStreamEvent(db, {
-      scopeId: task.scope_id,
-      eventType: "effect_changed",
-      entityId: `effect:${effectId}`,
-      entityVersion: 1,
-      payload: { state, retry_mode: retryMode },
-      now,
-    });
-    return {
-      effectId,
-      businessKey: bkey,
-      actionHash,
-      state,
-      approvalId: approval?.approvalId ?? null,
-      approvalNonce: approval?.nonce ?? null,
-    };
+  }
+  const payloadObject = insertObjectRow(db, {
+    scopeId: task.scope_id,
+    kind: "effect_payload",
+    sourceUri: `task:${taskId}`,
+    sourceActor: task.principal_id,
+    content: operationIntent.payloadContent ?? actionJson,
+    observedAt: now,
+    requiredScopeIds: [task.scope_id],
   });
+  const effectId = `efx:${escapeComponent(bkey, { allowSlash: true })}`;
+  const state = requiresApproval ? "WAITING_APPROVAL" : "DRAFT";
+  db.prepare(
+    `INSERT INTO effects(id, task_id, attempt_id, proposal_fence, scope_id, principal_id, scope_epoch,
+      authorization_revision, policy_version, action_json, action_hash, payload_object_id,
+      provider, resource, operation, expires_at, retry_mode, idempotency_key, business_key,
+      state, attempt_count, max_attempts, next_attempt_at, submit_owner, submit_started_at,
+      external_id, response_object_id, last_error, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,3,?, NULL, NULL, NULL, NULL, NULL, ?,?)`,
+  ).run(
+    effectId,
+    taskId,
+    attemptId,
+    task.fence,
+    task.scope_id,
+    task.principal_id,
+    scope.epoch,
+    authorizationRevision(db),
+    scope.policy_version,
+    actionJson,
+    actionHash,
+    payloadObject.id,
+    provider,
+    resource,
+    operationIntent.operation,
+    expiresAt,
+    retryMode,
+    retryMode === "IDEMPOTENCY_KEY" ? `idem:${bkey}` : null,
+    bkey,
+    state,
+    now,
+    now,
+    now,
+  );
+  let approval = null;
+  if (requiresApproval) {
+    approval = createApprovalRow(db, {
+      effectId,
+      actionHash,
+      approverId: approverPrincipalId,
+      attemptId,
+      proposalFence: task.fence,
+      scopeEpoch: scope.epoch,
+      authorizationRevisionValue: authorizationRevision(db),
+      policyVersion: scope.policy_version,
+      expiresAt,
+      now,
+    });
+  }
+  if (requiresApproval && task.state === "RUNNING") {
+    let checkpointObjectId = null;
+    if (checkpointContent !== null) {
+      const ck = insertObjectRow(db, {
+        scopeId: task.scope_id,
+        kind: "attempt_checkpoint",
+        sourceUri: `attempt:${attemptId}`,
+        sourceActor: "host",
+        content: checkpointContent,
+        observedAt: now,
+        requiredScopeIds: [task.scope_id],
+      });
+      checkpointObjectId = ck.id;
+      db.prepare("UPDATE attempts SET checkpoint_object_id=?, state='PARKED' WHERE id=? AND state='ACTIVE'")
+        .run(checkpointObjectId, attemptId);
+    } else {
+      db.prepare("UPDATE attempts SET state='PARKED' WHERE id=? AND state='ACTIVE'").run(attemptId);
+    }
+    db.prepare(
+      "UPDATE tasks SET state='WAITING_APPROVAL', lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=? AND state='RUNNING'",
+    ).run(now, taskId);
+    writeAudit(db, {
+      code: "task_parked_for_approval",
+      taskId,
+      details: { attempt_id: attemptId, effect_id: effectId, checkpoint: checkpointObjectId },
+      now,
+    });
+  }
+  writeAudit(db, {
+    code: "effect_proposed",
+    taskId,
+    details: { effect_id: effectId, state, retry_mode: retryMode, business_key: bkey, approval: approval?.approvalId ?? null },
+    now,
+  });
+  writeStreamEvent(db, {
+    scopeId: task.scope_id,
+    eventType: "effect_changed",
+    entityId: `effect:${effectId}`,
+    entityVersion: 1,
+    payload: { state, retry_mode: retryMode },
+    now,
+  });
+  return {
+    effectId,
+    businessKey: bkey,
+    actionHash,
+    state,
+    approvalId: approval?.approvalId ?? null,
+    approvalNonce: approval?.nonce ?? null,
+  };
 }
 
-// DRAFT -> READY is allowed only for a pre-approved narrow routine; external
-// writes, mail and public posts must always pass human approval, which
-// proposeEffect enforces by never creating them as DRAFT.
-export function draftToReady(db, { effectId, routineRef, approvedRoutines, now }) {
+export function proposeEffect(db, stateDir, opts) {
+  return withTx(db, () => proposeEffectInTx(db, stateDir, opts));
+}
+
+export function draftToReadyInTx(db, { effectId, routineRef, approvedRoutines, now }) {
   if (!routineRef || !Array.isArray(approvedRoutines) || !approvedRoutines.includes(routineRef)) {
     throw new EffectError(`routine ${routineRef ?? "(none)"} is not on the approved narrow-routine list`);
   }
-  return withTx(db, () => {
-    const changed = db
-      .prepare("UPDATE effects SET state='READY', next_attempt_at=?, updated_at=? WHERE id=? AND state='DRAFT'")
-      .run(now, now, effectId).changes;
-    if (changed !== 1) {
-      throw new EffectError(`effect ${effectId} is not DRAFT; a human-approval effect cannot skip its approval`);
-    }
-    writeAudit(db, {
-      code: "effect_draft_to_ready",
-      details: { effect_id: effectId, routine_ref: routineRef },
-      now,
-    });
-    return { effectId, state: "READY" };
+  const changed = db
+    .prepare("UPDATE effects SET state='READY', next_attempt_at=?, updated_at=? WHERE id=? AND state='DRAFT'")
+    .run(now, now, effectId).changes;
+  if (changed !== 1) {
+    throw new EffectError(`effect ${effectId} is not DRAFT; a human-approval effect cannot skip its approval`);
+  }
+  writeAudit(db, {
+    code: "effect_draft_to_ready",
+    details: { effect_id: effectId, routine_ref: routineRef },
+    now,
   });
+  return { effectId, state: "READY" };
+}
+
+export function draftToReady(db, opts) {
+  return withTx(db, () => draftToReadyInTx(db, opts));
 }
 
 function hashOfActionJson(actionJson) {

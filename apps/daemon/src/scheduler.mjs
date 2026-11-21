@@ -334,66 +334,89 @@ export function reapExpiredLeases(db, { now, maxAttempts }) {
 // command redelivered reads that checkpoint and never re-appends. DONE means
 // the work consumed it.
 
-export function deliveryAckCheckpoint(db, { eventId, taskId, checkpointObjectId, now }) {
-  return withTx(db, () => {
-    const row = db
-      .prepare("SELECT state, checkpoint_object_id FROM event_deliveries WHERE event_id=? AND task_id=?")
-      .get(eventId, taskId);
-    if (!row) throw new DeliveryError(`delivery ${eventId}/${taskId} not found`);
-    if (row.state === "PENDING") {
-      db.prepare(
-        "UPDATE event_deliveries SET state='ACKED', checkpoint_object_id=?, updated_at=? WHERE event_id=? AND task_id=? AND state='PENDING'",
-      ).run(checkpointObjectId, now, eventId, taskId);
-      return { state: "ACKED", checkpointObjectId, duplicate: false };
+export function deliveryAckCheckpointInTx(db, { eventId, taskId, checkpointObjectId, now }) {
+  const row = db
+    .prepare("SELECT state, checkpoint_object_id FROM event_deliveries WHERE event_id=? AND task_id=?")
+    .get(eventId, taskId);
+  if (!row) throw new DeliveryError(`delivery ${eventId}/${taskId} not found`);
+  if (row.state === "PENDING") {
+    db.prepare(
+      "UPDATE event_deliveries SET state='ACKED', checkpoint_object_id=?, updated_at=? WHERE event_id=? AND task_id=? AND state='PENDING'",
+    ).run(checkpointObjectId, now, eventId, taskId);
+    return { state: "ACKED", checkpointObjectId, duplicate: false };
+  }
+  if (row.state === "ACKED") {
+    if (row.checkpoint_object_id !== checkpointObjectId) {
+      throw new DeliveryError(
+        `delivery ${eventId}/${taskId} already ACKED with checkpoint ${row.checkpoint_object_id}; refusing a different checkpoint (would re-append)`,
+      );
     }
-    if (row.state === "ACKED") {
-      if (row.checkpoint_object_id !== checkpointObjectId) {
-        throw new DeliveryError(
-          `delivery ${eventId}/${taskId} already ACKED with checkpoint ${row.checkpoint_object_id}; refusing a different checkpoint (would re-append)`,
-        );
-      }
-      return { state: "ACKED", checkpointObjectId, duplicate: true };
-    }
-    if (row.state === "DONE" || row.state === "RETURNED" || row.state === "DEAD") {
-      return { state: row.state, checkpointObjectId: row.checkpoint_object_id, duplicate: true };
-    }
-    throw new DeliveryError(`delivery ${eventId}/${taskId} in unknown state ${row.state}`);
-  });
+    return { state: "ACKED", checkpointObjectId, duplicate: true };
+  }
+  if (row.state === "DONE" || row.state === "RETURNED" || row.state === "DEAD") {
+    return { state: row.state, checkpointObjectId: row.checkpoint_object_id, duplicate: true };
+  }
+  throw new DeliveryError(`delivery ${eventId}/${taskId} in unknown state ${row.state}`);
 }
 
-export function deliveryDone(db, { eventId, taskId, now }) {
-  return withTx(db, () => {
-    const changed = db
-      .prepare(
-        "UPDATE event_deliveries SET state='DONE', updated_at=? WHERE event_id=? AND task_id=? AND state='ACKED'",
-      )
-      .run(now, eventId, taskId).changes;
-    if (changed !== 1) {
-      throw new DeliveryError(`delivery ${eventId}/${taskId} is not ACKED`);
-    }
-    completeInboxIfDone(db, { eventId, now });
-    return { state: "DONE" };
-  });
+export function deliveryAckCheckpoint(db, opts) {
+  return withTx(db, () => deliveryAckCheckpointInTx(db, opts));
 }
 
-export function deliveryReturned(db, { eventId, taskId, now, reason }) {
-  return withTx(db, () => {
-    const changed = db
-      .prepare(
-        "UPDATE event_deliveries SET state='RETURNED', updated_at=? WHERE event_id=? AND task_id=? AND state IN ('PENDING','ACKED')",
-      )
-      .run(now, eventId, taskId).changes;
-    if (changed !== 1) throw new DeliveryError(`delivery ${eventId}/${taskId} cannot RETURN from its state`);
-    writeAudit(db, {
-      code: "delivery_returned",
-      taskId,
-      eventId,
-      details: { reason },
-      now,
-    });
-    completeInboxIfDone(db, { eventId, now });
-    return { state: "RETURNED" };
+export function deliveryDoneInTx(db, { eventId, taskId, now }) {
+  const changed = db
+    .prepare(
+      "UPDATE event_deliveries SET state='DONE', updated_at=? WHERE event_id=? AND task_id=? AND state='ACKED'",
+    )
+    .run(now, eventId, taskId).changes;
+  if (changed !== 1) {
+    throw new DeliveryError(`delivery ${eventId}/${taskId} is not ACKED`);
+  }
+  completeInboxIfDone(db, { eventId, now });
+  return { state: "DONE" };
+}
+
+export function deliveryDone(db, opts) {
+  return withTx(db, () => deliveryDoneInTx(db, opts));
+}
+
+export function deliveryReturnedInTx(db, { eventId, taskId, now, reason }) {
+  const changed = db
+    .prepare(
+      "UPDATE event_deliveries SET state='RETURNED', updated_at=? WHERE event_id=? AND task_id=? AND state IN ('PENDING','ACKED')",
+    )
+    .run(now, eventId, taskId).changes;
+  if (changed !== 1) throw new DeliveryError(`delivery ${eventId}/${taskId} cannot RETURN from its state`);
+  writeAudit(db, {
+    code: "delivery_returned",
+    taskId,
+    eventId,
+    details: { reason },
+    now,
   });
+  completeInboxIfDone(db, { eventId, now });
+  return { state: "RETURNED" };
+}
+
+export function deliveryReturned(db, opts) {
+  return withTx(db, () => deliveryReturnedInTx(db, opts));
+}
+
+export function completePendingDeliveryCheckpointInTx(db, { taskId, scopeId, sourceActor = "host", content, insertObjectRowFn, now }) {
+  const delivery = db.prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'").get(taskId);
+  if (!delivery) return null;
+  const ck = insertObjectRowFn(db, {
+    scopeId,
+    kind: "session_checkpoint",
+    sourceUri: `cmd:${delivery.event_id}:${taskId}`,
+    sourceActor,
+    content,
+    observedAt: now,
+    requiredScopeIds: [scopeId],
+  });
+  deliveryAckCheckpointInTx(db, { eventId: delivery.event_id, taskId, checkpointObjectId: ck.id, now });
+  deliveryDoneInTx(db, { eventId: delivery.event_id, taskId, now });
+  return { eventId: delivery.event_id, checkpointObjectId: ck.id };
 }
 
 export function deliveryDead(db, { eventId, taskId, now, reason }) {

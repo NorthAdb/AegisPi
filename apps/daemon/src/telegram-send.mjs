@@ -118,13 +118,8 @@ export function parseTelegramProxyUrl(rawUrl) {
   return { url: u.origin, host, port };
 }
 
-function isLoopbackProxyHost(host) {
-  const clean = String(host ?? "").toLowerCase();
-  return clean === "127.0.0.1" || clean === "::1" || clean === "localhost";
-}
-
 function readWindowsLoopbackProxy() {
-  if (process.platform !== "win32") return null;
+  if (process.platform !== "win32") return { ok: true, proxy: null };
   try {
     const reg = (value) =>
       spawnSync(
@@ -133,19 +128,42 @@ function readWindowsLoopbackProxy() {
         { encoding: "utf8", timeout: 3000 },
       );
     const enable = reg("ProxyEnable");
-    if (enable.status !== 0 || !/ProxyEnable\s+REG_DWORD\s+0x1\b/.test(enable.stdout ?? "")) return null;
+    if (enable.status !== 0 || !/ProxyEnable\s+REG_DWORD\s+0x1\b/.test(enable.stdout ?? "")) {
+      return { ok: true, proxy: null };
+    }
     const server = reg("ProxyServer");
     const m = (server.stdout ?? "").match(/ProxyServer\s+REG_SZ\s+(.+)/);
-    if (!m) return null;
+    if (!m) return { ok: true, proxy: null };
     const raw = m[1].trim();
+    if (!raw) return { ok: true, proxy: null };
     const parts = raw.split(";").map((s) => s.trim()).filter(Boolean);
-    const httpsEntry = parts.find((p) => /^https=/i.test(p)) ?? parts.find((p) => /^http=/i.test(p)) ?? parts[0];
-    const addr = httpsEntry ? httpsEntry.replace(/^(?:https?|socks)=/i, "").trim() : "";
-    if (!addr) return null;
+    let selected = null;
+    let fallbackHttp = null;
+    for (const part of parts) {
+      const kv = part.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+      if (kv) {
+        const key = kv[1].toLowerCase();
+        const val = kv[2].trim();
+        if (key === "https") {
+          selected = val;
+          break;
+        }
+        if (key === "http" && !fallbackHttp) fallbackHttp = val;
+      } else if (!selected && !fallbackHttp) {
+        selected = part;
+      }
+    }
+    const addr = selected ?? fallbackHttp ?? "";
+    if (!addr) {
+      return { ok: false, error: "telegram refused: Windows WinInet ProxyEnable=1 has no HTTP/HTTPS proxy entry; configure telegram.proxyUrl explicitly" };
+    }
     const parsed = parseTelegramProxyUrl(addr);
-    return isLoopbackProxyHost(parsed.host) ? { host: parsed.host, port: parsed.port } : null;
-  } catch {
-    return null;
+    if (!isLoopbackEndpoint(parsed.url)) {
+      return { ok: false, error: `telegram refused: Windows WinInet proxy ${parsed.host}:${parsed.port} is not loopback; configure telegram.proxyUrl explicitly` };
+    }
+    return { ok: true, proxy: { host: parsed.host, port: parsed.port } };
+  } catch (e) {
+    return { ok: false, error: `telegram refused: unreadable Windows WinInet proxy (${e.message})` };
   }
 }
 
@@ -156,13 +174,13 @@ function resolveTelegramProxy({ normalizedBase, allowRealSend, parsedExplicitPro
   if (isLoopbackEndpoint(normalizedBase) || allowRealSend !== true) {
     return { ok: true, proxy: null };
   }
-  const envProxy =
-    process.env.AEGISPI_TG_PROXY ||
-    process.env.HTTPS_PROXY ||
-    process.env.https_proxy ||
-    process.env.HTTP_PROXY ||
-    process.env.http_proxy ||
-    "";
+  const envProxy = [
+    process.env.AEGISPI_TG_PROXY,
+    process.env.HTTPS_PROXY,
+    process.env.https_proxy,
+    process.env.HTTP_PROXY,
+    process.env.http_proxy,
+  ].find((v) => typeof v === "string" && v.trim().length > 0) ?? "";
   if (envProxy.trim().length > 0) {
     try {
       const parsed = parseTelegramProxyUrl(envProxy.trim());
@@ -171,7 +189,7 @@ function resolveTelegramProxy({ normalizedBase, allowRealSend, parsedExplicitPro
       return { ok: false, error: `telegram refused: invalid proxy configuration (${e.message})` };
     }
   }
-  return { ok: true, proxy: readWindowsLoopbackProxy() };
+  return readWindowsLoopbackProxy();
 }
 
 export function createTelegramSendTransport({
@@ -264,17 +282,31 @@ export function createTelegramSendTransport({
         maxBuffer: 1024 * 1024,
       });
 
+      if (
+        r.error?.code === "ETIMEDOUT" ||
+        r.error?.code === "ENOBUFS" ||
+        r.signal === "SIGTERM" ||
+        r.status === null
+      ) {
+        return {
+          status: "unknown",
+          error: scrubSecretText(
+            `telegram child timed out or exceeded buffer (${r.error?.code ?? r.signal ?? r.status})`,
+            botToken,
+          ),
+        };
+      }
       if (r.error) {
         return {
           status: "failed_local",
           error: scrubSecretText(`telegram child spawn failed (${r.error.code ?? r.error.message})`, botToken),
         };
       }
-      if (r.status !== 0 || typeof r.stdout !== "string" || r.stdout.length === 0) {
-        const timedOut = r.signal === "SIGTERM" || r.status === null;
-        return timedOut
-          ? { status: "unknown", error: scrubSecretText(`telegram child timed out (${r.status ?? r.signal})`, botToken) }
-          : { status: "failed_local", error: scrubSecretText(`telegram child failed (exit ${r.status}): ${String(r.stderr ?? "")}`, botToken).slice(0, 200) };
+      if (typeof r.stdout !== "string" || r.stdout.length === 0 || r.status !== 0) {
+        return {
+          status: "failed_local",
+          error: scrubSecretText(`telegram child failed (exit ${r.status}): ${String(r.stderr ?? "")}`, botToken).slice(0, 200),
+        };
       }
       let out;
       try {

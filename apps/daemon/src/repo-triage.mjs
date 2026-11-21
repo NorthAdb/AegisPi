@@ -3,19 +3,22 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join, resolve, sep } from "node:path";
 import { writeAudit } from "./audit.mjs";
 import { withTx } from "./db/tx.mjs";
-import { draftToReady, proposeEffect } from "./effects.mjs";
+import { draftToReadyInTx, proposeEffectInTx } from "./effects.mjs";
 import { validateJobOracle } from "./job-oracle.mjs";
-import { isLoopbackModelEndpoint } from "./model-call.mjs";
-import { processPendingModelProposalsAsync } from "./model-requests.mjs";
+import { isLoopbackModelEndpoint, MAX_MODEL_MESSAGES_BYTES } from "./model-call.mjs";
+import { fenceAttemptProposals, processPendingModelProposalsAsync } from "./model-requests.mjs";
 import { insertObjectRow, putObjectContent } from "./objects.mjs";
-import { finalizeTaskWithNotification } from "./outbox.mjs";
+import { finalizeTaskWithNotificationInTx } from "./outbox.mjs";
 import {
   authorizeAcquisitionTarget,
   buildSafeRepoExcerpt,
   fitPromptToMaxInputBytes,
   isSafeRelativeReadPath,
+  jsonEnvelopeBytes,
+  resolveContainedEntry,
+  trimUtf8ToBytes,
 } from "./repo-observe.mjs";
-import { completeTask, deliveryAckCheckpoint, deliveryDone, heartbeat } from "./scheduler.mjs";
+import { completePendingDeliveryCheckpointInTx, completeTaskInTx, heartbeat } from "./scheduler.mjs";
 import { parseTelegramTargetResource } from "./telegram-send.mjs";
 
 const ALLOWED_TRIAGE_PAYLOAD_KEYS = new Set(["kind", "presetId", "notifyChannel", "question"]);
@@ -64,7 +67,8 @@ function parseInputFilesMap(rawMap, name) {
   let totalBytes = 0;
   const out = {};
   for (const [k, v] of entries) {
-    if (!isSafeRelativeReadPath(k) || k.toLowerCase() === "manifest.json" || k.startsWith("snapshot/") || typeof v !== "string") {
+    const lower = String(k).toLowerCase();
+    if (!isSafeRelativeReadPath(k) || lower === "manifest.json" || lower === "snapshot" || lower.startsWith("snapshot/") || typeof v !== "string") {
       throw new Error(`${name} has invalid entry ${JSON.stringify(k)}`);
     }
     totalBytes += Buffer.byteLength(v, "utf8");
@@ -104,8 +108,30 @@ export function validateTriagePreset(id, raw) {
     throw new Error(`triage preset ${id} baselineExpectedExitCode must be 0`);
   }
   const reproExitCode = raw.reproExitCode ?? 1;
-  if (!Number.isInteger(reproExitCode) || reproExitCode < 0 || reproExitCode > 255) {
+  if (
+    !Number.isInteger(reproExitCode) ||
+    reproExitCode < 0 ||
+    reproExitCode > 255 ||
+    reproExitCode === 2 ||
+    reproExitCode >= 124 ||
+    (mode === "snapshot_regression" && reproExitCode === 0)
+  ) {
     throw new Error(`triage preset ${id} invalid reproExitCode`);
+  }
+  let stageSubpaths = null;
+  if (raw.stageSubpaths !== undefined && raw.stageSubpaths !== null) {
+    if (raw.stageSnapshotPaths === false) {
+      throw new Error(`triage preset ${id} cannot set stageSubpaths when stageSnapshotPaths=false`);
+    }
+    if (!Array.isArray(raw.stageSubpaths) || raw.stageSubpaths.length === 0 || raw.stageSubpaths.length > 64) {
+      throw new Error(`triage preset ${id} stageSubpaths must be a non-empty array of <= 64 safe paths`);
+    }
+    for (const p of raw.stageSubpaths) {
+      if (!isSafeRelativeReadPath(p)) {
+        throw new Error(`triage preset ${id} stageSubpaths contains unsafe path ${JSON.stringify(p)}`);
+      }
+    }
+    stageSubpaths = [...raw.stageSubpaths];
   }
   return {
     baselineTargetId: raw.baselineTargetId,
@@ -120,6 +146,7 @@ export function validateTriagePreset(id, raw) {
     baselineInputFiles: parseInputFilesMap(raw.baselineInputFiles, `triage.presets.${id}.baselineInputFiles`),
     targetInputFiles: parseInputFilesMap(raw.targetInputFiles, `triage.presets.${id}.targetInputFiles`),
     stageSnapshotPaths: raw.stageSnapshotPaths !== false,
+    stageSubpaths,
     baselineCommitSha: typeof raw.baselineCommitSha === "string" && raw.baselineCommitSha.length >= 7 ? raw.baselineCommitSha : null,
     targetCommitSha: typeof raw.targetCommitSha === "string" && raw.targetCommitSha.length >= 7 ? raw.targetCommitSha : null,
     advisoryMeta: raw.advisoryMeta && typeof raw.advisoryMeta === "object" && !Array.isArray(raw.advisoryMeta) ? raw.advisoryMeta : null,
@@ -184,7 +211,7 @@ export function parseRepoTriagePayload(rawPayload) {
   return { isTriage: true, valid: true, presetId: obj.presetId, notifyChannel, question };
 }
 
-function collectContainedSnapshotFiles({ downloadsDir, entryDestRelPath, mode, prefix = "snapshot", maxBytes = 12 * 1024 * 1024, maxFiles = 2048 }) {
+function collectContainedSnapshotFiles({ downloadsDir, entryDestRelPath, mode, prefix = "snapshot", stageSubpaths = null, maxBytes = 12 * 1024 * 1024, maxFiles = 2048 }) {
   if (mode === "file") {
     if (!isSafeRelativeReadPath(entryDestRelPath)) {
       return { ok: false, code: "acquisition_invalid_read_paths", reason: `unsafe entry path ${entryDestRelPath}` };
@@ -199,6 +226,9 @@ function collectContainedSnapshotFiles({ downloadsDir, entryDestRelPath, mode, p
     }
     if (!st.isFile()) {
       return { ok: false, code: "acquisition_non_file_rejected", reason: `snapshot file ${entryDestRelPath} is not a regular file` };
+    }
+    if (st.size > maxBytes) {
+      return { ok: false, code: "triage_snapshot_too_large", reason: `staged file exceeds ${maxBytes} bytes` };
     }
     const raw = readFileSync(targetPath);
     if (raw.byteLength > maxBytes) {
@@ -224,6 +254,24 @@ function collectContainedSnapshotFiles({ downloadsDir, entryDestRelPath, mode, p
   let totalBytes = 0;
   let count = 0;
 
+  function stageFile(stagedKey, absPath, st) {
+    if (Object.prototype.hasOwnProperty.call(files, stagedKey)) return { ok: true };
+    count += 1;
+    if (count > maxFiles) {
+      return { ok: false, code: "triage_snapshot_too_many_files", reason: `staged snapshot exceeds ${maxFiles} files` };
+    }
+    if (st.size > maxBytes - totalBytes) {
+      return { ok: false, code: "triage_snapshot_too_large", reason: `staged snapshot exceeds ${maxBytes} bytes` };
+    }
+    const raw = readFileSync(absPath);
+    totalBytes += raw.byteLength;
+    if (totalBytes > maxBytes) {
+      return { ok: false, code: "triage_snapshot_too_large", reason: `staged snapshot exceeds ${maxBytes} bytes` };
+    }
+    files[stagedKey] = raw;
+    return { ok: true };
+  }
+
   function walk(absDir, relPrefix) {
     const entries = readdirSync(absDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
@@ -243,21 +291,28 @@ function collectContainedSnapshotFiles({ downloadsDir, entryDestRelPath, mode, p
         const sub = walk(childAbs, rel);
         if (!sub.ok) return sub;
       } else if (st.isFile()) {
-        count += 1;
-        if (count > maxFiles) {
-          return { ok: false, code: "triage_snapshot_too_many_files", reason: `staged snapshot exceeds ${maxFiles} files` };
-        }
-        const raw = readFileSync(childAbs);
-        totalBytes += raw.byteLength;
-        if (totalBytes > maxBytes) {
-          return { ok: false, code: "triage_snapshot_too_large", reason: `staged snapshot exceeds ${maxBytes} bytes` };
-        }
-        files[`${prefix}/${rel}`] = raw;
+        const staged = stageFile(`${prefix}/${rel}`, childAbs, st);
+        if (!staged.ok) return staged;
       } else {
         return { ok: false, code: "acquisition_non_file_rejected", reason: `snapshot contains unsupported special entry ${rel}` };
       }
     }
     return { ok: true };
+  }
+
+  if (Array.isArray(stageSubpaths) && stageSubpaths.length > 0) {
+    for (const sub of stageSubpaths) {
+      const checked = resolveContainedEntry(resolvedRoot, sub, { expectType: "any" });
+      if (!checked.ok) return checked;
+      if (checked.stat.isDirectory()) {
+        const subWalk = walk(checked.absPath, sub);
+        if (!subWalk.ok) return subWalk;
+      } else {
+        const staged = stageFile(`${prefix}/${sub}`, checked.absPath, checked.stat);
+        if (!staged.ok) return staged;
+      }
+    }
+    return { ok: true, files, totalBytes, fileCount: count };
   }
 
   const walkRes = walk(resolvedRoot, "");
@@ -408,8 +463,9 @@ export function buildCanonicalTriageManifest({
 }
 
 function buildBaselineAndTargetOracles(preset) {
-  const baseAssertion = preset.oracle.assertions?.[0] ?? null;
-  const targetAssertion = preset.oracle.assertions?.[1] ?? preset.oracle.assertions?.[0] ?? null;
+  const assertions = Array.isArray(preset.oracle.assertions) ? preset.oracle.assertions : [];
+  const baseAssertion = assertions[0] ?? null;
+  const targetAssertion = assertions.length > 1 ? assertions[1] : null;
   const baseOracle = {
     schemaVersion: 1,
     oracleId: `${preset.oracle.oracleId}:baseline`,
@@ -453,6 +509,7 @@ async function acquireSnapshotSide(db, {
   targetId,
   jobKeySuffix,
   stageSnapshotPaths,
+  stageSubpaths = null,
   now,
   onProgress,
 }) {
@@ -489,12 +546,16 @@ async function acquireSnapshotSide(db, {
         reason: run.timedOut ? `acquisition timed out after ${config.acquisition.timeoutMs}ms` : first?.reason ?? `acquisition exit ${run.exitCode}`,
       };
     }
+    const effectiveMaxInput = Number.isInteger(config.model?.maxInputBytes) && config.model.maxInputBytes > 0
+      ? Math.min(config.model.maxInputBytes, MAX_MODEL_MESSAGES_BYTES)
+      : MAX_MODEL_MESSAGES_BYTES;
+    const promptSideLimit = Math.max(256, Math.floor(effectiveMaxInput * 0.34));
     const excerpt = buildSafeRepoExcerpt({
       downloadsDir: run.downloadsDir,
       entryDestRelPath: "repo",
       mode: target.mode,
       readPaths: target.readPaths,
-      maxExcerptBytes: Math.min(config.acquisition.maxExcerptBytes, 8192),
+      maxExcerptBytes: Math.min(config.acquisition.maxExcerptBytes, promptSideLimit),
     });
     if (!excerpt.ok) return excerpt;
 
@@ -504,6 +565,7 @@ async function acquireSnapshotSide(db, {
         downloadsDir: run.downloadsDir,
         entryDestRelPath: "repo",
         mode: target.mode,
+        stageSubpaths,
       });
       if (!collected.ok) return collected;
       stagedFiles = collected.files;
@@ -565,9 +627,23 @@ async function runModelTriageSummary(db, {
   taskDeadlineAt,
   scopeDomainKey,
   promptText,
-  now,
 }) {
   const modelKey = config.model.provider && config.model.modelId ? `${config.model.provider}/${config.model.modelId}` : "deepseek/deepseek-flash";
+  if (taskDeadlineAt && Date.now() >= taskDeadlineAt) {
+    return { ok: false, errorCode: "triage_deadline_exceeded", replyObjectId: null, actualMicrousd: 0 };
+  }
+  const tryHeartbeat = () => {
+    try {
+      heartbeat(db, { taskId, attemptNo, leaseOwner, fence, now: Date.now(), leaseMs: config.leases.leaseMs });
+      return true;
+    } catch (e) {
+      if (isLeaseRevokedError(e)) return false;
+      throw e;
+    }
+  };
+  if (!tryHeartbeat()) {
+    return { ok: false, errorCode: "triage_lease_lost", leaseLost: true, replyObjectId: null, actualMicrousd: 0 };
+  }
   const launched = agentLauncher.launchAttempt({
     taskId,
     attemptId,
@@ -579,19 +655,14 @@ async function runModelTriageSummary(db, {
       modelId: modelKey,
       messages: [{ role: "user", content: promptText }],
     },
-    now,
+    now: Date.now(),
   });
   const wallLimit = Date.now() + (config.model.callTimeoutMs ?? 60000) + 15000;
   const deadline = taskDeadlineAt ? Math.min(wallLimit, taskDeadlineAt) : wallLimit;
   try {
     while (Date.now() < deadline) {
-      try {
-        heartbeat(db, { taskId, attemptNo, leaseOwner, fence, now: Date.now(), leaseMs: config.leases.leaseMs });
-      } catch (e) {
-        if (isLeaseRevokedError(e)) {
-          return { ok: false, errorCode: "triage_lease_lost", leaseLost: true, replyObjectId: null, actualMicrousd: 0 };
-        }
-        throw e;
+      if (!tryHeartbeat()) {
+        return { ok: false, errorCode: "triage_lease_lost", leaseLost: true, replyObjectId: null, actualMicrousd: 0 };
       }
       await processPendingModelProposalsAsync(db, {
         stateDir,
@@ -600,7 +671,7 @@ async function runModelTriageSummary(db, {
         leaseMs: config.leases.leaseMs,
         heartbeatMs: config.leases.heartbeatMs,
         completeActiveTask: false,
-        tasksToVisit: [{ taskId, attemptId, leaseOwner }],
+        onlyTaskId: taskId,
         now: Date.now(),
         useWallClockAfterCall: true,
       });
@@ -610,25 +681,32 @@ async function runModelTriageSummary(db, {
       if (mr) {
         if (mr.state === "SETTLED") {
           let reply = "";
+          let stopReason = null;
           if (mr.reply_object_id) {
             const obj = db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(mr.reply_object_id);
             if (obj?.storage_ref) {
               try {
                 const parsed = JSON.parse(readFileSync(join(stateDir, ...obj.storage_ref.split("/")), "utf8"));
                 reply = typeof parsed.reply === "string" ? parsed.reply : "";
+                stopReason = parsed.stopReason ?? null;
               } catch {}
             }
           }
           const resRow = mr.reservation_id ? db.prepare("SELECT actual_microusd FROM budget_reservations WHERE id=?").get(mr.reservation_id) : null;
           if (reply.trim().length === 0) {
-            return { ok: false, errorCode: "model_empty_reply", replyObjectId: mr.reply_object_id, actualMicrousd: resRow?.actual_microusd ?? 0 };
+            return {
+              ok: false,
+              errorCode: stopReason === "length" ? "model_output_truncated_empty" : "model_empty_reply",
+              replyObjectId: mr.reply_object_id,
+              actualMicrousd: resRow?.actual_microusd ?? 0,
+            };
           }
           return { ok: true, reply: reply.trim(), replyObjectId: mr.reply_object_id, actualMicrousd: resRow?.actual_microusd ?? 0 };
         }
         if (mr.state === "HELD") {
           return { ok: false, errorCode: "settlement_held_uncompleted", replyObjectId: mr.reply_object_id, actualMicrousd: null };
         }
-        if (mr.state === "FAILED" || mr.state === "ORPHAN") {
+        if (mr.state === "FAILED" || mr.state === "ORPHAN" || (mr.state === "EXECUTING" && mr.error_code)) {
           return { ok: false, errorCode: mr.error_code ?? "triage_model_failed", replyObjectId: mr.reply_object_id, actualMicrousd: 0 };
         }
       }
@@ -641,6 +719,7 @@ async function runModelTriageSummary(db, {
     return { ok: false, errorCode: "triage_model_timeout", replyObjectId: null, actualMicrousd: 0 };
   } finally {
     agentLauncher.stopAttempt({ containerId: launched.containerId, commandsDir: launched.commandsDir });
+    fenceAttemptProposals(launched.attemptDir, "triageStopped");
   }
 }
 
@@ -661,6 +740,9 @@ async function runSingleExecutionJob(db, {
   allowLaunch,
 }) {
   const startNow = Date.now();
+  if (taskDeadlineAt && startNow >= taskDeadlineAt) {
+    return { jobId, state: "TIMED_OUT", exitCode: null };
+  }
   const boundedMs = taskDeadlineAt ? Math.max(1000, Math.min(deadlineMs, taskDeadlineAt - startNow)) : deadlineMs;
   executor.submitJob({
     jobId,
@@ -705,23 +787,6 @@ async function runSingleExecutionJob(db, {
   return { jobId, state: last?.state ?? "LOST", exitCode: last?.exit_code ?? null };
 }
 
-function finalizeTaskDelivery(db, { taskId, scopeId, resultClass, now }) {
-  const delivery = db.prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'").get(taskId);
-  if (delivery) {
-    const ck = insertObjectRow(db, {
-      scopeId,
-      kind: "session_checkpoint",
-      sourceUri: `cmd:${delivery.event_id}:${taskId}`,
-      sourceActor: "host",
-      content: `repo_triage completed (${resultClass})`,
-      observedAt: now,
-      requiredScopeIds: [scopeId],
-    });
-    deliveryAckCheckpoint(db, { eventId: delivery.event_id, taskId, checkpointObjectId: ck.id, now });
-    deliveryDone(db, { eventId: delivery.event_id, taskId, now });
-  }
-}
-
 function finishTriageOutcome(db, {
   stateDir,
   taskId,
@@ -739,65 +804,86 @@ function finishTriageOutcome(db, {
   manifestHash,
   now,
 }) {
-  if (!notifyChannel) {
-    completeTask(db, {
-      taskId,
-      attemptNo,
-      leaseOwner,
-      fence,
-      now,
-      resultClass,
-      resultObjectId: reportObjectId,
-      errorCode,
+  const storedNote = notifyChannel ? putObjectContent(stateDir, notifyText) : null;
+  try {
+    return withTx(db, () => {
+      if (!notifyChannel) {
+        completeTaskInTx(db, {
+          taskId,
+          attemptNo,
+          leaseOwner,
+          fence,
+          now,
+          resultClass,
+          resultObjectId: reportObjectId,
+          errorCode,
+        });
+        completePendingDeliveryCheckpointInTx(db, {
+          taskId,
+          scopeId,
+          content: `repo_triage completed (${resultClass})`,
+          insertObjectRowFn: insertObjectRow,
+          now,
+        });
+        return { notified: false, leaseLost: false };
+      }
+      const effect = proposeEffectInTx(db, stateDir, {
+        now,
+        taskId,
+        attemptId,
+        effectType: "notify",
+        domainKey: scopeDomainKey,
+        naturalKey: `triage:${taskId}:${attemptNo}:${fence}`,
+        operationIntent: {
+          targetResource: notifyChannel,
+          operation: "im.notify",
+          contentHash: storedNote.contentHash,
+          evidenceManifestHash: manifestHash,
+        },
+        retryMode: "AT_MOST_ONCE",
+        provider: parseTelegramTargetResource(notifyChannel) !== null ? "telegram" : "upstream",
+        resource: notifyChannel,
+        requiresApproval: false,
+        expiresAt: now + 60 * 60 * 1000,
+      });
+      draftToReadyInTx(db, {
+        effectId: effect.effectId,
+        routineRef: "result-notification",
+        approvedRoutines: ["result-notification"],
+        now,
+      });
+      finalizeTaskWithNotificationInTx(db, {
+        now,
+        taskId,
+        attemptNo,
+        leaseOwner,
+        fence,
+        resultClass,
+        resultObjectId: reportObjectId,
+        errorCode,
+        notification: {
+          effectId: effect.effectId,
+          channel: parseTelegramTargetResource(notifyChannel) !== null ? "telegram" : "upstream",
+          destination: notifyChannel,
+          notBefore: now,
+          notifyReason: `triage:${resultClass}`,
+        },
+      });
+      completePendingDeliveryCheckpointInTx(db, {
+        taskId,
+        scopeId,
+        content: `repo_triage completed (${resultClass})`,
+        insertObjectRowFn: insertObjectRow,
+        now,
+      });
+      return { notified: true, effectId: effect.effectId, leaseLost: false };
     });
-    finalizeTaskDelivery(db, { taskId, scopeId, resultClass, now });
-    return { notified: false };
+  } catch (e) {
+    if (isLeaseRevokedError(e)) {
+      return { notified: false, leaseLost: true };
+    }
+    throw e;
   }
-  const storedNote = putObjectContent(stateDir, notifyText);
-  const effect = proposeEffect(db, stateDir, {
-    now,
-    taskId,
-    attemptId,
-    effectType: "notify",
-    domainKey: scopeDomainKey,
-    naturalKey: `triage:${taskId}:${attemptNo}:${fence}`,
-    operationIntent: {
-      targetResource: notifyChannel,
-      operation: "im.notify",
-      contentHash: storedNote.contentHash,
-      evidenceManifestHash: manifestHash,
-    },
-    retryMode: "AT_MOST_ONCE",
-    provider: parseTelegramTargetResource(notifyChannel) !== null ? "telegram" : "upstream",
-    resource: notifyChannel,
-    requiresApproval: false,
-    expiresAt: now + 60 * 60 * 1000,
-  });
-  draftToReady(db, {
-    effectId: effect.effectId,
-    routineRef: "result-notification",
-    approvedRoutines: ["result-notification"],
-    now,
-  });
-  finalizeTaskWithNotification(db, {
-    now,
-    taskId,
-    attemptNo,
-    leaseOwner,
-    fence,
-    resultClass,
-    resultObjectId: reportObjectId,
-    errorCode,
-    notification: {
-      effectId: effect.effectId,
-      channel: parseTelegramTargetResource(notifyChannel) !== null ? "telegram" : "upstream",
-      destination: notifyChannel,
-      notBefore: now,
-      notifyReason: `triage:${resultClass}`,
-    },
-  });
-  finalizeTaskDelivery(db, { taskId, scopeId, resultClass, now });
-  return { notified: true, effectId: effect.effectId };
 }
 
 function formatTriageNotification({ presetId, repo, resultClass, reason, actualMicrousd, reportHash }) {
@@ -829,24 +915,40 @@ export async function executeRepoTriageTask(db, {
       return { resultClass: "infra_error", errorCode: code };
     }
     const obj = putObjectContent(stateDir, JSON.stringify({ ok: false, code, reason, at: finishNow }));
-    const errRow = insertObjectRow(db, {
-      scopeId: taskRow.scope_id,
-      kind: "task_result",
-      sourceUri: `triage-fail:${claim.attemptId}`,
-      sourceActor: "host-triage",
-      contentHash: obj.contentHash,
-      storageRef: obj.storageRef,
-      observedAt: finishNow,
-      requiredScopeIds: [taskRow.scope_id],
-    });
-    completeTask(db, {
-      ...claim,
-      now: finishNow,
-      resultClass: "infra_error",
-      resultObjectId: errRow.id,
-      errorCode: code,
-    });
-    finalizeTaskDelivery(db, { taskId: claim.taskId, scopeId: taskRow.scope_id, resultClass: "infra_error", now: finishNow });
+    try {
+      withTx(db, () => {
+        const errRow = insertObjectRow(db, {
+          scopeId: taskRow.scope_id,
+          kind: "task_result",
+          sourceUri: `triage-fail:${claim.attemptId}`,
+          sourceActor: "host-triage",
+          contentHash: obj.contentHash,
+          storageRef: obj.storageRef,
+          observedAt: finishNow,
+          requiredScopeIds: [taskRow.scope_id],
+        });
+        completeTaskInTx(db, {
+          ...claim,
+          now: finishNow,
+          resultClass: "infra_error",
+          resultObjectId: errRow.id,
+          errorCode: code,
+        });
+        completePendingDeliveryCheckpointInTx(db, {
+          taskId: claim.taskId,
+          scopeId: taskRow.scope_id,
+          content: `repo_triage completed (infra_error)`,
+          insertObjectRowFn: insertObjectRow,
+          now: finishNow,
+        });
+      });
+    } catch (e) {
+      if (isLeaseRevokedError(e)) {
+        leaseRevoked = true;
+        return { resultClass: "infra_error", errorCode: "triage_lease_lost" };
+      }
+      throw e;
+    }
     return { resultClass: "infra_error", errorCode: code };
   };
 
@@ -889,6 +991,15 @@ export async function executeRepoTriageTask(db, {
       throw e;
     }
   };
+  const checkLease = () => {
+    try {
+      onProgress();
+      return true;
+    } catch (e) {
+      if (leaseRevoked || isLeaseRevokedError(e)) return false;
+      throw e;
+    }
+  };
 
   const baseAcq = await acquireSnapshotSide(db, {
     stateDir,
@@ -900,10 +1011,11 @@ export async function executeRepoTriageTask(db, {
     targetId: preset.baselineTargetId,
     jobKeySuffix: `${claim.attemptNo}-base`,
     stageSnapshotPaths: preset.stageSnapshotPaths,
+    stageSubpaths: preset.stageSubpaths,
     now,
     onProgress,
   });
-  if (leaseRevoked) return finishPreFail("triage_lease_lost", "task lease lost during baseline acquisition");
+  if (leaseRevoked || !checkLease()) return finishPreFail("triage_lease_lost", "task lease lost during baseline acquisition");
   if (!baseAcq.ok) {
     return finishPreFail(baseAcq.code, baseAcq.reason);
   }
@@ -917,10 +1029,11 @@ export async function executeRepoTriageTask(db, {
     targetId: preset.targetTargetId,
     jobKeySuffix: `${claim.attemptNo}-tgt`,
     stageSnapshotPaths: preset.stageSnapshotPaths,
+    stageSubpaths: preset.stageSubpaths,
     now: Date.now(),
     onProgress,
   });
-  if (leaseRevoked) return finishPreFail("triage_lease_lost", "task lease lost during target acquisition");
+  if (leaseRevoked || !checkLease()) return finishPreFail("triage_lease_lost", "task lease lost during target acquisition");
   if (!tgtAcq.ok) {
     return finishPreFail(tgtAcq.code, tgtAcq.reason);
   }
@@ -938,16 +1051,40 @@ export async function executeRepoTriageTask(db, {
     const formatSide = (label, side) =>
       `== ${label} (${side.archiveSha256 ?? "unpinned"}) ==\n` +
       side.files.map((f) => `--- ${f.path} (${f.sha256}, bytes=${f.bytes}, truncated=${f.truncated}) ---\n${f.excerpt}`).join("\n");
-    const prefix = `${header}\n${formatSide("BASELINE", baseAcq)}\n${formatSide("TARGET", tgtAcq)}`;
     const questionTail = `\n\nTask Question: ${questionText}`;
     const maxInput = config.model.maxInputBytes;
-    const minBytes = Buffer.byteLength(JSON.stringify([{ role: "user", content: `${header}\n${questionTail}` }]), "utf8");
-    if (maxInput !== null && maxInput !== undefined && minBytes > maxInput) {
-      return finishPreFail("input_bytes_exceeded", `triage prompt envelope (${minBytes}B) exceeds maxInputBytes (${maxInput}B)`);
+    const effectiveMaxInput = maxInput !== null && maxInput !== undefined
+      ? Math.min(maxInput, MAX_MODEL_MESSAGES_BYTES)
+      : MAX_MODEL_MESSAGES_BYTES;
+    const minBytes = jsonEnvelopeBytes(`${header}\n${questionTail}`);
+    if (minBytes > effectiveMaxInput) {
+      return finishPreFail("input_bytes_exceeded", `triage prompt envelope (${minBytes}B) exceeds maxInputBytes (${effectiveMaxInput}B)`);
     }
-    const promptText = maxInput !== null && maxInput !== undefined
-      ? fitPromptToMaxInputBytes(prefix, maxInput, questionTail)
-      : `${prefix}${questionTail}`;
+    const baseText = formatSide("BASELINE", baseAcq);
+    const tgtText = formatSide("TARGET", tgtAcq);
+    const sideBudgetBytes = Math.max(0, Math.floor((effectiveMaxInput - minBytes - 64) / 2));
+    const fitSideToJsonBytes = (rawSide) => {
+      if (jsonEnvelopeBytes(`${header}\n${rawSide}${questionTail}`) - minBytes <= sideBudgetBytes) {
+        return rawSide;
+      }
+      let lo = 0;
+      let hi = Buffer.byteLength(rawSide, "utf8");
+      let best = "";
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const cand = trimUtf8ToBytes(rawSide, mid).text;
+        const delta = Buffer.byteLength(JSON.stringify(cand), "utf8") - 2;
+        if (delta <= sideBudgetBytes) {
+          best = cand;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return best;
+    };
+    const symmetricPrefix = `${header}\n${fitSideToJsonBytes(baseText)}\n${fitSideToJsonBytes(tgtText)}`;
+    const promptText = fitPromptToMaxInputBytes(symmetricPrefix, effectiveMaxInput, questionTail);
 
     modelOutcome = await runModelTriageSummary(db, {
       stateDir,
@@ -1156,7 +1293,7 @@ export async function executeRepoTriageTask(db, {
     reportHash: storedReport.contentHash,
   });
 
-  finishTriageOutcome(db, {
+  const outcome = finishTriageOutcome(db, {
     stateDir,
     taskId: claim.taskId,
     attemptId: claim.attemptId,
@@ -1173,6 +1310,10 @@ export async function executeRepoTriageTask(db, {
     manifestHash: storedManifest.contentHash,
     now: reportPayload.at,
   });
+  if (outcome.leaseLost) {
+    leaseRevoked = true;
+    return finishPreFail("triage_lease_lost", "task lease lost before final triage completion");
+  }
 
   return {
     resultClass: verdict.resultClass,

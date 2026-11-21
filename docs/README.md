@@ -7,7 +7,7 @@
 1. 根 [README](../README.md)：项目定位、已实现/未实现边界、运行前置条件。
 2. 本文：按类别找对资料，认清「现行」与「历史」身份。
 3. [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md)：现行权威状态清单（四项真实验收现状、审计归档、镜像、缺口、待办）。
-4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（单元 4.1 已通过独立对抗审计并按路线 A 冻结；单元 4.2 许可 1/2、单元 4.3 与单元 4.4 离线收口均已完成）；单元 4.1 见 [phase4-1-closure.md](phase4/reports/phase4-1-closure.md) 与 [AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)；单元 4.2 见 [phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)；单元 4.3 见 [phase4-3-closure.md](phase4/reports/phase4-3-closure.md)；单元 4.4 见 [phase4-4-closure.md](phase4/reports/phase4-4-closure.md) 与 [user-value-report.md](phase4/reports/user-value-report.md)。
+4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：Phase 4 设计、实施与收口报告（**单元 4.1–4.5 及终局对抗审计均已完成**）：单元 4.1 见 [phase4-1-closure.md](phase4/reports/phase4-1-closure.md) 与 [AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)；单元 4.2 见 [phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)；单元 4.3 见 [phase4-3-closure.md](phase4/reports/phase4-3-closure.md)；单元 4.4 见 [phase4-4-closure.md](phase4/reports/phase4-4-closure.md)；**单元 4.5 与 Phase 4 最终收口见 [phase4-5-closure.md](phase4/reports/phase4-5-closure.md) 与 [user-value-report.md](phase4/reports/user-value-report.md)**。
 5. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
 
 ## 现行规范（操作依据）
@@ -40,16 +40,17 @@
 
 | 资料 | 用途 |
 | --- | --- |
-| [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md) | **单元 4.5 新会话交接文档**（2026-11-21 纪元 10 基线）：单元 4.4 成果、Telegram `CONNECT` 代理前置、已授权限、固定目标 SHA 与下一步顺序 |
+| [phase4/reports/phase4-5-closure.md](phase4/reports/phase4-5-closure.md) | **单元 4.5 与 Phase 4 终局收口报告**（2026-11-21 纪元 11.4/11.5）：`eval:triage:real` 6/6 实盘验收（GitHub + DeepSeek + 无网 TS 执行 + `@aegispibot` TLS/CONNECT 私聊）、4 路对抗审计加固、SSRF IP 字面量保护、全量 16 项回归与 `report:user-value` 134/134 通过 |
+| [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md) | **单元 4.5 会话交接存档**（历史基线，2026-11-21 纪元 10）：已由单元 4.5 实盘与终局收口完成承接 |
 | [phase4/reports/phase4-4-closure.md](phase4/reports/phase4-4-closure.md) | **单元 4.4 收口报告**（2026-11-21 纪元 9 终版）：Scenario 4 `repo_triage` 双快照采集与四分类神谕裁定、`eval:triage` 7/7、`report:user-value` 125/125 与全量 17 项通过 |
-| [phase4/reports/user-value-report.md](phase4/reports/user-value-report.md) | **Phase 4 证据聚合报告**：汇总 `triage`、`repo-observe`、`model-proposal`、`security-unit`、`offline-jobs`、`security-integration` 与真实 4.2 观测（125/125 PASS，defaults 失败关闭确认） |
+| [phase4/reports/user-value-report.md](phase4/reports/user-value-report.md) | **Phase 4 证据聚合报告**：汇总 `triage`、`repo-observe`、`model-proposal`、`security-unit`、`offline-jobs`、`security-integration`、`repo-observe-real` 与 `triage-real`（**134/134 PASS**，defaults 失败关闭确认） |
 | [phase4/reports/phase4-3-closure.md](phase4/reports/phase4-3-closure.md) | **单元 4.3 收口报告**（2026-11-21 纪元 7 终版）：空回复防误判 `SUCCEEDED`、KV 前缀稳态与前置截停、`telegram-send` fail-closed 出站适配器及全量 13 套件 + Hono 预检通过 |
 | [phase4/reports/phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md) | **单元 4.2 许可 2 广度真实 Repo Observe 验收报告**（2026-11-21）：6 个锁定 commit 公开 GitHub 仓库 + 真实 `api.deepseek.com` 8/8 PASS（含 `cacheRead` 命中结算、截断、`file` 模式、`302->codeload` 拦阻、`182 MB` tar 截停与欠价 `HELD` 停机）及 `4096` 输出耗尽实证记录 |
 | [phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) | **单元 4.2 许可 1 离线收口报告**（2026-11-21 纪元 6 终版）：只读 Repo Observe 离线闭环、`downloader.mjs` 双摘要修复、4.1 路线 A 延后加固闭合、`model-real` exit 4 护栏、纪元 6 镜像与全量 13 套件 + Hono 预检通过记录及待签许可 2 检查表 |
 | [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-21 纪元 5 终版）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 5 镜像证据与自审计 19 项加固整改汇总 |
 | [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 审计冻结、4.2 许可 1 离线就绪）与 4.2 首跑待办汇总 |
 | [phase3/reports/round-closure-2026-11-20-limited-fixes.md](phase3/reports/round-closure-2026-11-20-limited-fixes.md) | 限定修复收口：daemon 用例崩溃根因（测试层修复、生产零改动）与纪元 2 选择性重建；终树三 docker 套件 14/14、29/29、5/5 |
-| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（纪元 10：重建 `agent`，携带 `acquisition` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
+| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（**纪元 11.5**：重建 `acquisition`，携带 `agent` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
 | [phase3/reports/quota-calibration.md](phase3/reports/quota-calibration.md) | 容器配额占位值的实测依据（CPU/内存/pids/可写盘） |
 
 ## 历史收口与审计（史实身份，不作现行操作依据）
@@ -79,9 +80,9 @@
 - [telegram-call-ledger-retrospective.md](phase3/reports/telegram-call-ledger-retrospective.md)：Telegram 历史调用账本追溯（缺证如实记录，不追补）。
 - [phase3/audits/](phase3/audits)（六份原稿字节冻结，含 `AUDIT-PHASE3-REREVIEW-33d6361` 与 `AUDIT-PHASE3-LIMITED-FIXES-44b3514`）与 [phase3/evidence/](phase3/evidence)。
 
-**Phase 4（单元 4.1 审计冻结于 8943a10；单元 4.2 许可 1/2 完成；单元 4.3 纪元 7 完成；单元 4.4 纪元 9 提交于 `3e85c6d`；单元 4.5 代理前置与纪元 10 就绪，见 [HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md)）**
+**Phase 4（全量收口，2026-11-21；单元 4.1 审计冻结于 8943a10；单元 4.2–4.4 分步落地；单元 4.5 `eval:triage:real` 6/6 实盘 + 终局 4 路对抗审计加固 + 纪元 11.5 134/134 全绿收口，见 [phase4-5-closure.md](phase4/reports/phase4-5-closure.md)）**
 
-- 设计与计划见上文「设计决策」「阶段计划」；交接与收口/实测报告见 [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md)、[phase4/reports/phase4-4-closure.md](phase4/reports/phase4-4-closure.md)、[phase4/reports/user-value-report.md](phase4/reports/user-value-report.md)、[phase4/reports/phase4-3-closure.md](phase4/reports/phase4-3-closure.md)、[phase4/reports/phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)、[phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；独立对抗审计原稿见 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)（`PASS WITH RESIDUALS`，路线 A 冻结）；[phase4/reviews/](phase4/reviews) 为方案审核往来记录。
+- 设计与计划见上文「设计决策」「阶段计划」；**单元 4.5 与 Phase 4 终局收口报告**见 [phase4/reports/phase4-5-closure.md](phase4/reports/phase4-5-closure.md)、[phase4/reports/user-value-report.md](phase4/reports/user-value-report.md) 与实盘证据 [triage-real-report.json](phase3/evidence/triage-real-report.json)；前序报告与交接见 [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md)、[phase4/reports/phase4-4-closure.md](phase4/reports/phase4-4-closure.md)、[phase4/reports/phase4-3-closure.md](phase4/reports/phase4-3-closure.md)、[phase4/reports/phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)、[phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；独立对抗审计原稿见 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)（`PASS WITH RESIDUALS`，路线 A 冻结）；[phase4/reviews/](phase4/reviews) 为方案审核往来记录。
 
 ## 纪律速记
 

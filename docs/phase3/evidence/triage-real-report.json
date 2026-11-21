@@ -1,0 +1,150 @@
+{
+  "generatedAt": "2026-11-21T14:44:08.129Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "triage-real",
+  "label": "phase4:triage-real — Unit 4.5 真实 GitHub + DeepSeek + 执行容器 + @aegispibot 私聊端到端验收",
+  "counts": {
+    "pass": 6,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "real-hono-ghsa-46wx-csrf-unaffected-ts-exec-and-dm",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED/unaffected cost=3099u$(offPeak~1550u$) jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:[REDACTED_OWNER]:11 edges=5 leakFree=true"
+    },
+    {
+      "name": "real-hono-ghsa-88fw-cors-unaffected-ts-exec-and-dm",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED/unaffected cost=1044u$(offPeak~522u$) jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:[REDACTED_OWNER]:12 edges=5 leakFree=true"
+    },
+    {
+      "name": "real-hono-csrf-regression-affected-and-dm",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED/affected cost=3584u$(offPeak~1792u$) jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:[REDACTED_OWNER]:13 edges=5 leakFree=true"
+    },
+    {
+      "name": "real-aegispi-baseline-check-and-dm",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED/unaffected cost=1945u$(offPeak~973u$) jobs=SUCCEEDED:0,SUCCEEDED:0 effect=SUCCEEDED/tg:[REDACTED_OWNER]:14 edges=5 leakFree=true"
+    },
+    {
+      "name": "real-pi-agent-north-baseline-check-and-dm",
+      "status": "PASS",
+      "detail": "exit=0 task=SUCCEEDED/unaffected cost=2553u$(offPeak~1277u$) jobs=SUCCEEDED:0,SUCCEEDED:0 effect=SUCCEEDED/tg:[REDACTED_OWNER]:15 edges=5 leakFree=true"
+    },
+    {
+      "name": "real-triage-fail-closed-controls-defaults-and-zero-leak",
+      "status": "PASS",
+      "detail": "triageOff=triage_real_disabled badNotify=triage_notify_target_not_allowed defaultsClosed=true telemetryLeakFree=true"
+    }
+  ],
+  "dataSources": "真实公网 GitHub 目标（honojs/hono v4.13.19 vs v4.12.24、NorthAdb/AegisPi@8943a108、NorthAdb/pi-agent-north@ce950d78）+ 真实 https://api.deepseek.com（deepseek-flash, reasoning:high）+ 无网 --execution-image 执行真实 TypeScript 中间件与仓库检查 + 真实 @aegispibot TLS/CONNECT 私聊通知（.env 只读不入库、全链路脱敏、defaults.json 保持失败关闭）",
+  "telemetry": [
+    {
+      "case": "hono-ghsa-46wx-csrf",
+      "repo": "hono-4.12.24",
+      "resultClass": "unaffected",
+      "jobs": [
+        "SUCCEEDED:0",
+        "FAILED:1"
+      ],
+      "usage": {
+        "inputTokens": 5266,
+        "outputTokens": 1241,
+        "cacheReadTokens": 4864,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 3099,
+      "estimatedOffPeakMicrousd": 1550,
+      "effectState": "SUCCEEDED",
+      "externalIdMasked": "tg:[REDACTED_OWNER]:11",
+      "advisoryPreview": "v4.13.19 的 CSRF 源码中 `isCsrfContentTypeRe` 已显式匹配 `text/ping`，因此该 Content-Type 的请求仍会进入 Origin/sec-fetch-site 校验，不会因只检查 `text/plain` 而被绕过。故基于所给源码，v4.13.19 不受 GHSA-46wx-v44x-9hh2 的 text/ping 绕过影响（而 v4.12."
+    },
+    {
+      "case": "hono-ghsa-88fw-cors",
+      "repo": "hono-4.12.24",
+      "resultClass": "unaffected",
+      "jobs": [
+        "SUCCEEDED:0",
+        "FAILED:1"
+      ],
+      "usage": {
+        "inputTokens": 269,
+        "outputTokens": 753,
+        "cacheReadTokens": 9856,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 1044,
+      "estimatedOffPeakMicrousd": 522,
+      "effectState": "SUCCEEDED",
+      "externalIdMasked": "tg:[REDACTED_OWNER]:12",
+      "advisoryPreview": "v4.13.19 在 `origin` 默认 `*` 且 `credentials: true` 时，`findAllowOrigin` 的 `*` 分支直接返回 `*`，不会读取或反射请求的 `Origin`。因此它不存在“Origin 反射缺陷”，但会同时输出 `Access-Control-Allow-Origin: *` 与 `Access-Control-Allow-Credential"
+    },
+    {
+      "case": "hono-csrf-regression-affected",
+      "repo": "hono-4.12.24",
+      "resultClass": "affected",
+      "jobs": [
+        "SUCCEEDED:0",
+        "FAILED:1"
+      ],
+      "usage": {
+        "inputTokens": 253,
+        "outputTokens": 2874,
+        "cacheReadTokens": 9856,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 3584,
+      "estimatedOffPeakMicrousd": 1792,
+      "effectState": "SUCCEEDED",
+      "externalIdMasked": "tg:[REDACTED_OWNER]:13",
+      "advisoryPreview": "目标快照 v4.12.24 仍使用旧版 CSRF 正则：安全方法未包含 `OPTIONS`，且敏感 Content-Type 仅匹配 `text/plain` 而遗漏基线新增的 `text/ping`，因此相较 v4.13.19 出现预检兼容性与 CSRF 校验覆盖回归。"
+    },
+    {
+      "case": "aegispi-baseline-check",
+      "repo": "aegispi-origin",
+      "resultClass": "unaffected",
+      "jobs": [
+        "SUCCEEDED:0",
+        "SUCCEEDED:0"
+      ],
+      "usage": {
+        "inputTokens": 5362,
+        "outputTokens": 254,
+        "cacheReadTokens": 5120,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 1945,
+      "estimatedOffPeakMicrousd": 973,
+      "effectState": "SUCCEEDED",
+      "externalIdMasked": "tg:[REDACTED_OWNER]:14",
+      "advisoryPreview": "当前默认配置全面失败关闭：模型调用因 `baseUrl=null`、白名单为空且 `allowRealModelCalls=false` 被全拒，真实外部写、上游提交与凭据槽位也均未接线，外部写入保持关闭。`model-requests.mjs` 在请求入口执行枚举/白名单与占用校验，并在价格目录未授权时对未知用量保持 `HELD` 不结清，避免失败路径误放行或误结算。"
+    },
+    {
+      "case": "pi-agent-north-baseline-check",
+      "repo": "pi-agent-north",
+      "resultClass": "unaffected",
+      "jobs": [
+        "SUCCEEDED:0",
+        "SUCCEEDED:0"
+      ],
+      "usage": {
+        "inputTokens": 6976,
+        "outputTokens": 370,
+        "cacheReadTokens": 2560,
+        "cacheWriteTokens": 0,
+        "totalFromProvider": false
+      },
+      "settledPeakMicrousd": 2553,
+      "estimatedOffPeakMicrousd": 1277,
+      "effectState": "SUCCEEDED",
+      "externalIdMasked": "tg:[REDACTED_OWNER]:15",
+      "advisoryPreview": "packages/ai 提供与代理编排解耦的 AI 核心能力，包括模型、认证、API 类型与适配层、流式事件和通用工具，其入口保持无副作用，并把 provider/API 实现放到子路径导出。packages/coding-agent 负责编码代理的运行与会话编排，包括 CLI/SDK、AgentSession、扩展系统、工具集、模型运行时、资源/技能/设置与压缩等，并聚合对外 API，而不实现底"
+    }
+  ]
+}

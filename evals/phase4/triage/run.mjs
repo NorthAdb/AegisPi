@@ -20,7 +20,7 @@ import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
 import { claimNextTask } from "../../../apps/daemon/src/scheduler.mjs";
 import { createCredentialService } from "../../../apps/daemon/src/credentials.mjs";
 import { createContainerExecutor, ExecutorError } from "../../../apps/daemon/src/container-executor.mjs";
-import { evaluateTriageResultClass } from "../../../apps/daemon/src/repo-triage.mjs";
+import { evaluateTriageResultClass, validateTriagePreset } from "../../../apps/daemon/src/repo-triage.mjs";
 
 lockedNodeGuard();
 
@@ -810,6 +810,40 @@ try {
       baselineJob: { state: "FAILED", exitCode: 1 },
       targetJob: { state: "SUCCEEDED", exitCode: 0 },
     });
+    const baseSpec = {
+      baselineTargetId: "t1",
+      targetTargetId: "t2",
+      mode: "snapshot_regression",
+      jobKind: "config_verify",
+      baselineCommand: { command: "node", args: ["-e", "process.exit(0)"], deadlineMs: 5000 },
+      targetCommand: { command: "node", args: ["-e", "process.exit(0)"], deadlineMs: 5000 },
+      oracle: {
+        schemaVersion: 1,
+        oracleId: "o-sub",
+        proposition: "p",
+        assertions: [{ id: "A1", kind: "baseline_passes", description: "d", expectedExitCode: 0, requiredOutputHash: null }],
+        resultClassRules: { affected: "a", unaffected: "u", unknown: "k", infra_error: "i" },
+      },
+    };
+    const subOk = validateTriagePreset("sub-ok", { ...baseSpec, stageSubpaths: ["packages/ai/src", "package.json"] });
+    let subBadErr = "";
+    try {
+      validateTriagePreset("sub-bad", { ...baseSpec, stageSubpaths: ["../escape"] });
+    } catch (e) {
+      subBadErr = e.message;
+    }
+    let badReproErr = "";
+    try {
+      validateTriagePreset("repro-bad", { ...baseSpec, reproExitCode: 2 });
+    } catch (e) {
+      badReproErr = e.message;
+    }
+    let badSnapInputErr = "";
+    try {
+      validateTriagePreset("snap-in-bad", { ...baseSpec, baselineInputFiles: { snapshot: "collision" } });
+    } catch (e) {
+      badSnapInputErr = e.message;
+    }
     const defaultsRaw = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
     const hitsAfter = readModelLog().length;
 
@@ -824,11 +858,16 @@ try {
         /invalid staged input path/.test(travErr) &&
         /jobId/.test(dotDotErr) &&
         pureBaselineFail.resultClass === "infra_error" &&
+        Array.isArray(subOk.stageSubpaths) &&
+        subOk.stageSubpaths.length === 2 &&
+        /stageSubpaths/.test(subBadErr) &&
+        /reproExitCode/.test(badReproErr) &&
+        /invalid entry/.test(badSnapInputErr) &&
         hitsAfter === hitsBefore &&
         defaultsRaw.triage?.allowRealTriage === false &&
         Object.keys(defaultsRaw.triage?.presets ?? {}).length === 0 &&
         defaultsRaw.telegram?.allowRealSend === false,
-      `badPreset=${sBadPreset.attempt?.error_code} realBlocked=${sRealBlocked.attempt?.error_code} fetchBlocked=${sFetchBlocked.attempt?.error_code} badNotify=${sBadNotify.attempt?.error_code} sym=${sSym.attempt?.error_code} trav=${Boolean(travErr)} dotDot=${Boolean(dotDotErr)} hitsDelta=${hitsAfter - hitsBefore}`,
+      `badPreset=${sBadPreset.attempt?.error_code} realBlocked=${sRealBlocked.attempt?.error_code} fetchBlocked=${sFetchBlocked.attempt?.error_code} badNotify=${sBadNotify.attempt?.error_code} sym=${sSym.attempt?.error_code} trav=${Boolean(travErr)} dotDot=${Boolean(dotDotErr)} subPaths=${subOk.stageSubpaths?.length}/${Boolean(subBadErr)} reproGuard=${Boolean(badReproErr)} hitsDelta=${hitsAfter - hitsBefore}`,
     );
   }
 } finally {

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T09:27:31.862Z",
+  "generatedAt": "2026-11-21T15:05:17.838Z",
   "nodeVersion": "v22.23.5",
   "suite": "triage",
   "label": "eval:triage: Scenario 4 repository triage and four-class oracle offline acceptance",
@@ -11,7 +11,7 @@
     {
       "name": "triage-e2e-dependency-advisory-unaffected-and-telegram",
       "status": "PASS",
-      "detail": "exit=0 task=SUCCEEDED/unaffected cost=28 jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:6101:9001 manifestValid=true err=(node:7080) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the war"
+      "detail": "exit=0 task=SUCCEEDED/unaffected cost=28 jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:6101:9001 manifestValid=true err=(node:7484) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the war"
     },
     {
       "name": "triage-e2e-snapshot-regression-affected-ignores-forged-stdout",
@@ -36,12 +36,12 @@
     {
       "name": "triage-empty-model-reply-refuses-execution-containers",
       "status": "PASS",
-      "detail": "task=FAILED/infra_error err=model_empty_reply jobs=0 settled=4928"
+      "detail": "task=FAILED/infra_error err=model_output_truncated_empty jobs=0 settled=4928"
     },
     {
       "name": "triage-fail-closed-guards-and-defaults",
       "status": "PASS",
-      "detail": "badPreset=triage_preset_not_allowed realBlocked=triage_real_disabled fetchBlocked=acquisition_real_fetch_disabled badNotify=triage_notify_target_not_allowed sym=acquisition_failed trav=true dotDot=true hitsDelta=0"
+      "detail": "badPreset=triage_preset_not_allowed realBlocked=triage_real_disabled fetchBlocked=acquisition_real_fetch_disabled badNotify=triage_notify_target_not_allowed sym=acquisition_failed trav=true dotDot=true subPaths=2/true reproGuard=true hitsDelta=0"
     }
   ],
   "dataSources": "digest 钉住 agent / acquisition / execution 三镜像 + 本地 HTTP 归档 + Hono 4.13.19/4.12.24 夹具与 csrf-textping-check + pi-ai 环回模型 + 环回 Telegram /sendMessage；零真实仓库拉取、零真实模型调用、零真实 Telegram 外发，未读 .env"

@@ -231,7 +231,20 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
   if (!existsSync(path)) {
     throw new ConfigError(`defaults.json not found at ${path}`);
   }
-  const defaults = JSON.parse(readFileSync(path, "utf8"));
+  let defaults;
+  try {
+    defaults = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    throw new ConfigError(`config JSON at ${path} is invalid: ${e.message}`);
+  }
+  if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
+    throw new ConfigError(`config at ${path} must be a JSON object`);
+  }
+  for (const reqSection of ["budget", "leases", "time", "sqlite", "containerPlaceholders"]) {
+    if (!defaults[reqSection] || typeof defaults[reqSection] !== "object" || Array.isArray(defaults[reqSection])) {
+      throw new ConfigError(`config section ${reqSection} is missing or invalid`);
+    }
+  }
   // The single mapping point (D-11): never hand raw defaults to Pi settings.
   const piSettings = piSettingsFromDefaults(defaults);
 

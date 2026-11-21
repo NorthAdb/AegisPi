@@ -1,6 +1,6 @@
 # test:security:unit — 确定性安全门禁（02 §8 第一组）
 
-生成：2026-11-21T09:30:43.235Z；Node v22.23.5；suite `security-unit`。
+生成：2026-11-21T14:59:08.122Z；Node v22.23.5；suite `security-unit`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -30,14 +30,15 @@
 | PASS | sse-filters-to-caller-scopes-until-granted | own-visible=true foreign-before-grant=false foreign-after-grant=true |
 | PASS | no-flag-daemon-tick-settles-no-fabricated-usage | daemon exit=0 settlements=0 worker-reservations=0 (nothing is claimed or settled without the declared fixture flag) |
 | PASS | fixture-daemon-tick-settlement-is-labeled-fixture | daemon exit=0 settlements=1 fixture-labeled=true |
-| PASS | http-transport-carries-bytes-and-maps-outcomes | submit=succeeded(ext-1795253396519) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline |
-| PASS | authorized-production-tick-submits-over-real-http-transport | daemon exit=0 effect=SUCCEEDED/ext-1795253399068 local-service-saw=true |
+| PASS | http-transport-carries-bytes-and-maps-outcomes | submit=succeeded(ext-1795273089994) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline |
+| PASS | authorized-production-tick-submits-over-real-http-transport | daemon exit=0 effect=SUCCEEDED/ext-1795273092770 local-service-saw=true |
 | PASS | unauthorized-production-tick-sends-zero-bytes-through-real-transport | daemon exit=0 effect=FAILED zero-bytes=true adapter-refused-audits=1 |
-| PASS | not-yet-due-effect-is-not-dispatched-even-when-authorized | daemon exit=0 effect=READY due-in=58595ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing) |
+| PASS | not-yet-due-effect-is-not-dispatched-even-when-authorized | daemon exit=0 effect=READY due-in=58508ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing) |
 | PASS | dispatcher-refuses-before-due-time-and-commits-at-it | early -> effect efx:notify%3Adm%253atelegram%253a6101%3Acase-su-dispa still=READY submitting-audits-before=true due -> SUCCEEDED/SUCCEEDED deliveries=1 |
 | PASS | telegram-outbound-transport-fail-closed-and-secret-hygiene | ok=SUCCEEDED(tg:6101:9001) group=SUCCEEDED(tg:-100999:9001) empty=FAILED mismatch=FAILED policyOff=FAILED realBlocked=FAILED revoked=FAILED slow=UNKNOWN remote=FAILED leakFree=true |
-| PASS | telegram-outbound-connect-proxy-and-fail-closed | proxy=SUCCEEDED(connects=1) badCfgExit=2 deadProxy=FAILED(local_error: connect ECONNREFUSED 127.0.0.1:55630 ) leakFree=true |
-| PASS | worker-reserves-before-call-and-settles-real-usage | daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795253427825 at=1795253428686 settled=1795253428718] |
+| PASS | telegram-outbound-connect-proxy-and-fail-closed | proxy=SUCCEEDED(connects=1) badCfgExit=2 deadProxy=FAILED(local_error: connect ECONNREFUSED 127.0.0.1:58191 ) leakFree=true |
+| PASS | telegram-outbound-tls-connect-proxy-and-pre-http-fail-closed | tlsOk=SUCCEEDED ipSan=SUCCEEDED(httpsHits=1,proxyHits=1/5) badCert=FAILED(local_error: self-signed certificate (DEPTH_Z) eof=FAILED(1001ms) p407=FAILED leakFree=true |
+| PASS | worker-reserves-before-call-and-settles-real-usage | daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795273134145 at=1795273134973 settled=1795273135005] |
 | PASS | worker-no-usage-keeps-reservation-held-never-zero | daemon exit=0 req=HELD reservation=HELD settlements=0 not-settled-audits=1 |
 | PASS | worker-unauthorized-price-catalog-keeps-reservation-held | daemon exit=0 req=HELD reservation=HELD settlements=0 price-not-authorized-audits=1 |
 | PASS | worker-refuses-unauthorized-endpoint-before-any-call | daemon exit=0 reqRow=absent reservations=0 honest-log=true |
@@ -48,9 +49,10 @@
 | PASS | webhook-closed-in-read-only-maintenance | http=503 inbox-rows=0 |
 | PASS | disk-drill-seam-may-only-tighten-never-loosen | warn 0.001 -> refused; critical 5 -> refused; critical 25 alone -> refused; warn 25 + critical 12 -> accepted |
 | PASS | daemon-refuses-to-start-on-loosened-drill-seam | daemon exit=2 line=config: refusing to start — AEGISPI_DISK_DRILL_WARN_GIB may only tighten the watermark (production warn is 20  |
-| PASS | disk-watermark-critical-drill-opens-read-only | daemon exit=3 disk-line=disk: level=critical free=441GiB ratio=0.4735 |
+| PASS | disk-watermark-critical-drill-opens-read-only | daemon exit=3 disk-line=disk: level=critical free=441GiB ratio=0.4732 |
 | PASS | disk-watermark-alerts-once-per-level-transition | transition-alert=true steady-repeat=false audit-rows=1 stream-events=1 |
+| PASS | downloader-ssrf-ip-literal-and-dot-relpath-refused | blocked=5 reasons=refused non-public IP address 169.254.169.254 | refused non-public IP address 10.0.0.1 | refused non-public IP address 127.0.0.1 | refused non-public IP address ::ffff:a9fe:a9fe | refused non-public IP address fe80::1 |
 
-合计：46 PASS / 0 FAIL。
+合计：48 PASS / 0 FAIL。
 
 数据源：本地 SQLite 与真实模块（HMAC 验签、凭据槽位、预算账本、召回查询、审批 CAS、SSE scope 过滤、daemon tick 夹具隔离、磁盘水位 critical 演练）；无容器、无付费网络。

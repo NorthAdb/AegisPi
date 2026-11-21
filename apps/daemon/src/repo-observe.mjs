@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { writeAudit } from "./audit.mjs";
-import { isLoopbackModelEndpoint } from "./model-call.mjs";
+import { isLoopbackModelEndpoint, MAX_MODEL_MESSAGES_BYTES } from "./model-call.mjs";
 import { insertObjectRow, putObjectContent } from "./objects.mjs";
 
 const DEFAULT_OBSERVE_QUESTION =
@@ -56,20 +56,26 @@ export function trimUtf8ToBytes(text, maxBytes) {
   return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
 }
 
+export function jsonEnvelopeBytes(content) {
+  return Buffer.byteLength(JSON.stringify([{ role: "user", content }]), "utf8");
+}
+
 export function fitPromptToMaxInputBytes(excerptText, maxInputBytes, suffix = "") {
-  const envelopeBytes = (s) => Buffer.byteLength(JSON.stringify([{ role: "user", content: s }]), "utf8");
+  if (jsonEnvelopeBytes("") > maxInputBytes) {
+    return "";
+  }
   const combined = `${excerptText}${suffix}`;
-  if (envelopeBytes(combined) <= maxInputBytes) {
+  if (jsonEnvelopeBytes(combined) <= maxInputBytes) {
     return combined;
   }
-  if (envelopeBytes(suffix) > maxInputBytes) {
+  if (jsonEnvelopeBytes(suffix) > maxInputBytes) {
     let lo = 0;
     let hi = Buffer.byteLength(suffix, "utf8");
     let bestSuffix = "";
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
       const candidate = trimUtf8ToBytes(suffix, mid).text;
-      if (envelopeBytes(candidate) <= maxInputBytes) {
+      if (jsonEnvelopeBytes(candidate) <= maxInputBytes) {
         bestSuffix = candidate;
         lo = mid + 1;
       } else {
@@ -84,7 +90,7 @@ export function fitPromptToMaxInputBytes(excerptText, maxInputBytes, suffix = ""
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
     const candidate = trimUtf8ToBytes(excerptText, mid).text;
-    if (envelopeBytes(`${candidate}${suffix}`) <= maxInputBytes) {
+    if (jsonEnvelopeBytes(`${candidate}${suffix}`) <= maxInputBytes) {
       best = candidate;
       lo = mid + 1;
     } else {
@@ -192,13 +198,14 @@ export function authorizeAcquisitionTarget({ config, targetId, hasAcquisitionLau
   return { ok: true, target };
 }
 
-export function readContainedRegularFile(rootDir, relPath) {
+export function resolveContainedEntry(rootDir, relPath, { expectType = "file" } = {}) {
   if (!isSafeRelativeReadPath(relPath)) {
     return { ok: false, code: "acquisition_invalid_read_paths", reason: `unsafe readPath ${JSON.stringify(relPath)}` };
   }
   const resolvedRoot = resolve(rootDir);
   const parts = relPath.split("/");
   let cur = resolvedRoot;
+  let lastStat = null;
   for (let i = 0; i < parts.length; i += 1) {
     cur = join(cur, parts[i]);
     if (!cur.startsWith(resolvedRoot + sep)) {
@@ -214,14 +221,24 @@ export function readContainedRegularFile(rootDir, relPath) {
       return { ok: false, code: "acquisition_symlink_rejected", reason: `readPath ${relPath} traverses a symlink` };
     }
     const isLast = i === parts.length - 1;
-    if (isLast && !st.isFile()) {
-      return { ok: false, code: "acquisition_non_file_rejected", reason: `readPath ${relPath} is not a regular file` };
-    }
     if (!isLast && !st.isDirectory()) {
       return { ok: false, code: "acquisition_invalid_path_component", reason: `readPath ${relPath} parent is not a directory` };
     }
+    if (isLast && expectType === "file" && !st.isFile()) {
+      return { ok: false, code: "acquisition_non_file_rejected", reason: `readPath ${relPath} is not a regular file` };
+    }
+    if (isLast && expectType === "any" && !st.isFile() && !st.isDirectory()) {
+      return { ok: false, code: "acquisition_non_file_rejected", reason: `readPath ${relPath} is not a file or directory` };
+    }
+    lastStat = st;
   }
-  const raw = readFileSync(cur);
+  return { ok: true, absPath: cur, stat: lastStat };
+}
+
+export function readContainedRegularFile(rootDir, relPath) {
+  const checked = resolveContainedEntry(rootDir, relPath, { expectType: "file" });
+  if (!checked.ok) return checked;
+  const raw = readFileSync(checked.absPath);
   const sha256 = createHash("sha256").update(raw).digest("hex");
   return { ok: true, raw, sha256 };
 }
@@ -237,8 +254,7 @@ export function buildSafeRepoExcerpt({
   if (!existsSync(rootDir)) {
     return { ok: false, code: "acquisition_output_missing", reason: `extracted directory missing at ${entryDestRelPath}` };
   }
-  const files = [];
-  let remainingBytes = maxExcerptBytes;
+  const loaded = [];
   let lockfileHash = null;
   for (const rel of readPaths) {
     const res = readContainedRegularFile(rootDir, rel);
@@ -247,17 +263,40 @@ export function buildSafeRepoExcerpt({
       lockfileHash = `sha256:${res.sha256}`;
     }
     const sanitized = scrubSensitiveText(res.raw.toString("utf8"));
-    const budgetForFile = Math.max(0, remainingBytes);
-    const trimmed = trimUtf8ToBytes(sanitized, budgetForFile);
-    remainingBytes = Math.max(0, remainingBytes - Buffer.byteLength(trimmed.text, "utf8"));
-    files.push({
+    loaded.push({
       path: rel,
       sha256: `sha256:${res.sha256}`,
       bytes: res.raw.byteLength,
-      truncated: trimmed.truncated,
-      excerpt: trimmed.text,
+      sanitized,
+      sanitizedBytes: Buffer.byteLength(sanitized, "utf8"),
     });
   }
+
+  // Max-min fair allocation so an oversized first file cannot starve later files in readPaths to 0 bytes.
+  const allocations = new Array(loaded.length).fill(0);
+  let remainingBudget = Number.isFinite(maxExcerptBytes) ? Math.max(0, Math.floor(maxExcerptBytes)) : 0;
+  const bySize = loaded
+    .map((item, idx) => ({ idx, size: item.sanitizedBytes }))
+    .sort((a, b) => a.size - b.size || a.idx - b.idx);
+  let remainingFiles = bySize.length;
+  for (const item of bySize) {
+    const fairShare = Math.floor(remainingBudget / remainingFiles);
+    const grant = Math.min(item.size, fairShare);
+    allocations[item.idx] = grant;
+    remainingBudget -= grant;
+    remainingFiles -= 1;
+  }
+
+  const files = loaded.map((item, idx) => {
+    const trimmed = trimUtf8ToBytes(item.sanitized, allocations[idx]);
+    return {
+      path: item.path,
+      sha256: item.sha256,
+      bytes: item.bytes,
+      truncated: trimmed.truncated,
+      excerpt: trimmed.text,
+    };
+  });
   return { ok: true, files, lockfileHash };
 }
 
@@ -388,25 +427,29 @@ export async function executeRepoObserveAcquisition(db, {
       return { ok: false, code: "acquisition_failed", reason, reportObjectId: failObj.id };
     }
 
+    const effectiveMaxInput = hasInputCap
+      ? Math.min(config.model.maxInputBytes, MAX_MODEL_MESSAGES_BYTES)
+      : MAX_MODEL_MESSAGES_BYTES;
     const archiveSha256 = firstResult.sha256 ? `sha256:${firstResult.sha256}` : null;
     const header = buildObserveHeader(archiveSha256 ?? "unpinned");
-    const questionReserveBytes = Math.max(256, Buffer.byteLength(questionTail, "utf8"));
-    const headerEnvelopeBytes = Buffer.byteLength(JSON.stringify([{ role: "user", content: `${header}\n` }]), "utf8");
-    const fixedEnvelopeBytes = Buffer.byteLength(JSON.stringify([{ role: "user", content: `${header}\n${questionTail}` }]), "utf8");
+    const questionReserveBytes = Math.max(256, Buffer.byteLength(JSON.stringify(questionTail), "utf8") - 2);
+    const fixedEnvelopeBytes = jsonEnvelopeBytes(`${header}\n${questionTail}`);
     const perFileHeaderBytes = target.readPaths.reduce(
       (sum, p) => sum + Buffer.byteLength(`--- ${p} (sha256:${"0".repeat(64)}, bytes=9999999, truncated=true) ---\n\n`, "utf8"),
       0,
     );
-    if (hasInputCap && fixedEnvelopeBytes > config.model.maxInputBytes) {
+    if (fixedEnvelopeBytes > effectiveMaxInput) {
       return {
         ok: false,
         code: "input_bytes_exceeded",
-        reason: `repo-observe envelope (${fixedEnvelopeBytes}B) exceeds model.maxInputBytes (${config.model.maxInputBytes}B)`,
+        reason: `repo-observe envelope (${fixedEnvelopeBytes}B) exceeds max input budget (${effectiveMaxInput}B)`,
       };
     }
-    const capLimit = hasInputCap
-      ? Math.max(0, Math.min(config.acquisition.maxExcerptBytes, config.model.maxInputBytes - headerEnvelopeBytes - questionReserveBytes - perFileHeaderBytes - 32))
-      : config.acquisition.maxExcerptBytes;
+    const headerJsonBytes = jsonEnvelopeBytes(`${header}\n`);
+    const rawExcerptSlack = Math.floor(
+      Math.max(0, effectiveMaxInput - headerJsonBytes - questionReserveBytes - perFileHeaderBytes - 64) * 0.75,
+    );
+    const capLimit = Math.max(0, Math.min(config.acquisition.maxExcerptBytes, rawExcerptSlack));
 
     const excerpt = buildSafeRepoExcerpt({
       downloadsDir: run.downloadsDir,
@@ -480,9 +523,7 @@ export async function executeRepoObserveAcquisition(db, {
       .map((f) => `--- ${f.path} (${f.sha256}, bytes=${f.bytes}, truncated=${f.truncated}) ---\n${f.excerpt}`)
       .join("\n");
     const promptPrefix = `${header}\n${body}`;
-    const promptText = hasInputCap
-      ? fitPromptToMaxInputBytes(promptPrefix, config.model.maxInputBytes, questionTail)
-      : `${promptPrefix}${questionTail}`;
+    const promptText = fitPromptToMaxInputBytes(promptPrefix, effectiveMaxInput, questionTail);
 
     return { ok: true, manifestObjectId: manifestRow.id, promptText };
   } finally {

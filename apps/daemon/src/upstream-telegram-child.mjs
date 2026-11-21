@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { connect as netConnect } from "node:net";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { connect as netConnect, isIP } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 
+const MAX_RESPONSE_BYTES = 256 * 1024;
 const LOCAL_NETWORK_CODES = new Set([
   "ENOTFOUND",
   "EAI_AGAIN",
@@ -10,7 +12,25 @@ const LOCAL_NETWORK_CODES = new Set([
   "EHOSTUNREACH",
   "ENETUNREACH",
   "ERR_INVALID_URL",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
 ]);
+
+function parseTelegramBodyOrFail(status, textBody) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(textBody);
+  } catch {}
+  if (status >= 200 && status < 300 && parsed === null) {
+    return { ok: false, kind: "timeout", error: "telegram returned unparseable 2xx response" };
+  }
+  return { ok: true, status, body: parsed };
+}
 
 function scrubToken(text, botToken) {
   let clean = String(text ?? "");
@@ -54,14 +74,19 @@ function sendViaConnectProxy({ endpoint, proxy, chatId, text, timeoutMs }) {
   return new Promise((resolve) => {
     let settled = false;
     let connectConfirmed = false;
+    let tlsConfirmed = !useTls;
     let requestSent = false;
     const rawSock = netConnect(proxy.port, proxy.host);
     let activeSocket = rawSock;
+    let singleUseAgent = null;
 
     const finish = (outcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      try {
+        singleUseAgent?.destroy();
+      } catch {}
       try {
         activeSocket.destroy();
       } catch {}
@@ -73,20 +98,90 @@ function sendViaConnectProxy({ endpoint, proxy, chatId, text, timeoutMs }) {
 
     const failFromError = (err) => {
       const code = err?.cause?.code ?? err?.code ?? null;
-      const isLocal = !requestSent && (!connectConfirmed || (typeof code === "string" && LOCAL_NETWORK_CODES.has(code)));
+      const preHttp = !requestSent && (!connectConfirmed || !tlsConfirmed);
+      const isLocal =
+        preHttp ||
+        (!requestSent && typeof code === "string" && LOCAL_NETWORK_CODES.has(code));
       const detail = code ? `${err?.message ?? err} (${code})` : String(err?.message ?? err);
       finish({ ok: false, kind: isLocal ? "local" : "timeout", error: detail });
+    };
+
+    const failPreHttpEof = (stage) => () => {
+      if (!requestSent) {
+        finish({ ok: false, kind: "local", error: `telegram proxy closed before ${stage}` });
+      }
     };
 
     const timer = setTimeout(() => {
       finish({
         ok: false,
         kind: requestSent ? "timeout" : "local",
-        error: requestSent ? "telegram proxy request timed out" : "telegram proxy CONNECT timed out",
+        error: requestSent
+          ? "telegram proxy request timed out"
+          : connectConfirmed
+            ? "telegram proxy TLS handshake timed out"
+            : "telegram proxy CONNECT timed out",
       });
     }, timeoutMs);
 
+    const issueHttpRequest = (transportSock) => {
+      if (settled) return;
+      const defaultPort = useTls ? 443 : 80;
+      const hostHeader = targetPort === defaultPort ? connectHost : `${connectHost}:${targetPort}`;
+      singleUseAgent = useTls
+        ? new HttpsAgent({ keepAlive: false, maxSockets: 1 })
+        : new HttpAgent({ keepAlive: false, maxSockets: 1 });
+      singleUseAgent.createConnection = () => transportSock;
+      const requestFn = useTls ? httpsRequest : httpRequest;
+      const req = requestFn(
+        {
+          agent: singleUseAgent,
+          hostname: targetHost,
+          port: targetPort,
+          path: `${target.pathname}${target.search}`,
+          method: "POST",
+          headers: {
+            host: hostHeader,
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(payload, "utf8")),
+            connection: "close",
+          },
+        },
+        (res) => {
+          const chunks = [];
+          let totalBytes = 0;
+          res.on("data", (c) => {
+            totalBytes += c.length;
+            if (totalBytes > MAX_RESPONSE_BYTES) {
+              finish({ ok: false, kind: "timeout", error: `telegram proxy response exceeded ${MAX_RESPONSE_BYTES} bytes` });
+              return;
+            }
+            chunks.push(c);
+          });
+          res.on("error", failFromError);
+          res.on("aborted", () => {
+            finish({ ok: false, kind: "timeout", error: "telegram proxy response aborted mid-stream" });
+          });
+          res.once("close", () => {
+            if (!settled && !res.complete) {
+              finish({ ok: false, kind: "timeout", error: "telegram proxy response closed incomplete" });
+            }
+          });
+          res.on("end", () => {
+            const textBody = Buffer.concat(chunks).toString("utf8");
+            finish(parseTelegramBodyOrFail(res.statusCode ?? 0, textBody));
+          });
+        },
+      );
+      req.once("error", failFromError);
+      requestSent = true;
+      req.write(payload);
+      req.end();
+      transportSock.resume();
+    };
+
     rawSock.once("error", failFromError);
+    rawSock.once("close", failPreHttpEof("CONNECT 200"));
     rawSock.once("connect", () => {
       rawSock.write(`CONNECT ${connectHost}:${targetPort} HTTP/1.1\r\nHost: ${connectHost}:${targetPort}\r\n\r\n`);
     });
@@ -102,54 +197,34 @@ function sendViaConnectProxy({ endpoint, proxy, chatId, text, timeoutMs }) {
         return;
       }
       rawSock.off("data", onProxyHead);
-      const statusLine = head.slice(0, head.indexOf("\r\n"));
-      if (!/\s200\s/.test(` ${statusLine} `)) {
-        finish({ ok: false, kind: "local", error: `proxy CONNECT refused: ${statusLine.trim()}` });
+      const statusLine = head.slice(0, head.indexOf("\r\n")).trim();
+      if (!/^HTTP\/1\.[01]\s+200(?:\s|$)/.test(statusLine)) {
+        finish({ ok: false, kind: "local", error: `proxy CONNECT refused: ${statusLine}` });
         return;
       }
       connectConfirmed = true;
       const leftover = Buffer.from(head.slice(idx + 4), "latin1");
-      if (leftover.length > 0) rawSock.unshift(leftover);
+      if (leftover.length > 0) {
+        rawSock.pause();
+        rawSock.unshift(leftover);
+      }
 
-      const transportSock = useTls
-        ? tlsConnect({ socket: rawSock, servername: targetHost })
-        : rawSock;
+      if (!useTls) {
+        issueHttpRequest(rawSock);
+        return;
+      }
+
+      const tlsOpts = isIP(targetHost) === 0
+        ? { socket: rawSock, servername: targetHost }
+        : { socket: rawSock, host: targetHost };
+      const transportSock = tlsConnect(tlsOpts);
       activeSocket = transportSock;
       transportSock.once("error", failFromError);
-
-      const defaultPort = useTls ? 443 : 80;
-      const hostHeader = targetPort === defaultPort ? connectHost : `${connectHost}:${targetPort}`;
-      const req = httpRequest(
-        {
-          agent: false,
-          hostname: targetHost,
-          port: targetPort,
-          path: `${target.pathname}${target.search}`,
-          method: "POST",
-          headers: {
-            host: hostHeader,
-            "content-type": "application/json",
-            "content-length": String(Buffer.byteLength(payload, "utf8")),
-          },
-          createConnection: () => transportSock,
-        },
-        (res) => {
-          const chunks = [];
-          res.on("data", (c) => chunks.push(c));
-          res.on("end", () => {
-            const textBody = Buffer.concat(chunks).toString("utf8");
-            let parsed = null;
-            try {
-              parsed = JSON.parse(textBody);
-            } catch {}
-            finish({ ok: true, status: res.statusCode ?? 0, body: parsed });
-          });
-        },
-      );
-      req.once("error", failFromError);
-      requestSent = true;
-      req.write(payload);
-      req.end();
+      transportSock.once("close", failPreHttpEof("TLS handshake"));
+      transportSock.once("secureConnect", () => {
+        tlsConfirmed = true;
+        issueHttpRequest(transportSock);
+      });
     };
     rawSock.on("data", onProxyHead);
   });
@@ -206,18 +281,37 @@ try {
       text,
       disable_web_page_preview: true,
     }),
+    redirect: "error",
     signal: controller.signal,
   });
-  let parsed = null;
-  try {
-    parsed = await res.json();
-  } catch {}
-  process.stdout.write(JSON.stringify({ ok: true, status: res.status, body: parsed }));
+  let textBody = "";
+  if (res.body) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw Object.assign(new Error(`telegram direct response exceeded ${MAX_RESPONSE_BYTES} bytes`), { name: "AbortError" });
+      }
+      chunks.push(Buffer.from(value));
+    }
+    textBody = Buffer.concat(chunks).toString("utf8");
+  }
+  const bodyOutcome = parseTelegramBodyOrFail(res.status, textBody);
+  process.stdout.write(JSON.stringify(bodyOutcome.ok ? bodyOutcome : { ok: false, kind: bodyOutcome.kind, error: scrubToken(bodyOutcome.error, botToken) }));
 } catch (e) {
-  const causeCode = e?.cause?.code ?? e?.code ?? null;
+  const causeCode = e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.code ?? null;
+  const causeMsg = String(e?.cause?.message ?? "");
   const timedOut = controller.signal.aborted || e?.name === "AbortError";
-  const isPreSendLocal = !timedOut && typeof causeCode === "string" && LOCAL_NETWORK_CODES.has(causeCode);
-  const rawDetail = causeCode ? `${e?.message ?? e} (${causeCode})` : String(e?.message ?? e);
+  const isPreSendLocal =
+    !timedOut &&
+    ((typeof causeCode === "string" && LOCAL_NETWORK_CODES.has(causeCode)) ||
+      /^(?:bad port|unexpected redirect)$/i.test(causeMsg));
+  const rawDetail = causeCode ? `${e?.message ?? e} (${causeCode})` : (causeMsg || String(e?.message ?? e));
   process.stdout.write(
     JSON.stringify({
       ok: false,

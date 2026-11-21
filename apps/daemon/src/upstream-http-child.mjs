@@ -3,6 +3,21 @@
 // upstream-http.mjs (argv: endpoint, body JSON, timeout in ms). The child's
 // own abort deadline makes timeouts a clean, reported outcome; the parent's
 // longer spawn deadline is the wedge fallback.
+const LOCAL_NETWORK_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ERR_INVALID_URL",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
 const [endpoint, bodyJson, timeoutMsArg] = process.argv.slice(2);
 const timeoutMs = Number(timeoutMsArg);
 const body = JSON.parse(bodyJson);
@@ -14,6 +29,7 @@ try {
     method: "POST",
     headers: { "content-type": "application/json", "x-aegispi-request-kind": String(body.kind) },
     body: bodyJson,
+    redirect: "error",
     signal: controller.signal,
   });
   let parsed = null;
@@ -22,11 +38,18 @@ try {
   } catch {}
   process.stdout.write(JSON.stringify({ ok: true, status: res.status, body: parsed }));
 } catch (e) {
+  const code = e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.code ?? null;
+  const causeMsg = String(e?.cause?.message ?? e?.message ?? "");
+  const timedOut = e?.name === "AbortError" || controller.signal.aborted;
+  const isLocal =
+    !timedOut &&
+    ((typeof code === "string" && LOCAL_NETWORK_CODES.has(code)) ||
+      /^(?:bad port|unexpected redirect)$/i.test(causeMsg));
   process.stdout.write(
     JSON.stringify({
       ok: false,
-      kind: e?.name === "AbortError" ? "timeout" : "local",
-      error: String(e?.message ?? e),
+      kind: isLocal ? "local" : "timeout",
+      error: code ? `${e?.message ?? e} (${code})` : causeMsg || String(e?.message ?? e),
     }),
   );
 } finally {

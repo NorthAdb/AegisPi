@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-21T09:40:10.539Z",
+  "generatedAt": "2026-11-21T15:12:53.861Z",
   "ok": true,
   "summary": {
-    "passed": 126,
+    "passed": 134,
     "failed": 0,
-    "judged": 126,
+    "judged": 134,
     "taskBudgetCapMicrousd": 800000,
     "dayBudgetCapMicrousd": 5000000,
     "defaultsFailClosedPreserved": true
@@ -16,7 +16,7 @@
       "file": "docs/phase3/evidence/triage-report.json",
       "scope": "Scenario 4 offline baseline/target triage, oracle verdict, and outbox notify",
       "present": true,
-      "generatedAt": "2026-11-21T09:27:31.862Z",
+      "generatedAt": "2026-11-21T15:05:17.838Z",
       "passed": 7,
       "failed": 0,
       "judged": 7,
@@ -27,7 +27,7 @@
       "file": "docs/phase3/evidence/repo-observe-report.json",
       "scope": "Read-only repo observe acquisition, KV prefix ordering, and HELD stop",
       "present": true,
-      "generatedAt": "2026-11-21T09:28:46.092Z",
+      "generatedAt": "2026-11-21T15:01:22.279Z",
       "passed": 7,
       "failed": 0,
       "judged": 7,
@@ -38,7 +38,7 @@
       "file": "docs/phase3/evidence/model-proposal-report.json",
       "scope": "Agent->Host pi-ai 1.5.2 state machine T1-T10 and empty reply block",
       "present": true,
-      "generatedAt": "2026-11-21T09:29:44.255Z",
+      "generatedAt": "2026-11-21T15:00:08.355Z",
       "passed": 15,
       "failed": 0,
       "judged": 15,
@@ -49,10 +49,10 @@
       "file": "docs/phase3/evidence/security-unit-report.json",
       "scope": "Fail-closed credentials, ACL, budget, and Telegram outbound guards",
       "present": true,
-      "generatedAt": "2026-11-21T09:30:43.235Z",
-      "passed": 46,
+      "generatedAt": "2026-11-21T14:59:08.122Z",
+      "passed": 48,
       "failed": 0,
-      "judged": 46,
+      "judged": 48,
       "exitCode": 0
     },
     {
@@ -60,7 +60,7 @@
       "file": "docs/phase3/evidence/offline-jobs-report.json",
       "scope": "Offline container execution, deadlines, cancellation, and oracle gates",
       "present": true,
-      "generatedAt": "2026-11-21T09:39:16.306Z",
+      "generatedAt": "2026-11-21T15:11:54.174Z",
       "passed": 14,
       "failed": 0,
       "judged": 14,
@@ -71,7 +71,7 @@
       "file": "docs/phase3/evidence/security-integration-report.json",
       "scope": "Container network, rootfs, symlink, and escape integration matrix",
       "present": true,
-      "generatedAt": "2026-11-21T09:39:16.321Z",
+      "generatedAt": "2026-11-21T15:11:54.216Z",
       "passed": 29,
       "failed": 0,
       "judged": 29,
@@ -87,14 +87,46 @@
       "failed": 0,
       "judged": 8,
       "exitCode": 0
+    },
+    {
+      "id": "triage-real",
+      "file": "docs/phase3/evidence/triage-real-report.json",
+      "scope": "Unit 4.5 live GitHub + DeepSeek + container execution + @aegispibot DM acceptance (if present)",
+      "present": true,
+      "generatedAt": "2026-11-21T14:44:08.129Z",
+      "passed": 6,
+      "failed": 0,
+      "judged": 6,
+      "exitCode": 0
     }
   ],
   "realCostSummary": {
-    "sourceFile": "docs/phase3/evidence/repo-observe-real-report.json",
-    "generatedAt": "2026-11-21T05:28:45.388Z",
-    "passed": 8,
+    "id": "triage-real",
+    "sourceFile": "docs/phase3/evidence/triage-real-report.json",
+    "generatedAt": "2026-11-21T14:44:08.129Z",
+    "passed": 6,
     "failed": 0,
     "taskBudgetCapMicrousd": 800000,
     "dayBudgetCapMicrousd": 5000000
-  }
+  },
+  "realSummaries": [
+    {
+      "id": "repo-observe-real",
+      "sourceFile": "docs/phase3/evidence/repo-observe-real-report.json",
+      "generatedAt": "2026-11-21T05:28:45.388Z",
+      "passed": 8,
+      "failed": 0,
+      "taskBudgetCapMicrousd": 800000,
+      "dayBudgetCapMicrousd": 5000000
+    },
+    {
+      "id": "triage-real",
+      "sourceFile": "docs/phase3/evidence/triage-real-report.json",
+      "generatedAt": "2026-11-21T14:44:08.129Z",
+      "passed": 6,
+      "failed": 0,
+      "taskBudgetCapMicrousd": 800000,
+      "dayBudgetCapMicrousd": 5000000
+    }
+  ]
 }
