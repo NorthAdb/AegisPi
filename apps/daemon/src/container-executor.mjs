@@ -27,6 +27,7 @@
 // Container sidecars are stored with a "container:" prefix so the legacy
 // pid-based reaper ignores them and this module owns their lifecycle.
 
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -36,7 +37,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { withTx } from "./db/tx.mjs";
 import { writeAudit } from "./audit.mjs";
 import { insertObjectRow, putObjectContent } from "./objects.mjs";
@@ -488,31 +489,79 @@ export function createContainerExecutor(db, {
 }
 
 export function safeTaskDirComponent(taskId) {
-  return String(taskId).replace(/[^A-Za-z0-9._-]/g, "_");
+  const raw = String(taskId ?? "");
+  if (raw.length === 0) {
+    throw new ExecutorError("taskId must be a non-empty string");
+  }
+  const prefix = raw.replace(/[^A-Za-z0-9_-]/g, "_").replace(/^_+/, "").slice(0, 28) || "task";
+  const hash = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
+  return `${prefix}_${hash}`;
 }
 
 export function agentWorkAttemptDir(stateDir, taskId, attemptNo) {
-  return join(stateDir, "agent-work", safeTaskDirComponent(taskId), String(attemptNo));
+  const n = Number(attemptNo);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new ExecutorError(`attemptNo must be a positive integer, got ${JSON.stringify(attemptNo)}`);
+  }
+  const workRoot = resolve(stateDir, "agent-work");
+  const target = resolve(workRoot, safeTaskDirComponent(taskId), String(n));
+  if (!target.startsWith(workRoot + sep)) {
+    throw new ExecutorError(`agentWorkAttemptDir escaped agent-work boundary: ${target}`);
+  }
+  return target;
 }
 
-// Host proposals directory effective write-set lockdown (ADR-0001 §2, D-78
-// Conflict 2 option A):
-// - On Windows: NTFS has no Linux uid 999 principal and Docker Desktop
-//   proxies bind-mount writes as the daemon-running Windows account; remove
-//   inherited ACLs (which otherwise include Authenticated Users Modify) and
-//   grant (OI)(CI)F exclusively to that account, failing closed if any broad
-//   principal remains.
-// - On POSIX: chmod 0770 (never 0777 / 1777).
+function currentWindowsAccount() {
+  const who = spawnSync("whoami", { encoding: "utf8", shell: false });
+  const account = who.status === 0 && who.stdout.trim()
+    ? who.stdout.trim()
+    : (process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME);
+  if (!account) {
+    throw new ExecutorError("cannot resolve current Windows account to lock host directory");
+  }
+  return account;
+}
+
+function parseIcaclsEntries(raw, dirPath) {
+  const entries = [];
+  const prefixLower = dirPath.toLowerCase();
+  for (const line of String(raw ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || /^Successfully processed\b/i.test(trimmed) || /^No mapping\b/i.test(trimmed)) {
+      continue;
+    }
+    let acePart = trimmed;
+    if (trimmed.toLowerCase().startsWith(prefixLower)) {
+      acePart = trimmed.slice(dirPath.length).trim();
+    }
+    const colonIdx = acePart.indexOf(":");
+    if (colonIdx <= 0) continue;
+    const principal = acePart.slice(0, colonIdx).trim();
+    const perms = acePart.slice(colonIdx + 1).trim();
+    entries.push({ principal, perms });
+  }
+  return entries;
+}
+
 export function lockHostProposalsDir(proposalsDir) {
   mkdirSync(proposalsDir, { recursive: true });
   if (process.platform === "win32") {
-    const who = spawnSync("whoami", { encoding: "utf8", shell: false });
-    const account = who.status === 0 && who.stdout.trim()
-      ? who.stdout.trim()
-      : (process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME);
-    if (!account) {
-      throw new ExecutorError("cannot resolve current Windows account to lock host proposals directory");
+    const account = currentWindowsAccount();
+    const disableInherit = spawnSync("icacls", [proposalsDir, "/inheritance:r"], { encoding: "utf8", shell: false });
+    if (disableInherit.status !== 0) {
+      throw new ExecutorError(`icacls /inheritance:r failed on ${proposalsDir}: ${(disableInherit.stderr || disableInherit.stdout || "").trim()}`);
     }
+    const before = spawnSync("icacls", [proposalsDir], { encoding: "utf8", shell: false });
+    if (before.status === 0) {
+      const seen = new Set();
+      for (const entry of parseIcaclsEntries(before.stdout, proposalsDir)) {
+        if (entry.principal.toLowerCase() !== account.toLowerCase() && !seen.has(entry.principal.toLowerCase())) {
+          seen.add(entry.principal.toLowerCase());
+          spawnSync("icacls", [proposalsDir, "/remove", entry.principal], { encoding: "utf8", shell: false });
+        }
+      }
+    }
+    spawnSync("icacls", [proposalsDir, "/remove:d", account], { encoding: "utf8", shell: false });
     const grant = spawnSync(
       "icacls",
       [proposalsDir, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`],
@@ -535,29 +584,35 @@ export function inspectHostProposalsAcl(proposalsDir) {
   if (process.platform !== "win32") {
     return { ok: true, platform: process.platform, raw: "" };
   }
-  const who = spawnSync("whoami", { encoding: "utf8", shell: false });
-  const account = who.status === 0 ? who.stdout.trim().toLowerCase() : "";
+  const account = currentWindowsAccount();
   const r = spawnSync("icacls", [proposalsDir], { encoding: "utf8", shell: false });
   const raw = (r.stdout ?? "") + (r.stderr ?? "");
   if (r.status !== 0) {
     return { ok: false, reason: `icacls read failed: ${raw.trim()}`, raw };
   }
-  const lower = raw.toLowerCase();
-  const forbidden = ["authenticated users", "builtin\\users", "\\everyone", "everyone:"];
-  for (const bad of forbidden) {
-    if (lower.includes(bad)) {
-      return { ok: false, reason: `forbidden broad principal ${bad} present in ACL`, raw };
+  const entries = parseIcaclsEntries(raw, proposalsDir);
+  if (entries.length === 0) {
+    return { ok: false, reason: "no parsable ACL entries found", raw };
+  }
+  let hasDaemonAllow = false;
+  for (const { principal, perms } of entries) {
+    if (/\(N\)/i.test(perms) || /\bDENY\b/i.test(perms) || /\(D,/i.test(perms) || /,D\)/i.test(perms)) {
+      return { ok: false, reason: `deny ACE present for ${principal}: ${perms}`, raw };
+    }
+    if (principal.toLowerCase() !== account.toLowerCase()) {
+      return { ok: false, reason: `unexpected principal ${principal} present in ACL`, raw };
+    }
+    if (/\(F\)/i.test(perms)) {
+      hasDaemonAllow = true;
     }
   }
-  if (account && !lower.includes(account)) {
-    return { ok: false, reason: `daemon account ${account} missing from ACL`, raw };
+  if (!hasDaemonAllow) {
+    return { ok: false, reason: `daemon account ${account} lacks full-control allow ACE`, raw };
   }
-  return { ok: true, platform: "win32", account, raw };
+  return { ok: true, platform: "win32", account: account.toLowerCase(), raw };
 }
 
-// Production agent attempt launcher (parallel to createContainerExecutor for
-// --execution-image, ADR-0001 §2 & §9): per-attempt 3-path bind mount with
-// --network none, read-only rootfs, cap-drop ALL, and locked proposals ACL.
+// Production agent attempt launcher (parallel to createContainerExecutor for --execution-image, ADR-0001 §2 & §9).
 export function createAgentLauncher(db, {
   stateDir,
   imageRef,
@@ -581,6 +636,7 @@ export function createAgentLauncher(db, {
     const commandsDir = join(attemptDir, "host-commands");
     const contextPath = join(attemptDir, "context.json");
     rmSync(attemptDir, { recursive: true, force: true });
+    lockHostProposalsDir(attemptDir);
     mkdirSync(commandsDir, { recursive: true });
     lockHostProposalsDir(proposalsDir);
     const context = {
@@ -599,6 +655,10 @@ export function createAgentLauncher(db, {
       "run",
       "--detach",
       "--name", containerName,
+      "--label", "aegispi.role=agent",
+      "--label", `aegispi.state_dir=${resolve(stateDir)}`,
+      "--label", `aegispi.task_id=${taskId}`,
+      "--label", `aegispi.attempt_no=${attemptNo}`,
       "--network", network,
       "--init",
       "--cpus", String(quotas.cpus),
@@ -618,12 +678,17 @@ export function createAgentLauncher(db, {
       throw new ExecutorError(`docker run agent failed for ${taskId}#${attemptNo}: ${run.out.slice(0, 300)}`);
     }
     const containerId = run.out.split("\n").pop().trim();
-    writeAudit(db, {
-      code: "agent_container_launched",
-      taskId,
-      details: { attempt_id: attemptId, attempt_no: attemptNo, fence, container: containerId, image: imageRef, network },
-      now,
-    });
+    try {
+      writeAudit(db, {
+        code: "agent_container_launched",
+        taskId,
+        details: { attempt_id: attemptId, attempt_no: attemptNo, fence, container: containerId, image: imageRef, network },
+        now,
+      });
+    } catch (e) {
+      stopAttempt({ containerId, commandsDir });
+      throw e;
+    }
     return { containerId, containerName, attemptDir, proposalsDir, commandsDir, contextPath };
   }
 
@@ -644,6 +709,23 @@ export function createAgentLauncher(db, {
     return { exists: true, running: running === "true", exitCode: Number(exitCode) };
   }
 
+  function reapOrphanContainers({ activeIds = new Set() } = {}) {
+    const listed = docker(dockerBin, [
+      "ps", "-aq",
+      "--filter", "label=aegispi.role=agent",
+      "--filter", `label=aegispi.state_dir=${resolve(stateDir)}`,
+    ], { capture: true });
+    if (listed.code !== 0 || !listed.out) return [];
+    const reaped = [];
+    for (const id of listed.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+      if (activeIds.has(id)) continue;
+      docker(dockerBin, ["stop", "--time", "2", id]);
+      docker(dockerBin, ["rm", "-f", id]);
+      reaped.push(id);
+    }
+    return reaped;
+  }
+
   return {
     imageRef,
     quotas,
@@ -651,5 +733,6 @@ export function createAgentLauncher(db, {
     launchAttempt,
     stopAttempt,
     inspectContainer,
+    reapOrphanContainers,
   };
 }

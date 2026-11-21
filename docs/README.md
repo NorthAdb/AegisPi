@@ -7,7 +7,7 @@
 1. 根 [README](../README.md)：项目定位、已实现/未实现边界、运行前置条件。
 2. 本文：按类别找对资料，认清「现行」与「历史」身份。
 3. [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md)：现行权威状态清单（四项真实验收现状、审计归档、镜像、缺口、待办）。
-4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（方案已确认，未实施、未授权运行）；单元 4.1 的实施细则见 [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md)（已备待授权，不含运行授权）。
+4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：下一步的设计与计划（单元 4.1 已实施并收口；单元 4.2 真实运行仍未授权）；单元 4.1 的实施细则见 [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md)，收口报告见 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)。
 5. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
 
 ## 现行规范（操作依据）
@@ -16,7 +16,7 @@
 | --- | --- |
 | 本机设计包 `D:\AegisPi\aegis-pi-design-pack-v1.4.1` | 唯一规范来源，不随库分发；修订契约读原包 |
 | 根 [AGENTS.md](../AGENTS.md) | 仓库级硬约束（版本锁定、Phase 边界、敏感内容、证据格式、不越界） |
-| [apps/daemon/config/defaults.json](../apps/daemon/config/defaults.json) | 唯一策略默认（预算 $0.80/$5、失败关闭开关），git diff 始终 0 行 |
+| [apps/daemon/config/defaults.json](../apps/daemon/config/defaults.json) | 唯一策略默认（预算 $0.80/$5、失败关闭开关：baseUrl=null、双白名单=[]、allowReal*=false、四项 priceCatalog=null） |
 | [apps/daemon/config/schema-source.json](../apps/daemon/config/schema-source.json) | schema.sql 指针与哈希门（漂移即红） |
 
 ## 设计决策（现行）
@@ -39,10 +39,10 @@
 
 | 资料 | 用途 |
 | --- | --- |
-| [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-20）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 3 镜像证据、全量 12 套件 + Hono 预检通过记录、生产树 `model-call-child` 零出现证明、`defaults.json` 失败关闭核对与三项已知残留 |
+| [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-21 纪元 5 终版）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 5 镜像证据、全量 12 套件 + Hono 预检通过记录、生产树 `model-call-child` 零出现证明、`defaults.json` 失败关闭核对、三项已知残留与 §7 自审计 19 项加固整改汇总 |
 | [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**（2026-11-20）：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 实施完成）与 4.2 待办汇总 |
 | [phase3/reports/round-closure-2026-11-20-limited-fixes.md](phase3/reports/round-closure-2026-11-20-limited-fixes.md) | 限定修复收口：daemon 用例崩溃根因（测试层修复、生产零改动）与纪元 2 选择性重建；终树三 docker 套件 14/14、29/29、5/5 |
-| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（纪元 3：重建 `agent`，携带 `acquisition`/`execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
+| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（纪元 5：重建 `agent`，携带 `acquisition`/`execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
 | [phase3/reports/quota-calibration.md](phase3/reports/quota-calibration.md) | 容器配额占位值的实测依据（CPU/内存/pids/可写盘） |
 
 ## 历史收口与审计（史实身份，不作现行操作依据）

@@ -106,6 +106,11 @@ export function startupRecovery(db, {
   const ledger = createBudgetLedger(db, {});
   const hasModelRequests =
     db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_requests'").get() !== undefined;
+  if (hasModelRequests) {
+    db.prepare(
+      "UPDATE model_requests SET state='FAILED', error_code='stranded_received_recovered', updated_at=? WHERE state='RECEIVED'",
+    ).run(now);
+  }
   const staleHeld = hasModelRequests
     ? db
         .prepare(

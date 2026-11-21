@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T15:01:04.227Z",
+  "generatedAt": "2026-11-21T01:00:50.624Z",
   "nodeVersion": "v22.23.5",
   "results": [
     {
@@ -299,7 +299,7 @@
         {
           "name": "physical-model-in-catalog",
           "status": "PASS",
-          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:50663"
+          "detail": "getModel('deepseek','deepseek-flash') = deepseek-flash @ http://127.0.0.1:65101"
         },
         {
           "name": "dts-two-route-signatures",
@@ -574,7 +574,7 @@
         {
           "name": "entries-cursor",
           "status": "PASS",
-          "detail": "entries=8 leafId=7c881462 after-cursor=0"
+          "detail": "entries=8 leafId=802d5fc3 after-cursor=0"
         },
         {
           "name": "new_session",
@@ -657,7 +657,7 @@
         {
           "name": "compact-response-usage",
           "status": "PASS",
-          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"7ac967d5\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
+          "detail": "compact response: {\"id\":\"c1\",\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"summary\":\"No prior history.\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe summarized conversation so far\",\"firstKeptEntryId\":\"ecddbd6c\",\"tokensBefore\":46,\"estimatedTokensAfter\":61039,\"usage\":{\"input\":12,\"output\":34,\"cacheRead"
         }
       ]
     },
@@ -673,17 +673,17 @@
           "detail": "spawned CLI node is v22.23.5 (LOCKED_NODE=D:\\AegisPi\\tools\\node-v22.23.5\\node.exe)"
         },
         {
-          "name": "confirm-request:ac203691",
+          "name": "confirm-request:d32b0031",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe confirm\",\"message\":\"Allow?\",\"timeout\":8000}"
         },
         {
-          "name": "select-request:a5e64ba3",
+          "name": "select-request:72716a34",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe select\",\"options\":[\"A\",\"B\"],\"timeout\":8000}"
         },
         {
-          "name": "editor-request:79388474",
+          "name": "editor-request:327142bf",
           "status": "PASS",
           "detail": "nested options: {\"title\":\"Probe editor\",\"prefill\":\"draft\"}"
         },
@@ -743,32 +743,32 @@
         {
           "name": "persistent-session-created",
           "status": "PASS",
-          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-swuJ7E\\2026-11-20T15-00-58-133Z_01a1f979-9895-7706-b7a3-c9905acc8a8e.jsonl"
+          "detail": "sessionFile=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-tRvODr\\2026-11-21T01-00-44-424Z_01a1fb9e-b407-7079-ba5a-dbb9ea9a4b74.jsonl"
         },
         {
           "name": "original-dir-removed",
           "status": "PASS",
-          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-swuJ7E\\2026-11-20T15-00-58-133Z_01a1f979-9895-7706-b7a3-c9905acc8a8e.jsonl"
+          "detail": "wsA deleted; session file remains at C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-tRvODr\\2026-11-21T01-00-44-424Z_01a1fb9e-b407-7079-ba5a-dbb9ea9a4b74.jsonl"
         },
         {
           "name": "rpc-resume-with-gone-dir-errors",
           "status": "PASS",
-          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-U9IagW\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-swuJ7E\\2026-11-20T15-00-58-133Z_01a1f979-9895-7706-b7a3-c990"
+          "detail": "RPC resume exit code=1; stderr: Stored session working directory does not exist: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-9elUUI\nSession file: C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-tRvODr\\2026-11-21T01-00-44-424Z_01a1fb9e-b407-7079-ba5a-dbb9"
         },
         {
           "name": "fork-into-new-dir-works",
           "status": "PASS",
-          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-swuJ7E\\2026-11-20T15-00-59-377Z_01a1f979-9d70-7733-8b51-0aae5a32145b.jsonl"
+          "detail": "forked session file=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-tRvODr\\2026-11-21T01-00-45-699Z_01a1fb9e-b902-7130-ae8d-8d48f2b88e96.jsonl"
         },
         {
           "name": "fork-preserves-conversation",
           "status": "PASS",
-          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"75b24c7f\",\"parentId\":null,\"timestamp\":\"2026-11-20T15:00:58.135Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"e2242ce1\",\"parentId\":"
+          "detail": "forked entries contain the original prompt: [{\"type\":\"session_info\",\"id\":\"216f2eb5\",\"parentId\":null,\"timestamp\":\"2026-11-21T01:00:44.426Z\",\"name\":\"pi08\"},{\"type\":\"model_change\",\"id\":\"73c9c6f8\",\"parentId\":"
         },
         {
           "name": "fork-header-parent-session",
           "status": "PASS",
-          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-swuJ7E\\2026-11-20T15-00-58-133Z_01a1f979-9895-7706-b7a3-c9905acc8a8e.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-7BQwdg"
+          "detail": "header parentSession=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-tRvODr\\2026-11-21T01-00-44-424Z_01a1fb9e-b407-7079-ba5a-dbb9ea9a4b74.jsonl cwd=C:\\Users\\1\\AppData\\Local\\Temp\\aegispi-phase1-probes\\ws-VLISNL"
         }
       ]
     },
@@ -781,7 +781,7 @@
         {
           "name": "catalog-metadata-preserved-under-override",
           "status": "PASS",
-          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:51046"
+          "detail": "deepseek-flash after baseUrl override: contextWindow=1000000 maxTokens=384000 cost.input=0.3 baseUrl=http://127.0.0.1:62104"
         },
         {
           "name": "env-var-makes-provider-available",

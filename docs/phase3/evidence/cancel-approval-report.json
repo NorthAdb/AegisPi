@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T15:01:45.876Z",
+  "generatedAt": "2026-11-21T01:01:35.533Z",
   "nodeVersion": "v22.23.5",
   "suite": "cancel-approval",
   "label": "test:cancel-approval — 审批/取消线性化（生产路径，fake 远端）",

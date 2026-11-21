@@ -37,7 +37,7 @@ const CONTEXT_PATH = join(WORK_ROOT, "context.json");
 
 export const WORKER_VERSION = 1;
 export const MAX_MODEL_MESSAGES_BYTES = 128 * 1024;
-export const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // Env names that must NEVER be set inside the agent container: a leaked key
 // in the environment is the asset boundary tests care most about.
@@ -230,7 +230,12 @@ export async function serveCommands({
       const p = join(commandsDir, f);
       let cmd;
       try {
-        cmd = JSON.parse(readFileSync(p, "utf8"));
+        const parsedCmd = JSON.parse(readFileSync(p, "utf8"));
+        if (parsedCmd === null || typeof parsedCmd !== "object" || Array.isArray(parsedCmd)) {
+          cmd = { kind: "invalid", parseError: "command JSON must be an object" };
+        } else {
+          cmd = parsedCmd;
+        }
       } catch (e) {
         cmd = { kind: "invalid", parseError: e.message };
       }

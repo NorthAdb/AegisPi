@@ -23,7 +23,12 @@ import { writeAudit } from "./audit.mjs";
 import { assertLiveReservation, PURPOSES } from "./budget.mjs";
 import { extraFieldsOfAction } from "./effects.mjs";
 import { createCredentialService } from "./credentials.mjs";
-import { callModelOnce, isLoopbackModelEndpoint } from "./model-call.mjs";
+import {
+  assertValidModelBaseUrl,
+  callModelOnce,
+  isLoopbackModelEndpoint,
+  validateModelMessages,
+} from "./model-call.mjs";
 
 export class AdapterRefused extends Error {}
 
@@ -41,6 +46,10 @@ export const OPERATIONS = {
       if (!STRING(intent.targetResource)) return "model.inference needs a purpose-bound target resource";
       if (!intent.extra || !["router", "worker", "summary", "classify", "rsi", "replay", "warming", "watchdog"].includes(intent.extra.purpose)) {
         return "model.inference needs a known chargeable purpose in extra.purpose";
+      }
+      if (intent.extra.messages !== undefined) {
+        const msgCheck = validateModelMessages(intent.extra.messages);
+        if (!msgCheck.ok) return msgCheck.reason;
       }
       return null;
     },
@@ -235,7 +244,7 @@ export function createAdapterUpstream(db, {
           };
         }
       }
-      if (opName === "model.inference" && (modelConfig || transportKind !== "fake")) {
+      if (opName === "model.inference" && transportKind !== "fake") {
         const validated = this.validateIntent(opName, intent);
         if (!validated.ok) {
           auditRefusal(opName, validated.reason, effectId);
@@ -244,6 +253,12 @@ export function createAdapterUpstream(db, {
         if (!modelConfig?.baseUrl) {
           auditRefusal(opName, "model.baseUrl is null (fail closed)", effectId);
           return { status: "failed_local", error: "adapter refused: model.baseUrl is not configured (fail closed)" };
+        }
+        try {
+          assertValidModelBaseUrl(modelConfig.baseUrl);
+        } catch (e) {
+          auditRefusal(opName, e.message, effectId);
+          return { status: "failed_local", error: `adapter refused: ${e.message}` };
         }
         if (!isLoopbackModelEndpoint(modelConfig.baseUrl) && modelConfig.allowRealModelCalls !== true) {
           auditRefusal(opName, "non-loopback model.baseUrl without allowRealModelCalls", effectId);
@@ -264,21 +279,36 @@ export function createAdapterUpstream(db, {
           return { status: "failed_local", error: `adapter refused: modelId ${modelKey} is not in model.allowedModelIds` };
         }
         const cred = createCredentialService(db).resolve("model");
-        const bearer = cred.ok ? cred.value : (credentials.model ?? null);
+        const bearer = cred.ok ? cred.value : null;
+        if (!bearer || !bearer.trim()) {
+          auditRefusal(opName, "credential slot model is unwired or empty", effectId);
+          return { status: "failed_local", error: "adapter refused: model credential slot is not wired or revoked" };
+        }
         const messages = Array.isArray(intent.extra.messages) && intent.extra.messages.length > 0
           ? intent.extra.messages
           : [{ role: "user", content: typeof intent.extra.prompt === "string" && intent.extra.prompt.length > 0 ? intent.extra.prompt : `effect ${effectId ?? businessKey}` }];
-        const call = callModelOnce({
-          baseUrl: modelConfig.baseUrl,
-          model: modelKey,
-          messages,
-          timeoutMs: modelConfig.callTimeoutMs ?? 60000,
-          bearer,
-        });
+        const msgCheck = validateModelMessages(messages);
+        if (!msgCheck.ok) {
+          auditRefusal(opName, msgCheck.reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${msgCheck.reason}` };
+        }
+        let call;
+        try {
+          call = callModelOnce({
+            baseUrl: modelConfig.baseUrl,
+            model: modelKey,
+            messages,
+            timeoutMs: modelConfig.callTimeoutMs ?? 60000,
+            bearer,
+          });
+        } catch (e) {
+          auditRefusal(opName, e.message, effectId);
+          return { status: "failed_local", error: `adapter refused: ${e.message}` };
+        }
         if (!call.ok) {
-          return call.kind === "timeout"
-            ? { status: "unknown", error: call.error }
-            : { status: "failed_remote", error: call.error };
+          if (call.kind === "timeout") return { status: "unknown", error: call.error };
+          if (call.kind === "local") return { status: "failed_local", error: call.error };
+          return { status: "failed_remote", error: call.error };
         }
         return {
           status: "succeeded",

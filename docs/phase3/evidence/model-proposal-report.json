@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-20T14:52:17.745Z",
+  "generatedAt": "2026-11-21T00:52:07.853Z",
   "nodeVersion": "v22.23.5",
   "suite": "model-proposal",
   "label": "test:model-proposal — Phase 4.1 模型提议链路全量本地闭环与 T1–T10 矩阵",
   "counts": {
-    "pass": 13,
+    "pass": 14,
     "fail": 0
   },
   "results": [
@@ -21,7 +21,7 @@
     {
       "name": "production-agent-launcher-acl-and-bind-isolation",
       "status": "PASS",
-      "detail": "daemon=0 task=SUCCEEDED req=SETTLED res=SETTLED/28 aclOk=true iso=\"rootfs=RO:EROFS cmds=RO:EROFS prop=RW\" nonUuidRejected=true"
+      "detail": "daemon=0 task=SUCCEEDED req=SETTLED res=SETTLED/28 attemptAcl=true aclOk=true iso=\"rootfs=RO:EROFS cmds=RO:EROFS ctx=RO:EROFS prop=RW\" nonUuidRejected=true"
     },
     {
       "name": "t2-refused-inputs-and-budget-rejection",
@@ -72,6 +72,11 @@
       "name": "remaining-boundaries-timeout-overcharge-and-adapter-unified-core",
       "status": "PASS",
       "detail": "timeout=EXECUTING/CHARGED_BOUND(1000) overchargeFrozen=1/2 adapter=succeeded/deepseek-flash//chat/completions"
+    },
+    {
+      "name": "adversarial-hardening-invariants",
+      "status": "PASS",
+      "detail": "revoked=call_failed warm=warming_disabled upper=invalid_request_id leaseExp=ORPHAN/SETTLED(28) compsUnique=true explicitAclCleaned=true"
     }
   ],
   "dataSources": "digest 钉住 agent 容器（--network none / PI_OFFLINE=1 / 只读 rootfs / 宿主 ACL 锁定 proposals）+ 真实 daemon tick + pi-ai 1.5.2 子进程 + 本地 OpenAI SSE 环回服务 + 真实 SQLite 账本与 crashpoint 注入；零真实推理服务调用，未读 .env"

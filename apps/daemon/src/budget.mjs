@@ -174,6 +174,21 @@ export function createBudgetLedger(db, {
     });
   }
 
+  function inSavepoint(name, fn) {
+    db.exec(`SAVEPOINT ${name}`);
+    try {
+      const out = fn();
+      db.exec(`RELEASE ${name}`);
+      return out;
+    } catch (e) {
+      try {
+        db.exec(`ROLLBACK TO ${name}`);
+        db.exec(`RELEASE ${name}`);
+      } catch {}
+      throw e;
+    }
+  }
+
   function reserveInTx({
     requestKey,
     taskId = null,
@@ -184,56 +199,10 @@ export function createBudgetLedger(db, {
     accounts,
     now,
   }) {
-    const existing = db
-      .prepare("SELECT id, state FROM budget_reservations WHERE request_key=?")
-      .get(requestKey);
-    if (existing) {
-      return { reservationId: existing.id, state: existing.state, duplicate: true };
-    }
-    const reservationId = `res:${requestKey}`;
-    db.prepare(
-      `INSERT INTO budget_reservations(id, request_key, task_id, purpose, provider, price_version,
-        state, upper_microusd, actual_microusd, created_at, settled_at)
-       VALUES (?,?,?,?,?,?, 'HELD', ?, NULL, ?, NULL)`,
-    ).run(reservationId, requestKey, taskId, purpose, provider, priceVersion, upperMicrousd, now);
-    for (const a of accounts) {
-      const changed = db
-        .prepare(
-          `UPDATE budget_accounts SET held_microusd=held_microusd+?
-           WHERE id=? AND frozen=0 AND spent_microusd+held_microusd+?<=limit_microusd`,
-        )
-        .run(a.amountMicrousd, a.accountId, a.amountMicrousd).changes;
-      if (changed !== 1) {
-        const acc = db.prepare("SELECT frozen, spent_microusd, held_microusd, limit_microusd FROM budget_accounts WHERE id=?").get(a.accountId);
-        if (!acc) {
-          throw new BudgetError(`account ${a.accountId} not found`);
-        }
-        if (acc.frozen) {
-          throw new AccountFrozen(`account ${a.accountId} is frozen`);
-        }
-        throw new BudgetExceeded(
-          `account ${a.accountId} cannot hold ${a.amountMicrousd}: spent=${acc.spent_microusd} held=${acc.held_microusd} limit=${acc.limit_microusd}`,
-        );
-      }
-      db.prepare(
-        "INSERT INTO reservation_accounts(reservation_id, account_id, amount_microusd) VALUES (?,?,?)",
-      ).run(reservationId, a.accountId, a.amountMicrousd);
-    }
-    writeAudit(db, {
-      code: "budget_reserved",
-      taskId,
-      details: { reservation_id: reservationId, purpose, provider, price_version: priceVersion, upper_microusd: upperMicrousd, accounts: accounts.map((a) => `${a.accountId}:${a.amountMicrousd}`) },
-      now,
-    });
-    return { reservationId, state: "HELD", duplicate: false };
-  }
-
-  function reserve(opts) {
-    const { purpose, upperMicrousd, accounts } = opts;
     if (!PURPOSES.includes(purpose)) {
       throw new BudgetError(`purpose ${purpose} is not one of the eight 06 section 8 purposes`);
     }
-    if (!Number.isInteger(upperMicrousd) || upperMicrousd < 0) {
+    if (!Number.isSafeInteger(upperMicrousd) || upperMicrousd < 0) {
       throw new BudgetError("upper_microusd must be a non-negative integer");
     }
     if (purpose === "warming" && !warmingEnabled) {
@@ -242,6 +211,58 @@ export function createBudgetLedger(db, {
     if (!Array.isArray(accounts) || accounts.length === 0) {
       throw new BudgetError("a reservation must name at least one account");
     }
+    for (const a of accounts) {
+      if (!a || typeof a.accountId !== "string" || !Number.isSafeInteger(a.amountMicrousd) || a.amountMicrousd < 0) {
+        throw new BudgetError(`invalid reservation account entry: ${JSON.stringify(a)}`);
+      }
+    }
+    return inSavepoint("budget_reserve", () => {
+      const existing = db
+        .prepare("SELECT id, state FROM budget_reservations WHERE request_key=?")
+        .get(requestKey);
+      if (existing) {
+        return { reservationId: existing.id, state: existing.state, duplicate: true };
+      }
+      const reservationId = `res:${requestKey}`;
+      db.prepare(
+        `INSERT INTO budget_reservations(id, request_key, task_id, purpose, provider, price_version,
+          state, upper_microusd, actual_microusd, created_at, settled_at)
+         VALUES (?,?,?,?,?,?, 'HELD', ?, NULL, ?, NULL)`,
+      ).run(reservationId, requestKey, taskId, purpose, provider, priceVersion, upperMicrousd, now);
+      for (const a of accounts) {
+        const changed = db
+          .prepare(
+            `UPDATE budget_accounts SET held_microusd=held_microusd+?
+             WHERE id=? AND frozen=0 AND spent_microusd+held_microusd+?<=limit_microusd`,
+          )
+          .run(a.amountMicrousd, a.accountId, a.amountMicrousd).changes;
+        if (changed !== 1) {
+          const acc = db.prepare("SELECT frozen, spent_microusd, held_microusd, limit_microusd FROM budget_accounts WHERE id=?").get(a.accountId);
+          if (!acc) {
+            throw new BudgetError(`account ${a.accountId} not found`);
+          }
+          if (acc.frozen) {
+            throw new AccountFrozen(`account ${a.accountId} is frozen`);
+          }
+          throw new BudgetExceeded(
+            `account ${a.accountId} cannot hold ${a.amountMicrousd}: spent=${acc.spent_microusd} held=${acc.held_microusd} limit=${acc.limit_microusd}`,
+          );
+        }
+        db.prepare(
+          "INSERT INTO reservation_accounts(reservation_id, account_id, amount_microusd) VALUES (?,?,?)",
+        ).run(reservationId, a.accountId, a.amountMicrousd);
+      }
+      writeAudit(db, {
+        code: "budget_reserved",
+        taskId,
+        details: { reservation_id: reservationId, purpose, provider, price_version: priceVersion, upper_microusd: upperMicrousd, accounts: accounts.map((a) => `${a.accountId}:${a.amountMicrousd}`) },
+        now,
+      });
+      return { reservationId, state: "HELD", duplicate: false };
+    });
+  }
+
+  function reserve(opts) {
     return withTx(db, () => reserveInTx(opts));
   }
 
@@ -286,87 +307,89 @@ export function createBudgetLedger(db, {
   // usage must never settle as zero cost (06 section 8; Phase 1 N11 kept the
   // zero-value predicate honest — this is its budget-side twin).
   function settleInTx({ reservationId, usage, now, actorId = null }) {
-    const row = reservationRow(reservationId);
-    if (!row) throw new BudgetError(`reservation ${reservationId} not found`);
-    if (row.state !== "HELD") {
-      throw new BudgetError(`reservation ${reservationId} is ${row.state}; only HELD settles`);
-    }
-    const split = splitAccounts(reservationId, usage.actualMicrousd, row.upper_microusd);
-    for (const s of split) {
-      const changed = db
-        .prepare(
-          "UPDATE budget_accounts SET held_microusd=held_microusd-?, spent_microusd=spent_microusd+? WHERE id=? AND held_microusd>=?",
-        )
-        .run(s.heldDrop, s.spentRise, s.accountId, s.heldDrop).changes;
-      if (changed !== 1) {
-        throw new BudgetError(`account ${s.accountId} cannot release held ${s.heldDrop}`);
-      }
-    }
-    db.prepare(
-      "UPDATE budget_reservations SET state='SETTLED', actual_microusd=?, settled_at=? WHERE id=? AND state='HELD'",
-    ).run(usage.actualMicrousd, now, reservationId);
-    writeAudit(db, {
-      code: "budget_settled",
-      taskId: row.task_id,
-      actorId,
-      details: { reservation_id: reservationId, purpose: row.purpose, actual_microusd: usage.actualMicrousd, upper_microusd: row.upper_microusd, usage },
-      now,
-    });
-    if (usage.actualMicrousd > row.upper_microusd) {
-      // Over the computed bound: record honestly, freeze, alert (06 section 8).
-      for (const s of split) {
-        db.prepare("UPDATE budget_accounts SET frozen=1 WHERE id=?").run(s.accountId);
-        writeAudit(db, {
-          code: "budget_overcharge_frozen",
-          taskId: row.task_id,
-          details: { account_id: s.accountId, actual_microusd: usage.actualMicrousd, upper_microusd: row.upper_microusd },
-          now,
-        });
-        writeStreamEvent(db, {
-          scopeId: "scp:service:budget",
-          eventType: "audit_alert",
-          entityId: `account:${s.accountId}`,
-          entityVersion: 1,
-          payload: { overcharge: usage.actualMicrousd - row.upper_microusd },
-          now,
-        });
-      }
-    }
-    return { state: "SETTLED", overcharged: usage.actualMicrousd > row.upper_microusd };
-  }
-
-  function settle(opts) {
-    const { reservationId, usage } = opts;
-    if (!usage || !Number.isInteger(usage.actualMicrousd) || usage.actualMicrousd < 0) {
+    if (!usage || !Number.isSafeInteger(usage.actualMicrousd) || usage.actualMicrousd < 0) {
       throw new MissingUsage(
         `settlement of ${reservationId} requires a trusted usage with integer actualMicrousd (>=0); refusing to settle unknown usage`,
       );
     }
+    return inSavepoint("budget_settle", () => {
+      const row = reservationRow(reservationId);
+      if (!row) throw new BudgetError(`reservation ${reservationId} not found`);
+      if (row.state !== "HELD") {
+        throw new BudgetError(`reservation ${reservationId} is ${row.state}; only HELD settles`);
+      }
+      const split = splitAccounts(reservationId, usage.actualMicrousd, row.upper_microusd);
+      for (const s of split) {
+        const changed = db
+          .prepare(
+            "UPDATE budget_accounts SET held_microusd=held_microusd-?, spent_microusd=spent_microusd+? WHERE id=? AND held_microusd>=?",
+          )
+          .run(s.heldDrop, s.spentRise, s.accountId, s.heldDrop).changes;
+        if (changed !== 1) {
+          throw new BudgetError(`account ${s.accountId} cannot release held ${s.heldDrop}`);
+        }
+      }
+      db.prepare(
+        "UPDATE budget_reservations SET state='SETTLED', actual_microusd=?, settled_at=? WHERE id=? AND state='HELD'",
+      ).run(usage.actualMicrousd, now, reservationId);
+      writeAudit(db, {
+        code: "budget_settled",
+        taskId: row.task_id,
+        actorId,
+        details: { reservation_id: reservationId, purpose: row.purpose, actual_microusd: usage.actualMicrousd, upper_microusd: row.upper_microusd, usage },
+        now,
+      });
+      if (usage.actualMicrousd > row.upper_microusd) {
+        for (const s of split) {
+          db.prepare("UPDATE budget_accounts SET frozen=1 WHERE id=?").run(s.accountId);
+          writeAudit(db, {
+            code: "budget_overcharge_frozen",
+            taskId: row.task_id,
+            details: { account_id: s.accountId, actual_microusd: usage.actualMicrousd, upper_microusd: row.upper_microusd },
+            now,
+          });
+          writeStreamEvent(db, {
+            scopeId: "scp:service:budget",
+            eventType: "audit_alert",
+            entityId: `account:${s.accountId}`,
+            entityVersion: 1,
+            payload: { overcharge: usage.actualMicrousd - row.upper_microusd },
+            now,
+          });
+        }
+      }
+      return { state: "SETTLED", overcharged: usage.actualMicrousd > row.upper_microusd };
+    });
+  }
+
+  function settle(opts) {
     return withTx(db, () => settleInTx(opts));
   }
 
   function releaseInTx({ reservationId, reason, now, actorId = null }) {
-    const row = reservationRow(reservationId);
-    if (!row) throw new BudgetError(`reservation ${reservationId} not found`);
-    if (row.state !== "HELD") {
-      throw new BudgetError(`reservation ${reservationId} is ${row.state}; only HELD can release`);
-    }
-    const split = splitAccounts(reservationId, 0, row.upper_microusd);
-    for (const s of split) {
-      const changed = db
-        .prepare("UPDATE budget_accounts SET held_microusd=held_microusd-? WHERE id=? AND held_microusd>=?")
-        .run(s.heldDrop, s.accountId, s.heldDrop).changes;
-      if (changed !== 1) throw new BudgetError(`account ${s.accountId} cannot release held ${s.heldDrop}`);
-    }
-    db.prepare("UPDATE budget_reservations SET state='RELEASED', settled_at=? WHERE id=? AND state='HELD'").run(now, reservationId);
-    writeAudit(db, {
-      code: "budget_released",
-      taskId: row.task_id,
-      actorId,
-      details: { reservation_id: reservationId, reason },
-      now,
+    return inSavepoint("budget_release", () => {
+      const row = reservationRow(reservationId);
+      if (!row) throw new BudgetError(`reservation ${reservationId} not found`);
+      if (row.state !== "HELD") {
+        throw new BudgetError(`reservation ${reservationId} is ${row.state}; only HELD can release`);
+      }
+      const split = splitAccounts(reservationId, 0, row.upper_microusd);
+      for (const s of split) {
+        const changed = db
+          .prepare("UPDATE budget_accounts SET held_microusd=held_microusd-? WHERE id=? AND held_microusd>=?")
+          .run(s.heldDrop, s.accountId, s.heldDrop).changes;
+        if (changed !== 1) throw new BudgetError(`account ${s.accountId} cannot release held ${s.heldDrop}`);
+      }
+      db.prepare("UPDATE budget_reservations SET state='RELEASED', settled_at=? WHERE id=? AND state='HELD'").run(now, reservationId);
+      writeAudit(db, {
+        code: "budget_released",
+        taskId: row.task_id,
+        actorId,
+        details: { reservation_id: reservationId, reason },
+        now,
+      });
+      return { state: "RELEASED" };
     });
-    return { state: "RELEASED" };
   }
 
   // "确定未发出且未计费才RELEASED" — the caller must state the justification;

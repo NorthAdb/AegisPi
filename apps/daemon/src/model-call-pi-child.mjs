@@ -65,6 +65,15 @@ try {
 
 const { baseUrl, provider, modelId, messages, timeoutMs, apiKey, maxTokens } = req;
 
+if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_000_000) {
+  process.stdout.write(JSON.stringify({ ok: false, kind: "local", error: `invalid timeoutMs: ${JSON.stringify(timeoutMs)}` }));
+  process.exit(0);
+}
+if (typeof apiKey !== "string" || apiKey.trim().length === 0) {
+  process.stdout.write(JSON.stringify({ ok: false, kind: "local", error: "No API key: missing or empty apiKey (fail closed before HTTP)" }));
+  process.exit(0);
+}
+
 let builtin;
 try {
   builtin = getBuiltinModel(provider, modelId);
@@ -85,26 +94,27 @@ const model = { ...builtin, baseUrl };
 const piMessages = buildPiMessages(messages, model);
 
 const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || 60000);
+const timer = setTimeout(() => controller.abort(), timeoutMs);
 
 try {
   const options = {
     reasoning: "high",
     env: {},
     maxRetries: 0,
-    timeoutMs: Number(timeoutMs) || 60000,
+    timeoutMs,
     signal: controller.signal,
-    ...(typeof apiKey === "string" && apiKey.length > 0 ? { apiKey } : {}),
+    apiKey,
     ...(Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
   };
   const msg = await completeSimple(model, { messages: piMessages }, options);
   const usage = extractUsage(msg?.usage);
   if (msg?.stopReason === "error" || msg?.stopReason === "aborted") {
     const isTimeout = msg.stopReason === "aborted" || controller.signal.aborted;
+    const isLocalPreflight = !isTimeout && typeof msg.errorMessage === "string" && /^no api key/i.test(msg.errorMessage);
     process.stdout.write(
       JSON.stringify({
         ok: false,
-        kind: isTimeout ? "timeout" : "provider_error",
+        kind: isTimeout ? "timeout" : isLocalPreflight ? "local" : "provider_error",
         stopReason: msg.stopReason,
         error: msg.errorMessage || `provider stopped with ${msg.stopReason}`,
         usage,

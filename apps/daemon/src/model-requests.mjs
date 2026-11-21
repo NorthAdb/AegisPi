@@ -13,14 +13,24 @@ import { writeAudit } from "./audit.mjs";
 import { PURPOSES } from "./budget.mjs";
 import { createCredentialService } from "./credentials.mjs";
 import { putObjectContent, insertObjectRow } from "./objects.mjs";
-import { completeTaskInTx, deliveryAckCheckpoint, deliveryDone } from "./scheduler.mjs";
-import { callModelOnce, isLoopbackModelEndpoint, microusdForUsage } from "./model-call.mjs";
+import { completeTaskInTx, deliveryAckCheckpoint, deliveryDone, heartbeat } from "./scheduler.mjs";
+import {
+  assertValidModelBaseUrl,
+  callModelOnce,
+  callModelOnceAsync,
+  isLoopbackModelEndpoint,
+  MAX_MODEL_MESSAGES_BYTES,
+  microusdForUsage,
+  parseModelWhitelistKey,
+  validateModelMessages,
+} from "./model-call.mjs";
 import { crashpoint } from "./testing/crashpoints.mjs";
 
 export class ModelRequestError extends Error {}
 
-export const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-export const MAX_MODEL_MESSAGES_BYTES = 128 * 1024;
+export const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export { MAX_MODEL_MESSAGES_BYTES };
+export const MAX_PROPOSAL_FILE_BYTES = MAX_MODEL_MESSAGES_BYTES + 16 * 1024;
 
 const ALLOWED_ENVELOPE_KEYS = new Set([
   "schemaVersion",
@@ -34,8 +44,6 @@ const ALLOWED_ENVELOPE_KEYS = new Set([
   "modelId",
   "messages",
 ]);
-const ALLOWED_MESSAGE_KEYS = new Set(["role", "content"]);
-const ALLOWED_ROLES = new Set(["system", "user", "assistant"]);
 
 export function isUuidV4(value) {
   return typeof value === "string" && UUID_V4_RE.test(value);
@@ -84,44 +92,27 @@ export function validateModelRequestEnvelope(envelope) {
   if (!Number.isInteger(envelope.fence) || envelope.fence <= 0) {
     return { ok: false, code: "invalid_fence", reason: "fence must be a positive integer" };
   }
-  if (!Array.isArray(envelope.messages) || envelope.messages.length === 0) {
-    return { ok: false, code: "invalid_messages", reason: "messages must be a non-empty array" };
-  }
-  for (let i = 0; i < envelope.messages.length; i += 1) {
-    const m = envelope.messages[i];
-    if (m === null || typeof m !== "object" || Array.isArray(m)) {
-      return { ok: false, code: "invalid_messages", reason: `messages[${i}] must be an object` };
-    }
-    for (const k of Object.keys(m)) {
-      if (!ALLOWED_MESSAGE_KEYS.has(k)) {
-        return { ok: false, code: "unknown_field", reason: `unknown message field: ${k}` };
-      }
-    }
-    if (!ALLOWED_ROLES.has(m.role)) {
-      return { ok: false, code: "invalid_messages", reason: `messages[${i}].role invalid: ${JSON.stringify(m.role)}` };
-    }
-    if (typeof m.content !== "string" || m.content.length === 0) {
-      return { ok: false, code: "invalid_messages", reason: `messages[${i}].content must be a non-empty string` };
-    }
-  }
-  const msgBytes = Buffer.byteLength(JSON.stringify(envelope.messages), "utf8");
-  if (msgBytes > MAX_MODEL_MESSAGES_BYTES) {
-    return {
-      ok: false,
-      code: "messages_too_large",
-      reason: `messages exceed 128 KiB hard cap (${msgBytes} > ${MAX_MODEL_MESSAGES_BYTES})`,
-    };
+  const msgCheck = validateModelMessages(envelope.messages);
+  if (!msgCheck.ok) {
+    return msgCheck;
   }
   return { ok: true };
 }
 
-export function checkModelWhitelists({ purpose, modelId, config }) {
+export function checkModelWhitelists({ purpose, modelId, config, warmingEnabled = config?.budget?.warmingEnabled ?? false }) {
   const allowedPurposes = Array.isArray(config?.model?.allowedPurposes) ? config.model.allowedPurposes : [];
   if (!PURPOSES.includes(purpose) || !allowedPurposes.includes(purpose)) {
     return {
       ok: false,
       code: "purpose_not_allowed",
       reason: `purpose ${JSON.stringify(purpose)} is not permitted by ledger PURPOSES and model.allowedPurposes`,
+    };
+  }
+  if (purpose === "warming" && warmingEnabled === false) {
+    return {
+      ok: false,
+      code: "warming_disabled",
+      reason: "warming is off: purpose=warming cannot reserve",
     };
   }
   const allowedModelIds = Array.isArray(config?.model?.allowedModelIds) ? config.model.allowedModelIds : [];
@@ -168,24 +159,52 @@ export function checkRunningClaimIdentity(db, { taskId, attemptId, fence, scopeD
   return { ok: true, task, attempt, scope };
 }
 
+function writeRefusalResultFile(db, { requestId, code, reason, hostCommandsDir, allowOverwrite = false }) {
+  if (!hostCommandsDir || !isUuidV4(requestId)) return;
+  const filename = modelResultFileName(requestId);
+  if (!allowOverwrite) {
+    const existingRow = db.prepare("SELECT 1 FROM model_requests WHERE request_id=?").get(requestId);
+    if (existingRow || existsSync(join(hostCommandsDir, filename))) {
+      return;
+    }
+  }
+  writeAtomicJson(hostCommandsDir, filename, {
+    kind: "model_result",
+    requestId,
+    ok: false,
+    refusal: { code, reason },
+  });
+}
+
+function recordRefusalInTx(db, { taskId = null, requestId = null, code, reason, now }) {
+  const safeTaskId = taskId && db.prepare("SELECT 1 FROM tasks WHERE id=?").get(taskId) ? taskId : null;
+  writeAudit(db, {
+    code: "model_request_refused",
+    taskId: safeTaskId,
+    details: { request_id: requestId, reason_code: code, reason },
+    now,
+  });
+}
+
 function recordRefusal(db, { taskId = null, requestId = null, code, reason, hostCommandsDir = null, now }) {
   withTx(db, () => {
-    const safeTaskId = taskId && db.prepare("SELECT 1 FROM tasks WHERE id=?").get(taskId) ? taskId : null;
-    writeAudit(db, {
-      code: "model_request_refused",
-      taskId: safeTaskId,
-      details: { request_id: requestId, reason_code: code, reason },
-      now,
-    });
+    recordRefusalInTx(db, { taskId, requestId, code, reason, now });
   });
-  if (hostCommandsDir && isUuidV4(requestId)) {
-    writeAtomicJson(hostCommandsDir, modelResultFileName(requestId), {
-      kind: "model_result",
-      requestId,
-      ok: false,
-      refusal: { code, reason },
-    });
-  }
+  writeRefusalResultFile(db, { requestId, code, reason, hostCommandsDir, allowOverwrite: false });
+}
+
+function isClaimExpiredOrTerminal(task, attempt, expectedFence, now) {
+  const leaseExpired = Boolean(task && task.lease_expires_at !== null && task.lease_expires_at <= now);
+  return {
+    leaseExpired,
+    terminal:
+      !task ||
+      task.state !== "RUNNING" ||
+      task.fence !== expectedFence ||
+      !attempt ||
+      attempt.state !== "ACTIVE" ||
+      leaseExpired,
+  };
 }
 
 // Unified write-back transaction (ADR §6 & §7): transitions request row from
@@ -221,12 +240,7 @@ export function commitModelCallWriteback(db, {
 
   const taskPre = db.prepare("SELECT * FROM tasks WHERE id=?").get(reqRowPre.task_id);
   const attemptPre = db.prepare("SELECT * FROM attempts WHERE id=?").get(reqRowPre.attempt_id);
-  const taskIsTerminal =
-    !taskPre ||
-    taskPre.state !== "RUNNING" ||
-    taskPre.fence !== reqRowPre.fence ||
-    !attemptPre ||
-    attemptPre.state !== "ACTIVE";
+  const preStatus = isClaimExpiredOrTerminal(taskPre, attemptPre, reqRowPre.fence, now);
 
   if (!call.ok) {
     withTx(db, () => {
@@ -234,7 +248,7 @@ export function commitModelCallWriteback(db, {
       if (!reqNow || reqNow.state !== "EXECUTING") return;
       writeAudit(db, {
         code: "model_call_failed",
-        taskId: reqNow.task_id,
+        taskId: taskPre ? reqNow.task_id : null,
         details: {
           request_id: requestId,
           error: String(call.error ?? "model call failed").slice(0, 200),
@@ -242,18 +256,18 @@ export function commitModelCallWriteback(db, {
         },
         now,
       });
-      if (taskIsTerminal) {
-        db.prepare("UPDATE model_requests SET state='ORPHAN', error_code='task_terminal_on_failed_call', updated_at=? WHERE request_id=? AND state='EXECUTING'")
-          .run(now, requestId);
+      if (preStatus.terminal) {
+        db.prepare("UPDATE model_requests SET state='ORPHAN', error_code=?, updated_at=? WHERE request_id=? AND state='EXECUTING'")
+          .run(preStatus.leaseExpired ? "lease_expired_on_failed_call" : "task_terminal_on_failed_call", now, requestId);
         writeAudit(db, {
           code: "model_result_orphan",
-          taskId: reqNow.task_id,
+          taskId: taskPre ? reqNow.task_id : null,
           details: { request_id: requestId, reservation: reqNow.reservation_id, task_state: taskPre?.state ?? "missing", call_ok: false },
           now,
         });
       }
     });
-    if (!taskIsTerminal && hostCommandsDir && isUuidV4(requestId)) {
+    if (!preStatus.terminal && hostCommandsDir && isUuidV4(requestId)) {
       writeAtomicJson(hostCommandsDir, modelResultFileName(requestId), {
         kind: "model_result",
         requestId,
@@ -262,8 +276,8 @@ export function commitModelCallWriteback(db, {
       });
     }
     return {
-      status: taskIsTerminal ? "orphan_failed_call" : "call_failed",
-      state: taskIsTerminal ? "ORPHAN" : "EXECUTING",
+      status: preStatus.terminal ? "orphan_failed_call" : "call_failed",
+      state: preStatus.terminal ? "ORPHAN" : "EXECUTING",
       reservationState: ledger.reservationRow(reqRowPre.reservation_id)?.state ?? null,
       settled: false,
     };
@@ -304,27 +318,28 @@ export function commitModelCallWriteback(db, {
 
     const taskNow = db.prepare("SELECT * FROM tasks WHERE id=?").get(reqNow.task_id);
     const attemptNow = db.prepare("SELECT * FROM attempts WHERE id=?").get(reqNow.attempt_id);
-    const isTerminalNow =
-      !taskNow ||
-      taskNow.state !== "RUNNING" ||
-      taskNow.fence !== reqNow.fence ||
-      !attemptNow ||
-      attemptNow.state !== "ACTIVE";
+    const nowStatus = isClaimExpiredOrTerminal(taskNow, attemptNow, reqNow.fence, now);
 
-    const scopeId = taskNow.scope_id;
-    const evidence = insertObjectRow(db, {
-      scopeId,
-      kind: "task_result",
-      sourceUri: `task:${reqNow.task_id}:req:${requestId}`,
-      sourceActor: "model-worker",
-      contentHash: storedEvidence.contentHash,
-      storageRef: storedEvidence.storageRef,
-      observedAt: now,
-      requiredScopeIds: [scopeId],
-    });
+    const scopeId =
+      taskNow?.scope_id ??
+      db.prepare("SELECT id FROM scopes WHERE domain_key=?").get(reqNow.scope_domain_key)?.id ??
+      null;
+    const evidence = scopeId
+      ? insertObjectRow(db, {
+          scopeId,
+          kind: "task_result",
+          sourceUri: `task:${reqNow.task_id}:req:${requestId}`,
+          sourceActor: "model-worker",
+          contentHash: storedEvidence.contentHash,
+          storageRef: storedEvidence.storageRef,
+          observedAt: now,
+          requiredScopeIds: [scopeId],
+        })
+      : null;
 
     let settled = false;
     let finalRequestState;
+    const auditTaskId = taskNow ? reqNow.task_id : null;
     if (priced !== null) {
       ledger.settleInTx({
         reservationId: reqNow.reservation_id,
@@ -340,17 +355,17 @@ export function commitModelCallWriteback(db, {
       if (auditCodeOnSettle) {
         writeAudit(db, {
           code: auditCodeOnSettle,
-          taskId: reqNow.task_id,
+          taskId: auditTaskId,
           details: { request_id: requestId, reservation_id: reqNow.reservation_id, actual_microusd: priced },
           now,
         });
       }
-      finalRequestState = isTerminalNow ? "ORPHAN" : "SETTLED";
+      finalRequestState = nowStatus.terminal ? "ORPHAN" : "SETTLED";
     } else {
-      finalRequestState = isTerminalNow ? "ORPHAN" : "HELD";
+      finalRequestState = nowStatus.terminal ? "ORPHAN" : "HELD";
       writeAudit(db, {
         code: "model_usage_not_settled",
-        taskId: reqNow.task_id,
+        taskId: auditTaskId,
         details: {
           reason: call.usage ? "usage missing totalFromProvider/zero or category rate null" : "no usage block",
           reservation: reqNow.reservation_id,
@@ -361,18 +376,19 @@ export function commitModelCallWriteback(db, {
       });
     }
 
-    if (isTerminalNow) {
+    if (nowStatus.terminal) {
       db.prepare(
-        "UPDATE model_requests SET state='ORPHAN', reply_object_id=?, error_code='task_terminal_before_writeback', updated_at=? WHERE request_id=? AND state='EXECUTING'",
-      ).run(evidence.id, now, requestId);
+        "UPDATE model_requests SET state='ORPHAN', reply_object_id=?, error_code=?, updated_at=? WHERE request_id=? AND state='EXECUTING'",
+      ).run(evidence?.id ?? null, nowStatus.leaseExpired ? "lease_expired_before_writeback" : "task_terminal_before_writeback", now, requestId);
       writeAudit(db, {
         code: "model_result_orphan",
-        taskId: reqNow.task_id,
+        taskId: auditTaskId,
         details: {
           request_id: requestId,
           reservation: reqNow.reservation_id,
-          reply_object_id: evidence.id,
+          reply_object_id: evidence?.id ?? null,
           task_state: taskNow?.state ?? "missing",
+          lease_expired: nowStatus.leaseExpired,
           settled_microusd: priced,
         },
         now,
@@ -380,10 +396,10 @@ export function commitModelCallWriteback(db, {
     } else {
       db.prepare(
         "UPDATE model_requests SET state=?, reply_object_id=?, error_code=?, updated_at=? WHERE request_id=? AND state='EXECUTING'",
-      ).run(finalRequestState, evidence.id, priced === null ? "usage_not_settled" : null, now, requestId);
+      ).run(finalRequestState, evidence?.id ?? null, priced === null ? "usage_not_settled" : null, now, requestId);
     }
 
-    if (!isTerminalNow && completeActiveTask) {
+    if (!nowStatus.terminal && completeActiveTask && evidence?.id) {
       const effectiveLeaseOwner = leaseOwner ?? taskNow.lease_owner;
       if (effectiveLeaseOwner) {
         completeTaskInTx(db, {
@@ -400,13 +416,13 @@ export function commitModelCallWriteback(db, {
 
     const resAfter = ledger.reservationRow(reqNow.reservation_id);
     return {
-      status: isTerminalNow ? "orphan" : finalRequestState === "SETTLED" ? "settled" : "held",
+      status: nowStatus.terminal ? "orphan" : finalRequestState === "SETTLED" ? "settled" : "held",
       state: finalRequestState,
       reservationState: resAfter?.state ?? null,
       actualMicrousd: priced,
-      replyObjectId: evidence.id,
+      replyObjectId: evidence?.id ?? null,
       settled,
-      orphan: isTerminalNow,
+      orphan: nowStatus.terminal,
     };
   });
 
@@ -442,17 +458,7 @@ export function commitModelCallWriteback(db, {
   return txOut;
 }
 
-export function processModelRequest(db, {
-  stateDir,
-  config,
-  ledger,
-  envelope,
-  hostCommandsDir = null,
-  completeActiveTask = false,
-  preCallCancelled = false,
-  now = Date.now(),
-}) {
-  // 1. Validate closed envelope shape BEFORE inserting any DB row (ADR §2/§7, D-78).
+function validateAndAuthorizeModelProposal(db, { config, envelope, hostCommandsDir, warmingEnabled, now }) {
   const envCheck = validateModelRequestEnvelope(envelope);
   if (!envCheck.ok) {
     recordRefusal(db, {
@@ -463,11 +469,14 @@ export function processModelRequest(db, {
       hostCommandsDir,
       now,
     });
-    return { accepted: false, status: "refused", code: envCheck.code, reason: envCheck.reason, rowCreated: false };
+    return { ok: false, result: { accepted: false, status: "refused", code: envCheck.code, reason: envCheck.reason, rowCreated: false } };
   }
-
-  // 2. Dual whitelist: purpose (PURPOSES + allowedPurposes) and modelId (allowedModelIds) (ADR §3).
-  const wlCheck = checkModelWhitelists({ purpose: envelope.purpose, modelId: envelope.modelId, config });
+  const wlCheck = checkModelWhitelists({
+    purpose: envelope.purpose,
+    modelId: envelope.modelId,
+    config,
+    warmingEnabled,
+  });
   if (!wlCheck.ok) {
     recordRefusal(db, {
       taskId: envelope.taskId,
@@ -477,70 +486,10 @@ export function processModelRequest(db, {
       hostCommandsDir,
       now,
     });
-    return { accepted: false, status: "refused", code: wlCheck.code, reason: wlCheck.reason, rowCreated: false };
+    return { ok: false, result: { accepted: false, status: "refused", code: wlCheck.code, reason: wlCheck.reason, rowCreated: false } };
   }
-
-  // 3. Idempotent PK lookup: duplicate requestId reads existing state, never double-reserves or double-calls (ADR §4/§7, T3).
-  const existing = db.prepare("SELECT * FROM model_requests WHERE request_id=?").get(envelope.requestId);
-  if (existing) {
-    if (
-      existing.task_id !== envelope.taskId ||
-      existing.attempt_id !== envelope.attemptId ||
-      existing.fence !== envelope.fence ||
-      existing.scope_domain_key !== envelope.scopeDomainKey
-    ) {
-      recordRefusal(db, {
-        taskId: envelope.taskId,
-        requestId: envelope.requestId,
-        code: "request_id_identity_conflict",
-        reason: `requestId ${envelope.requestId} already bound to a different task/attempt/fence/scope`,
-        hostCommandsDir,
-        now,
-      });
-      return { accepted: false, status: "refused", code: "request_id_identity_conflict", rowCreated: false };
-    }
-    withTx(db, () => {
-      writeAudit(db, {
-        code: "model_request_duplicate",
-        taskId: existing.task_id,
-        details: { request_id: existing.request_id, state: existing.state, reservation_id: existing.reservation_id },
-        now,
-      });
-    });
-    return {
-      accepted: true,
-      duplicate: true,
-      status: "duplicate",
-      state: existing.state,
-      reservationId: existing.reservation_id,
-      replyObjectId: existing.reply_object_id,
-      rowCreated: false,
-    };
-  }
-
-  // 4. Identity quadruple re-check against RUNNING claim row (ADR §2/§4).
-  const idCheck = checkRunningClaimIdentity(db, {
-    taskId: envelope.taskId,
-    attemptId: envelope.attemptId,
-    fence: envelope.fence,
-    scopeDomainKey: envelope.scopeDomainKey,
-    now,
-  });
-  if (!idCheck.ok) {
-    recordRefusal(db, {
-      taskId: envelope.taskId,
-      requestId: envelope.requestId,
-      code: idCheck.code,
-      reason: idCheck.reason,
-      hostCommandsDir,
-      now,
-    });
-    return { accepted: false, status: "refused", code: idCheck.code, reason: idCheck.reason, rowCreated: false };
-  }
-
-  // 5. Endpoint authorization gate (fail-closed if baseUrl null or non-loopback without allowRealModelCalls).
   if (!config?.model?.baseUrl) {
-    return { accepted: false, status: "pending_no_base_url", rowCreated: false };
+    return { ok: false, result: { accepted: false, status: "pending_no_base_url", rowCreated: false } };
   }
   const authorizedForModel = isLoopbackModelEndpoint(config.model.baseUrl) || config.model.allowRealModelCalls === true;
   if (!authorizedForModel) {
@@ -552,11 +501,92 @@ export function processModelRequest(db, {
       hostCommandsDir,
       now,
     });
-    return { accepted: false, status: "refused", code: "endpoint_not_authorized", rowCreated: false };
+    return { ok: false, result: { accepted: false, status: "refused", code: "endpoint_not_authorized", rowCreated: false } };
   }
+  try {
+    assertValidModelBaseUrl(config.model.baseUrl);
+    parseModelWhitelistKey(envelope.modelId);
+  } catch (e) {
+    recordRefusal(db, {
+      taskId: envelope.taskId,
+      requestId: envelope.requestId,
+      code: "invalid_model_config",
+      reason: e.message,
+      hostCommandsDir,
+      now,
+    });
+    return { ok: false, result: { accepted: false, status: "refused", code: "invalid_model_config", reason: e.message, rowCreated: false } };
+  }
+  return { ok: true };
+}
 
-  // 6. All validations passed -> insert RECEIVED row (ADR §7).
-  withTx(db, () => {
+function admitAndReserveModelRequestTx(db, { envelope, ledger, config, now }) {
+  const upperMicrousd = config.model.callUpperMicrousd ?? 1000;
+  const provider = envelope.modelId.split("/")[0] || config.model.provider || "deepseek";
+  return withTx(db, () => {
+    const existing = db.prepare("SELECT * FROM model_requests WHERE request_id=?").get(envelope.requestId);
+    if (existing) {
+      if (
+        existing.task_id !== envelope.taskId ||
+        existing.attempt_id !== envelope.attemptId ||
+        existing.fence !== envelope.fence ||
+        existing.scope_domain_key !== envelope.scopeDomainKey
+      ) {
+        const reason = `requestId ${envelope.requestId} already bound to a different task/attempt/fence/scope`;
+        recordRefusalInTx(db, { taskId: envelope.taskId, requestId: envelope.requestId, code: "request_id_identity_conflict", reason, now });
+        return {
+          done: true,
+          refusalFile: { code: "request_id_identity_conflict", reason, allowOverwrite: false },
+          result: { accepted: false, status: "refused", code: "request_id_identity_conflict", rowCreated: false },
+        };
+      }
+      if (existing.state === "RECEIVED") {
+        db.prepare("UPDATE model_requests SET state='FAILED', error_code='stranded_received_recovered', updated_at=? WHERE request_id=? AND state='RECEIVED'")
+          .run(now, envelope.requestId);
+        const reason = `requestId ${envelope.requestId} recovered from incomplete RECEIVED state before reservation`;
+        recordRefusalInTx(db, { taskId: envelope.taskId, requestId: envelope.requestId, code: "stranded_received_recovered", reason, now });
+        return {
+          done: true,
+          refusalFile: { code: "stranded_received_recovered", reason: "request recovered from stranded RECEIVED state", allowOverwrite: false },
+          result: { accepted: false, status: "refused", code: "stranded_received_recovered", state: "FAILED", rowCreated: false },
+        };
+      }
+      writeAudit(db, {
+        code: "model_request_duplicate",
+        taskId: existing.task_id,
+        details: { request_id: existing.request_id, state: existing.state, reservation_id: existing.reservation_id },
+        now,
+      });
+      return {
+        done: true,
+        result: {
+          accepted: true,
+          duplicate: true,
+          status: "duplicate",
+          state: existing.state,
+          reservationId: existing.reservation_id,
+          replyObjectId: existing.reply_object_id,
+          rowCreated: false,
+        },
+      };
+    }
+
+    const idCheck = checkRunningClaimIdentity(db, {
+      taskId: envelope.taskId,
+      attemptId: envelope.attemptId,
+      fence: envelope.fence,
+      scopeDomainKey: envelope.scopeDomainKey,
+      now,
+    });
+    if (!idCheck.ok) {
+      recordRefusalInTx(db, { taskId: envelope.taskId, requestId: envelope.requestId, code: idCheck.code, reason: idCheck.reason, now });
+      return {
+        done: true,
+        refusalFile: { code: idCheck.code, reason: idCheck.reason, allowOverwrite: false },
+        result: { accepted: false, status: "refused", code: idCheck.code, reason: idCheck.reason, rowCreated: false },
+      };
+    }
+
     db.prepare(
       `INSERT INTO model_requests(request_id, task_id, attempt_id, fence, scope_domain_key, purpose, model_id,
          state, reservation_id, reply_object_id, error_code, created_at, updated_at)
@@ -572,14 +602,9 @@ export function processModelRequest(db, {
       now,
       now,
     );
-  });
 
-  // 7. Same-transaction ledger.reserve + RECEIVED -> RESERVED (ADR §7).
-  const upperMicrousd = config.model.callUpperMicrousd ?? 1000;
-  const provider = envelope.modelId.split("/")[0] || config.model.provider || "deepseek";
-  let reservationId = null;
-  try {
-    reservationId = withTx(db, () => {
+    try {
+      db.exec("SAVEPOINT reserve_sp");
       const taskAcc = ledger.ensureTaskAccount({ taskId: envelope.taskId, now }).accountId;
       const dayAcc = ledger.ensureDayAccount({ now }).accountId;
       const res = ledger.reserveInTx({
@@ -601,11 +626,13 @@ export function processModelRequest(db, {
       if (changed !== 1) {
         throw new ModelRequestError(`failed to transition ${envelope.requestId} RECEIVED->RESERVED`);
       }
-      return res.reservationId;
-    });
-  } catch (e) {
-    // BudgetExceeded / AccountFrozen: reservation rolled back, mark request FAILED before any call (T2 subcase 2).
-    withTx(db, () => {
+      db.exec("RELEASE reserve_sp");
+      return { done: false, idCheck, reservationId: res.reservationId };
+    } catch (e) {
+      try {
+        db.exec("ROLLBACK TO reserve_sp");
+        db.exec("RELEASE reserve_sp");
+      } catch {}
       db.prepare("UPDATE model_requests SET state='FAILED', error_code=?, updated_at=? WHERE request_id=? AND state='RECEIVED'")
         .run(e.constructor?.name ?? "budget_refused", now, envelope.requestId);
       writeAudit(db, {
@@ -614,84 +641,192 @@ export function processModelRequest(db, {
         details: { request_id: envelope.requestId, reason_code: e.constructor?.name ?? "budget_refused", reason: e.message },
         now,
       });
-    });
-    if (hostCommandsDir) {
-      writeAtomicJson(hostCommandsDir, modelResultFileName(envelope.requestId), {
-        kind: "model_result",
-        requestId: envelope.requestId,
-        ok: false,
-        refusal: { code: "budget_refused", reason: e.message },
-      });
+      return {
+        done: true,
+        refusalFile: { code: "budget_refused", reason: e.message, allowOverwrite: true },
+        result: { accepted: false, status: "budget_refused", state: "FAILED", reason: e.message, rowCreated: true },
+      };
     }
-    return {
-      accepted: false,
-      status: "budget_refused",
-      state: "FAILED",
-      reason: e.message,
-      rowCreated: true,
-    };
-  }
+  });
+}
 
-  // Crashpoint window between RESERVED and EXECUTING (T5).
-  crashpoint("model_requests:after-reserve-before-executing");
-
-  // 8. Pre-call cancellation seam (T4): only RESERVED can release before EXECUTING commits.
-  const taskBeforeExec = db.prepare("SELECT state FROM tasks WHERE id=?").get(envelope.taskId);
-  if (preCallCancelled || !taskBeforeExec || taskBeforeExec.state === "CANCELLED") {
-    return cancelPreCallModelRequest(db, {
-      ledger,
-      requestId: envelope.requestId,
-      reason: preCallCancelled ? "pre_call_cancelled" : `task_${taskBeforeExec?.state ?? "missing"}_before_executing`,
-      now,
-    });
-  }
-
-  // 9. Separate transaction: RESERVED -> EXECUTING committed strictly before spawning child (ADR §7).
+function commitExecutingTransition(db, { requestId, now }) {
   withTx(db, () => {
     const changed = db
       .prepare("UPDATE model_requests SET state='EXECUTING', updated_at=? WHERE request_id=? AND state='RESERVED'")
-      .run(now, envelope.requestId).changes;
+      .run(now, requestId).changes;
     if (changed !== 1) {
-      throw new ModelRequestError(`cannot commit EXECUTING for ${envelope.requestId}`);
+      throw new ModelRequestError(`cannot commit EXECUTING for ${requestId}`);
     }
   });
+}
 
-  // Crashpoint window after EXECUTING commit, before/during call (T6).
+function prepareAndStartModelRequest(db, {
+  stateDir,
+  config,
+  ledger,
+  envelope,
+  hostCommandsDir = null,
+  completeActiveTask = false,
+  preCallCancelled = false,
+  now,
+}) {
+  const explicitNow = now !== undefined;
+  const effectiveNow = explicitNow ? now : Date.now();
+  const warmingEnabled = ledger?.warmingEnabled ?? config?.budget?.warmingEnabled ?? false;
+
+  const gate = validateAndAuthorizeModelProposal(db, {
+    config,
+    envelope,
+    hostCommandsDir,
+    warmingEnabled,
+    now: effectiveNow,
+  });
+  if (!gate.ok) {
+    return { done: true, result: gate.result };
+  }
+
+  const admission = admitAndReserveModelRequestTx(db, {
+    envelope,
+    ledger,
+    config,
+    now: effectiveNow,
+  });
+  if (admission.refusalFile) {
+    writeRefusalResultFile(db, {
+      requestId: envelope.requestId,
+      code: admission.refusalFile.code,
+      reason: admission.refusalFile.reason,
+      hostCommandsDir,
+      allowOverwrite: admission.refusalFile.allowOverwrite,
+    });
+  }
+  if (admission.done) {
+    return { done: true, result: admission.result };
+  }
+
+  crashpoint("model_requests:after-reserve-before-executing");
+
+  const preCallIdentity = checkRunningClaimIdentity(db, {
+    taskId: envelope.taskId,
+    attemptId: envelope.attemptId,
+    fence: envelope.fence,
+    scopeDomainKey: envelope.scopeDomainKey,
+    now: effectiveNow,
+  });
+  if (preCallCancelled || !preCallIdentity.ok) {
+    return {
+      done: true,
+      result: cancelPreCallModelRequest(db, {
+        ledger,
+        requestId: envelope.requestId,
+        reason: preCallCancelled ? "pre_call_cancelled" : `pre_call_${preCallIdentity.code}`,
+        now: effectiveNow,
+      }),
+    };
+  }
+
+  commitExecutingTransition(db, { requestId: envelope.requestId, now: effectiveNow });
   crashpoint("model_requests:after-executing-before-call");
 
-  // 10. Execute single inference via unique pi-ai core; key resolved from host credential slot "model".
   const cred = createCredentialService(db).resolve("model");
   const bearer = cred.ok === true ? cred.value : null;
-  const call = callModelOnce({
-    baseUrl: config.model.baseUrl,
-    model: envelope.modelId,
-    messages: envelope.messages,
-    timeoutMs: config.model.callTimeoutMs ?? 60000,
-    bearer,
-  });
+  return {
+    done: false,
+    prep: {
+      stateDir,
+      config,
+      ledger,
+      envelope,
+      hostCommandsDir,
+      completeActiveTask,
+      idCheck: admission.idCheck,
+      bearer,
+      now: effectiveNow,
+      explicitNow,
+    },
+  };
+}
 
-  // Optional test capture hook for T7 (call finished and usage obtained, write-back not yet committed).
+function finishModelRequest(db, prep, call, { useWallClockAfterCall = false } = {}) {
   if (process.env.AEGISPI_T7_CAPTURE_PATH) {
     writeFileSync(
       process.env.AEGISPI_T7_CAPTURE_PATH,
-      JSON.stringify({ requestId: envelope.requestId, call }),
+      JSON.stringify({ requestId: prep.envelope.requestId, call }),
       "utf8",
     );
   }
   crashpoint("model_requests:after-call-before-writeback");
 
-  // 11. Atomic write-back (after-call wall clock).
+  const writebackNow = !prep.explicitNow || useWallClockAfterCall
+    ? Math.max(prep.now, Date.now())
+    : prep.now;
+
   return commitModelCallWriteback(db, {
-    stateDir,
-    ledger,
-    requestId: envelope.requestId,
+    stateDir: prep.stateDir,
+    ledger: prep.ledger,
+    requestId: prep.envelope.requestId,
     call,
-    priceCatalog: config.model.priceCatalog,
-    hostCommandsDir,
-    completeActiveTask,
-    leaseOwner: idCheck.task.lease_owner,
-    now: Date.now(),
+    priceCatalog: prep.config.model.priceCatalog,
+    hostCommandsDir: prep.hostCommandsDir,
+    completeActiveTask: prep.completeActiveTask,
+    leaseOwner: prep.idCheck.task.lease_owner,
+    now: writebackNow,
   });
+}
+
+export function processModelRequest(db, opts = {}) {
+  const started = prepareAndStartModelRequest(db, opts);
+  if (started.done) return started.result;
+  const { prep } = started;
+  let call;
+  try {
+    call = callModelOnce({
+      baseUrl: prep.config.model.baseUrl,
+      model: prep.envelope.modelId,
+      messages: prep.envelope.messages,
+      timeoutMs: prep.config.model.callTimeoutMs ?? 60000,
+      bearer: prep.bearer,
+    });
+  } catch (e) {
+    call = { ok: false, kind: "local", stopReason: "error", error: e.message, usage: null };
+  }
+  return finishModelRequest(db, prep, call, { useWallClockAfterCall: opts.useWallClockAfterCall === true });
+}
+
+export async function processModelRequestAsync(db, opts = {}) {
+  const started = prepareAndStartModelRequest(db, opts);
+  if (started.done) return started.result;
+  const { prep } = started;
+  const leaseMs = opts.leaseMs ?? 45000;
+  const hbEveryMs = Math.max(250, Math.floor(leaseMs / 3));
+  const timer = setInterval(() => {
+    try {
+      heartbeat(db, {
+        taskId: prep.idCheck.task.id,
+        attemptNo: prep.idCheck.task.attempt_no,
+        leaseOwner: prep.idCheck.task.lease_owner,
+        fence: prep.idCheck.task.fence,
+        now: Date.now(),
+        leaseMs,
+      });
+    } catch {}
+  }, hbEveryMs);
+  let call;
+  try {
+    call = await callModelOnceAsync({
+      baseUrl: prep.config.model.baseUrl,
+      model: prep.envelope.modelId,
+      messages: prep.envelope.messages,
+      timeoutMs: prep.config.model.callTimeoutMs ?? 60000,
+      bearer: prep.bearer,
+    });
+  } catch (e) {
+    call = { ok: false, kind: "local", stopReason: "error", error: e.message, usage: null };
+  } finally {
+    clearInterval(timer);
+  }
+  return finishModelRequest(db, prep, call, { useWallClockAfterCall: opts.useWallClockAfterCall ?? true });
 }
 
 // Pre-call cancellation / attempt abandonment (T4 & T5): only RESERVED may release.
@@ -763,21 +898,16 @@ export function settleLateModelUsage(db, {
 
 // Scan <stateDir>/agent-work/<safeTask>/<attemptNo>/proposals/ for pending
 // model-request-*.json files and drive each through processModelRequest.
-export function processPendingModelProposals(db, {
-  stateDir,
-  config,
-  ledger,
-  completeActiveTask = true,
-  now = Date.now(),
-}) {
+function scanPendingProposals(db, { stateDir, now = Date.now() }) {
   const workRoot = join(stateDir, "agent-work");
-  if (!existsSync(workRoot)) return { processed: 0, results: [] };
+  if (!existsSync(workRoot)) return { processed: 0, results: [], tasksToVisit: [] };
   const results = [];
+  const tasksToVisit = [];
   let taskDirs = [];
   try {
     taskDirs = readdirSync(workRoot, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
   } catch {
-    return { processed: 0, results: [] };
+    return { processed: 0, results: [], tasksToVisit: [] };
   }
   for (const tDir of taskDirs) {
     const tPath = join(workRoot, tDir);
@@ -809,17 +939,33 @@ export function processPendingModelProposals(db, {
       } catch {
         continue;
       }
+      const pendingItems = [];
       let dirty = false;
       for (const f of files) {
         const fPath = join(proposalsDir, f);
         let st;
         try {
           st = statSync(fPath);
+          if (!st.isFile()) continue;
         } catch {
           continue;
         }
         const prev = consumed[f];
         if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) {
+          continue;
+        }
+        if (st.size > MAX_PROPOSAL_FILE_BYTES) {
+          recordRefusal(db, {
+            taskId: null,
+            requestId: null,
+            code: "messages_too_large",
+            reason: `proposal file ${f} size ${st.size} exceeds max envelope cap ${MAX_PROPOSAL_FILE_BYTES}`,
+            hostCommandsDir: null,
+            now,
+          });
+          consumed[f] = { mtimeMs: st.mtimeMs, size: st.size };
+          dirty = true;
+          results.push({ file: f, status: "refused", code: "messages_too_large" });
           continue;
         }
         let envelope;
@@ -839,25 +985,84 @@ export function processPendingModelProposals(db, {
           results.push({ file: f, status: "refused", code: "invalid_json" });
           continue;
         }
-        const outcome = processModelRequest(db, {
-          stateDir,
-          config,
-          ledger,
-          envelope,
-          hostCommandsDir: commandsDir,
-          completeActiveTask,
-          now,
-        });
-        results.push({ file: f, ...outcome });
-        if (outcome.status !== "pending_no_base_url") {
-          consumed[f] = { mtimeMs: st.mtimeMs, size: st.size };
-          dirty = true;
-        }
+        pendingItems.push({ f, st, envelope, proposalsDir });
       }
-      if (dirty) {
-        writeFileSync(consumedPath, JSON.stringify(consumed, null, 2) + "\n", "utf8");
-      }
+      tasksToVisit.push({ consumedPath, consumed, dirty, commandsDir, proposalsDir, pendingItems });
     }
   }
-  return { processed: results.length, results };
+  return { results, tasksToVisit };
+}
+
+export function processPendingModelProposals(db, {
+  stateDir,
+  config,
+  ledger,
+  completeActiveTask = true,
+  now,
+  useWallClockAfterCall = false,
+}) {
+  const effectiveNow = now ?? Date.now();
+  const scan = scanPendingProposals(db, { stateDir, now: effectiveNow });
+  for (const entry of scan.tasksToVisit) {
+    let dirty = entry.dirty;
+    for (const item of entry.pendingItems) {
+      const outcome = processModelRequest(db, {
+        stateDir,
+        config,
+        ledger,
+        envelope: item.envelope,
+        hostCommandsDir: entry.commandsDir,
+        completeActiveTask,
+        now,
+        useWallClockAfterCall,
+      });
+      scan.results.push({ file: item.f, taskId: item.envelope?.taskId ?? null, proposalsDir: entry.proposalsDir, ...outcome });
+      if (outcome.status !== "pending_no_base_url") {
+        entry.consumed[item.f] = { mtimeMs: item.st.mtimeMs, size: item.st.size };
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      writeFileSync(entry.consumedPath, JSON.stringify(entry.consumed, null, 2) + "\n", "utf8");
+    }
+  }
+  return { processed: scan.results.length, results: scan.results };
+}
+
+export async function processPendingModelProposalsAsync(db, {
+  stateDir,
+  config,
+  ledger,
+  leaseMs = 45000,
+  completeActiveTask = true,
+  now,
+  useWallClockAfterCall = true,
+}) {
+  const effectiveNow = now ?? Date.now();
+  const scan = scanPendingProposals(db, { stateDir, now: effectiveNow });
+  for (const entry of scan.tasksToVisit) {
+    let dirty = entry.dirty;
+    for (const item of entry.pendingItems) {
+      const outcome = await processModelRequestAsync(db, {
+        stateDir,
+        config,
+        ledger,
+        leaseMs,
+        envelope: item.envelope,
+        hostCommandsDir: entry.commandsDir,
+        completeActiveTask,
+        now,
+        useWallClockAfterCall,
+      });
+      scan.results.push({ file: item.f, taskId: item.envelope?.taskId ?? null, proposalsDir: entry.proposalsDir, ...outcome });
+      if (outcome.status !== "pending_no_base_url") {
+        entry.consumed[item.f] = { mtimeMs: item.st.mtimeMs, size: item.st.size };
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      writeFileSync(entry.consumedPath, JSON.stringify(entry.consumed, null, 2) + "\n", "utf8");
+    }
+  }
+  return { processed: scan.results.length, results: scan.results };
 }

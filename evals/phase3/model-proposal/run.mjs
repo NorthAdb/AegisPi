@@ -37,8 +37,9 @@ import {
 } from "../../../apps/daemon/src/model-requests.mjs";
 import {
   agentWorkAttemptDir,
-  lockHostProposalsDir,
   inspectHostProposalsAcl,
+  lockHostProposalsDir,
+  safeTaskDirComponent,
 } from "../../../apps/daemon/src/container-executor.mjs";
 
 lockedNodeGuard();
@@ -391,18 +392,22 @@ process.env.AEGISPI_TEST_MODEL_KEY = "loopback-fixture-placeholder";
   const reqRow = db2.prepare("SELECT state FROM model_requests WHERE task_id=?").get(dispatched.taskId);
   const resRow = db2.prepare("SELECT state, actual_microusd FROM budget_reservations WHERE task_id=?").get(dispatched.taskId);
   db2.close();
-  const proposalsDir = join(agentWorkAttemptDir(ws.stateDir, dispatched.taskId, task.attempt_no), "proposals");
+  const attemptDirProd = agentWorkAttemptDir(ws.stateDir, dispatched.taskId, task.attempt_no);
+  const proposalsDir = join(attemptDirProd, "proposals");
+  const commandsDirProd = join(attemptDirProd, "host-commands");
+  const contextPathProd = join(attemptDirProd, "context.json");
+  const attemptAcl = inspectHostProposalsAcl(attemptDirProd);
   const acl = inspectHostProposalsAcl(proposalsDir);
   const leftContainers = spawnSync("docker", ["ps", "-aq", "-f", `name=aegispi-agent-`], { encoding: "utf8" }).stdout.trim();
 
-  // Also run a bind-mount isolation probe (ro rootfs, ro host-commands, rw proposals, no network)
   const isoProbe = spawnSync(
     "docker",
     [
       "run", "--rm", "--network", "none",
       "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "-v", `${proposalsDir}:/agent-work/proposals:rw`,
-      "-v", `${join(agentWorkAttemptDir(ws.stateDir, dispatched.taskId, task.attempt_no), "host-commands")}:/agent-work/host-commands:ro`,
+      "-v", `${commandsDirProd}:/agent-work/host-commands:ro`,
+      "-v", `${contextPathProd}:/agent-work/context.json:ro`,
       "--entrypoint", "node",
       AGENT_REF,
       "-e", `
@@ -410,6 +415,7 @@ process.env.AEGISPI_TEST_MODEL_KEY = "loopback-fixture-placeholder";
         const out = [];
         try { fs.writeFileSync('/workspace/x', '1'); out.push('rootfs=RW'); } catch (e) { out.push('rootfs=RO:' + e.code); }
         try { fs.writeFileSync('/agent-work/host-commands/x', '1'); out.push('cmds=RW'); } catch (e) { out.push('cmds=RO:' + e.code); }
+        try { fs.writeFileSync('/agent-work/context.json', '{}'); out.push('ctx=RW'); } catch (e) { out.push('ctx=RO:' + e.code); }
         try { fs.writeFileSync('/agent-work/proposals/probe.tmp', '1'); fs.unlinkSync('/agent-work/proposals/probe.tmp'); out.push('prop=RW'); } catch (e) { out.push('prop=ERR:' + e.code); }
         console.log(out.join(' '));
       `,
@@ -431,13 +437,15 @@ process.env.AEGISPI_TEST_MODEL_KEY = "loopback-fixture-placeholder";
       resRow?.state === "SETTLED" &&
       resRow?.actual_microusd === 28 &&
       hits.length === 1 &&
+      attemptAcl.ok === true &&
       acl.ok === true &&
       leftContainers === "" &&
       /rootfs=RO:EROFS/.test(isoProbe.stdout) &&
       /cmds=RO:EROFS/.test(isoProbe.stdout) &&
+      /ctx=RO:EROFS/.test(isoProbe.stdout) &&
       /prop=RW/.test(isoProbe.stdout) &&
       nonUuidRejected,
-    `daemon=${r.status} task=${task?.state} req=${reqRow?.state} res=${resRow?.state}/${resRow?.actual_microusd} aclOk=${acl.ok} iso="${isoProbe.stdout.trim()}" nonUuidRejected=${nonUuidRejected}`,
+    `daemon=${r.status} task=${task?.state} req=${reqRow?.state} res=${resRow?.state}/${resRow?.actual_microusd} attemptAcl=${attemptAcl.ok} aclOk=${acl.ok} iso="${isoProbe.stdout.trim()}" nonUuidRejected=${nonUuidRejected}`,
   );
 }
 
@@ -1062,6 +1070,112 @@ rmSync(crashHelperPath, { force: true });
   function tOutOut(x) {
     return x.status === "call_failed";
   }
+}
+
+{
+  const prevAmbientKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "sk-ambient-must-never-leak";
+  const { ws, db, ledger, claim, commandsDir, now } = seedRunningClaim("mp-hardening");
+  createCredentialService(db).revokeSlot({ slot: "model", actorId: "audit", now: now + 1 });
+  const cfgPath = writeTestConfig(ws, { allowedPurposes: ["worker", "warming"] });
+  const cfg = loadConfigObj(cfgPath);
+  const hitsBefore = readServiceLog().length;
+
+  const revId = randomUUID();
+  const revOut = processModelRequest(db, {
+    stateDir: ws.stateDir,
+    config: cfg,
+    ledger,
+    envelope: makeEnvelope(claim, { requestId: revId }),
+    hostCommandsDir: commandsDir,
+    now: now + 2,
+  });
+  const revHits = readServiceLog().length - hitsBefore;
+
+  const warmId = randomUUID();
+  const warmOut = processModelRequest(db, {
+    stateDir: ws.stateDir,
+    config: cfg,
+    ledger,
+    envelope: makeEnvelope(claim, { requestId: warmId, purpose: "warming" }),
+    hostCommandsDir: commandsDir,
+    now: now + 3,
+  });
+
+  const upperId = randomUUID().toUpperCase();
+  const upperOut = processModelRequest(db, {
+    stateDir: ws.stateDir,
+    config: cfg,
+    ledger,
+    envelope: makeEnvelope(claim, { requestId: upperId }),
+    hostCommandsDir: commandsDir,
+    now: now + 4,
+  });
+
+  const { ws: wsExp, db: dbExp, ledger: ledgerExp, claim: claimExp, commandsDir: cmdExp, now: nowExp } = seedRunningClaim("mp-lease-exp");
+  setServiceMode({ kind: "priced", promptTokens: 40, completionTokens: 13, reply: "lease-exp-reply" });
+  const cfgExp = loadConfigObj(writeTestConfig(wsExp));
+  dbExp.prepare("UPDATE tasks SET lease_expires_at=? WHERE id=?").run(nowExp + 100, claimExp.taskId);
+  const origPrepareExp = dbExp.prepare.bind(dbExp);
+  let expiredInjected = false;
+  dbExp.prepare = (sql) => {
+    const st = origPrepareExp(sql);
+    if (!expiredInjected && sql.includes("UPDATE model_requests SET state='EXECUTING'")) {
+      expiredInjected = true;
+      origPrepareExp("UPDATE tasks SET lease_expires_at=? WHERE id=?").run(nowExp - 10, claimExp.taskId);
+    }
+    return st;
+  };
+  const expId = randomUUID();
+  const expOut = processModelRequest(dbExp, {
+    stateDir: wsExp.stateDir,
+    config: cfgExp,
+    ledger: ledgerExp,
+    envelope: makeEnvelope(claimExp, { requestId: expId }),
+    hostCommandsDir: cmdExp,
+    completeActiveTask: true,
+    now: nowExp,
+  });
+  const expReq = origPrepareExp("SELECT state FROM model_requests WHERE request_id=?").get(expId);
+  const expRes = origPrepareExp("SELECT state, actual_microusd FROM budget_reservations WHERE request_key=?").get(`model:${expId}`);
+  dbExp.close();
+
+  const compA = safeTaskDirComponent("tsk:inb%3Agithub%3Aorg/repo-long-name-12345/pr/1:opened");
+  const compB = safeTaskDirComponent("tsk:inb%3Agithub%3Aorg/repo-long-name-12345/pr/1:sync");
+  const compSlash = safeTaskDirComponent("tsk:a/b");
+  const compColon = safeTaskDirComponent("tsk:a:b");
+  const aclExplicitDir = join(ws.stateDir, "acl-explicit-probe");
+  mkdirSync(aclExplicitDir, { recursive: true });
+  if (process.platform === "win32") {
+    spawnSync("icacls", [aclExplicitDir, "/grant", "NT AUTHORITY\\INTERACTIVE:(OI)(CI)F"], { encoding: "utf8" });
+  }
+  lockHostProposalsDir(aclExplicitDir);
+  const aclExplicitVerified = inspectHostProposalsAcl(aclExplicitDir);
+
+  const hitsAfter = readServiceLog().length;
+  db.close();
+  if (prevAmbientKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+  else process.env.DEEPSEEK_API_KEY = prevAmbientKey;
+
+  suite.check(
+    "adversarial-hardening-invariants",
+    revOut.status === "call_failed" &&
+      revHits === 0 &&
+      hitsAfter === hitsBefore + 1 &&
+      warmOut.code === "warming_disabled" &&
+      warmOut.rowCreated === false &&
+      upperOut.code === "invalid_request_id" &&
+      upperOut.rowCreated === false &&
+      expOut.orphan === true &&
+      expReq?.state === "ORPHAN" &&
+      expRes?.state === "SETTLED" &&
+      expRes?.actual_microusd === 28 &&
+      compA !== compB &&
+      compSlash !== compColon &&
+      compA.length <= 45 &&
+      aclExplicitVerified.ok === true,
+    `revoked=${revOut.status} warm=${warmOut.code} upper=${upperOut.code} leaseExp=${expReq?.state}/${expRes?.state}(${expRes?.actual_microusd}) compsUnique=${compA !== compB && compSlash !== compColon} explicitAclCleaned=${aclExplicitVerified.ok}`,
+  );
 }
 
 svc.kill();

@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piSettingsFromDefaults } from "../config/load-pi-settings.mjs";
+import { assertValidModelBaseUrl, ModelCallError } from "./model-call.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -75,6 +76,27 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
   const piSettings = piSettingsFromDefaults(defaults);
 
   const warmingEnabled = defaults.budget.cacheWarming === "off" ? false : true;
+  const modelRaw = defaults.model ?? {};
+  const baseUrl = modelRaw.baseUrl ?? null;
+  if (baseUrl !== null) {
+    if (typeof baseUrl !== "string") {
+      throw new ConfigError(`model.baseUrl must be null or a pathless URL string, got ${typeof baseUrl}`);
+    }
+    try {
+      assertValidModelBaseUrl(baseUrl);
+    } catch (e) {
+      throw new ConfigError(e instanceof ModelCallError ? e.message : String(e));
+    }
+  }
+  const callUpperMicrousd = modelRaw.callUpperMicrousd ?? 1000;
+  if (!Number.isSafeInteger(callUpperMicrousd) || callUpperMicrousd < 0) {
+    throw new ConfigError(`model.callUpperMicrousd must be a non-negative safe integer, got ${JSON.stringify(callUpperMicrousd)}`);
+  }
+  const callTimeoutMs = modelRaw.callTimeoutMs ?? 60000;
+  if (!Number.isInteger(callTimeoutMs) || callTimeoutMs <= 0 || callTimeoutMs > 2_147_000_000) {
+    throw new ConfigError(`model.callTimeoutMs must be a positive integer <= 2147000000, got ${JSON.stringify(callTimeoutMs)}`);
+  }
+
   return {
     defaultsPath: path,
     raw: defaults,
@@ -104,20 +126,20 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     // token count in that category keeps the reservation HELD, never zero.
     model: {
       ...(() => {
-        const { endpoint: _removed, ...rest } = defaults.model ?? {};
+        const { endpoint: _removed, ...rest } = modelRaw;
         return rest;
       })(),
-      baseUrl: defaults.model?.baseUrl ?? null,
-      allowedPurposes: Array.isArray(defaults.model?.allowedPurposes) ? [...defaults.model.allowedPurposes] : [],
-      allowedModelIds: Array.isArray(defaults.model?.allowedModelIds) ? [...defaults.model.allowedModelIds] : [],
-      allowRealModelCalls: defaults.model?.allowRealModelCalls === true,
-      callUpperMicrousd: defaults.model?.callUpperMicrousd ?? 1000,
-      callTimeoutMs: defaults.model?.callTimeoutMs ?? 60000,
+      baseUrl,
+      allowedPurposes: Array.isArray(modelRaw.allowedPurposes) ? [...modelRaw.allowedPurposes] : [],
+      allowedModelIds: Array.isArray(modelRaw.allowedModelIds) ? [...modelRaw.allowedModelIds] : [],
+      allowRealModelCalls: modelRaw.allowRealModelCalls === true,
+      callUpperMicrousd,
+      callTimeoutMs,
       priceCatalog: {
-        inputPerMTokMicrousd: defaults.model?.priceCatalog?.inputPerMTokMicrousd ?? null,
-        outputPerMTokMicrousd: defaults.model?.priceCatalog?.outputPerMTokMicrousd ?? null,
-        cacheReadPerMTokMicrousd: defaults.model?.priceCatalog?.cacheReadPerMTokMicrousd ?? null,
-        cacheWritePerMTokMicrousd: defaults.model?.priceCatalog?.cacheWritePerMTokMicrousd ?? null,
+        inputPerMTokMicrousd: modelRaw.priceCatalog?.inputPerMTokMicrousd ?? null,
+        outputPerMTokMicrousd: modelRaw.priceCatalog?.outputPerMTokMicrousd ?? null,
+        cacheReadPerMTokMicrousd: modelRaw.priceCatalog?.cacheReadPerMTokMicrousd ?? null,
+        cacheWritePerMTokMicrousd: modelRaw.priceCatalog?.cacheWritePerMTokMicrousd ?? null,
       },
     },
     timezone: defaults.time.timezoneIANA,

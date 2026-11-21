@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T14:59:16.441Z",
+  "generatedAt": "2026-11-21T00:59:35.846Z",
   "nodeVersion": "v22.23.5",
   "suite": "quota-calibration",
   "label": "容器配额校准（06 §4 占位值实测，不宣称最优）",
@@ -11,7 +11,7 @@
     {
       "name": "cpu-quota-has-measurable-effect",
       "status": "PASS",
-      "detail": "2 worker threads: --cpus 1 实测 1622ms vs --cpus 2 实测 677ms (ratio 2.4)"
+      "detail": "2 worker threads: --cpus 1 实测 2972ms vs --cpus 2 实测 666ms (ratio 4.46)"
     },
     {
       "name": "memory-2gib-placeholder-enforced-with-dirty-pages",
@@ -38,9 +38,9 @@
   "measurements": {
     "cpu": {
       "innerLoopMs": {
-        "cpus1": 1622,
-        "cpus2": 677,
-        "ratio": 2.4
+        "cpus1": 2972,
+        "cpus2": 666,
+        "ratio": 4.46
       }
     },
     "memory": {

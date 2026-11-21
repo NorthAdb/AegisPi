@@ -38,7 +38,7 @@ import { dispatchEffect, autoRecoverUnknown, reproposeHeadChanged } from "./effe
 import { createAdapterUpstream, headPrecondition, AdapterRefused } from "./adapters.mjs";
 import { createContainerExecutor, createAgentLauncher } from "./container-executor.mjs";
 import { isLoopbackModelEndpoint } from "./model-call.mjs";
-import { processPendingModelProposals } from "./model-requests.mjs";
+import { processPendingModelProposalsAsync } from "./model-requests.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
 import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
@@ -102,7 +102,6 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(`backup: pre-migration snapshot ${backup.path} (${backup.bytes} bytes, integrity ${backup.integrity})`);
   }
   migrate(db, canonical);
-  ensureModelRequestsTable(db);
 
   const recovery = startupRecovery(db, {
     stateDir: dataDir,
@@ -176,6 +175,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 3;
   }
 
+  ensureModelRequestsTable(db);
   const ledger = createBudgetLedger(db, {
     taskLimitMicrousd: config.budget.taskLimitMicrousd,
     dayLimitMicrousd: config.budget.dayLimitMicrousd,
@@ -262,6 +262,71 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
   const activeAgentContainers = new Map();
+  if (agentLauncher) {
+    agentLauncher.reapOrphanContainers();
+  }
+
+  function reclaimFinishedAgentContainers() {
+    if (!agentLauncher) return 0;
+    let reclaimed = 0;
+    for (const [key, info] of activeAgentContainers.entries()) {
+      let receipts = [];
+      try {
+        receipts = readdirSync(info.proposalsDir).filter((f) => f.startsWith("receipt-model-result-") && f.endsWith(".json"));
+      } catch {}
+      const taskRow = db.prepare("SELECT state FROM tasks WHERE id=?").get(info.taskId);
+      const mrRow = db
+        .prepare("SELECT state, error_code FROM model_requests WHERE attempt_id=? ORDER BY updated_at DESC LIMIT 1")
+        .get(info.attemptId);
+      const insp = agentLauncher.inspectContainer(info.containerId);
+      if (insp.running && taskRow?.state === "RUNNING") {
+        try {
+          heartbeat(db, {
+            taskId: info.taskId,
+            attemptNo: info.attemptNo,
+            leaseOwner: info.leaseOwner,
+            fence: info.fence,
+            now: Date.now(),
+            leaseMs: config.leases.leaseMs,
+          });
+        } catch {}
+      }
+      const proposalFailed = mrRow?.state === "FAILED" || mrRow?.state === "ORPHAN";
+      if (taskRow?.state === "RUNNING" && proposalFailed && (receipts.length > 0 || !insp.running)) {
+        try {
+          completeTask(db, {
+            taskId: info.taskId,
+            attemptNo: info.attemptNo,
+            leaseOwner: info.leaseOwner,
+            fence: info.fence,
+            now: Date.now(),
+            resultClass: "infra_error",
+            errorCode: mrRow?.error_code ?? "model_request_failed",
+          });
+        } catch {}
+      }
+      const postTask = db.prepare("SELECT state FROM tasks WHERE id=?").get(info.taskId);
+      if (postTask?.state === "SUCCEEDED" && !info.settledSeenAt) {
+        info.settledSeenAt = Date.now();
+      }
+      const graceExpired = Boolean(info.settledSeenAt && Date.now() - info.settledSeenAt > 1500);
+      const nonSuccessTerminal = postTask && postTask.state !== "RUNNING" && postTask.state !== "SUCCEEDED";
+      if (receipts.length > 0 || !insp.running || graceExpired || nonSuccessTerminal) {
+        agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
+        activeAgentContainers.delete(key);
+        reclaimed += 1;
+      }
+    }
+    return reclaimed;
+  }
+
+  function stopAllActiveAgentContainers() {
+    if (!agentLauncher) return;
+    for (const [key, info] of activeAgentContainers.entries()) {
+      agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
+      activeAgentContainers.delete(key);
+    }
+  }
 
   // Watermark level changes stream an alert once per transition; the backup
   // runs once per window-day when the manifest key is configured.
@@ -269,7 +334,7 @@ export async function main(argv = process.argv.slice(2)) {
   let lastBackupDayKey = null;
   const backupKey = process.env.AEGISPI_BACKUP_MANIFEST_KEY ?? null;
 
-  const tick = () => {
+  const tick = async () => {
     const now = Date.now();
     // 0. Disk watermark: warn blocks NEW job launches; critical never reaches
     //    here (startup already opened read-only).
@@ -434,23 +499,32 @@ export async function main(argv = process.argv.slice(2)) {
               },
               now,
             });
+            try {
+              heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
+            } catch {}
             activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
               ...launched,
               taskId: claim.taskId,
+              attemptId: claim.attemptId,
               attemptNo: claim.attemptNo,
+              fence: claim.fence,
+              leaseOwner: claim.leaseOwner,
               deadlineAt: taskRow.deadline_at,
             });
           }
         }
-        const batch = processPendingModelProposals(db, {
+        const batch = await processPendingModelProposalsAsync(db, {
           stateDir: dataDir,
           config,
           ledger,
+          leaseMs: config.leases.leaseMs,
           completeActiveTask: true,
           now,
+          useWallClockAfterCall: true,
         });
         proposalProcessed = batch.processed;
       }
+      reclaimFinishedAgentContainers();
     } else {
       // No model path is configured: nothing is claimed, nothing settles.
       // Say so on the record instead of pretending the loop is production.
@@ -461,20 +535,11 @@ export async function main(argv = process.argv.slice(2)) {
         console.error(`worker: ${awaiting} task(s) await an execution path; no model baseUrl is configured (model.baseUrl is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
       }
     }
-    // 5. Effect dispatch through the adapter upstream whenever a transport
-    //    is wired (fixture under --fake-upstream, the REAL HTTP transport
-    //    when the host configured a submit endpoint); without one, READY
-    //    effects stay durable and the loop says so instead of pretending.
+    // 5. Effect dispatch & UNKNOWN reconciler (non-model READY/UNKNOWN stay durable when baseUpstream is null).
     if (adapterUpstream) {
-      // Per-mode reconciliation of UNKNOWN effects (06 section 6 table) runs
-      // IN the daemon: IDEMPOTENCY_KEY requeues for a same-key resend,
-      // LOOKUP_THEN_RETRY records a strong-consistency hit or requeues only
-      // a definitive not-found, AT_LEAST_ONCE requeues within its bounded
-      // backoff, and AT_MOST_ONCE plus weak-visibility lookups stay UNKNOWN —
-      // no blind retry ever leaves this loop.
-      const unknowns = db
-        .prepare("SELECT id, retry_mode FROM effects WHERE state='UNKNOWN'")
-        .all();
+      const unknowns = baseUpstream
+        ? db.prepare("SELECT id, retry_mode FROM effects WHERE state='UNKNOWN'").all()
+        : db.prepare("SELECT id, retry_mode FROM effects WHERE state='UNKNOWN' AND operation='model.inference'").all();
       for (const u of unknowns) {
         try {
           const action = autoRecoverUnknown(db, adapterUpstream, { effectId: u.id, now, backoffMs: 0 });
@@ -485,9 +550,9 @@ export async function main(argv = process.argv.slice(2)) {
           console.error(`reconcile refused ${u.id}: ${err.message}`);
         }
       }
-      const ready = db
-        .prepare("SELECT id FROM effects WHERE state='READY' AND next_attempt_at<=? ORDER BY next_attempt_at")
-        .all(now);
+      const ready = baseUpstream
+        ? db.prepare("SELECT id FROM effects WHERE state='READY' AND next_attempt_at<=? ORDER BY next_attempt_at").all(now)
+        : db.prepare("SELECT id FROM effects WHERE state='READY' AND operation='model.inference' AND next_attempt_at<=? ORDER BY next_attempt_at").all(now);
       for (const e of ready) {
         try {
           const row = db.prepare("SELECT * FROM effects WHERE id=?").get(e.id);
@@ -525,12 +590,15 @@ export async function main(argv = process.argv.slice(2)) {
           console.error(`dispatcher refused ${e.id}: ${err.message}`);
         }
       }
-    } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='READY'").get().c > 0) {
-      console.error("dispatcher: READY effects exist but no submit transport is wired (upstream.submitUrl unset); they stay durable and dispatched later");
-    } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c > 0) {
-      // UNKNOWN without an upstream stays UNKNOWN, on the record: the daemon
-      // never converts uncertainty into a success or a blind resend.
-      console.error("reconcile: UNKNOWN effects present but no upstream adapter is wired; they stay UNKNOWN for a human or a later phase");
+    }
+    if (!baseUpstream) {
+      if (db.prepare("SELECT count(*) c FROM effects WHERE state='READY' AND operation!='model.inference'").get().c > 0) {
+        console.error("dispatcher: READY effects exist but no submit transport is wired (upstream.submitUrl unset); they stay durable and dispatched later");
+      } else if (db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN' AND operation!='model.inference'").get().c > 0) {
+        // UNKNOWN without an upstream stays UNKNOWN, on the record: the daemon
+        // never converts uncertainty into a success or a blind resend.
+        console.error("reconcile: UNKNOWN effects present but no upstream adapter is wired; they stay UNKNOWN for a human or a later phase");
+      }
     }
     // 6. Outbox: only a report — delivery status lives in effects.state.
     const due = dueNotifications(db, { now });
@@ -597,86 +665,86 @@ export async function main(argv = process.argv.slice(2)) {
   };
 
   if (args.has("--once")) {
-    let rounds = 0;
-    while (tick() > 0 && rounds < 20) {
-      rounds += 1;
-    }
-    if (agentLauncher && activeAgentContainers.size > 0) {
-      const waitDeadline = Date.now() + 30000;
-      while (activeAgentContainers.size > 0 && Date.now() < waitDeadline) {
-        const batch = processPendingModelProposals(db, {
-          stateDir: dataDir,
-          config,
-          ledger,
-          completeActiveTask: true,
-          now: Date.now(),
-        });
-        for (const [key, info] of activeAgentContainers.entries()) {
-          let receipts = [];
-          try {
-            receipts = readdirSync(info.proposalsDir).filter((f) => f.startsWith("receipt-model-result-") && f.endsWith(".json"));
-          } catch {}
-          const insp = agentLauncher.inspectContainer(info.containerId);
-          if (receipts.length > 0 || !insp.running || batch.results.some((r) => r.status === "refused" || r.status === "budget_refused")) {
-            agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
-            activeAgentContainers.delete(key);
+    let exitCode = 0;
+    try {
+      let rounds = 0;
+      const waitDeadline = Date.now() + Math.max(30000, (config.model.callTimeoutMs ?? 60000) + 15000);
+      while (rounds < 20) {
+        const work = await tick();
+        rounds += 1;
+        if (agentLauncher && activeAgentContainers.size > 0) {
+          while (activeAgentContainers.size > 0 && Date.now() < waitDeadline) {
+            reclaimFinishedAgentContainers();
+            if (activeAgentContainers.size === 0) break;
+            await processPendingModelProposalsAsync(db, {
+              stateDir: dataDir,
+              config,
+              ledger,
+              leaseMs: config.leases.leaseMs,
+              completeActiveTask: true,
+              now: Date.now(),
+              useWallClockAfterCall: true,
+            });
+            reclaimFinishedAgentContainers();
+            if (activeAgentContainers.size > 0) {
+              await new Promise((r) => setTimeout(r, 200));
+            }
+          }
+          stopAllActiveAgentContainers();
+          if (db.prepare("SELECT count(*) c FROM tasks WHERE state='QUEUED'").get().c > 0) {
+            continue;
           }
         }
-        if (activeAgentContainers.size > 0) {
-          await new Promise((r) => setTimeout(r, 200));
+        if (work === 0) break;
+      }
+      // Offline container jobs are async by nature: a once-run that launched
+      // them WAITS for their completion, bounded by each job's host-enforced
+      // deadline. Never exit --once with a live container behind us. The bound
+      // is the OUTSTANDING work's own deadlines: a launch policy (the disk
+      // watermark's warn stance) can keep a job QUEUED forever, and --once
+      // must say so and exit honestly instead of hanging.
+      if (executor) {
+        let waited = 0;
+        for (;;) {
+          const outstanding = db
+            .prepare("SELECT count(*) c, max(deadline_at) d FROM execution_jobs WHERE state IN ('QUEUED','RUNNING')")
+            .get();
+          if (outstanding.c === 0) break;
+          if (outstanding.d && Date.now() > Number(outstanding.d) + 5000) {
+            console.error(
+              `once: ${outstanding.c} offline job(s) still QUEUED/RUNNING after the deadline bound (a launch policy — disk warn, watermark gate — can keep work queued); exit 5`,
+            );
+            exitCode = 5;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 500));
+          waited += 500;
+          const diskOnce = diskWatermark(dataDir, {
+            warnFreeBytes: config.disk.warnFreeBytes,
+            criticalFreeBytes: config.disk.criticalFreeBytes,
+          });
+          const events = executor.tick({ now: Date.now(), allowLaunch: diskOnce.level === "ok" });
+          for (const ev of events) {
+            console.log(`job: ${ev.jobId} -> ${ev.state}`);
+          }
+        }
+        if (exitCode === 0) {
+          console.log(`once: waited ${Math.round(waited / 1000)}s for offline jobs to reach terminal state`);
         }
       }
-      for (const [key, info] of activeAgentContainers.entries()) {
-        agentLauncher.stopAttempt({ containerId: info.containerId, commandsDir: info.commandsDir });
-        activeAgentContainers.delete(key);
-      }
-    }
-    // Offline container jobs are async by nature: a once-run that launched
-    // them WAITS for their completion, bounded by each job's host-enforced
-    // deadline. Never exit --once with a live container behind us. The bound
-    // is the OUTSTANDING work's own deadlines: a launch policy (the disk
-    // watermark's warn stance) can keep a job QUEUED forever, and --once
-    // must say so and exit honestly instead of hanging.
-    if (executor) {
-      let waited = 0;
-      for (;;) {
-        const outstanding = db
-          .prepare("SELECT count(*) c, max(deadline_at) d FROM execution_jobs WHERE state IN ('QUEUED','RUNNING')")
-          .get();
-        if (outstanding.c === 0) break;
-        if (outstanding.d && Date.now() > Number(outstanding.d) + 5000) {
-          console.error(
-            `once: ${outstanding.c} offline job(s) still QUEUED/RUNNING after the deadline bound (a launch policy — disk warn, watermark gate — can keep work queued); exit 5`,
-          );
-          lock.release();
-          process.exit(5);
-        }
-        await new Promise((r) => setTimeout(r, 500));
-        waited += 500;
-        const diskOnce = diskWatermark(dataDir, {
-          warnFreeBytes: config.disk.warnFreeBytes,
-          criticalFreeBytes: config.disk.criticalFreeBytes,
-        });
-        const events = executor.tick({ now: Date.now(), allowLaunch: diskOnce.level === "ok" });
-        for (const ev of events) {
-          console.log(`job: ${ev.jobId} -> ${ev.state}`);
+      if (exitCode === 0) {
+        console.log(`once: ${rounds} tick(s) to drain the durable backlog`);
+        const unknownLeft = db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c;
+        if (unknownLeft > 0) {
+          console.error(`once: ${unknownLeft} UNKNOWN effect(s) unresolved at drain end; exit 4`);
+          exitCode = 4;
         }
       }
-      console.log(`once: waited ${Math.round(waited / 1000)}s for offline jobs to reach terminal state`);
+    } finally {
+      stopAllActiveAgentContainers();
+      lock.release();
     }
-    console.log(`once: ${rounds + 1} tick(s) to drain the durable backlog`);
-    // An honest exit code: UNKNOWN effects are committed-but-unresolved
-    // actions. Exiting 0 while any remain would hide them from every script
-    // that trusts the exit code. Only reconciliation (a wired upstream's
-    // per-mode policy inside the tick, or a recorded human decision) clears
-    // them — the code distinguishes the states, the logs say why.
-    const unknownLeft = db.prepare("SELECT count(*) c FROM effects WHERE state='UNKNOWN'").get().c;
-    lock.release();
-    if (unknownLeft > 0) {
-      console.error(`once: ${unknownLeft} UNKNOWN effect(s) unresolved at drain end; exit 4`);
-      process.exit(4);
-    }
-    process.exit(0);
+    process.exit(exitCode);
   }
 
   // Continuous mode: drain until idle, then keep a slow heartbeat loop.
@@ -685,16 +753,22 @@ export async function main(argv = process.argv.slice(2)) {
   process.on("SIGINT", () => {
     running = false;
   });
-  const loop = () => {
+  const loop = async () => {
     if (!running) {
-      console.log("daemon: shutting down, releasing lock");
+      console.log("daemon: shutting down, stopping active agent containers & releasing lock");
+      stopAllActiveAgentContainers();
       lock.release();
       process.exit(0);
     }
     try {
-      tick();
+      await tick();
     } catch (e) {
       console.error(`tick error: ${e.message}`);
+    }
+    if (!running) {
+      stopAllActiveAgentContainers();
+      lock.release();
+      process.exit(0);
     }
     setTimeout(loop, Math.max(config.leases.heartbeatMs, 1000));
   };

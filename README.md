@@ -45,7 +45,7 @@
 - scope ACL 与审批/取消流（acl、cancel-approval 套件）。
 - 离线 job 容器执行与磁盘水位（offline-jobs 套件；docker）。
 - Telegram 入站解析（本地夹具，零真实外联；ingress-telegram 套件）。
-- 应用镜像真实构建（现行**纪元 3**）、digest 绑定与门禁、容器配额实测（三 docker 套件 + `test:model-proposal` + `test:quota-calibration`）。
+- 应用镜像真实构建（现行**纪元 5**）、digest 绑定与门禁、容器配额实测（三 docker 套件 + `test:model-proposal` + `test:quota-calibration`）。
 - 容器→宿主模型提议与宿主 `pi-ai@1.5.2` 单一执行核心：`model_request` 闭信封与 `model-result-<uuid>.json` 通道、`model_requests` 七态状态机与同事务预留/结算、Windows 宿主程序化 `icacls` 锁定 `proposals` 目录（`model-proposal`、`security-unit` 套件，零真实推理调用）。
 
 **已执行过且授权已闭合的一次性真实验收**（重跑即需新的逐项书面授权）：A 真实模型 1 次（DeepSeek 官方端点，28 microUSD 结清）；B 真实外部写 1 次（可丢弃端点）；C Telegram 只读 2 次调用（历史计数缺证不闭项，按既定口径归档）。
@@ -68,14 +68,14 @@
 
 `package.json` 脚本名与实际入口一致（`node evals/…`）。锁定 Node 显式路径执行：
 
-| 套件（npm 脚本） | 需 Docker | 最近在案全量记录（单元 4.1 终树，2026-11-20） |
+| 套件（npm 脚本） | 需 Docker | 最近在案全量记录（单元 4.1 纪元 5 终树，2026-11-21） |
 | --- | --- | --- |
 | `test:contracts`（PI-01..13 契约探针 + LF 分帧 + SQLite 门禁） | 否 | 15/15 PASS，exit 0 |
 | `test:durability` / `test:acl` / `test:budget`（Phase 2 三套件） | 否 | 164/164、15/15、20/20，exit 0 |
 | `test:cancel-approval` / `test:security:unit` / `test:restore` | 否 | 16/16、44/44、11/11，exit 0 |
 | `test:ingress-telegram`（本地夹具） | 否 | 7/7 + 1 NOTE，exit 0 |
-| `test:model-proposal`（4.1 锚点 E2E + T1–T10 + 生产启动器） | 是 | 13/13 PASS，exit 0 |
-| `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 3） |
+| `test:model-proposal`（4.1 锚点 E2E + T1–T10 + 生产启动器 + 对抗加固） | 是 | 14/14 PASS，exit 0 |
+| `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 5） |
 | hono 配对自检（非 npm 脚本）：`node evals/contracts/tools/verify-hono-oracle-pair.mjs` | 否 | lockfile sha 双核对 exit 0 |
 
 在案证据：[docs/phase4/reports/phase4-1-closure.md](docs/phase4/reports/phase4-1-closure.md)、[phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md) §5 与 [image-digest.md](docs/phase3/reports/image-digest.md)。以上 12 套离线/容器脚本与 Hono 预检均在本轮终树以锁定 Node v22.23.5 全量实跑通过（零真实推理调用）。
