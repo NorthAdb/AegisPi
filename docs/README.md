@@ -72,9 +72,9 @@
 - [telegram-call-ledger-retrospective.md](phase3/reports/telegram-call-ledger-retrospective.md)：Telegram 历史调用账本追溯（缺证如实记录，不追补）。
 - [phase3/audits/](phase3/audits)（六份原稿字节冻结，含 `AUDIT-PHASE3-REREVIEW-33d6361` 与 `AUDIT-PHASE3-LIMITED-FIXES-44b3514`）与 [phase3/evidence/](phase3/evidence)。
 
-**Phase 4（单元 4.1 已收口，4.2 未授权开工）**
+**Phase 4（单元 4.1 独立审计通过并冻结于 8943a10，4.2 真实运行未授权）**
 
-- 设计与计划见上文「设计决策」「阶段计划」；收口报告见 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；[phase4/reviews/](phase4/reviews) 为审核往来记录。
+- 设计与计划见上文「设计决策」「阶段计划」；收口报告见 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；独立对抗审计原稿见 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)（`PASS WITH RESIDUALS`，路线 A 冻结）；[phase4/reviews/](phase4/reviews) 为方案审核往来记录。
 
 ## 纪律速记
 

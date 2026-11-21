@@ -5,8 +5,8 @@
 ## 当前位置（2026-11-20）
 
 - Phase 1（底座契约）与 Phase 2（持久化只读链路）已收口；**Phase 3 出口 MET WITH RESIDUAL RISKS**，其中 `44b3514` 两项限定修复已独立验收关闭，不重开。
-- 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地并本机离线/容器验收通过**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)）；**4.1 收口仍不构成任何真实运行授权**。
-- Phase 4 拆为**单元 4.1**（模型链路实现：**已获授权完成实施与离线/容器验收**）与**单元 4.2**（真实仓库 Observe：[受限开工草案](docs/phase4/phase4-restricted-kickoff-draft.md)，首跑仍待七项首跑检查表逐项书面确认）。
+- 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地、通过独立对抗审计并按路线 A 冻结于 `8943a10`（纪元 5）**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)、[独立审计报告](docs/phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）；**4.1 收口与审计通过仍不构成任何真实运行授权**。
+- Phase 4 拆为**单元 4.1**（模型链路实现：**已通过独立对抗审计 `PASS WITH RESIDUALS`**）与**单元 4.2**（真实仓库 Observe：[受限开工草案](docs/phase4/phase4-restricted-kickoff-draft.md)，首跑仍待七项首跑检查表逐项书面确认）。
 - **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。
 - 任务预算 $0.80、日预算 $5 已定，不重开；真实运行前的价格目录、token 约束与单次预留确认属首跑检查表核对，不是重新讨论预算。
 - 真实验收 A（模型）/B（外部写）/C（Telegram 只读）各已执行一次且授权闭合，**无剩余额度**；D（公网 webhook）延期至首次启用 Telegram 公网入站 webhook 前，且不作为全部 Phase 4 的前置条件；出站发送另需授权。历史 A/B/C 缺证按既定口径归档不追补；原镜像按主人「本机验证通过即闭项」口径处理。
