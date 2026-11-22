@@ -33,18 +33,41 @@ export function claimNextTask(db, {
   now,
   leaseMs,
   maxConcurrentPerScope = 1,
+  // Unit 5.2 fair scheduling (01 section 2, F14): waiting tasks gain
+  // priority with age, and a scope that has held the claim for N
+  // consecutive rounds steps aside while any other scope has eligible
+  // work — a chatty group cannot starve the DM or the repo lane.
+  agingStepMs = null,
+  scopeTurnState = null,
+  scopeConsecutiveTurnLimit = null,
 }) {
   return withTx(db, () => {
+    const agingSelect =
+      Number.isInteger(agingStepMs) && agingStepMs > 0
+        ? `(t.priority + CAST((? - t.available_at) / ? AS INTEGER))`
+        : "t.priority";
     const candidates = db
       .prepare(
         `SELECT t.*, s.paused AS scope_paused, s.epoch AS scope_epoch_now,
-           (SELECT count(*) FROM tasks t2 WHERE t2.scope_id=t.scope_id AND t2.state='RUNNING') AS running_in_scope
+           (SELECT count(*) FROM tasks t2 WHERE t2.scope_id=t.scope_id AND t2.state='RUNNING') AS running_in_scope,
+           ${agingSelect} AS effective_priority
          FROM tasks t JOIN scopes s ON s.id=t.scope_id
          WHERE t.state IN ('QUEUED','RETRY_WAIT')
-         ORDER BY t.priority DESC, t.available_at ASC, t.created_at ASC`,
+         ORDER BY effective_priority DESC, t.available_at ASC, t.created_at ASC`,
       )
-      .all();
-    for (const t of candidates) {
+      .all(...(Number.isInteger(agingStepMs) && agingStepMs > 0 ? [now, agingStepMs] : []));
+    const turnCounts = scopeTurnState ?? null;
+    const limit = Number.isInteger(scopeConsecutiveTurnLimit) && scopeConsecutiveTurnLimit > 0 ? scopeConsecutiveTurnLimit : null;
+    let eligible = candidates;
+    if (turnCounts !== null && limit !== null) {
+      // Separate the candidates into the scope that just held the turn
+      // (if it is at the limit) and everyone else; the starved lanes keep
+      // first claim, the chatty lane only wins when nothing else can run.
+      eligible = candidates.filter((t) => (turnCounts.get(t.scope_id) ?? 0) < limit);
+      const saturated = candidates.filter((t) => (turnCounts.get(t.scope_id) ?? 0) >= limit);
+      eligible = [...eligible, ...saturated];
+    }
+    for (const t of eligible) {
       if (t.available_at > now) continue;
       if (t.scope_paused) continue;
       if (t.scope_epoch_now !== t.scope_epoch) continue; // Stale epoch: cancelled fence.
@@ -94,6 +117,8 @@ export function claimNextTask(db, {
       });
       return {
         taskId: t.id,
+        scopeId: t.scope_id,
+        effectivePriority: t.effective_priority ?? t.priority,
         attemptId,
         attemptNo,
         fence,
@@ -403,20 +428,31 @@ export function deliveryReturned(db, opts) {
 }
 
 export function completePendingDeliveryCheckpointInTx(db, { taskId, scopeId, sourceActor = "host", content, insertObjectRowFn, now }) {
-  const delivery = db.prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'").get(taskId);
-  if (!delivery) return null;
-  const ck = insertObjectRowFn(db, {
-    scopeId,
-    kind: "session_checkpoint",
-    sourceUri: `cmd:${delivery.event_id}:${taskId}`,
-    sourceActor,
-    content,
-    observedAt: now,
-    requiredScopeIds: [scopeId],
-  });
-  deliveryAckCheckpointInTx(db, { eventId: delivery.event_id, taskId, checkpointObjectId: ck.id, now });
-  deliveryDoneInTx(db, { eventId: delivery.event_id, taskId, now });
-  return { eventId: delivery.event_id, checkpointObjectId: ck.id };
+  // Unit 5.2 batch semantics: a batch-merged task carries up to 8
+  // same-scope events, and EVERY pending delivery is consumed here — a
+  // stranded PENDING delivery would leave its inbox row unable to reach
+  // DONE. Single-delivery tasks (every pre-5.2 suite) behave exactly as
+  // before: one checkpoint, one ACK, one DONE.
+  const deliveries = db
+    .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING' ORDER BY rowid ASC")
+    .all(taskId);
+  if (deliveries.length === 0) return null;
+  let last = null;
+  for (const delivery of deliveries) {
+    const ck = insertObjectRowFn(db, {
+      scopeId,
+      kind: "session_checkpoint",
+      sourceUri: `cmd:${delivery.event_id}:${taskId}`,
+      sourceActor,
+      content,
+      observedAt: now,
+      requiredScopeIds: [scopeId],
+    });
+    deliveryAckCheckpointInTx(db, { eventId: delivery.event_id, taskId, checkpointObjectId: ck.id, now });
+    deliveryDoneInTx(db, { eventId: delivery.event_id, taskId, now });
+    last = { eventId: delivery.event_id, checkpointObjectId: ck.id };
+  }
+  return last;
 }
 
 export function deliveryDead(db, { eventId, taskId, now, reason }) {

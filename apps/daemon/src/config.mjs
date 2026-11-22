@@ -207,11 +207,83 @@ function parseTelegramConfig(raw) {
       throw new ConfigError(e instanceof TelegramSendError ? e.message : String(e));
     }
   }
+  // Route 1 pull ingress (Unit 5.2). Fail closed: allowRealPull only ever
+  // becomes true by explicit owner config, and an empty allowedChatIds means
+  // every update is refused (masked counter only, zero payload persisted).
+  const allowRealPull = raw.allowRealPull === true;
+  const pullIntervalMs = raw.pullIntervalMs ?? 5000;
+  if (!Number.isInteger(pullIntervalMs) || pullIntervalMs < 500 || pullIntervalMs > 600_000) {
+    throw new ConfigError(`telegram.pullIntervalMs must be an integer 500..600000, got ${JSON.stringify(raw.pullIntervalMs)}`);
+  }
+  const pullTimeoutSeconds = raw.pullTimeoutSeconds ?? 0;
+  if (!Number.isInteger(pullTimeoutSeconds) || pullTimeoutSeconds < 0 || pullTimeoutSeconds > 60) {
+    throw new ConfigError(`telegram.pullTimeoutSeconds must be an integer 0..60, got ${JSON.stringify(raw.pullTimeoutSeconds)}`);
+  }
+  const pullBatchLimit = raw.pullBatchLimit ?? 20;
+  if (!Number.isInteger(pullBatchLimit) || pullBatchLimit < 1 || pullBatchLimit > 100) {
+    throw new ConfigError(`telegram.pullBatchLimit must be an integer 1..100, got ${JSON.stringify(raw.pullBatchLimit)}`);
+  }
+  const allowedChatIds = parseStringAllowlist(raw.allowedChatIds, "telegram.allowedChatIds").map((v) => String(v).trim()).filter((v) => v.length > 0);
   return {
     apiBase: normalizedApiBase,
     allowRealSend: raw.allowRealSend === true,
     proxyUrl,
     timeoutMs,
+    allowRealPull,
+    pullIntervalMs,
+    pullTimeoutSeconds,
+    pullBatchLimit,
+    allowedChatIds,
+  };
+}
+
+// Fair-scheduling bounds for the per-domain single-flight Router (01 §2,
+// audit matrix F14). Pure numeric bounds — none of these gates real-world
+// writes; they shape starvation-free ordering only.
+function parseRouterConfig(raw) {
+  const r = raw ?? {};
+  if (!r || typeof r !== "object" || Array.isArray(r)) {
+    throw new ConfigError("router config must be an object");
+  }
+  const agingStepMs = r.agingStepMs ?? 60000;
+  if (!Number.isInteger(agingStepMs) || agingStepMs < 1000 || agingStepMs > 3_600_000) {
+    throw new ConfigError(`router.agingStepMs must be an integer 1000..3600000, got ${JSON.stringify(r.agingStepMs)}`);
+  }
+  const batchMaxEvents = r.batchMaxEvents ?? 8;
+  if (!Number.isInteger(batchMaxEvents) || batchMaxEvents < 1 || batchMaxEvents > 8) {
+    throw new ConfigError(`router.batchMaxEvents must be an integer 1..8, got ${JSON.stringify(r.batchMaxEvents)}`);
+  }
+  const scopeConsecutiveTurnLimit = r.scopeConsecutiveTurnLimit ?? 3;
+  if (!Number.isInteger(scopeConsecutiveTurnLimit) || scopeConsecutiveTurnLimit < 1 || scopeConsecutiveTurnLimit > 100) {
+    throw new ConfigError(`router.scopeConsecutiveTurnLimit must be an integer 1..100, got ${JSON.stringify(r.scopeConsecutiveTurnLimit)}`);
+  }
+  return { agingStepMs, batchMaxEvents, scopeConsecutiveTurnLimit };
+}
+
+// Layered memory bounds (Unit 5.1, 01 §4–6). autoActivateCandidateFacts stays
+// false: candidate facts never self-activate, and identity/recipient/payment/
+// approval-exemption/permission facts are hard-refused regardless.
+function parseMemoryConfig(raw) {
+  const m = raw ?? {};
+  if (!m || typeof m !== "object" || Array.isArray(m)) {
+    throw new ConfigError("memory config must be an object");
+  }
+  const intBound = (value, fallback, min, max, name) => {
+    const v = value ?? fallback;
+    if (!Number.isInteger(v) || v < min || v > max) {
+      throw new ConfigError(`memory.${name} must be an integer ${min}..${max}, got ${JSON.stringify(value)}`);
+    }
+    return v;
+  };
+  return {
+    l0MemoryMaxChars: intBound(m.l0MemoryMaxChars, 2200, 200, 100_000, "l0MemoryMaxChars"),
+    l0UserMaxChars: intBound(m.l0UserMaxChars, 1375, 100, 50_000, "l0UserMaxChars"),
+    l1MaxHops: intBound(m.l1MaxHops, 2, 1, 4, "l1MaxHops"),
+    l1MaxObjects: intBound(m.l1MaxObjects, 16, 1, 64, "l1MaxObjects"),
+    summaryMaxOutputTokens: intBound(m.summaryMaxOutputTokens, 500, 50, 4000, "summaryMaxOutputTokens"),
+    autoActivateCandidateFacts: m.autoActivateCandidateFacts === true,
+    spillMaxBytes: intBound(m.spillMaxBytes, 51200, 1024, 8 * 1024 * 1024, "spillMaxBytes"),
+    spillMaxLines: intBound(m.spillMaxLines, 2000, 10, 100_000, "spillMaxLines"),
   };
 }
 
@@ -358,6 +430,8 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
       timeoutMs: defaults.upstream?.timeoutMs ?? 30000,
     },
     telegram,
+    router: parseRouterConfig(defaults.router),
+    memory: parseMemoryConfig(defaults.memory),
     // Credential SLOT markers the adapter checks (values never live here —
     // 02 section 4: only the host credential service reads secrets). A null
     // slot means nothing real is wired and the adapter refuses real writes.

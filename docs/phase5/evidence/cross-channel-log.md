@@ -1,0 +1,28 @@
+# Phase 5 Unit 5.2 — Telegram 路线 1 拉取入站与跨通道 9 环节 Canary 隔离
+
+生成：2026-11-22T06:44:27.358Z；Node v22.23.5；suite `cross-channel`。
+
+| 状态 | 检查 | 证据 |
+| --- | --- | --- |
+| PASS | pull-admits-whitelisted-and-persists-cursor | pass 1: two whitelisted updates admitted (dm+group), cursor 0->8004, unauthorized text persisted nowhere |
+| PASS | pull-unauthorized-chat-zero-persistence-masked-audit | the unauthorized chat produced exactly one masked audit row and zero payload objects/inbox rows |
+| PASS | pull-traverses-local-connect-proxy | the pull child reached the Bot-API stand-in through the CONNECT tunnel (1 CONNECT entries) |
+| PASS | pull-token-never-logged | the Bot-API log lines carry the token REDACTED only |
+| PASS | pull-persisted-cursor-prevents-refetch | pass 2 with the persisted cursor 8004: the stand-in serves nothing (pulled=0), zero inbox churn — the crash-window re-fetch case is covered by the scenario below |
+| PASS | pull-crashpoint-killed-in-the-cursor-window | the scenario child died by the armed crashpoint (marker fresh, exit {"code":1,"signal":null}) |
+| PASS | pull-crash-committed-events-cursor-untouched | after the crash the two receiveEvents are committed (2 rows) and the cursor is still 0 |
+| PASS | pull-restart-replay-zero-duplicate-tasks | the restart re-pulled the same update_ids: 2 duplicates absorbed, cursor advanced 0->8003, exactly 2 tasks (zero duplicates) |
+| PASS | control-stop-executes-deterministically-and-instantly | /stop cancelled the DM task (CANCELLED) in 102ms with zero model requests while the group lane kept its RUNNING slot (RUNNING) |
+| PASS | control-refuses-unauthorized-principal | a principal with no live grant cannot /pause; the scope stays unpaused (0) |
+| PASS | canary-links-1-5-zero-hits | router history / worker context / L0 export / L1 graph / L2 FTS+LIKE all zero across the four foreign scopes (①groupA=0, ②groupA=0, ③groupA=0, ④groupA=0, ⑤groupA=0, ①groupB=0, ②groupB=0, ③groupB=0, ④groupB=0, ⑤groupB=0, ①repo=0, ②repo=0, ③repo=0, ④repo=0, ⑤repo=0, ①service=0, ②service=0, ③service=0, ④service=0, ⑤service=0) |
+| PASS | canary-links-6-8-zero-hits | scope-local summaries carry no canary and the DM spill + fork checkpoint are denied to every foreign principal (⑥groupA=0, ⑦groupA=denied:true, ⑧groupA=denied:true, ⑥groupB=0, ⑦groupB=denied:true, ⑧groupB=denied:true, ⑥repo=0, ⑦repo=denied:true, ⑧repo=denied:true, ⑥service=0, ⑦service=denied:true, ⑧service=denied:true) |
+| PASS | canary-link9-dispatcher-blocks-cross-group-send | the DM-canary summary approved toward group A dies at dispatch (state=DEAD, audits=1): CP4 blocked: effect efx:notify%3Adm%253atelegram%253a6101%3Acanary-leak-probe may not flow to its target — cross-scope d |
+| PASS | canary-link9-adapter-allowlist-blocks-group-zero-bytes | the adapter refuses the group target with zero bytes (not in adapters.allowedRecipients) while the same-scope DM control send delivers; the service log has no sendMessage to the group |
+| PASS | canary-owner-summarize-request-double-blocked | the owner's group-A request is durably pending; the canary exists in exactly its home FTS row (1) and no foreign surface ever saw it |
+| PASS | revoke-group-session-stale-immediately | revoking the group-A read grant bumps the revision (1 < 2); the in-flight group session must be abandoned |
+| PASS | fairness-aging-lifts-low-priority-within-bounded-rounds | the priority-1 repo task won a claim after 7 aging rounds (effective 1+4*7 vs the flood's 5) — no starvation |
+| PASS | fairness-consecutive-turn-limit-steps-aside | with group B holding 3 consecutive turns at the limit, the equal-priority claim goes to the repo lane (repo) |
+
+合计：18 PASS / 0 FAIL。
+
+数据源：本地环回 Bot-API 夹具与本地 CONNECT 代理（零真实外联、零模型调用、零真实 Telegram）。

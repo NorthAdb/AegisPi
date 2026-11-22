@@ -56,11 +56,33 @@
     "timeoutMs": 30000
   },
   "telegram": {
-    "$comment": "真实 Telegram Bot 出站传输（Unit 4.3）：apiBase null 且 allowRealSend false 时失败关闭，零出站字节。仅作用于 dm:telegram:<id> / group:telegram:<id> / telegram:<id> 目标，并强制要求 adapters.allowedRecipients 非空与宿主凭据槽位 im 接线。",
+    "$comment": "真实 Telegram Bot 出站传输（Unit 4.3）：apiBase null 且 allowRealSend false 时失败关闭，零出站字节。仅作用于 dm:telegram:<id> / group:telegram:<id> / telegram:<id> 目标，并强制要求 adapters.allowedRecipients 非空与宿主凭据槽位 im 接线。Phase 5 Unit 5.2 新增路线 1 入站拉取键（01 §2 / 03 §5 / 06 §3.1）：allowRealPull 默认 false（非环回 apiBase 未授权即零 getUpdates 调用）；allowedChatIds 默认空数组 = 全部拒收（未命中仅记脱敏安全计数，零正文持久化、零 Task）；pullIntervalMs/pullTimeoutSeconds/pullBatchLimit 为有界运行参数，不是放行开关。",
     "apiBase": null,
     "allowRealSend": false,
     "proxyUrl": null,
-    "timeoutMs": 15000
+    "timeoutMs": 15000,
+    "allowRealPull": false,
+    "pullIntervalMs": 5000,
+    "pullTimeoutSeconds": 0,
+    "pullBatchLimit": 20,
+    "allowedChatIds": []
+  },
+  "router": {
+    "$comment": "按域单飞 Router 的公平调度参数（01 §2 / 审计矩阵 F14）：agingStepMs 为优先级等待增益步长（每等待一个步长 effectivePriority +1）；batchMaxEvents 为同域 PENDING 事件单批合并上限；scopeConsecutiveTurnLimit 限制单 scope 连续抢占轮次防高频群聊饿死私聊/仓库。纯数值有界参数，非真实世界放行开关。",
+    "agingStepMs": 60000,
+    "batchMaxEvents": 8,
+    "scopeConsecutiveTurnLimit": 3
+  },
+  "memory": {
+    "$comment": "分层记忆（Unit 5.1，01 §4–6）：l0MemoryMaxChars/l0UserMaxChars 为分域 L0 导出字符起点上限（USER.md 仅 owner_dm 域，严禁全局共享）；l1MaxHops/l1MaxObjects 为引用图有界展开；summaryMaxOutputTokens 为 purpose='summary' 摘要输出 token 上界；autoActivateCandidateFacts 默认 false —— 涉及身份/收件人/支付/审批豁免/权限的候选一律禁止自动激活，普通候选也须经主人书面策略或控制台人工裁决；spillMaxBytes/spillMaxLines 为工具输出 Spill 阈值（超限原文入受 ACL 对象，模型仅见截断视图）。全部为有界数值与失败关闭布尔，不放宽任何既有门禁。",
+    "l0MemoryMaxChars": 2200,
+    "l0UserMaxChars": 1375,
+    "l1MaxHops": 2,
+    "l1MaxObjects": 16,
+    "summaryMaxOutputTokens": 500,
+    "autoActivateCandidateFacts": false,
+    "spillMaxBytes": 51200,
+    "spillMaxLines": 2000
   },
   "credentials": {
     "$comment": "宿主接线的外部凭据槽位标记（02 §4）：键名 mail/repo/im；值为槽位引用或描述，非明文密钥；null = 未接线，真实写即拒。密钥本体只经宿主凭据服务（credentials.mjs）读取。",

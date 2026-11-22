@@ -103,3 +103,161 @@ export function dispatchEventToTask(db, {
     return { taskId, created: true, duplicatePlan: false };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Unit 5.2: per-domain single-flight fair routing (01 section 2, audit
+// matrix F14). Waiting events gain priority with age, a scope's pending
+// events merge into ONE bounded batch (max 8) anchored on the
+// highest-effective-priority event, and a thread's live task may receive
+// a follow-up event ONLY when it cannot widen permissions.
+
+/** effectivePriority = base + floor(waitMs / agingStepMs) (01 section 2). */
+export function effectivePriorityOf({ priority, receivedAt, now, agingStepMs = null }) {
+  if (!Number.isInteger(agingStepMs) || agingStepMs <= 0) return priority;
+  const waitMs = Math.max(0, now - receivedAt);
+  return priority + Math.floor(waitMs / agingStepMs);
+}
+
+function hasRequestGrant(db, { scopeId, principalId, now }) {
+  const row = db
+    .prepare(
+      `SELECT count(*) c FROM acl_grants
+       WHERE scope_id=? AND principal_id=? AND permission IN ('request','admin')
+         AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)`,
+    )
+    .get(scopeId, principalId, now);
+  return row.c > 0;
+}
+
+/**
+ * The bounded same-scope batch: PENDING ADMIT rows ordered by
+ * effectivePriority (aging applied), capped at maxBatchEvents.
+ */
+export function claimScopeInboxBatch(db, { scopeId, now, agingStepMs = null, maxBatchEvents = 8 }) {
+  const rows = db
+    .prepare("SELECT * FROM inbox WHERE scope_id=? AND state='PENDING' AND verdict='ADMIT'")
+    .all(scopeId);
+  const scored = rows
+    .map((row) => ({
+      row,
+      effectivePriority: effectivePriorityOf({ priority: row.priority, receivedAt: row.received_at, now, agingStepMs }),
+    }))
+    .sort((a, b) => b.effectivePriority - a.effectivePriority || a.row.received_at - b.row.received_at || (a.row.id < b.row.id ? -1 : 1));
+  return scored.slice(0, Math.max(1, maxBatchEvents)).map((s) => ({ ...s.row, effective_priority: s.effectivePriority }));
+}
+
+/** Attach one more event to an already-dispatched task (idempotent by PK). */
+export function attachEventToTask(db, { inboxId, taskId, now, batchReason }) {
+  return withTx(db, () => {
+    const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(inboxId);
+    if (!inbox) throw new DispatchError(`inbox ${inboxId} not found`);
+    if (inbox.state === "DONE" || inbox.state === "DEAD") {
+      throw new DispatchError(`inbox ${inboxId} is ${inbox.state}; attach refused`);
+    }
+    const existing = db
+      .prepare("SELECT state FROM event_deliveries WHERE event_id=? AND task_id=?")
+      .get(inboxId, taskId);
+    if (existing) {
+      db.prepare("UPDATE inbox SET state='ROUTED' WHERE id=? AND state='PENDING'").run(inboxId);
+      return { attached: true, duplicate: true, taskId };
+    }
+    db.prepare(
+      "INSERT INTO event_deliveries(event_id, task_id, state, command_id, checkpoint_object_id, updated_at) VALUES (?,?, 'PENDING', ?, NULL, ?)",
+    ).run(inboxId, taskId, commandIdFor(inboxId, taskId), now);
+    db.prepare(
+      "INSERT OR IGNORE INTO thread_subscriptions(scope_id, thread_key, task_id, active) VALUES (?,?,?,1)",
+    ).run(inbox.scope_id, inbox.thread_key, taskId);
+    db.prepare("UPDATE inbox SET state='ROUTED' WHERE id=? AND state='PENDING'").run(inboxId);
+    writeAudit(db, {
+      code: "event_attached_to_task",
+      taskId,
+      eventId: inboxId,
+      details: { batch_reason: batchReason ?? "same-scope batch merge", thread_key: inbox.thread_key },
+      now,
+    });
+    return { attached: true, duplicate: false, taskId };
+  });
+}
+
+/**
+ * Thread direct-delivery with the tighten-only rule (01 section 2): a new
+ * event may join a live thread task only when the sender holds a live
+ * request grant, the task is non-terminal, the scope epoch matches, and
+ * the event's payload closure never exceeds the task's own scope. Any
+ * widening demand — a cross-scope payload, a stale epoch, an unknown
+ * sender — means a NEW task, not a widened old one.
+ */
+export function directDeliverToThreadTask(db, { inboxId, now }) {
+  const inbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(inboxId);
+  if (!inbox) return { directDelivered: false, reason: "inbox row missing" };
+  const scope = db.prepare("SELECT id, epoch FROM scopes WHERE id=?").get(inbox.scope_id);
+  if (!scope) return { directDelivered: false, reason: "scope missing" };
+  const candidates = db
+    .prepare(
+      `SELECT t.id, t.state, t.scope_epoch FROM thread_subscriptions s JOIN tasks t ON t.id=s.task_id
+       WHERE s.scope_id=? AND s.thread_key=? AND s.active=1
+         AND t.state NOT IN ('SUCCEEDED','FAILED','CANCELLED','DEAD')`,
+    )
+    .all(inbox.scope_id, inbox.thread_key);
+  if (candidates.length === 0) return { directDelivered: false, reason: "no live thread task" };
+  if (!hasRequestGrant(db, { scopeId: inbox.scope_id, principalId: inbox.principal_id, now })) {
+    return { directDelivered: false, reason: "sender lacks a live request grant; new task instead" };
+  }
+  const extraScopes = db
+    .prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=? AND scope_id != ?")
+    .all(inbox.payload_object_id, inbox.scope_id);
+  if (extraScopes.length > 0) {
+    return { directDelivered: false, reason: "event payload requires scopes beyond the thread; new task instead" };
+  }
+  for (const candidate of candidates) {
+    if (candidate.scope_epoch !== scope.epoch) continue;
+    const attached = attachEventToTask(db, { inboxId, taskId: candidate.id, now, batchReason: "thread direct-delivery (tighten-only)" });
+    if (attached.attached) return { directDelivered: true, taskId: candidate.id, duplicate: attached.duplicate };
+  }
+  return { directDelivered: false, reason: "no live thread task at the current scope epoch" };
+}
+
+/**
+ * Route one inbox event: direct-delivery into a live thread task when the
+ * tighten-only checks pass, otherwise a fresh dispatch through the
+ * ordinary (idempotent) plan path.
+ */
+export function routeInboxEvent(db, {
+  inboxId, dispatchKey, now, routineId = null, priority, maxSteps, deadlineAt, skillSetHash,
+}) {
+  const direct = directDeliverToThreadTask(db, { inboxId, now });
+  if (direct.directDelivered) {
+    return { taskId: direct.taskId, created: false, directDelivered: true };
+  }
+  const dispatched = dispatchEventToTask(db, { inboxId, dispatchKey, now, routineId, priority, maxSteps, deadlineAt, skillSetHash });
+  return { ...dispatched, directDelivered: false, directReason: direct.reason };
+}
+
+/**
+ * The Router batch pass for one scope: the anchor event becomes the task,
+ * the rest of the bounded batch attaches to it. Returns an honest summary.
+ */
+export function dispatchEventBatchToTask(db, {
+  scopeId, now, agingStepMs = null, maxBatchEvents = 8, routineId = null,
+  maxSteps, deadlineAt, skillSetHash, dispatchKeyFor,
+}) {
+  const batch = claimScopeInboxBatch(db, { scopeId, now, agingStepMs, maxBatchEvents });
+  if (batch.length === 0) return { dispatched: 0, attached: 0, taskId: null };
+  const anchor = batch[0];
+  const routed = routeInboxEvent(db, {
+    inboxId: anchor.id,
+    dispatchKey: dispatchKeyFor(anchor),
+    now,
+    routineId,
+    priority: anchor.priority,
+    maxSteps,
+    deadlineAt,
+    skillSetHash,
+  });
+  let attached = 0;
+  for (const row of batch.slice(1)) {
+    const res = attachEventToTask(db, { inboxId: row.id, taskId: routed.taskId, now, batchReason: "same-scope batch merge" });
+    if (res.attached) attached += 1;
+  }
+  return { dispatched: batch.length, attached, taskId: routed.taskId, anchorInboxId: anchor.id, effectivePriority: anchor.effective_priority };
+}

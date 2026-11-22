@@ -17,10 +17,18 @@ import { reapExpiredLeases } from "./scheduler.mjs";
 import { markSubmittingEffectsUnknown } from "./effects.mjs";
 import { reapLostJobs } from "./execution-jobs.mjs";
 import { createBudgetLedger } from "./budget.mjs";
+import { withTx } from "./db/tx.mjs";
+import {
+  verifyDeletionManifestInvariant,
+  replayDeletionManifestInTx,
+} from "./deletion-manifest.mjs";
 
 export function scanMissingObjectFiles(db, stateDir) {
+  // Deleted objects are EXCLUDED on purpose: phase-2 forget physically
+  // removes the content file (Unit 5.1) — a tombstoned object with no file
+  // is the designed end state, not a missing reference.
   const rows = db
-    .prepare("SELECT id, storage_ref FROM objects WHERE storage_ref IS NOT NULL")
+    .prepare("SELECT id, storage_ref FROM objects WHERE storage_ref IS NOT NULL AND status != 'deleted'")
     .all();
   const missing = [];
   for (const r of rows) {
@@ -64,6 +72,29 @@ export function startupRecovery(db, {
   if (!step("object-references", missingFiles.length === 0,
     missingFiles.length === 0 ? "all activated object files present" : `missing: ${JSON.stringify(missingFiles.slice(0, 5))}`)) {
     return readonly("object-references", `${missingFiles.length} missing object file(s)`);
+  }
+
+  // 3b. Deletion-manifest invariant (Unit 5.1): the tombstone file may be
+  // AHEAD of the DB (crash between append and tx — repaired by replay
+  // below) but must never be missing, corrupt, or behind a non-zero DB
+  // deletion sequence. A stale or rolled-back manifest means forgotten
+  // data could resurrect from an old backup: execution stays closed.
+  const manifestCheck = verifyDeletionManifestInvariant(db, stateDir);
+  if (!manifestCheck.ok) {
+    step("deletion-manifest", false, manifestCheck.reason);
+    return readonly("deletion-manifest", manifestCheck.reason);
+  }
+  if (manifestCheck.pendingReplay.length > 0) {
+    const replayed = withTx(db, () =>
+      replayDeletionManifestInTx(db, { entries: manifestCheck.pendingReplay, now }),
+    );
+    step("deletion-manifest", true,
+      `manifest seq ${manifestCheck.fileLatestSeq} verified; replayed ${replayed.applied} tombstone(s) the DB had not committed yet`);
+  } else {
+    step("deletion-manifest", true,
+      manifestCheck.fresh
+        ? "no deletions recorded and no manifest required"
+        : `manifest seq ${manifestCheck.fileLatestSeq} verified, DB in sync`);
   }
 
   // 4. Scope configuration and revocation versions are restorable from the

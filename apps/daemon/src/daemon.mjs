@@ -16,8 +16,11 @@ import { loadCanonicalSchema, migrate, ensureModelRequestsTable } from "./db/mig
 import { migrationPending, preMigrationBackup } from "./db/backup.mjs";
 import { startupRecovery } from "./recovery.mjs";
 import { createBudgetLedger } from "./budget.mjs";
-import { dispatchEventToTask } from "./router.mjs";
+import { dispatchEventBatchToTask } from "./router.mjs";
+import { currentSkillSetHash } from "./skills.mjs";
 import { dispatchKeyForInbox } from "./ingress.mjs";
+import { pullTelegramUpdates } from "./telegram-pull.mjs";
+import { createCredentialService } from "./credentials.mjs";
 import { withTx } from "./db/tx.mjs";
 import {
   claimNextTask,
@@ -235,6 +238,22 @@ export async function main(argv = process.argv.slice(2)) {
       })
     : null;
 
+  // Unit 5.2 runtime state (in-memory only; everything durable lives in
+  // the DB): the pull interval tracker, and the per-scope consecutive-turn
+  // counter that backs the anti-starvation claim limit. The daemon-level
+  // pull gate requires telegram.allowRealPull === true — an apiBase alone
+  // only ever wired the OUTBOUND transport (Phase 4.3), and the send-only
+  // fixtures must never see a getUpdates request. A loopback apiBase with
+  // allowRealPull is the local verification seam, mirroring model.baseUrl.
+  const credentials = createCredentialService(db);
+  const telegramPullEnabled =
+    config.telegram?.apiBase !== null &&
+    config.telegram?.apiBase !== undefined &&
+    config.telegram?.allowRealPull === true;
+  let lastPullAt = 0;
+  const scopeTurnCounts = new Map();
+  let lastClaimedScope = null;
+
   function parseImageLauncher(flagPrefix, label, createFn, { reapOnStart = false } = {}) {
     const flag = argv.find((a) => a.startsWith(flagPrefix));
     if (!flag) return null;
@@ -408,19 +427,56 @@ export async function main(argv = process.argv.slice(2)) {
     expireStaleNotifications(db, { now });
     // 2. Timers generate durable inbox events.
     const timers = processDueTimers(db, { now });
-    // 3. Pending inbox rows get their default dispatch plan — recovery from
-    //    any crash never depends on an in-memory wakeup.
-    const pending = db.prepare("SELECT * FROM inbox WHERE state='PENDING' AND verdict='ADMIT'").all();
-    for (const row of pending) {
-      dispatchEventToTask(db, {
-        inboxId: row.id,
-        dispatchKey: dispatchKeyForInbox(row),
-        now,
-        priority: row.priority,
-        maxSteps: config.budget.taskMaxSteps,
-        deadlineAt: now + config.budget.taskMaxWallClockMs,
-        skillSetHash: "skillset-phase2-default",
-      });
+    // 2b. Telegram Route 1 pull (Unit 5.2): gated by config — without an
+    //     apiBase (and, off loopback, allowRealPull + allowedChatIds + a
+    //     live 'im' slot) this is a durable no-op. Interval-tracked in
+    //     memory only; the durable cursor is system_state.
+    let pullResult = null;
+    if (telegramPullEnabled) {
+      if (now - lastPullAt >= (config.telegram.pullIntervalMs ?? 5000)) {
+        lastPullAt = now;
+        try {
+          pullResult = pullTelegramUpdates(db, dataDir, {
+            telegram: config.telegram,
+            credentials,
+            now,
+          });
+          if (pullResult && typeof pullResult === "object" && !("skipped" in pullResult) && !("failed" in pullResult)) {
+            console.error(
+              `telegram-pull: admitted=${pullResult.admitted} dup=${pullResult.duplicates} unauthorized=${pullResult.skippedUnauthorized} offset=${pullResult.offsetBefore}->${pullResult.offsetAfter}`,
+            );
+          }
+        } catch (e) {
+          console.error(`telegram-pull: pull pass refused: ${String(e.message).slice(0, 160)}`);
+        }
+      }
+    }
+    // 3. Pending inbox rows get their routing plan — recovery from any
+    //    crash never depends on an in-memory wakeup. Unit 5.2: events are
+    //    grouped per scope, ordered by aging-boosted effective priority,
+    //    merged into a bounded batch anchored on the top event, and a live
+    //    thread task can absorb a follow-up event only under the
+    //    tighten-only rule (router.mjs).
+    const pendingScopes = db
+      .prepare("SELECT DISTINCT scope_id FROM inbox WHERE state='PENDING' AND verdict='ADMIT'")
+      .all();
+    for (const { scope_id: pendingScopeId } of pendingScopes) {
+      try {
+        dispatchEventBatchToTask(db, {
+          scopeId: pendingScopeId,
+          now,
+          agingStepMs: config.router?.agingStepMs ?? null,
+          maxBatchEvents: config.router?.batchMaxEvents ?? 8,
+          maxSteps: config.budget.taskMaxSteps,
+          deadlineAt: now + config.budget.taskMaxWallClockMs,
+          skillSetHash: currentSkillSetHash(db, { scopeId: pendingScopeId }),
+          dispatchKeyFor: dispatchKeyForInbox,
+        });
+      } catch (e) {
+        // One scope's dispatch failure (e.g. a CP4-blocked cross-scope
+        // proposal) must not stop the other scopes from routing.
+        console.error(`router: scope ${pendingScopeId} dispatch refused: ${String(e.message).slice(0, 160)}`);
+      }
     }
     // 4. Worker paths. The fixture worker exists EXCLUSIVELY under
     //    --fake-upstream: it is a test seam, so the no-authorization path
@@ -432,8 +488,27 @@ export async function main(argv = process.argv.slice(2)) {
     let claim = null;
     let proposalProcessed = 0;
     const excludeTriageTaskIds = new Set();
+    const claimWithFairness = () =>
+      claimNextTask(db, {
+        now,
+        leaseMs: config.leases.leaseMs,
+        agingStepMs: config.router?.agingStepMs ?? null,
+        scopeTurnState: scopeTurnCounts,
+        scopeConsecutiveTurnLimit: config.router?.scopeConsecutiveTurnLimit ?? null,
+      });
+    const trackTurn = (claimed) => {
+      if (!claimed) return;
+      if (claimed.scopeId === lastClaimedScope) {
+        scopeTurnCounts.set(claimed.scopeId, (scopeTurnCounts.get(claimed.scopeId) ?? 0) + 1);
+      } else {
+        scopeTurnCounts.clear();
+        scopeTurnCounts.set(claimed.scopeId, 1);
+        lastClaimedScope = claimed.scopeId;
+      }
+    };
     if (fakeUpstream) {
-      claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
+      claim = claimWithFairness();
+      trackTurn(claim);
       if (claim) {
         heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
         const taskAcc = ledger.ensureTaskAccount({ taskId: claim.taskId, now }).accountId;
@@ -481,10 +556,14 @@ export async function main(argv = process.argv.slice(2)) {
           resultClass: "not_applicable",
           resultObjectId: evidence.id,
         });
-        const delivery = db
-          .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
-          .get(claim.taskId);
-        if (delivery) {
+        // Consume EVERY pending delivery on the claimed task — a batch-
+        // merged task (Unit 5.2: up to 8 same-scope events) must leave no
+        // attached event stranded PENDING, or its inbox row can never
+        // reach DONE.
+        const pendingDeliveries = db
+          .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING' ORDER BY rowid ASC")
+          .all(claim.taskId);
+        for (const delivery of pendingDeliveries) {
           const ck = insertObjectRow(db, {
             scopeId,
             kind: "session_checkpoint",
@@ -538,16 +617,24 @@ export async function main(argv = process.argv.slice(2)) {
         }
       } else {
         if (agentLauncher || canRunModelFreeTriage) {
-          claim = claimNextTask(db, { now, leaseMs: config.leases.leaseMs });
+          claim = claimWithFairness();
+          trackTurn(claim);
           if (claim) {
             heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
             const taskRow = db.prepare("SELECT scope_id, deadline_at FROM tasks WHERE id=?").get(claim.taskId);
             const scopeRow = db.prepare("SELECT domain_key FROM scopes WHERE id=?").get(taskRow.scope_id);
             let callInput = null;
-            const delivery = db
-              .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING'")
-              .get(claim.taskId);
-            if (delivery) {
+            // Unit 5.2 batch semantics: the model input joins EVERY pending
+            // delivery's payload (a batch-merged task carries up to 8
+            // same-scope events), bounded so a merged batch can never blow
+            // the model's input budget. Single-delivery tasks — every
+            // pre-5.2 suite — read exactly as before.
+            const MAX_MERGED_INPUT_BYTES = 65536;
+            const pendingDeliveries = db
+              .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING' ORDER BY rowid ASC")
+              .all(claim.taskId);
+            const payloadTexts = [];
+            for (const delivery of pendingDeliveries) {
               const inboxRow = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(delivery.event_id);
               const obj = inboxRow
                 ? db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(inboxRow.payload_object_id)
@@ -555,9 +642,14 @@ export async function main(argv = process.argv.slice(2)) {
               const payloadPath = obj?.storage_ref ? join(dataDir, ...obj.storage_ref.split("/")) : null;
               if (payloadPath && existsSync(payloadPath)) {
                 try {
-                  callInput = readFileSync(payloadPath, "utf8");
+                  payloadTexts.push(readFileSync(payloadPath, "utf8"));
                 } catch {}
               }
+            }
+            if (payloadTexts.length === 1) {
+              callInput = payloadTexts[0];
+            } else if (payloadTexts.length > 1) {
+              callInput = payloadTexts.join("\n").slice(0, MAX_MERGED_INPUT_BYTES);
             }
             let launchInput = callInput;
             let skipLaunch = false;
@@ -741,7 +833,14 @@ export async function main(argv = process.argv.slice(2)) {
           // Head precondition (06 section 6: the CAS transaction re-checks the
           // target resource precondition) — INSIDE the dispatcher transaction.
           const precondition = adapterUpstream ? headPrecondition(adapterUpstream, row) : () => true;
-          dispatchEffect(db, adapterUpstream, { effectId: e.id, now, precondition });
+          dispatchEffect(db, adapterUpstream, {
+            effectId: e.id, now, precondition,
+            // CP4 disclosure record (Unit 5.2): the deployment's
+            // authorized recipients are the owner's explicit cross-scope
+            // disclosure decisions; everything else needs the system_state
+            // disclosure allowlist or stays same-scope.
+            authorizedRecipients: config.adapters.allowedRecipients,
+          });
         } catch (err) {
           if (
             err instanceof AdapterRefused &&
@@ -840,12 +939,13 @@ export async function main(argv = process.argv.slice(2)) {
         }
       }
     }
-    if (timers.fired.length > 0 || pending.length > 0 || claim || proposalProcessed > 0 || due.length > 0) {
+    const pendingScopeCount = pendingScopes.length;
+    if (timers.fired.length > 0 || pendingScopeCount > 0 || claim || proposalProcessed > 0 || due.length > 0) {
       console.log(
-        `tick: timers=${timers.fired.length} dispatched_pending=${pending.length} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} due_notifications=${due.length}`,
+        `tick: timers=${timers.fired.length} dispatched_scopes=${pendingScopeCount} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} due_notifications=${due.length}`,
       );
     }
-    return timers.fired.length + pending.length + (claim ? 1 : 0) + proposalProcessed + due.length;
+    return timers.fired.length + pendingScopeCount + (claim ? 1 : 0) + proposalProcessed + due.length;
   };
 
   if (args.has("--once")) {

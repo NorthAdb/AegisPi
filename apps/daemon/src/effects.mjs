@@ -13,6 +13,8 @@ import { withTx } from "./db/tx.mjs";
 import { writeAudit, writeStreamEvent, authorizationRevision } from "./audit.mjs";
 import { canonicalJson, businessKey as encodeBusinessKey, escapeComponent } from "./keys.mjs";
 import { insertObjectRow } from "./objects.mjs";
+import { scopeId as scopeIdForDomainKey } from "./ingress.mjs";
+import { cp4Decision, recordCp4Block, GROUP_SHAPED_TARGET_RE } from "./cp4.mjs";
 import {
   createApprovalRow,
   approvalIdFor,
@@ -270,7 +272,16 @@ function hashOfActionJson(actionJson) {
 // The dispatcher. One short transaction re-checks everything and CASes
 // READY -> SUBMITTING; the upstream call happens after COMMIT, outside any
 // SQLite transaction.
-export function dispatchEffect(db, upstream, { effectId, now, precondition = null, label = "dispatcher", submitMode = undefined, reservationId = null }) {
+//
+// Unit 5.2 CP4 (02 section 3 / 01 section 3): before the CAS commits, a
+// scope-shaped Telegram target OUTSIDE the effect's own scope must be
+// authorized to RECEIVE the payload's full upstream closure. The
+// deployment's authorized recipient list (adapters.allowedRecipients,
+// passed by the daemon) and the system_state disclosure allowlist are the
+// two honest disclosure records; anything else is blocked BEFORE the
+// commitment point, the effect lands DEAD with the audit trail, and zero
+// bytes leave.
+export function dispatchEffect(db, upstream, { effectId, now, precondition = null, label = "dispatcher", submitMode = undefined, reservationId = null, authorizedRecipients = [] }) {
   let cas;
   cas = withTx(db, () => {
     const e = db.prepare("SELECT * FROM effects WHERE id=?").get(effectId);
@@ -283,6 +294,37 @@ export function dispatchEffect(db, upstream, { effectId, now, precondition = nul
     }
     if (now >= e.expires_at) {
       throw new DispatcherRefused(`effect ${effectId} expired`);
+    }
+    // CP4 recipient reverse-check (only the GROUP-shaped targets — the
+    // multi-member audiences; unlisted DM targets stay under the Phase 4
+    // recipient-allowlist discipline and legacy fixture resources never
+    // match).
+    if (
+      (e.operation === "im.notify" || e.operation === "send_message") &&
+      GROUP_SHAPED_TARGET_RE.test(e.resource)
+    ) {
+      const targetScopeId = scopeIdForDomainKey(e.resource);
+      if (targetScopeId !== e.scope_id) {
+        const deploymentAuthorized = Array.isArray(authorizedRecipients) && authorizedRecipients.includes(e.resource);
+        const decision = deploymentAuthorized
+          ? { allowed: true, basis: "deployment-authorized recipient (adapters.allowedRecipients)", closure: [] }
+          : cp4Decision(db, { payloadObjectId: e.payload_object_id, targetScopeId, now });
+        if (!decision.allowed) {
+          // Block INSIDE the transaction so the refusal record commits:
+          // the effect goes DEAD (visible, demands a human), the audit
+          // and stream alert land with it, and no byte is ever built.
+          db.prepare("UPDATE effects SET state='DEAD', last_error=?, updated_at=? WHERE id=? AND state='READY'")
+            .run(`cp4_recipient_scope_leak_blocked: ${decision.basis}`, now, effectId);
+          recordCp4Block(db, {
+            payloadObjectId: e.payload_object_id,
+            targetScopeId,
+            closure: decision.closure,
+            basis: decision.basis,
+            now,
+          });
+          return { effectId, cp4Blocked: true, basis: decision.basis };
+        }
+      }
     }
     const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(e.task_id);
     const scope = db.prepare("SELECT * FROM scopes WHERE id=?").get(e.scope_id);
@@ -328,6 +370,12 @@ export function dispatchEffect(db, upstream, { effectId, now, precondition = nul
     });
     return { effectId, attemptCount: e.attempt_count + 1 };
   });
+  if (cas.cp4Blocked === true) {
+    // The blocking transaction is COMMITTED at this point: the refusal,
+    // its audit trail and the DEAD effect are durable. The throw tells
+    // the caller the dispatch did not happen.
+    throw new DispatcherRefused(`CP4 blocked: effect ${effectId} may not flow to its target — ${cas.basis}`);
+  }
   // Commit is the linearization point of the system's commitment. A crash
   // from here on leaves SUBMITTING for startup recovery to call UNKNOWN.
   crashpoint("effects:after-cas-before-call");

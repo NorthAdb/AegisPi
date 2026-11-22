@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T14:57:57.192Z",
+  "generatedAt": "2026-11-22T06:43:32.659Z",
   "nodeVersion": "v22.23.5",
   "suite": "restore",
   "label": "test:restore — 一致性备份维护窗口 + 加密 manifest（含 dbSha256 字节认证）+ 删除清单 + 恢复演练 + 保留期清理",
@@ -11,7 +11,7 @@
     {
       "name": "consistency-backup-seals-manifest-with-ledger",
       "status": "PASS",
-      "detail": "image=workspace-state\\phase3\\restore-drill\\backups\\consistency-1795273073245.db entries=1"
+      "detail": "image=workspace-state\\phase3\\restore-drill\\backups\\consistency-1795329809124.db entries=1"
     },
     {
       "name": "manifest-is-encrypted-at-rest",
@@ -56,12 +56,12 @@
     {
       "name": "restore-rejects-equal-length-db-tampering",
       "status": "PASS",
-      "detail": "tampered image size unchanged=true -> backup image bytes hash to sha256:58f1eda06f2fbd02cccc6c1a18cfeee8602aea11da5e2f"
+      "detail": "tampered image size unchanged=true -> backup image bytes hash to sha256:0a41030c135a7782ca78d19850f5ea25d2fde8de2ef08e"
     },
     {
       "name": "backup-retention-prunes-expired-pairs",
       "status": "PASS",
-      "detail": "before=2 pruned=[\"consistency-1793545077188.db\"] fresh-kept=true"
+      "detail": "before=2 pruned=[\"consistency-1793601812649.db\"] fresh-kept=true"
     }
   ],
   "dataSources": "本地 SQLite 与真实备份/恢复路径（VACUUM INTO + AES-256-GCM manifest，dbSha256 拒等长篡改）；无外部连接"

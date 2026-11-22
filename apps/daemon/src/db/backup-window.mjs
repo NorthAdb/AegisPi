@@ -34,6 +34,11 @@ import { loadCanonicalSchema, verifySchema } from "./migrate.mjs";
 import { withTx } from "./tx.mjs";
 import { writeAudit } from "../audit.mjs";
 import { insertObjectRow, putObjectContent } from "../objects.mjs";
+import {
+  DeletionManifestStale,
+  verifyDeletionManifestInvariant,
+  replayDeletionManifestInTx,
+} from "../deletion-manifest.mjs";
 
 export const DELETION_LEDGER_STATE_KEY = "deletion_ledger_object";
 
@@ -240,6 +245,15 @@ export function consistencyBackup(db, {
 // target directory, re-verifies it against the canonical schema, and applies
 // the deletion ledger from the (decrypted) manifest — forgotten stays
 // forgotten across a restore.
+//
+// Unit 5.1: with `stateDir` provided, the restore ALSO enforces the
+// protected deletion-manifest invariant against the restored image: a
+// missing, corrupt, or sequence-behind manifest refuses the restore (the
+// daemon then stays in read-only diagnostics); a valid manifest is REPLAYED
+// so objects forgotten after the backup cannot resurrect. Startup recovery
+// (recovery.mjs step 3b) enforces the same invariant unconditionally at
+// every boot, so a restore that skipped this parameter is still gated
+// before execution ever opens.
 
 export function restoreFromBackup({
   backupPath,
@@ -247,6 +261,7 @@ export function restoreFromBackup({
   manifestKeyHex,
   targetDbPath,
   now,
+  stateDir = null,
 }) {
   if (!existsSync(backupPath)) {
     throw new BackupError(`no backup image at ${backupPath}`);
@@ -316,6 +331,24 @@ export function restoreFromBackup({
       removed.push(objectId);
     }
   }
+  // Unit 5.1: the protected deletion manifest is INDEPENDENT of this
+  // backup, so it can be newer than the restored image. Verify it against
+  // the restored DB and replay every tombstone the image has not seen.
+  // A missing/corrupt/stale manifest refuses the restore outright —
+  // execution cannot open on top of potentially resurrected data.
+  let manifestReplay = null;
+  if (stateDir !== null) {
+    const invariant = verifyDeletionManifestInvariant(db, stateDir);
+    if (!invariant.ok) {
+      db.close();
+      throw new DeletionManifestStale(`deletion-manifest gate refused the restore: ${invariant.reason}`);
+    }
+    if (invariant.pendingReplay.length > 0) {
+      manifestReplay = withTx(db, () => replayDeletionManifestInTx(db, { entries: invariant.pendingReplay, now }));
+    } else {
+      manifestReplay = { applied: 0, latestSeq: invariant.fileLatestSeq };
+    }
+  }
   // What did we actually get back? The Phase 3 acceptance cares about
   // pending-approval, ready-to-send and timer work surviving.
   const restored = {
@@ -325,7 +358,7 @@ export function restoreFromBackup({
     queuedInbox: db.prepare("SELECT count(*) c FROM inbox WHERE state='PENDING' AND verdict='ADMIT'").get().c,
   };
   db.close();
-  return { restored, manifest, appliedDeletions: removed, integrity: integrity.detail };
+  return { restored, manifest, appliedDeletions: removed, integrity: integrity.detail, manifestReplay };
 }
 
 // ---------------------------------------------------------------------------

@@ -64,7 +64,7 @@ export function putObjectContent(stateDir, content) {
   return { contentHash, storageRef: relRef, alreadyPresent: false };
 }
 
-function fsyncParentDir(dir) {
+export function fsyncParentDir(dir) {
   try {
     const fd = openSync(dir, "r");
     try {

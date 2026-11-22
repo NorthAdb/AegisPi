@@ -10,6 +10,12 @@
 //   3   NOT VERIFIED — no TELEGRAM_BOT_TOKEN on this machine. This is not a
 //       skip dressed as a pass: the acceptance is explicitly UNACCEPTED
 //       until the owner-authorized source is configured.
+//   4   REFUSED — AEGISPI_ALLOW_REAL_TELEGRAM_READ is not set. The C-item
+//       authorization ledger is CLOSED ("任何重跑即需新授权"), and the
+//       presence of a token on this machine is not an authorization
+//       (2026-11-22 incident: an unguarded re-run read the queue once
+//       against a closed ledger — the guard below now makes that
+//       impossible without an explicit opt-in).
 //
 // `--simulate-no-token` drills the refusal path on any machine: with the
 // token present it behaves exactly like a token-less machine; on a machine
@@ -39,6 +45,15 @@ import { receiveEvent } from "../../../apps/daemon/src/ingress.mjs";
 import { createTelegramPullAdapter } from "../../../apps/daemon/src/ingress-telegram.mjs";
 
 lockedNodeGuard();
+
+// The authorization ledger is closed: refuse BEFORE reading .env unless
+// the owner explicitly opts this run in (the same guard pattern as
+// model-real / repo-observe-real / triage-real).
+if (process.env.AEGISPI_ALLOW_REAL_TELEGRAM_READ !== "1") {
+  console.error("=== test:ingress-telegram:real — REFUSED (exit 4) ===");
+  console.error("AEGISPI_ALLOW_REAL_TELEGRAM_READ is not set; the C-item authorization ledger is closed and re-running the real read needs a new owner authorization.");
+  process.exit(4);
+}
 
 const suite = makeSuite("ingress-telegram-real");
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");

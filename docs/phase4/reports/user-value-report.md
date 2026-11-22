@@ -1,6 +1,6 @@
 # User-value and verification report
 
-> Generated: 2026-11-21T15:12:53.861Z from verified evidence JSON files
+> Generated: 2026-11-22T07:02:11.612Z from verified evidence JSON files
 
 - status: PASS (134 pass / 0 fail / 134 judged)
 - configured budgets: task=800000 microUSD (`$0.80`), day=5000000 microUSD (`$5.00`)
