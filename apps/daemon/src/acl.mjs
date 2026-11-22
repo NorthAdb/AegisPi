@@ -6,6 +6,7 @@
 
 import { withTx } from "./db/tx.mjs";
 import { writeAudit, writeStreamEvent, bumpAuthorizationRevision, authorizationRevision } from "./audit.mjs";
+import { cancelScopeTimersInTx } from "./timers.mjs";
 
 export class AclError extends Error {}
 
@@ -46,6 +47,13 @@ export function revokePermission(db, { scopeId, principalId, permission, now, ac
       throw new AclError(`no live ${permission} grant for ${principalId} in ${scopeId}`);
     }
     db.prepare("UPDATE scopes SET acl_version=acl_version+1 WHERE id=?").run(scopeId);
+    // Unit 5.4 cascade (03 section 4): revoking READ access kills the
+    // scope's SCHEDULED timers in the same transaction — a follow-up that
+    // can no longer read its thread may not keep firing.
+    let cancelledTimers = [];
+    if (permission === "read") {
+      cancelledTimers = cancelScopeTimersInTx(db, { scopeId, now, reason: `read grant revoked for ${principalId}`, actorId });
+    }
     const revision = bumpAuthorizationRevision(db, { now, reason: reason || `revoke ${permission} in ${scopeId}`, actorId });
     writeStreamEvent(db, {
       scopeId,
@@ -55,7 +63,7 @@ export function revokePermission(db, { scopeId, principalId, permission, now, ac
       payload: { revoked: true, permission },
       now,
     });
-    return { scopeId, principalId, permission, authorizationRevision: revision };
+    return { scopeId, principalId, permission, authorizationRevision: revision, cancelledTimers };
   });
 }
 

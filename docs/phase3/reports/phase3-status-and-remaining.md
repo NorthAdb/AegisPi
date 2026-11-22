@@ -54,6 +54,7 @@
 ## 6. 普通残留（复审原判维持，不挡出口）
 
 备份库明文 SQLite、同主机重定向换端口、备份两次读之间的替换窗口、4 GiB 全量写未做、PID 复用窗口、stdout 微秒竞态未稳定复现、短 webhook secret 未捕获异常 exit 1、模型 bearer 经短命子进程 argv。镜像复跑配方的 `docker load` 标签保留限度（确认审计标注）已写入 `image-transfer-manifest.md` §3 第 5 步。
+7. Phase 5 第 2 批（单元 5.3 场景一邮件 + 单元 5.4 场景二日历/L3 Dreaming 编排 + 单元 5.5 Web 控制台）：**许可 1 实现与自测收口已完成（2026-11-22，D-97，本地提交待独立审计）**——新增 `eval:scenarios` **78/78**（环回 TLS SMTP/IMAP/CalDAV 夹具全矩阵）、security-unit 扩编 **63/63**（+15 个 5.5 用例）、cancel-approval 扩编 **20/20**（+4）、镜像**纪元 14**（agent `sha256:e33246a5…`）；终树 17 套全量回归 exit 0、5 个 real 入口 exit 4、`report:user-value` **149/149**（`defaultsFailClosed=true`）；浏览器 E2E 四页签实测（批准→环回 SMTP 恰 1 封、UNKNOWN 对账、XSS 纯文本渲染）截图归档 `docs/phase5/evidence/browser-e2e/`；`defaults.json` 新增 mail/calendar 双节全失败关闭；**5.6 实盘未授权未实施**，等待独立审计通过后进入。
 
 ## 7. 待办汇总
 

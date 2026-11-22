@@ -705,6 +705,132 @@ const sessionHeaders = (session) => ({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Unit 5.5: the SAME approval/revise/reconcile semantics driven through the
+// console production API. The designated approver's live session receives
+// the decision materials (full action hash + nonce) from the card GET; the
+// bootstrap token never sees them and never mutates.
+{
+  const { ws, db, now } = seedWorkspace("ca-55-api");
+  const { task } = seedTask(db, ws, { label: "api-revise", now });
+  const card = proposeCard(db, ws, { task, label: "api-revise", now });
+  const consoleCtx = makeConsole(db, ws);
+  const session = await mintSession(consoleCtx.fetch, consoleCtx.token);
+
+  // The card GET hands the designated approver's session the decision
+  // materials; a bare bootstrap-token caller gets null.
+  const cardRes = await consoleCtx.fetch("GET", `/api/approvals/${encodeURIComponent(card.approvalId)}`, {
+    headers: { authorization: `Bearer ${session.sessionId}` },
+  });
+  const cardData = cardRes.body;
+  const bareCard = await consoleCtx.fetch("GET", `/api/approvals/${encodeURIComponent(card.approvalId)}`, {
+    headers: { authorization: `Bearer ${consoleCtx.token}` },
+  });
+  const bareData = bareCard.body;
+  suite.check(
+    "55-api-decision-materials-session-only",
+    cardRes.status === 200 && cardData.decisionMaterials && cardData.decisionMaterials.nonce && cardData.decisionMaterials.actionHash === card.actionHash && bareData.decisionMaterials === null,
+    `session=${cardData.decisionMaterials ? "materials" : "null"} bare=${bareData.decisionMaterials === null ? "null" : "LEAKED"}`,
+  );
+
+  // Revise through the API: new effect + new card, old card invalidated.
+  const reviseRes = await consoleCtx.fetch("POST", `/api/approvals/${encodeURIComponent(card.approvalId)}/revise`, {
+    headers: sessionHeaders(session),
+    body: JSON.stringify({
+      intent: {
+        targetResource: "im:dm:6101",
+        operation: "im.notify",
+        contentHash: "c".repeat(64),
+        evidenceManifestHash: "d".repeat(64),
+        extra: { body_preview: "api-revised body" },
+      },
+      expiresAt: now + 60 * 60 * 1000,
+    }),
+  });
+  const revised = reviseRes.status === 200 ? reviseRes.body : null;
+  const oldClick = await consoleCtx.fetch("POST", `/api/approvals/${encodeURIComponent(revised ? revised.oldApprovalId : card.approvalId)}/decide`, {
+    headers: sessionHeaders(session),
+    body: JSON.stringify({ decision: "approve", actionHash: card.actionHash, nonce: card.approvalNonce }),
+  });
+  suite.check(
+    "55-api-revise-mints-new-card-old-dead",
+    reviseRes.status === 200 && revised && revised.newApprovalId !== card.approvalId && oldClick.status === 409,
+    `${reviseRes.status} new=${revised ? revised.newApprovalId : "n/a"} oldClick=${oldClick.status}`,
+  );
+
+  // The new card's decision materials, consumed through the API, dispatch
+  // through the fake transport exactly like a host-proposed card.
+  const newCardRes = await consoleCtx.fetch("GET", `/api/approvals/${encodeURIComponent(revised.newApprovalId)}`, {
+    headers: { authorization: `Bearer ${session.sessionId}` },
+  });
+  const newCardData = newCardRes.body;
+  const approveRes = await consoleCtx.fetch("POST", `/api/approvals/${encodeURIComponent(revised.newApprovalId)}/decide`, {
+    headers: sessionHeaders(session),
+    body: JSON.stringify({
+      decision: "approve",
+      actionHash: newCardData.decisionMaterials.actionHash,
+      nonce: newCardData.decisionMaterials.nonce,
+    }),
+  });
+  const fake = createFakeRemote(ws.stateDir, { label: "ca-55-fake" });
+  const upstream = createAdapterUpstream(db, {
+    baseUpstream: fake,
+    transportKind: "fake",
+    policy: { allowRealExternalWrites: false },
+    config: { fixedSendingIdentity: "aegispi@local", allowedRecipients: [], allowedRepos: [], allowedBranches: [] },
+  });
+  const dispatched = approveRes.status === 200
+    ? dispatchEffect(db, upstream, { effectId: revised.newEffectId, now: Date.now() })
+    : { state: "skipped" };
+  suite.check(
+    "55-api-approved-card-dispatches",
+    approveRes.status === 200 && dispatched.state === "SUCCEEDED",
+    `${approveRes.status} dispatch=${dispatched.state}`,
+  );
+
+  // UNKNOWN reconcile ladder via the API: listed for the visible scope,
+  // refused without a live session CSRF, refused when CONFIRMED_SUCCESS
+  // lacks the external id, resolved with actor + evidence.
+  const unknownEffect = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: task.id,
+    attemptId: db.prepare("SELECT id FROM attempts WHERE task_id=? AND attempt_no=?").get(task.id, task.attempt_no).id,
+    effectType: "notify",
+    domainKey: "dm:telegram:6101",
+    naturalKey: "api-unknown",
+    operationIntent: { targetResource: "im:dm:6101", operation: "im.notify", contentHash: "e".repeat(64), evidenceManifestHash: "f".repeat(64) },
+    retryMode: "AT_MOST_ONCE",
+    provider: "telegram",
+    resource: "im:dm:6101",
+    requiresApproval: false,
+    expiresAt: now + 60 * 60 * 1000,
+  });
+  db.prepare("UPDATE effects SET state='UNKNOWN', last_error='fixture unknown' WHERE id=?").run(unknownEffect.effectId);
+  const unknownList = await consoleCtx.fetch("GET", "/api/effects-unknown", {
+    headers: { authorization: `Bearer ${session.sessionId}` },
+  });
+  const unknownListBody = unknownList.body;
+  const noCsrf = await consoleCtx.fetch("POST", `/api/effects/${encodeURIComponent(unknownEffect.effectId)}/reconcile`, {
+    headers: { authorization: `Bearer ${session.sessionId}`, "content-type": "application/json" },
+    body: JSON.stringify({ resolution: "CONFIRMED_SUCCESS", externalEvidenceRef: "sent-items" }),
+  });
+  const noExternalId = await consoleCtx.fetch("POST", `/api/effects/${encodeURIComponent(unknownEffect.effectId)}/reconcile`, {
+    headers: sessionHeaders(session),
+    body: JSON.stringify({ resolution: "CONFIRMED_SUCCESS", externalEvidenceRef: "sent-items" }),
+  });
+  const reconciled = await consoleCtx.fetch("POST", `/api/effects/${encodeURIComponent(unknownEffect.effectId)}/reconcile`, {
+    headers: sessionHeaders(session),
+    body: JSON.stringify({ resolution: "CONFIRMED_SUCCESS", externalEvidenceRef: "sent-items check", externalId: "<proof@example.com>" }),
+  });
+  const reconciledRow = db.prepare("SELECT state FROM effects WHERE id=?").get(unknownEffect.effectId);
+  suite.check(
+    "55-api-reconcile-ladder",
+    unknownList.status === 200 && unknownListBody.effects.some((x) => x.id === unknownEffect.effectId) && noCsrf.status === 403 && noExternalId.status === 409 && reconciled.status === 200 && reconciledRow.state === "SUCCEEDED",
+    `${unknownList.status} noCsrf=${noCsrf.status} noExternalId=${noExternalId.status} final=${reconciled.status}/${reconciledRow.state}`,
+  );
+  db.close();
+}
+
 writeReport({
   suiteId: "cancel-approval",
   suite,

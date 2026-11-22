@@ -71,7 +71,27 @@ export function createApprovalRow(db, {
     nonceHashFor(nonce),
     now,
   );
+  // Unit 5.5 console delivery: the raw nonce rides system_state (host-only
+  // storage; the approvals table itself keeps ONLY its hash) so the local
+  // web console can hand it back to the DESIGNATED approver's live session.
+  // It never enters a URL, an SSE payload, or a log line, and it is cleared
+  // the moment the card leaves WAITING.
+  db.prepare("INSERT INTO system_state(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    .run(consoleNonceKey(id), nonce);
   return { approvalId: id, nonce };
+}
+
+function consoleNonceKey(approvalId) {
+  return `console_nonce:${approvalId}`;
+}
+
+export function readConsoleNonce(db, approvalId) {
+  const row = db.prepare("SELECT value FROM system_state WHERE key=?").get(consoleNonceKey(approvalId));
+  return row?.value ?? null;
+}
+
+export function clearConsoleNonce(db, approvalId) {
+  db.prepare("DELETE FROM system_state WHERE key=?").run(consoleNonceKey(approvalId));
 }
 
 function verifyDecision(db, { approval, actionHash, nonce, approverId, now }) {
@@ -186,6 +206,7 @@ export function decideApproval(db, { approvalId, decision, actionHash, nonce, ap
         now,
       });
       const out = { accepted: true, state: "CONSUMED", effectState: "READY", taskState: "WAITING_EFFECT" };
+      clearConsoleNonce(db, approvalId);
       crashpoint("approvals:inside-txn");
       return out;
     }
@@ -212,6 +233,7 @@ export function decideApproval(db, { approvalId, decision, actionHash, nonce, ap
       details: { approval_id: approvalId, effect_id: effect.id },
       now,
     });
+    clearConsoleNonce(db, approvalId);
     return { accepted: true, state: "REJECTED", effectState: "DEAD", taskState: "FAILED" };
   });
   // Past this line the decision transaction committed; a crash before the
@@ -233,6 +255,7 @@ export function invalidateApproval(db, { approvalId, reason, now }) {
     const changed = db
       .prepare("UPDATE effects SET state='CANCELLED', last_error=?, updated_at=? WHERE id=? AND state='WAITING_APPROVAL'")
       .run(`approval invalidated: ${reason}`, now, approval.effect_id).changes;
+    clearConsoleNonce(db, approvalId);
     writeAudit(db, {
       code: "approval_invalidated",
       taskId: db.prepare("SELECT task_id FROM effects WHERE id=?").get(approval.effect_id)?.task_id ?? null,
@@ -251,6 +274,7 @@ export function expireApprovals(db, { now }) {
   for (const a of stale) {
     db.prepare("UPDATE approvals SET state='EXPIRED' WHERE id=? AND state='WAITING'").run(a.id);
     db.prepare("UPDATE effects SET state='CANCELLED', last_error='approval expired', updated_at=? WHERE id=? AND state='WAITING_APPROVAL'").run(now, a.effect_id);
+    clearConsoleNonce(db, a.id);
     writeAudit(db, { code: "approval_expired", details: { approval_id: a.id }, now });
     out.push(a.id);
   }

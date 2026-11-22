@@ -14,6 +14,7 @@ import { piSettingsFromDefaults } from "../config/load-pi-settings.mjs";
 import { assertValidModelBaseUrl, MAX_MODEL_MESSAGES_BYTES, ModelCallError } from "./model-call.mjs";
 import { isHttpUrlWithoutCredentials, isSafeRelativeReadPath } from "./repo-observe.mjs";
 import { parseTriageConfig } from "./repo-triage.mjs";
+import { parseQuietHours, wallClock } from "./quiet-time.mjs";
 import { assertValidTelegramApiBase, parseTelegramProxyUrl, TelegramSendError } from "./telegram-send.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -295,6 +296,98 @@ function parseStringAllowlist(rawValue, name) {
   return [...rawValue];
 }
 
+// Unit 5.3 mail adapter config (03 section 3 / 02 section 4). Hosts are null
+// by default (fail closed); a loopback host is the local verification seam
+// but still demands the explicit allow flag, exactly like model.baseUrl and
+// the telegram pull seam. Port bounds keep numeric fields numeric.
+function parseMailConfig(raw) {
+  const m = raw ?? {};
+  if (!m || typeof m !== "object" || Array.isArray(m)) {
+    throw new ConfigError("mail config must be an object");
+  }
+  const hostOrNull = (v, name) => {
+    if (v === undefined || v === null) return null;
+    if (typeof v !== "string" || v.length === 0 || v.length > 253 || /[\s/\\]/.test(v)) {
+      throw new ConfigError(`mail.${name} must be null or a bare hostname without spaces`);
+    }
+    return v;
+  };
+  const port = (v, fallback, name) => {
+    const p = v ?? fallback;
+    if (!Number.isInteger(p) || p < 1 || p > 65535) {
+      throw new ConfigError(`mail.${name} must be an integer 1..65535, got ${JSON.stringify(v)}`);
+    }
+    return p;
+  };
+  const ttl = m.approvalTtlMs ?? 14400000;
+  if (!Number.isInteger(ttl) || ttl < 60_000 || ttl > 7 * 24 * 3600_000) {
+    throw new ConfigError(`mail.approvalTtlMs must be an integer 60000..604800000, got ${JSON.stringify(ttl)}`);
+  }
+  const maxAttachmentBytes = m.maxAttachmentBytes ?? 4194304;
+  if (!Number.isInteger(maxAttachmentBytes) || maxAttachmentBytes < 1024 || maxAttachmentBytes > 26_214_400) {
+    throw new ConfigError(`mail.maxAttachmentBytes must be an integer 1024..26214400, got ${JSON.stringify(maxAttachmentBytes)}`);
+  }
+  return {
+    imapHost: hostOrNull(m.imapHost, "imapHost"),
+    imapPort: port(m.imapPort, 993, "imapPort"),
+    imapTls: m.imapTls !== false,
+    smtpHost: hostOrNull(m.smtpHost, "smtpHost"),
+    smtpPort: port(m.smtpPort, 465, "smtpPort"),
+    smtpTls: m.smtpTls !== false,
+    allowRealMailRead: m.allowRealMailRead === true,
+    allowRealMailSend: m.allowRealMailSend === true,
+    allowedFolders: parseStringAllowlist(m.allowedFolders, "mail.allowedFolders"),
+    allowedSenders: parseStringAllowlist(m.allowedSenders, "mail.allowedSenders"),
+    allowedRecipients: parseStringAllowlist(m.allowedRecipients, "mail.allowedRecipients"),
+    approvalTtlMs: ttl,
+    maxAttachmentBytes,
+  };
+}
+
+// Unit 5.4 calendar adapter config + the quiet window the briefing merge and
+// the L3 dreaming loop share (03 section 4, 06 section 7).
+function parseCalendarConfig(raw) {
+  const c = raw ?? {};
+  if (!c || typeof c !== "object" || Array.isArray(c)) {
+    throw new ConfigError("calendar config must be an object");
+  }
+  let caldavUrl = c.caldavUrl ?? null;
+  if (caldavUrl !== null) {
+    if (typeof caldavUrl !== "string" || !/^https?:\/\//.test(caldavUrl)) {
+      throw new ConfigError(`calendar.caldavUrl must be null or an http(s) URL, got ${JSON.stringify(caldavUrl)}`);
+    }
+    try {
+      const u = new URL(caldavUrl);
+      if (u.username !== "" || u.password !== "" || u.search !== "") {
+        throw new ConfigError("calendar.caldavUrl must not embed credentials or a query string");
+      }
+    } catch (e) {
+      if (e instanceof ConfigError) throw e;
+      throw new ConfigError(`calendar.caldavUrl is not a valid URL: ${e.message}`);
+    }
+  }
+  const defaultTimezone = typeof c.defaultTimezone === "string" && c.defaultTimezone.length > 0 ? c.defaultTimezone : "Asia/Hong_Kong";
+  let quietHours;
+  try {
+    quietHours = parseQuietHours(c.quietHours, { defaultTimezone });
+  } catch (e) {
+    throw new ConfigError(`calendar.quietHours invalid: ${e.message}`);
+  }
+  try {
+    wallClock(Date.now(), defaultTimezone);
+  } catch {
+    throw new ConfigError(`calendar.defaultTimezone ${defaultTimezone} is not a valid IANA zone`);
+  }
+  return {
+    caldavUrl,
+    allowRealCalendarRead: c.allowRealCalendarRead === true,
+    allowRealCalendarWrite: c.allowRealCalendarWrite === true,
+    allowedCalendars: parseStringAllowlist(c.allowedCalendars, "calendar.allowedCalendars"),
+    defaultTimezone,
+    quietHours,
+  };
+}
+
 export function defaultsJsonPath() {
   return join(here, "..", "config", "defaults.json");
 }
@@ -432,6 +525,8 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     telegram,
     router: parseRouterConfig(defaults.router),
     memory: parseMemoryConfig(defaults.memory),
+    mail: parseMailConfig(defaults.mail),
+    calendar: parseCalendarConfig(defaults.calendar),
     // Credential SLOT markers the adapter checks (values never live here —
     // 02 section 4: only the host credential service reads secrets). A null
     // slot means nothing real is wired and the adapter refuses real writes.

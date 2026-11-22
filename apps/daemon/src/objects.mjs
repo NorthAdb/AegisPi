@@ -171,6 +171,21 @@ export function objectRowId(scopeId, contentHash) {
   return `obj:${scopeId}:${contentHash}`;
 }
 
+// Read an object's stored content through its DB-activated storage_ref (the
+// only sanctioned accessor for timers/conditions and console paging; callers
+// never receive a host path). Returns null when the row has no ref or the
+// file is gone (deleted is a design terminal state, not an error).
+export function readObjectContent(db, stateDir, objectId) {
+  const row = db.prepare("SELECT storage_ref FROM objects WHERE id=?").get(objectId);
+  if (!row?.storage_ref) return null;
+  const path = join(stateDir, ...row.storage_ref.split(/[\\/]/));
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 // GC for files that were written but never activated (crash between file
 // durability and DB activation) plus leftover tmp files. Moves them to
 // objects/trash/<ts>/ rather than hard-deleting, so nothing is silently gone.

@@ -23,11 +23,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { decideApproval, hasApproveGrant } from "../approvals.mjs";
+import { decideApproval, hasApproveGrant, readConsoleNonce } from "../approvals.mjs";
 import { reviseEffect, cancelTask, reconcileUnknown } from "../effects.mjs";
 import { grantPermission, revokePermission } from "../acl.mjs";
 import { createTelegramWebhookGuard, mapTelegramUpdate } from "../ingress-telegram.mjs";
 import { receiveEvent } from "../ingress.mjs";
+import { activateMemoryFact, forgetObject } from "../memory.mjs";
+import { readObjectContent } from "../objects.mjs";
+import { hasReadGrant } from "../acl.mjs";
+import { withTx } from "../db/tx.mjs";
+import { writeAudit } from "../audit.mjs";
+import { consoleIndexHtml } from "./ui.mjs";
 
 export const CONSOLE_BIND = "127.0.0.1";
 export const CONSOLE_DEFAULT_PORT = 4310;
@@ -336,6 +342,12 @@ export function createConsoleApp(db, {
     try {
       action = JSON.parse(effect.action_json);
     } catch {}
+    // The nonce and the FULL action hash go only to the designated approver
+    // ON A LIVE SESSION — the same authenticated channel the decision uses.
+    // The bootstrap token (read-only) never sees them; they never appear in
+    // a URL, an SSE payload, or a log line.
+    const sessionPrincipal = c.get("authKind") === "session" ? c.get("session").principalId : null;
+    const forDesignatedApprover = sessionPrincipal !== null && sessionPrincipal === approval.approver_id && approval.state === "WAITING";
     return c.json({
       approval: {
         id: approval.id,
@@ -345,6 +357,13 @@ export function createConsoleApp(db, {
         createdAt: approval.created_at,
         actionHashShort: hashShort(approval.action_hash),
       },
+      // Full hash + raw nonce: designated-approver LIVE SESSION view only —
+      // the same authenticated channel the decision uses. The bootstrap
+      // token (read-only) never sees them; they never enter a URL, an SSE
+      // payload, or a log line.
+      decisionMaterials: forDesignatedApprover
+        ? { actionHash: approval.action_hash, nonce: readConsoleNonce(db, approval.id) }
+        : null,
       action: {
         // Card fields per 04 section 2. Secrets never enter action_json, so
         // nothing here can leak one.
@@ -512,11 +531,19 @@ export function createConsoleApp(db, {
     }
   });
 
-  // Budget console (04 section 3: Phase 3 adds the budget surface).
+  // Budget console (04 section 3: Phase 3 adds the budget surface). Unit 5.5
+  // adds the byPurpose attribution (router/worker/summary/classify ...):
+  // spent = SETTLED actuals, held = live HELD uppers, chargedBound = the
+  // conservative conversion of unknown-usage uppers. Token-level cache
+  // attribution does not exist in this phase and is reported as null —
+  // never a fabricated percentage.
   app.get("/api/budget", (c) => {
+    // NOTE: budget_accounts has NO kind column in the canonical schema — the
+    // Phase 3 query named one and would 500 against a live DB; the Unit 5.5
+    // UI is its first real consumer, so the latent defect is fixed here.
     const accounts = db
       .prepare(
-        "SELECT id, period_key, kind, limit_microusd, spent_microusd, held_microusd, frozen FROM budget_accounts ORDER BY id",
+        "SELECT id, period_key, limit_microusd, spent_microusd, held_microusd, frozen FROM budget_accounts ORDER BY id",
       )
       .all();
     const reservations = db
@@ -524,9 +551,30 @@ export function createConsoleApp(db, {
         "SELECT id, request_key, purpose, provider, state, upper_microusd, actual_microusd, created_at, settled_at FROM budget_reservations ORDER BY created_at DESC LIMIT 200",
       )
       .all();
+    const byPurposeRows = db
+      .prepare(
+        `SELECT purpose,
+           SUM(CASE WHEN state='SETTLED' THEN actual_microusd ELSE 0 END) AS spent_microusd,
+           SUM(CASE WHEN state='HELD' THEN upper_microusd ELSE 0 END) AS held_microusd,
+           SUM(CASE WHEN state='CHARGED_BOUND' THEN upper_microusd ELSE 0 END) AS charged_bound_microusd,
+           COUNT(*) AS request_count
+         FROM budget_reservations GROUP BY purpose`,
+      )
+      .all();
+    const byPurpose = byPurposeRows.map((r) => ({
+      purpose: r.purpose,
+      spentMicrousd: r.spent_microusd ?? 0,
+      heldMicrousd: r.held_microusd ?? 0,
+      chargedBoundMicrousd: r.charged_bound_microusd ?? 0,
+      requestCount: r.request_count ?? 0,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      measured: "amounts only; token-level cache attribution is not measured in this phase",
+    }));
     return c.json({
       accounts,
       reservations,
+      byPurpose,
       semantics: "usage unknown stays HELD and only a timeout converts to CHARGED_BOUND; a trusted bill may correct it later",
     });
   });
@@ -613,11 +661,403 @@ export function createConsoleApp(db, {
     }
   });
 
-  // SSE event stream (04 sections 4/5): authenticated, SCOPE-FILTERED to the
-  // caller's visible scopes, replay-from-Last-Event-ID within a bounded
-  // window, generation-gated. The snapshot comes FIRST, then the stream
-  // from the snapshot's watermark — the client never trusts a stream
-  // without its starting cursor.
+  // ---------------------------------------------------------------------
+  // Unit 5.5 (04 sections 2/4): memory governance, routines, object paging,
+  // task steering, purpose-attributed budget, and the task trace. All read
+  // surfaces re-verify the caller's VISIBLE scopes server-side; all
+  // mutations run the session+CSRF mutationGuard and a CAS on the entity
+  // revision the caller saw. The scope-visibility rule is the SSE rule:
+  // owned scopes, live-grant scopes, and service scopes.
+  const visibleScopeIds = (principalId, now) => {
+    return db
+      .prepare(
+        `SELECT id FROM scopes
+          WHERE kind='service' OR owner_id=?
+             OR id IN (
+               SELECT scope_id FROM acl_grants
+               WHERE principal_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)
+             )`,
+      )
+      .all(principalId, principalId, now)
+      .map((r) => r.id);
+  };
+
+  app.get("/api/memory", (c) => {
+    const principalId = c.get("principalId");
+    const now = Date.now();
+    const scopes = visibleScopeIds(principalId, now);
+    if (scopes.length === 0) return c.json({ memories: [], scanAlerts: [], suggestions: [] });
+    const placeholders = scopes.map(() => "?").join(",");
+    const facts = db
+      .prepare(
+        `SELECT id, scope_id, kind, status, version, supersedes_id, observed_at, expires_at, metadata_json, content_hash
+         FROM objects
+         WHERE kind='memory_fact' AND status IN ('candidate','active','conflicted') AND scope_id IN (${placeholders})
+         ORDER BY observed_at DESC LIMIT 200`,
+      )
+      .all(...scopes);
+    const memories = facts.map((f) => {
+      let meta = {};
+      try {
+        meta = JSON.parse(f.metadata_json || "{}");
+      } catch {}
+      return {
+        id: f.id,
+        scopeId: f.scope_id,
+        status: f.status,
+        revision: f.version,
+        factKey: meta.factKey ?? null,
+        category: meta.category ?? null,
+        factText: String(meta.factValue ?? "").slice(0, 500),
+        confidence: meta.confidence ?? null,
+        expiresAt: f.expires_at,
+        observedAt: f.observed_at,
+        quarantinedReasons: Array.isArray(meta.quarantined_reasons) ? meta.quarantined_reasons : [],
+        neverActivatable: meta.never_activatable === true,
+      };
+    });
+    // 13-class scan alerts: quarantined candidates, plus the dreaming
+    // suggestions the loop filed for this caller's scopes. Suggestion
+    // detail lives in the object's DISK content (no content column).
+    const scanAlerts = memories.filter((m) => m.quarantinedReasons.length > 0);
+    const suggestionRows = db
+      .prepare(
+        `SELECT id, scope_id, status, version, observed_at FROM objects
+         WHERE kind='dreaming_suggestion' AND status IN ('candidate','active') AND scope_id IN (${placeholders})
+         ORDER BY observed_at DESC LIMIT 100`,
+      )
+      .all(...scopes);
+    const suggestions = suggestionRows.map((s) => {
+      let content = {};
+      const text = readObjectContent(db, stateDir ?? "", s.id);
+      try {
+        content = JSON.parse(text || "{}");
+      } catch {}
+      return { id: s.id, scopeId: s.scope_id, status: s.status, revision: s.version, observedAt: s.observed_at, type: content.type ?? null, detail: content };
+    });
+    return c.json({ memories, scanAlerts, suggestions });
+  });
+
+  app.post("/api/memory/:id/decide", mutationGuard, async (c) => {
+    let body;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ code: "invalid_json", message: "decide body must be JSON" }, 422);
+    }
+    const decision = body?.decision;
+    if (!["activate", "reject", "forget"].includes(decision)) {
+      return c.json({ code: "invalid_field", message: "decision must be activate/reject/forget" }, 422);
+    }
+    const objectId = c.req.param("id");
+    const row = db.prepare("SELECT id, scope_id, kind, status, version, metadata_json FROM objects WHERE id=?").get(objectId);
+    if (!row) return c.json({ code: "not_found", message: "no such memory object" }, 404);
+    const sessionPrincipal = c.get("session").principalId;
+    const now = Date.now();
+    if (!hasAdminGrant(db, { scopeId: row.scope_id, principalId: sessionPrincipal, now })) {
+      return c.json({ code: "forbidden", message: "memory decisions require an admin grant on the object's scope" }, 403);
+    }
+    // CAS on the revision the caller saw (objects.version). A stale caller
+    // gets 409 with the current revision; the status CAS inside the memory
+    // functions is the second, authoritative gate.
+    if (Number.isInteger(body?.expectedRevision) && body.expectedRevision !== row.version) {
+      return c.json({ code: "conflict", message: "revision moved", currentRevision: row.version }, 409);
+    }
+    try {
+      if (decision === "activate") {
+        const out = activateMemoryFact(db, { objectId, actorId: sessionPrincipal, now });
+        return c.json({ decision, ...out }, 200);
+      }
+      if (decision === "reject") {
+        if (!["candidate", "conflicted"].includes(row.status)) {
+          return c.json({ code: "conflict", message: `object is ${row.status}; only candidate/conflicted can be rejected`, currentRevision: row.version }, 409);
+        }
+        return c.json(withTx(db, () => {
+          let meta = {};
+          try {
+            meta = JSON.parse(row.metadata_json || "{}");
+          } catch {}
+          meta.rejectedBy = sessionPrincipal;
+          meta.rejectedAt = now;
+          const changed = db
+            .prepare("UPDATE objects SET status='expired', metadata_json=? WHERE id=? AND status IN ('candidate','conflicted')")
+            .run(JSON.stringify(meta), objectId).changes;
+          writeAuditSafe(db, {
+            code: "memory_fact_rejected",
+            actorId: sessionPrincipal,
+            details: { object_id: objectId, scope_id: row.scope_id },
+            now,
+          });
+          return { decision, objectId, status: changed === 1 ? "expired" : row.status };
+        }), 200);
+      }
+      // forget: two-phase + deletion manifest (memory.mjs forgetObject).
+      const out = forgetObject(db, stateDir ?? "", { objectId, now, actorId: sessionPrincipal });
+      return c.json({ decision, ...out }, 200);
+    } catch (e) {
+      return c.json({ code: "conflict", message: String(e.message).slice(0, 300) }, 409);
+    }
+  });
+
+  app.get("/api/routines", (c) => {
+    const principalId = c.get("principalId");
+    const now = Date.now();
+    const scopes = visibleScopeIds(principalId, now);
+    if (scopes.length === 0) return c.json({ routines: [], note: "no visible scopes" });
+    const placeholders = scopes.map(() => "?").join(",");
+    const rows = db
+      .prepare(
+        `SELECT id, scope_id, status, version, observed_at, metadata_json FROM objects
+         WHERE kind='routine' AND status IN ('candidate','active') AND scope_id IN (${placeholders})
+         ORDER BY observed_at DESC LIMIT 100`,
+      )
+      .all(...scopes);
+    const routines = rows.map((r) => {
+      let meta = {};
+      try {
+        meta = JSON.parse(r.metadata_json || "{}");
+      } catch {}
+      let content = {};
+      const text = readObjectContent(db, stateDir ?? "", r.id);
+      try {
+        content = JSON.parse(text || "{}");
+      } catch {}
+      return {
+        id: r.id,
+        scopeId: r.scope_id,
+        status: r.status,
+        revision: r.version,
+        observedAt: r.observed_at,
+        routineId: meta.routineId ?? content.id ?? r.id,
+        mode: meta.mode ?? content.mode ?? "observe",
+        policyVersion: meta.policyVersion ?? content.policyVersion ?? null,
+        reviewReportRef: meta.reviewReportRef ?? null,
+        autoExternalWritesStillNeedApproval: true,
+      };
+    });
+    return c.json({
+      routines,
+      note: routines.length === 0 ? "no routines registered in the visible scopes; Observe/Auto switching applies to kind='routine' objects" : null,
+    });
+  });
+
+  app.post("/api/routines/:id/mode", mutationGuard, async (c) => {
+    let body;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ code: "invalid_json", message: "mode body must be JSON" }, 422);
+    }
+    if (!["observe", "auto"].includes(body?.mode)) {
+      return c.json({ code: "invalid_field", message: "mode must be observe/auto" }, 422);
+    }
+    const row = db.prepare("SELECT id, scope_id, kind, status, version, metadata_json, content FROM objects WHERE id=?").get(c.req.param("id"));
+    if (!row || row.kind !== "routine") return c.json({ code: "not_found", message: "no such routine" }, 404);
+    const sessionPrincipal = c.get("session").principalId;
+    const now = Date.now();
+    if (!hasAdminGrant(db, { scopeId: row.scope_id, principalId: sessionPrincipal, now })) {
+      return c.json({ code: "forbidden", message: "routine mode changes require an admin grant on the routine's scope" }, 403);
+    }
+    if (Number.isInteger(body?.expectedRevision) && body.expectedRevision !== row.version) {
+      return c.json({ code: "conflict", message: "revision moved", currentRevision: row.version }, 409);
+    }
+    let meta = {};
+    try {
+      meta = JSON.parse(row.metadata_json || "{}");
+    } catch {}
+    if (typeof body.policyVersion === "string" && meta.policyVersion && body.policyVersion !== meta.policyVersion) {
+      return c.json({ code: "conflict", message: "policyVersion mismatch", currentRevision: row.version }, 409);
+    }
+    if (body.mode === "auto") {
+      if (typeof body.reviewReportRef !== "string" || body.reviewReportRef.length === 0) {
+        return c.json({ code: "invalid_field", message: "switching to auto requires reviewReportRef (a human-approved review record)" }, 422);
+      }
+    }
+    meta.mode = body.mode;
+    if (typeof body.reviewReportRef === "string") meta.reviewReportRef = body.reviewReportRef;
+    return c.json(withTx(db, () => {
+      const changed = db
+        .prepare("UPDATE objects SET metadata_json=? WHERE id=? AND kind='routine'")
+        .run(JSON.stringify(meta), row.id).changes;
+      writeAuditSafe(db, {
+        code: "routine_mode_changed",
+        actorId: sessionPrincipal,
+        details: { routine_id: row.id, mode: body.mode, review_report_ref: meta.reviewReportRef ?? null, note: "auto NEVER exempts external writes from approval" },
+        now,
+      });
+      return { routineId: row.id, mode: meta.mode, autoStillApprovesExternalWrites: true };
+    }), 200);
+  });
+
+  // The UNKNOWN list the reconcile tab renders (visible scopes only).
+  app.get("/api/effects-unknown", (c) => {
+    const principalId = c.get("principalId");
+    const now = Date.now();
+    const scopes = visibleScopeIds(principalId, now);
+    if (scopes.length === 0) return c.json({ effects: [] });
+    const placeholders = scopes.map(() => "?").join(",");
+    const rows = db
+      .prepare(
+        `SELECT id, task_id, scope_id, operation, retry_mode, last_error, updated_at FROM effects
+         WHERE state='UNKNOWN' AND scope_id IN (${placeholders}) ORDER BY updated_at DESC LIMIT 100`,
+      )
+      .all(...scopes);
+    return c.json({ effects: rows });
+  });
+
+  // Object paging (04 section 4: "重验来源ACL后分页读取，禁止任意path").
+  // Every object_required_scope must be readable by the caller — missing one
+  // returns the SAME 404 as a missing object (no existence oracle).
+  app.get("/api/objects/:id", (c) => {
+    const objectId = c.req.param("id");
+    const row = db.prepare("SELECT id, scope_id, kind, status, content_hash, storage_ref, observed_at, metadata_json FROM objects WHERE id=?").get(objectId);
+    const principalId = c.get("principalId");
+    const now = Date.now();
+    if (!row || row.status === "deleted") {
+      return c.json({ code: "not_found", message: "no such object" }, 404);
+    }
+    const requiredScopes = db
+      .prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?")
+      .all(objectId)
+      .map((r) => r.scope_id);
+    const scopes = requiredScopes.length > 0 ? requiredScopes : [row.scope_id];
+    const allowed = scopes.every((s) => hasReadGrant(db, { scopeId: s, principalId, now }));
+    if (!allowed) {
+      return c.json({ code: "not_found", message: "no such object" }, 404);
+    }
+    const content = readObjectContent(db, stateDir ?? "", objectId);
+    if (content === null) {
+      return c.json({ code: "not_found", message: "no such object" }, 404);
+    }
+    const offset = Math.max(0, Number(c.req.query("offset") ?? 0) || 0);
+    const limitRaw = Number(c.req.query("limit") ?? 2000);
+    const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 2000), 10000);
+    const slice = content.slice(offset, offset + limit);
+    return c.json({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      contentHash: row.content_hash,
+      observedAt: row.observed_at,
+      totalBytes: Buffer.byteLength(content, "utf8"),
+      offset,
+      limit,
+      content: slice,
+      truncated: offset + limit < content.length,
+    });
+  });
+
+  // Steer (04 section 4): the message becomes a durable inbox event in the
+  // SAME scope; the reply is queued/accepted, never "the tool was
+  // interrupted" — only the router's own rules attach it to a live task.
+  app.post("/api/tasks/:id/steer", mutationGuard, async (c) => {
+    let body;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ code: "invalid_json", message: "steer body must be JSON" }, 422);
+    }
+    const message = typeof body?.message === "string" ? body.message : "";
+    if (message.trim().length === 0 || message.length > 16384) {
+      return c.json({ code: "invalid_field", message: "steer needs a non-empty message of at most 16384 chars" }, 422);
+    }
+    const taskId = c.req.param("id");
+    const task = db.prepare("SELECT id, scope_id, principal_id, state, updated_at FROM tasks WHERE id=?").get(taskId);
+    if (!task) return c.json({ code: "not_found", message: "no such task" }, 404);
+    const sessionPrincipal = c.get("session").principalId;
+    const now = Date.now();
+    const row = db
+      .prepare("SELECT 1 FROM acl_grants WHERE scope_id=? AND principal_id=? AND permission='request' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1")
+      .get(task.scope_id, sessionPrincipal, now);
+    if (!row) {
+      return c.json({ code: "forbidden", message: "steering requires a live request grant on the task's scope" }, 403);
+    }
+    if (Number.isInteger(body?.expectedRevision) && Number(task.updated_at) !== body.expectedRevision) {
+      return c.json({ code: "conflict", message: "task revision moved", currentRevision: task.updated_at }, 409);
+    }
+    const received = receiveEvent(db, stateDir ?? "", {
+      now,
+      source: "console-steer",
+      sourceEventId: `steer-${taskId}-${randomBytes(6).toString("hex")}`,
+      principal: { platform: "console", subject: sessionPrincipal },
+      scope: { kind: "owner_dm", domainKey: db.prepare("SELECT domain_key FROM scopes WHERE id=?").get(task.scope_id)?.domain_key, channel: "console", conversationId: taskId },
+      threadKey: `task:${taskId}`,
+      priority: 8,
+      policyVersion: "pv1",
+      payload: { kind: "steer", taskId, message, by: sessionPrincipal },
+      verdict: "ADMIT",
+    });
+    return c.json({ code: "queued", inboxId: received.inboxId, note: "the steer is queued as a durable inbox event; it does not interrupt an in-flight tool call" }, 202);
+  });
+
+  // Trace (04 sections 3/4): the whole sanitized timeline plus the honest
+  // "Task SUCCEEDED but Effect UNKNOWN" flag.
+  app.get("/api/tasks/:id/trace", (c) => {
+    const taskId = c.req.param("id");
+    const principalId = c.get("principalId");
+    const now = Date.now();
+    const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(taskId);
+    if (!task) return c.json({ code: "not_found", message: "no such task" }, 404);
+    const scopes = visibleScopeIds(principalId, now);
+    if (!scopes.includes(task.scope_id)) {
+      return c.json({ code: "not_found", message: "no such task" }, 404);
+    }
+    const timeline = [];
+    const inboxRows = db.prepare("SELECT id, source, source_event_id, thread_key, state, verdict, received_at FROM inbox WHERE scope_id=? ORDER BY received_at ASC LIMIT 100").all(task.scope_id);
+    for (const r of inboxRows) {
+      timeline.push({ at: r.received_at, stage: "inbox", ref: r.id, detail: { source: r.source, state: r.state, verdict: r.verdict } });
+    }
+    const attempts = db.prepare("SELECT id, attempt_no, fence, state, started_at, ended_at, error_code FROM attempts WHERE task_id=? ORDER BY attempt_no").all(taskId);
+    for (const a of attempts) {
+      timeline.push({ at: a.started_at, stage: "attempt", ref: a.id, detail: { attempt_no: a.attempt_no, fence: a.fence, state: a.state, error_code: a.error_code, ended_at: a.ended_at } });
+    }
+    const requests = db.prepare("SELECT request_id, attempt_id, purpose, model_id, state, created_at, updated_at FROM model_requests WHERE task_id=? ORDER BY created_at").all(taskId);
+    for (const r of requests) {
+      timeline.push({ at: r.created_at, stage: "model_request", ref: r.request_id, detail: { purpose: r.purpose, model: r.model_id, state: r.state, updated_at: r.updated_at } });
+    }
+    const jobs = db.prepare("SELECT id, attempt_id, state, exit_code, created_at, ended_at FROM execution_jobs WHERE task_id=?").all(taskId);
+    for (const j of jobs) {
+      timeline.push({ at: j.created_at, stage: "execution_job", ref: j.id, detail: { state: j.state, exit_code: j.exit_code ?? null, ended_at: j.ended_at } });
+    }
+    const effects = db.prepare("SELECT id, operation, state, retry_mode, external_id, last_error, created_at, updated_at FROM effects WHERE task_id=?").all(taskId);
+    for (const e of effects) {
+      timeline.push({ at: e.created_at, stage: "effect", ref: e.id, detail: { operation: e.operation, state: e.state, retry_mode: e.retry_mode, external_id: e.external_id, last_error: e.last_error } });
+    }
+    const approvals = db
+      .prepare("SELECT a.id, a.state, a.expires_at, a.created_at, e.id AS effect_id FROM approvals a JOIN effects e ON e.id=a.effect_id WHERE e.task_id=?")
+      .all(taskId);
+    for (const a of approvals) {
+      timeline.push({ at: a.created_at, stage: "approval", ref: a.id, detail: { state: a.state, effect_id: a.effect_id, expires_at: a.expires_at } });
+    }
+    const outboxRows = db
+      .prepare("SELECT o.id, o.channel, o.destination, o.not_before, o.notify_reason, e.id AS effect_id FROM outbox o JOIN effects e ON e.id=o.effect_id WHERE e.task_id=?")
+      .all(taskId);
+    for (const o of outboxRows) {
+      timeline.push({ at: o.not_before, stage: "outbox", ref: o.id, detail: { channel: o.channel, destination: o.destination, notify_reason: o.notify_reason, effect_id: o.effect_id } });
+    }
+    timeline.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+    const unknownEffects = effects.filter((e) => e.state === "UNKNOWN").map((e) => e.id);
+    return c.json({
+      taskId,
+      taskState: task.state,
+      resultClass: task.result_class,
+      timeline,
+      computedButUnconfirmed: unknownEffects.length > 0,
+      unconfirmedEffects: unknownEffects,
+      note: unknownEffects.length > 0
+        ? "Task SUCCEEDED but one or more effects are UNKNOWN: the computation finished and the external action has NOT been confirmed"
+        : null,
+    });
+  });
+
+  // Local web console (04 sections 2-5): same-origin HTML only, zero
+  // external assets; the Host middleware above already refuses any other
+  // Host with 403.
+  app.get("/", (c) => {
+    return c.html(consoleIndexHtml({ port }));
+  });
+
+
   //
   // Visible scopes (audit F8 fixed the leak where every scope's events
   // reached any bootstrap/session caller): scopes the caller OWNS, scopes
@@ -755,6 +1195,14 @@ function hasAdminGrant(db, { scopeId, principalId, now }) {
     )
     .get(scopeId, principalId, now);
   return row !== undefined;
+}
+
+// Console-side audit must never turn a decision into a 500 (the same
+// discipline as the adapter's auditRefusal).
+function writeAuditSafe(db, entry) {
+  try {
+    writeAudit(db, entry);
+  } catch {}
 }
 
 export function serveConsole(app, { port = CONSOLE_DEFAULT_PORT }) {

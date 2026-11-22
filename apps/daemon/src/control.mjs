@@ -11,6 +11,7 @@ import { withTx } from "./db/tx.mjs";
 import { writeAudit, writeStreamEvent } from "./audit.mjs";
 import { cancelTask } from "./effects.mjs";
 import { completeInboxIfDone } from "./scheduler.mjs";
+import { cancelScopeTimersInTx } from "./timers.mjs";
 
 export class ControlCommandRefused extends Error {}
 
@@ -135,6 +136,10 @@ export function handleDeterministicControl(db, {
   withTx(db, () => {
     if (bare === "pause") {
       db.prepare("UPDATE scopes SET paused=1 WHERE id=? AND paused=0").run(scopeId);
+      // Unit 5.4 cascade: a paused scope loses its SCHEDULED timers in the
+      // SAME transaction (03 section 4) — pausing must not leave follow-ups
+      // armed behind a scope that can no longer act on them.
+      cancelScopeTimersInTx(db, { scopeId, now, reason: "scope paused", actorId: principalId });
       outcome = { command: "/pause", paused: true };
     } else if (bare === "resume") {
       db.prepare("UPDATE scopes SET paused=0 WHERE id=? AND paused=1").run(scopeId);

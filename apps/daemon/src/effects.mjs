@@ -25,6 +25,7 @@ import {
   decideApproval,
   invalidateApproval,
 } from "./approvals.mjs";
+import { cancelScopeTimersInTx } from "./timers.mjs";
 import { crashpoint } from "./testing/crashpoints.mjs";
 
 export class EffectError extends Error {}
@@ -808,6 +809,10 @@ export function cancelScope(db, { scopeId, now, actorId = null, onlyTaskId = nul
     const cancelledEffects = db
       .prepare("SELECT id, task_id FROM effects WHERE scope_id=? AND state IN ('DRAFT','WAITING_APPROVAL','READY')")
       .all(scopeId);
+    // Unit 5.4 cascade (03 section 4): a cancelled scope loses its SCHEDULED
+    // timers in the SAME transaction — a cancelled task may not leave a
+    // follow-up armed.
+    cancelScopeTimersInTx(db, { scopeId, now, reason: "scope/task cancelled", actorId });
     for (const e of cancelledEffects) {
       db.prepare("UPDATE effects SET state='CANCELLED', last_error='scope cancelled', updated_at=? WHERE id=? AND state IN ('DRAFT','WAITING_APPROVAL','READY')").run(now, e.id);
       const approval = db.prepare("SELECT id FROM approvals WHERE effect_id=? AND state='WAITING'").get(e.id);

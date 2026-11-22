@@ -55,7 +55,7 @@ const MAX_FORGET_CASCADE_OBJECTS = 512;
 const MAX_FACT_CHARS = 4000;
 // Facts whose activation is refused forever (01 section 4.1: never
 // auto-activated into an authorization-relevant L0).
-const NEVER_ACTIVATABLE_CATEGORIES = ["identity", "recipient", "payment", "approval_exemption", "permission"];
+export const NEVER_ACTIVATABLE_CATEGORIES = ["identity", "recipient", "payment", "approval_exemption", "permission"];
 // Deterministic refusal of write-time policy-capture claims (acceptance
 // 5.1-3: a candidate that tries to rewrite the approval regime or the
 // recipient whitelist never becomes a row at all). The refusal tier is

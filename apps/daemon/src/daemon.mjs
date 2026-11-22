@@ -21,6 +21,9 @@ import { currentSkillSetHash } from "./skills.mjs";
 import { dispatchKeyForInbox } from "./ingress.mjs";
 import { pullTelegramUpdates } from "./telegram-pull.mjs";
 import { createCredentialService } from "./credentials.mjs";
+import { pullMailMessages, createMailUpstream } from "./mail-adapter.mjs";
+import { pullCalendarEvents, createCalendarUpstream, reproposeAfter412 } from "./calendar-adapter.mjs";
+import { runDreamingLoop } from "./dreaming.mjs";
 import { withTx } from "./db/tx.mjs";
 import {
   claimNextTask,
@@ -226,10 +229,22 @@ export async function main(argv = process.argv.slice(2)) {
           allowedRecipients: config.adapters.allowedRecipients,
         })
       : null;
-  const adapterUpstream = baseUpstream || telegramUpstream || config.model.baseUrl
+  // Unit 5.3/5.4 dedicated child transports. Wiring one is a config fact —
+  // each transport's own fail-closed ladder (allowRealMailSend /
+  // allowRealCalendarWrite + credential slots) decides at submit time, so
+  // a wired transport with closed gates sends zero bytes.
+  const mailUpstream = !fakeUpstream && config.mail?.smtpHost
+    ? createMailUpstream(db, { mail: config.mail })
+    : null;
+  const calendarUpstream = !fakeUpstream && config.calendar?.caldavUrl
+    ? createCalendarUpstream(db, { calendar: config.calendar })
+    : null;
+  const adapterUpstream = baseUpstream || telegramUpstream || mailUpstream || calendarUpstream || config.model.baseUrl
     ? createAdapterUpstream(db, {
         baseUpstream,
         telegramUpstream,
+        mailUpstream,
+        calendarUpstream,
         transportKind: fakeUpstream ? "fake" : "real",
         policy: { allowRealExternalWrites: config.policy.allowRealExternalWrites },
         credentials: config.credentials,
@@ -256,6 +271,12 @@ export async function main(argv = process.argv.slice(2)) {
     config.telegram?.apiBase !== undefined &&
     config.telegram?.allowRealPull === true;
   let lastPullAt = 0;
+  // Unit 5.3/5.4 runtime pull state (in-memory interval trackers; the gates
+  // themselves are config-owned and fail closed inside the pull functions).
+  const mailPullEnabled = config.mail?.imapHost !== null && config.mail?.imapHost !== undefined;
+  const calendarPullEnabled = config.calendar?.caldavUrl !== null && config.calendar?.caldavUrl !== undefined;
+  let lastMailPullAt = 0;
+  let lastCalendarPullAt = 0;
   const scopeTurnCounts = new Map();
   // The merged model-input byte bound (Unit 5.2 batch semantics): the
   // ROUTER enforces it per attach, and the merge below re-checks it as
@@ -458,7 +479,7 @@ export async function main(argv = process.argv.slice(2)) {
     cancelSatisfiedFollowUpReminders(db, { now });
     expireStaleNotifications(db, { now });
     // 2. Timers generate durable inbox events.
-    const timers = processDueTimers(db, { now });
+    const timers = processDueTimers(db, { now, stateDir: dataDir });
     // 2b. Telegram Route 1 pull (Unit 5.2): gated by config — without an
     //     apiBase (and, off loopback, allowRealPull + allowedChatIds + a
     //     live 'im' slot) this is a durable no-op. Interval-tracked in
@@ -482,6 +503,50 @@ export async function main(argv = process.argv.slice(2)) {
           console.error(`telegram-pull: pull pass refused: ${String(e.message).slice(0, 160)}`);
         }
       }
+    }
+    // 2b2. Unit 5.3 mail pull (IMAP over TLS child): every gate is config-
+    //      owned and re-checked inside pullMailMessages — null host or
+    //      allowRealMailRead=false means zero IMAP calls.
+    let mailPullResult = null;
+    if (mailPullEnabled) {
+      if (now - lastMailPullAt >= (config.mail.pullIntervalMs ?? 15000)) {
+        lastMailPullAt = now;
+        try {
+          mailPullResult = pullMailMessages(db, { mail: config.mail, now });
+          if (mailPullResult && typeof mailPullResult === "object" && "fetched" in mailPullResult) {
+            console.log(`mail-pull: fetched=${mailPullResult.fetched}`);
+          }
+        } catch (e) {
+          console.error(`mail-pull: pass refused: ${String(e.message).slice(0, 160)}`);
+        }
+      }
+    }
+    // 2b3. Unit 5.4 calendar pull (CalDAV child): feeds the briefing
+    //      composition; the write path is approval-only and lives in the
+    //      dispatcher, never here.
+    let calendarPullResult = null;
+    if (calendarPullEnabled && now - lastCalendarPullAt >= (config.calendar.pullIntervalMs ?? 30000)) {
+      lastCalendarPullAt = now;
+      try {
+        calendarPullResult = pullCalendarEvents(db, dataDir, { now, calendar: config.calendar });
+        if (calendarPullResult && typeof calendarPullResult === "object" && "stored" in calendarPullResult) {
+          console.log(`calendar-pull: stored=${calendarPullResult.stored}`);
+        }
+      } catch (e) {
+        console.error(`calendar-pull: pass refused: ${String(e.message).slice(0, 160)}`);
+      }
+    }
+    // 2b4. Unit 5.4 L3 Dreaming orchestration loop: quiet-hours gated,
+    //      purpose='summary' independent-budget gated (dreaming.mjs).
+    try {
+      runDreamingLoop(db, dataDir, {
+        now,
+        quietHours: config.calendar?.quietHours ?? null,
+        ledger,
+        modelProvider: config.model.provider,
+      });
+    } catch (e) {
+      console.error(`dreaming: pass refused: ${String(e.message).slice(0, 160)}`);
     }
     // 3. Pending inbox rows get their routing plan — recovery from any
     //    crash never depends on an in-memory wakeup. Unit 5.2: events are
@@ -956,7 +1021,9 @@ export async function main(argv = process.argv.slice(2)) {
           row.operation === "model.inference" ||
           (telegramUpstream &&
             (row.operation === "im.notify" || row.operation === "send_message") &&
-            telegramUpstream.canHandle(row.resource)),
+            telegramUpstream.canHandle(row.resource)) ||
+          (mailUpstream && row.operation === "mail.send" && mailUpstream.canHandle(row.resource)) ||
+          (calendarUpstream && row.operation === "calendar.write" && calendarUpstream.canHandle(row.resource)),
       );
     // 5. Effect dispatch & UNKNOWN reconciler (non-model READY/UNKNOWN stay durable when baseUpstream is null).
     if (adapterUpstream) {
@@ -1009,6 +1076,26 @@ export async function main(argv = process.argv.slice(2)) {
             continue;
           }
           console.error(`dispatcher refused ${e.id}: ${err.message}`);
+        }
+      }
+      // Unit 5.4: a calendar.write that FAILED with a server-side 412 (the
+      // race between the head precondition and the PUT) names head_changed;
+      // the old card is cancelled and a NEW card pins the CURRENT ETag for
+      // re-approval — zero silent overwrites, in either race order.
+      const failedHeadChanged = db
+        .prepare("SELECT id, resource FROM effects WHERE operation='calendar.write' AND state='FAILED' AND last_error LIKE 'head_changed:%'")
+        .all();
+      for (const f of failedHeadChanged) {
+        try {
+          const head = calendarUpstream.lookupHead({ targetResource: f.resource });
+          if (!head.ok) {
+            console.error(`calendar 412 repropose refused ${f.id}: ${head.reason}`);
+            continue;
+          }
+          const out = reproposeAfter412(db, dataDir, { now, effectId: f.id, currentHead: head.head });
+          console.log(`calendar-412: ${f.id} -> re-approval ${out.newApprovalId} pinned to ${head.head}`);
+        } catch (e) {
+          console.error(`calendar 412 repropose refused ${f.id}: ${String(e.message).slice(0, 160)}`);
         }
       }
     }

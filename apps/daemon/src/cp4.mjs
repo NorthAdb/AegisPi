@@ -65,6 +65,18 @@ export function cp4TargetShape({ operation, resource }) {
   if (operation === "pr.create_draft" && REPO_URL_TARGET_RE.test(resource)) {
     return { shape: "repo-write", scopeDomainKey: null };
   }
+  // Unit 5.3/5.4 (D-96 red line): mail.send and calendar.write are ALWAYS
+  // adjudicated — their audiences (email addresses, calendar readers) are
+  // undeterminable scopes, so the payload closure must stay inside the
+  // effect's own scope unless a human-reviewed disclosure allowlist entry
+  // says otherwise. adapters.allowedRecipients / mail.allowedRecipients are
+  // transport reachability only and never substitute for this gate.
+  if (operation === "mail.send") {
+    return { shape: "mail-send", scopeDomainKey: null };
+  }
+  if (operation === "calendar.write") {
+    return { shape: "calendar-write", scopeDomainKey: null };
+  }
   return { shape: "none", scopeDomainKey: null };
 }
 
@@ -214,6 +226,14 @@ export function cp4EffectDecision(db, {
     if (targetScopeId !== null && closure.every((s) => s === targetScopeId)) {
       return { allowed: true, basis: "same-scope delivery" };
     }
+    if ((shape.shape === "mail-send" || shape.shape === "calendar-write") && closure.every((s) => s === effectScopeId)) {
+      return {
+        allowed: true,
+        basis: shape.shape === "mail-send"
+          ? "mail payload closure stays inside the effect's own scope (transport whitelist still applies at the adapter)"
+          : "calendar payload closure stays inside the effect's own scope (ETag precondition still applies at submit)",
+      };
+    }
     if (shape.shape === "im-dm-legacy" && closure.every((s) => s === effectScopeId)) {
       const legacyId = String(resource).split(":").pop();
       const effectScope = db.prepare("SELECT kind, domain_key, conversation_id FROM scopes WHERE id=?").get(effectScopeId);
@@ -242,6 +262,12 @@ export function cp4EffectDecision(db, {
     }
     if (shape.shape === "repo-write") {
       return { allowed: false, basis: "cross-scope disclosure to a repository (public) audience without an explicit review record" };
+    }
+    if (shape.shape === "mail-send") {
+      return { allowed: false, basis: "mail payload closure leaves the effect's scope and the recipients' audience is undeterminable; a disclosure allowlist record is required" };
+    }
+    if (shape.shape === "calendar-write") {
+      return { allowed: false, basis: "calendar payload closure leaves the effect's scope and the calendar readers are undeterminable; a disclosure allowlist record is required" };
     }
     return { allowed: false, basis: "target audience undeterminable while the payload closure leaves its own scope" };
   };

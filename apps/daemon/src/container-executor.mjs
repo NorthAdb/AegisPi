@@ -716,10 +716,24 @@ export function agentWorkAttemptDir(stateDir, taskId, attemptNo) {
 }
 
 function currentWindowsAccount() {
-  const who = spawnSync("whoami", { encoding: "utf8", shell: false });
-  const account = who.status === 0 && who.stdout.trim()
-    ? who.stdout.trim()
-    : (process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME);
+  // Resolve the account the way icacls itself does — USERDOMAIN\USERNAME of
+  // the current token — instead of trusting which `whoami` the PATH serves
+  // up. A Git-Bash /usr/bin/whoami answers with the bare name ("1"), the
+  // native whoami.exe answers with the full name ("DESKTOP-…\1"), and icacls
+  // prints the full resolved form; a PATH-dependent answer made the ACL
+  // verify fail closed on machines whose shell set differs. The env pair is
+  // authoritative for the current logon session; the native binary is only
+  // a fallback when both variables are missing.
+  const domain = process.env.USERDOMAIN ?? "";
+  const user = process.env.USERNAME ?? "";
+  if (domain && user) {
+    return `${domain}\\${user}`;
+  }
+  const who = spawnSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe"), {
+    encoding: "utf8",
+    shell: false,
+  });
+  const account = who.status === 0 && who.stdout.trim() ? who.stdout.trim() : (user || null);
   if (!account) {
     throw new ExecutorError("cannot resolve current Windows account to lock host directory");
   }

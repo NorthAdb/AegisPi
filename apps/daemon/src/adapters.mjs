@@ -91,6 +91,26 @@ export const OPERATIONS = {
       return null;
     },
   },
+  // Unit 5.4 (03 section 4): a calendar write is never a briefing side
+  // effect — it carries the remote ETag as expected_head (06 section 5
+  // resource-version precondition) and submits with If-Match, so an external
+  // concurrent edit turns into a refusal + re-approval, never an overwrite.
+  "calendar.write": {
+    category: "external_write",
+    transport: "real",
+    validate: (intent) => {
+      if (!STRING(intent.targetResource) || !intent.targetResource.startsWith("caldav:")) {
+        return "calendar.write needs a caldav: resource identity";
+      }
+      if (!STRING(intent.expectedHead)) return "calendar.write needs an expected_head ETag (zero silent overwrites)";
+      if (!STRING(intent.contentHash)) return "calendar.write needs the ics content hash";
+      if (!intent.extra || !STRING(intent.extra.href) || !intent.extra.href.startsWith("/")) {
+        return "calendar.write needs a collection-relative href in extra.href";
+      }
+      if (!["PUT", "DELETE"].includes(intent.extra.method)) return "calendar.write method must be PUT or DELETE in extra.method";
+      return null;
+    },
+  },
   "im.notify": {
     category: "notify",
     transport: "real",
@@ -126,6 +146,8 @@ export function operationSpec(operation) {
 export function createAdapterUpstream(db, {
   baseUpstream, // the wired transport (fake remote in tests) or null
   telegramUpstream = null,
+  mailUpstream = null, // Unit 5.3: the SMTP child transport
+  calendarUpstream = null, // Unit 5.4: the CalDAV child transport
   transportKind = "fake", // "fake" (test seam) | "real"
   policy = { allowRealExternalWrites: false },
   credentials = {}, // host-wired secrets; empty means nothing real is wired
@@ -238,7 +260,7 @@ export function createAdapterUpstream(db, {
             error: "adapter refused: real external writes are not authorized in this phase (fail closed; no request bytes sent)",
           };
         }
-        const needed = opName.startsWith("pr.") ? "repo" : opName.startsWith("mail.") ? "mail" : opName.startsWith("im.") || opName === "send_message" ? "im" : "generic";
+        const needed = opName.startsWith("pr.") ? "repo" : opName.startsWith("mail.") ? "mail" : opName.startsWith("calendar.") ? "calendar" : opName.startsWith("im.") || opName === "send_message" ? "im" : "generic";
         if (!credentials[needed]) {
           auditRefusal(opName, `real external write without wired ${needed} credentials`, effectId);
           return {
@@ -359,6 +381,31 @@ export function createAdapterUpstream(db, {
           return out;
         }
       }
+      // Unit 5.3/5.4 dedicated child transports. The generic policy gate
+      // above already demanded allowRealExternalWrites for external_write
+      // ops on a "real" transportKind; these transports run their own
+      // fail-closed ladders (allowRealMailSend / allowRealCalendarWrite +
+      // credential slots) inside submit().
+      if (opName === "mail.send" && mailUpstream && mailUpstream.canHandle(intent.targetResource)) {
+        const validated = this.validateIntent(opName, intent);
+        if (!validated.ok) {
+          auditRefusal(opName, validated.reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${validated.reason}` };
+        }
+        const out = mailUpstream.submit({ businessKey, idempotencyKey, operation: opRow, now: submitNow, mode, effectId });
+        if (out.status === "failed_local") auditRefusal(opName, out.error, effectId);
+        return out;
+      }
+      if (opName === "calendar.write" && calendarUpstream && calendarUpstream.canHandle(intent.targetResource)) {
+        const validated = this.validateIntent(opName, intent);
+        if (!validated.ok) {
+          auditRefusal(opName, validated.reason, effectId);
+          return { status: "failed_local", error: `adapter refused: ${validated.reason}` };
+        }
+        const out = calendarUpstream.submit({ businessKey, idempotencyKey, operation: opRow, now: submitNow, mode, effectId });
+        if (out.status === "failed_local") auditRefusal(opName, out.error, effectId);
+        return out;
+      }
       if (!baseUpstream) {
         auditRefusal(opName, "no transport wired", effectId);
         return { status: "failed_local", error: "adapter refused: no upstream transport is wired" };
@@ -380,6 +427,9 @@ export function createAdapterUpstream(db, {
     },
     lookup({ businessKey, consistency = "strong" }) {
       const effectRow = db.prepare("SELECT operation, resource FROM effects WHERE business_key=?").get(businessKey);
+      if (effectRow && calendarUpstream && calendarUpstream.canHandle(effectRow.resource)) {
+        return { found: false, strong: false };
+      }
       if (
         telegramUpstream &&
         effectRow &&
@@ -393,8 +443,12 @@ export function createAdapterUpstream(db, {
       return { found: false, strong: false };
     },
     // Head precondition source for the dispatcher (06 section 6: the CAS
-    // transaction re-checks the target resource precondition).
+    // transaction re-checks the target resource precondition). Calendar
+    // writes get their CURRENT remote ETag from the CalDAV transport.
     lookupHead({ targetResource }) {
+      if (calendarUpstream && calendarUpstream.canHandle(targetResource)) {
+        return calendarUpstream.lookupHead({ targetResource });
+      }
       if (!baseUpstream || typeof baseUpstream.lookupHead !== "function") return { ok: false, reason: "transport cannot verify resource heads" };
       return baseUpstream.lookupHead({ targetResource });
     },

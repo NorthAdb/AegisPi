@@ -1,6 +1,6 @@
 # test:cancel-approval — 审批/取消线性化（生产路径，fake 远端）
 
-生成：2026-11-22T09:40:55.043Z；Node v22.23.5；suite `cancel-approval`。
+生成：2026-11-22T12:06:12.401Z；Node v22.23.5；suite `cancel-approval`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -20,7 +20,11 @@
 | PASS | session-mint-requires-the-bootstrap-token | mint with guessed token -> 401 |
 | PASS | revise-requires-live-approve-grant | revise=403(revising requires a live approve grant on the action's scope) old approval untouched=WAITING |
 | PASS | adapter-registry-gates-unknown-real-and-chargeable | unknown->FAILED(local_error: adapter refused: operation ) realwrite->FAILED(local_error: adapter refused: real external write for pr.cre) chargeable->FAILED(local_error: adapter refused: chargeable operation) |
+| PASS | 55-api-decision-materials-session-only | session=materials bare=null |
+| PASS | 55-api-revise-mints-new-card-old-dead | 200 new=apr:efx:notify%3Adm%253atelegram%253a6101%3Acase-api-revise~rev1 oldClick=409 |
+| PASS | 55-api-approved-card-dispatches | 200 dispatch=SUCCEEDED |
+| PASS | 55-api-reconcile-ladder | 200 noCsrf=403 noExternalId=409 final=200/SUCCEEDED |
 
-合计：16 PASS / 0 FAIL。
+合计：20 PASS / 0 FAIL。
 
 数据源：本地 SQLite 工作区 + fake 远端（唯一传输缝）；审批/取消/编辑全部经控制台会话（session+CSRF+JSON）生产端点驱动；无真实外部调用，无模型调用。

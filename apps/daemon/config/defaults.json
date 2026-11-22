@@ -84,6 +84,31 @@
     "spillMaxBytes": 51200,
     "spillMaxLines": 2000
   },
+  "mail": {
+    "$comment": "场景一邮件适配器（Unit 5.3，03 §3 / 02 §4）：imapHost/smtpHost null = 未接线任何邮件传输（零 IMAP/SMTP 字节，失败关闭）；allowRealMailRead/allowRealMailSend 默认 false —— 即使配了 host 也必须显式放行（环回 host 为本地验证缝，仍要求显式 true，与 model.baseUrl/telegram 拉取缝同一惯例）；allowedFolders/allowedSenders/allowedRecipients 默认仅允许收 INBOX、收发全拒（allowedRecipients 仅传输可达白名单，绝不是 CP4 跨私域披露授权）；approvalTtlMs 默认 14400000 = 4 小时审批停车起点；maxAttachmentBytes 限制单附件大小。凭据只经宿主凭据槽 'mail'（credentials.mjs）解析，绝不入配置/日志/模型。",
+    "imapHost": null,
+    "imapPort": 993,
+    "imapTls": true,
+    "smtpHost": null,
+    "smtpPort": 465,
+    "smtpTls": true,
+    "allowRealMailRead": false,
+    "allowRealMailSend": false,
+    "allowedFolders": ["INBOX"],
+    "allowedSenders": [],
+    "allowedRecipients": [],
+    "approvalTtlMs": 14400000,
+    "maxAttachmentBytes": 4194304
+  },
+  "calendar": {
+    "$comment": "场景二日历适配器与静默时段（Unit 5.4，03 §4 / 06 §7）：caldavUrl null = 未接线 CalDAV（零 HTTP 字节，失败关闭）；allowRealCalendarRead/Write 默认 false，环回 URL 为本地验证缝仍需显式放行；allowedCalendars 空 = 全拒；defaultTimezone 为晨报/Timer 展示时区；quietHours 起止为挂钟时间（显式时区）—— L3 Dreaming 编排循环仅在静默时段内按 purpose='summary' 独立预算触发，简报出站按 not_before 推到静默结束。",
+    "caldavUrl": null,
+    "allowRealCalendarRead": false,
+    "allowRealCalendarWrite": false,
+    "allowedCalendars": [],
+    "defaultTimezone": "Asia/Hong_Kong",
+    "quietHours": { "start": "23:00", "end": "07:00", "timezone": "Asia/Hong_Kong" }
+  },
   "credentials": {
     "$comment": "宿主接线的外部凭据槽位标记（02 §4）：键名 mail/repo/im；值为槽位引用或描述，非明文密钥；null = 未接线，真实写即拒。密钥本体只经宿主凭据服务（credentials.mjs）读取。",
     "mail": null,

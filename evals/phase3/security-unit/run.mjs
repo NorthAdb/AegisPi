@@ -1917,6 +1917,315 @@ function seed(tag) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Unit 5.5 console surfaces (04 sections 2/4/5): the local web UI contract,
+// memory governance, routines, ACL-reverified object paging, steering,
+// purpose-attributed budget, and the honest trace. Everything runs through
+// the production console app (session + CSRF + JSON mutations).
+{
+  const ws = makeWorkspace("su-55-console");
+  mkdirSync(join(ws.stateDir, "db"), { recursive: true });
+  const db = openDatabase(ws.dbPath);
+  migrate(db, loadCanonicalSchema());
+  (await import("../../../apps/daemon/src/db/migrate.mjs")).ensureModelRequestsTable(db);
+  const now = Date.now();
+  const { createConsoleApp, ensureConsoleToken } = await import("../../../apps/daemon/src/console/api.mjs");
+  const { proposeMemoryFact } = await import("../../../apps/daemon/src/memory.mjs");
+  const { ensureScope, ensurePrincipal } = await import("../../../apps/daemon/src/ingress.mjs");
+  const { insertObjectRow, putObjectContent } = await import("../../../apps/daemon/src/objects.mjs");
+
+  ensurePrincipal(db, { platform: "local", subject: "owner" });
+  const OWNER = "prn:local:owner";
+  const scope = ensureScope(db, {
+    ownerId: OWNER,
+    kind: "owner_dm",
+    domainKey: "dm:telegram:8001",
+    channel: "telegram",
+    conversationId: "8001",
+    policyVersion: "pv1",
+  });
+  for (const p of ["read", "request", "approve", "admin"]) {
+    grantPermission(db, { scopeId: scope.id, principalId: OWNER, permission: p, now });
+  }
+  const token = ensureConsoleToken(ws.stateDir).token;
+  const app = createConsoleApp(db, {
+    recovery: { failedStep: null, actions: [] },
+    mode: "open",
+    token,
+    port: 4310,
+    stateDir: ws.stateDir,
+    ownerPrincipalId: OWNER,
+  });
+  const H = { host: "127.0.0.1:4310" };
+  const get = async (path, headers = {}) =>
+    app.fetch(new Request("http://127.0.0.1:4310" + path, { headers: { ...H, ...headers } }));
+  const post = async (path, body, headers = {}) =>
+    app.fetch(new Request("http://127.0.0.1:4310" + path, {
+      method: "POST",
+      headers: { ...H, "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    }));
+
+  // 1. The page itself: 200 text/html on the bind host, 403 on any other
+  // Host (DNS-rebinding guard), zero innerHTML in the shipped bundle, and
+  // the bootstrap token never embedded in the HTML.
+  const page = await get("/");
+  const html = await page.text();
+  const crossHost = await app.fetch(new Request("http://127.0.0.1:4310/", { headers: { host: "rebind.example.com:4310" } }));
+  suite.check(
+    "55-page-200-html-and-cross-host-403",
+    page.status === 200 && (page.headers.get("content-type") ?? "").includes("text/html") && crossHost.status === 403,
+    page.status + " " + page.headers.get("content-type") + " crossHost=" + crossHost.status,
+  );
+  const scriptPart = html.split("<script>")[1] ?? "";
+  suite.check(
+    "55-page-no-innerhtml-no-token-no-external-assets",
+    !/innerHTML/.test(scriptPart) && !html.includes(token) && !/src=["']https?:\/\//.test(html),
+    "bytes=" + html.length + " tokenLeaked=" + html.includes(token),
+  );
+
+  // 2. Sessions: mint requires the bootstrap token; the bare bootstrap token
+  // can never decide (mutations demand the session CSRF).
+  const mint = await post("/api/session", { token }, { authorization: "Bearer " + token });
+  const session = await mint.json();
+  const AUTH = { authorization: "Bearer " + session.sessionId, "x-csrf-token": session.csrfToken };
+  suite.check(
+    "55-session-mint-and-mutation-guard",
+    mint.status === 200 && !!session.csrfToken,
+    String(mint.status),
+  );
+  const bareDecide = await post("/api/memory/obj:x/decide", { decision: "activate" }, { authorization: "Bearer " + token });
+  suite.check(
+    "55-bootstrap-token-cannot-mutate",
+    bareDecide.status === 401,
+    String(bareDecide.status),
+  );
+
+  // 3. Memory decide: quarantine/never-activatable refusals, activation,
+  // revision CAS, reject, forget with the deletion manifest.
+  const xssFact = proposeMemoryFact(db, ws.stateDir, {
+    scopeId: scope.id,
+    factKey: "note.xss",
+    factText: "<script>alert(1)</script> hidden html",
+    category: "note",
+    sourceUri: "t:xss",
+    sourceActor: "contact:x",
+    now,
+  });
+  const cleanFact = proposeMemoryFact(db, ws.stateDir, {
+    scopeId: scope.id,
+    factKey: "pref.color",
+    factText: "favorite console color is dim blue",
+    category: "preference",
+    sourceUri: "t:c",
+    sourceActor: "contact:x",
+    now,
+  });
+  const memList = await (await get("/api/memory", AUTH)).json();
+  const xssEntry = memList.memories.find((m) => m.id === xssFact.objectId);
+  suite.check(
+    "55-xss-fact-quarantined-not-activatable",
+    xssEntry && xssEntry.quarantinedReasons.length > 0 && xssEntry.neverActivatable === true,
+    "quarantined=" + (xssEntry ? xssEntry.quarantinedReasons.join("|") : "missing") + " (the API returns JSON; the UI renders via textContent only)",
+  );
+  const activateXss = await post("/api/memory/" + encodeURIComponent(xssFact.objectId) + "/decide", { decision: "activate", expectedRevision: xssEntry.revision }, AUTH);
+  suite.check(
+    "55-quarantined-activation-refused",
+    activateXss.status === 409,
+    String(activateXss.status),
+  );
+  const cleanEntry = memList.memories.find((m) => m.id === cleanFact.objectId);
+  const staleRevision = await post(
+    "/api/memory/" + encodeURIComponent(cleanFact.objectId) + "/decide",
+    { decision: "activate", expectedRevision: cleanEntry.revision + 5 },
+    AUTH,
+  );
+  const activateClean = await post(
+    "/api/memory/" + encodeURIComponent(cleanFact.objectId) + "/decide",
+    { decision: "activate", expectedRevision: cleanEntry.revision },
+    AUTH,
+  );
+  const activatedRow = db.prepare("SELECT status FROM objects WHERE id=?").get(cleanFact.objectId);
+  suite.check(
+    "55-revision-cas-409-then-activate-works",
+    staleRevision.status === 409 && activateClean.status === 200 && activatedRow.status === "active",
+    staleRevision.status + "/" + activateClean.status + " status=" + activatedRow.status,
+  );
+  const rejectOut = await post(
+    "/api/memory/" + encodeURIComponent(xssFact.objectId) + "/decide",
+    { decision: "reject", expectedRevision: xssEntry.revision },
+    AUTH,
+  );
+  const rejectedRow = db.prepare("SELECT status FROM objects WHERE id=?").get(xssFact.objectId);
+  suite.check(
+    "55-reject-archives-candidate",
+    rejectOut.status === 200 && rejectedRow.status === "expired",
+    rejectOut.status + " status=" + rejectedRow.status,
+  );
+  const forgetOut = await post(
+    "/api/memory/" + encodeURIComponent(cleanFact.objectId) + "/decide",
+    { decision: "forget" },
+    AUTH,
+  );
+  const forgottenRow = db.prepare("SELECT status FROM objects WHERE id=?").get(cleanFact.objectId);
+  const manifestExists = existsSync(join(ws.stateDir, "deletion-manifest.json"));
+  suite.check(
+    "55-forget-two-phase-with-manifest",
+    forgetOut.status === 200 && forgottenRow.status === "deleted" && manifestExists,
+    forgetOut.status + " status=" + forgottenRow.status + " manifest=" + manifestExists,
+  );
+
+  // 4. Objects: a caller without the closure read grant gets the SAME 404
+  // as a missing object (no existence oracle); the owner pages content.
+  const foreignScope = ensureScope(db, {
+    ownerId: OWNER,
+    kind: "repo",
+    domainKey: "repo:gh/x/y",
+    channel: "github",
+    repoId: "gh/x/y",
+    policyVersion: "pv1",
+  });
+  const secretStored = putObjectContent(ws.stateDir, "A".repeat(5000));
+  const secretObject = insertObjectRow(db, {
+    scopeId: foreignScope.id,
+    kind: "task_result",
+    sourceUri: "repo:gh/x/y",
+    sourceActor: "host",
+    contentHash: secretStored.contentHash,
+    storageRef: secretStored.storageRef,
+    observedAt: now,
+    requiredScopeIds: [foreignScope.id],
+  });
+  const foreignRead = await get("/api/objects/" + encodeURIComponent(secretObject.id), AUTH);
+  const missingRead = await get("/api/objects/obj:does-not-exist", AUTH);
+  suite.check(
+    "55-object-404-uniform-no-existence-oracle",
+    foreignRead.status === 404 && missingRead.status === 404,
+    foreignRead.status + "/" + missingRead.status,
+  );
+  const ownStored = putObjectContent(ws.stateDir, "B".repeat(3000));
+  const ownObject = insertObjectRow(db, {
+    scopeId: scope.id,
+    kind: "task_result",
+    sourceUri: "t:own",
+    sourceActor: "host",
+    contentHash: ownStored.contentHash,
+    storageRef: ownStored.storageRef,
+    observedAt: now,
+    requiredScopeIds: [scope.id],
+  });
+  const page0 = await (await get("/api/objects/" + encodeURIComponent(ownObject.id) + "?offset=0&limit=100", AUTH)).json();
+  const page1 = await (await get("/api/objects/" + encodeURIComponent(ownObject.id) + "?offset=100&limit=100", AUTH)).json();
+  suite.check(
+    "55-object-paging-bounded",
+    page0.content.length === 100 && page1.content.length === 100 && page0.truncated === true && page0.totalBytes === 3000,
+    "len=" + page0.content.length + "/" + page1.content.length + " total=" + page0.totalBytes,
+  );
+
+  // 5. Steer: request-grant gate + 202 queued + durable inbox event.
+  const steerIngest = receiveEvent(db, ws.stateDir, {
+    now,
+    source: "telegram",
+    sourceEventId: "evt-su-steer",
+    principal: { platform: "telegram", subject: "8001" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:8001", channel: "telegram", conversationId: "8001" },
+    threadKey: "t-steer",
+    priority: 5,
+    policyVersion: "pv1",
+    payload: "steer target task",
+    verdict: "ADMIT",
+  });
+  const steerInbox = db.prepare("SELECT * FROM inbox WHERE id=?").get(steerIngest.inboxId);
+  dispatchEventToTask(db, {
+    inboxId: steerInbox.id,
+    dispatchKey: dispatchKeyForInbox(steerInbox),
+    now,
+    priority: 5,
+    maxSteps: 25,
+    deadlineAt: now + 15 * 60 * 1000,
+    skillSetHash: "ss",
+  });
+  claimNextTask(db, { now, leaseMs: 45000 });
+  const steerTask = db.prepare("SELECT id, updated_at FROM tasks WHERE origin_event_id=?").get(steerIngest.inboxId);
+  revokePermission(db, { scopeId: scope.id, principalId: OWNER, permission: "request", now, reason: "55-steer gate test" });
+  const steerForbidden = await post(
+    "/api/tasks/" + encodeURIComponent(steerTask.id) + "/steer",
+    { message: "no grant" },
+    { authorization: "Bearer " + session.sessionId, "x-csrf-token": session.csrfToken },
+  );
+  grantPermission(db, { scopeId: scope.id, principalId: OWNER, permission: "request", now });
+  const steerOk = await post(
+    "/api/tasks/" + encodeURIComponent(steerTask.id) + "/steer",
+    { message: "focus on the failure branch", expectedRevision: Number(steerTask.updated_at) },
+    AUTH,
+  );
+  const steerQueued = steerOk.status === 202 ? await steerOk.json() : null;
+  const steerInboxRow = steerQueued ? db.prepare("SELECT state FROM inbox WHERE id=?").get(steerQueued.inboxId) : null;
+  suite.check(
+    "55-steer-request-grant-then-202-queued",
+    steerForbidden.status === 403 && steerOk.status === 202 && steerQueued && steerQueued.code === "queued" && steerInboxRow && steerInboxRow.state === "PENDING",
+    steerForbidden.status + "/" + steerOk.status + " inbox=" + (steerInboxRow ? steerInboxRow.state : "n/a"),
+  );
+
+  // 6. Budget byPurpose arithmetic vs the raw reservation rows.
+  const ledger = createBudgetLedger(db, {
+    taskLimitMicrousd: 800000,
+    dayLimitMicrousd: 5000000,
+    warmingEnabled: false,
+    timeZone: "Asia/Hong_Kong",
+  });
+  const dayAcc = ledger.ensureDayAccount({ now }).accountId;
+  const rA = ledger.reserve({ requestKey: "su-55-a", taskId: steerTask.id, purpose: "summary", provider: "deepseek", priceVersion: "catalog-v1", upperMicrousd: 400, accounts: [{ accountId: dayAcc, amountMicrousd: 400 }], now });
+  const rB = ledger.reserve({ requestKey: "su-55-b", taskId: steerTask.id, purpose: "router", provider: "deepseek", priceVersion: "catalog-v1", upperMicrousd: 100, accounts: [{ accountId: dayAcc, amountMicrousd: 100 }], now });
+  ledger.settle({ reservationId: rA.reservationId, usage: { actualMicrousd: 250, source: "su-55-fixture", basis: "suite fixture" }, now, actorId: "suite" });
+  ledger.chargeBound({ reservationId: rB.reservationId, now, actorId: "suite" });
+  const budget = await (await get("/api/budget", AUTH)).json();
+  const bySummary = budget.byPurpose.find((x) => x.purpose === "summary");
+  const byRouter = budget.byPurpose.find((x) => x.purpose === "router");
+  const rawSummarySettled = db.prepare("SELECT actual_microusd FROM budget_reservations WHERE purpose='summary' AND state='SETTLED'").all().reduce((a, r) => a + r.actual_microusd, 0);
+  const rawRouterBound = db.prepare("SELECT upper_microusd FROM budget_reservations WHERE purpose='router' AND state='CHARGED_BOUND'").all().reduce((a, r) => a + r.upper_microusd, 0);
+  suite.check(
+    "55-budget-bypurpose-arithmetic-matches-ledger",
+    bySummary && byRouter && bySummary.spentMicrousd === rawSummarySettled && bySummary.spentMicrousd === 250 && byRouter.chargedBoundMicrousd === rawRouterBound && byRouter.chargedBoundMicrousd === 100 && bySummary.cacheReadTokens === null,
+    "summary=" + (bySummary && bySummary.spentMicrousd) + "/" + rawSummarySettled + " routerBound=" + (byRouter && byRouter.chargedBoundMicrousd) + "/" + rawRouterBound + " cache=unmeasured-null",
+  );
+
+  // 7. Trace: visible-scope 404, sanitized timeline, and the honest
+  // "Task SUCCEEDED but Effect UNKNOWN" annotation.
+  const unknownEffect = proposeEffect(db, ws.stateDir, {
+    now,
+    taskId: steerTask.id,
+    attemptId: db.prepare("SELECT id FROM attempts WHERE task_id=? ORDER BY attempt_no DESC LIMIT 1").get(steerTask.id).id,
+    effectType: "notify",
+    domainKey: "dm:telegram:8001",
+    naturalKey: "trace-unknown",
+    operationIntent: { targetResource: "telegram-dm:8001", operation: "send_message", contentHash: "c", evidenceManifestHash: "e" },
+    retryMode: "AT_MOST_ONCE",
+    provider: "fake",
+    resource: "dm",
+    requiresApproval: false,
+    expiresAt: now + 3600000,
+  });
+  db.prepare("UPDATE effects SET state='UNKNOWN', last_error='fixture unknown' WHERE id=?").run(unknownEffect.effectId);
+  const trace = await (await get("/api/tasks/" + encodeURIComponent(steerTask.id) + "/trace", AUTH)).json();
+  const traceForeign = await get("/api/tasks/task:not-here/trace", AUTH);
+  suite.check(
+    "55-trace-timeline-and-unknown-annotation",
+    traceForeign.status === 404 && trace.timeline.length > 0 && trace.computedButUnconfirmed === true && trace.unconfirmedEffects.includes(unknownEffect.effectId) && /UNKNOWN/.test(trace.note ?? ""),
+    "stages=" + trace.timeline.length + " unconfirmed=" + trace.computedButUnconfirmed,
+  );
+
+  // 8. Phase 6 surfaces stay honest 501 with the session attached.
+  const phase6 = await get("/api/replay/jobs", AUTH);
+  const phase6Body = await phase6.json();
+  suite.check(
+    "55-phase6-501-not-implemented",
+    phase6.status === 501 && phase6Body.code === "not_implemented_yet",
+    phase6.status + " " + phase6Body.code,
+  );
+  db.close();
+}
+
 writeReport({
   suiteId: "security-unit",
   suite,
