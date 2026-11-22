@@ -54,3 +54,11 @@
 - 锁定 Node：`D:\AegisPi\tools\node-v22.23.5\node.exe`（PATH 上是 v24.17.0，禁止依赖 PATH 命中）。
 - 审计探针与日志：`.audit/batch2-audit/`（probes/ 可直接重放，全部只读产品代码）。
 - `.env` 纪律、5 个 real 入口 exit 4 守卫、D 项公网 webhook 关闭，均不变。
+
+## 五、第二轮独立对抗审计复核追记（`D-99`）
+
+- **复核结论**：维持 **HOLD**。第二轮对 `1d019fc` + `e754899` 双提交做整批再证伪：14 项本地套件 + 5 个 `*-real` 入口 + 6 套 Docker 拒绝（rc=2）+ `probe-evidence-holds.mjs`（rc=1）+ D-98 全部 8 项发现（F-1/F-2/F-3/F-5/F-6/F-7/F-8/F-9）及审计提交纯洁性（`e754899` 零产品变更、账本修复无损）**全部复现成立**。
+- **新增发现**：
+  - **F-10（P2，建议纳入 R6）**：`apps/daemon/src/dreaming.mjs:152-187` 对已转为 `expired`/`deleted` 的 `dreaming_suggestion` 未阻止重复审计与流事件（`alreadyPresent: true` 时仍写 `memory_dreaming_merge_proposed`），建议在 `insertObjectRow` 返回 `alreadyPresent` 时跳过审计/事件与计数。
+  - **F-11（P3）**：`apps/daemon/src/console/ui.mjs:355` 审批表 `action_hash` 列误渲染为重复 `a.id`，且 `:316` `detail` 预览未挂载。
+- **第二轮证据**：`.audit/second-audit/report.md`、`.audit/second-audit/probes/probe-second-audit.mjs`、`.audit/second-audit/logs/`。
