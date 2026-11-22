@@ -76,13 +76,16 @@ export function isSystemNotifierAddress(address) {
 // Unit 5.4 predicate (host-supplied; 03 section 4):
 //   {type:"contact_no_reply", threadKey, expectedSender, sinceMs} — SATISFIED
 //   only by a REAL reply from the expected contact on that thread since the
-//   window opened: bot receipts (sourceActor=bot), the owner's own messages
+//   window opened, judged ONLY inside the timer's frozen scope (F-6): bot
+//   receipts (sourceActor=bot), the owner's own messages
 //   (condition.ownerAddresses) and bounce/system notices
 //   (payload.systemNotification or a well-known mailer identity) never count.
 //   The display name is NEVER identity — the envelope address is compared.
 //   An unreadable payload is skipped (conservative: an unread record never
 //   cancels a reminder); this condition without a payload reader at all is a
 //   hard error, never a silent "not satisfied".
+//   {type:"morning_briefing"} — never satisfied: the fired occurrence IS the
+//   briefing trigger (briefing-followup.mjs composes and queues the digest).
 export function evaluateCondition(db, condition, { now, timer = null, stateDir = null }) {
   if (!condition || condition.type === "none") {
     return { satisfied: false, evidence: null };
@@ -96,9 +99,23 @@ export function evaluateCondition(db, condition, { now, timer = null, stateDir =
     }
     return { satisfied: false, evidence: null };
   }
+  if (condition.type === "morning_briefing") {
+    // A briefing timer is never satisfied by any event: the fired occurrence
+    // IS the trigger (briefing-followup.mjs composes and queues the digest).
+    return { satisfied: false, evidence: null };
+  }
   if (condition.type === "contact_no_reply") {
     if (typeof stateDir !== "string" || stateDir.length === 0) {
       throw new TimerError("contact_no_reply evaluation requires the state dir to read thread payloads (fail closed)");
+    }
+    // The condition is judged INSIDE the timer's frozen scope (F-6, D-98:
+    // a same-thread_key row in another scope — another mailbox account, any
+    // foreign channel — must never satisfy this timer). The timer row is the
+    // authority; a condition-level scopeId is accepted only as a fallback for
+    // detached conditions, and a missing scope in both fails closed.
+    const scopeId = timer?.scope_id ?? condition.scopeId;
+    if (typeof scopeId !== "string" || scopeId.length === 0) {
+      throw new TimerError("contact_no_reply evaluation requires the timer's scope_id (fail closed; cross-scope replies must never satisfy)");
     }
     const since = Number.isFinite(condition.sinceAt)
       ? condition.sinceAt
@@ -114,10 +131,10 @@ export function evaluateCondition(db, condition, { now, timer = null, stateDir =
     const rows = db
       .prepare(
         `SELECT id, payload_object_id, received_at FROM inbox
-          WHERE thread_key=? AND received_at>=? AND state IN ('PENDING','ROUTED','DONE')
+          WHERE scope_id=? AND thread_key=? AND received_at>=? AND state IN ('PENDING','ROUTED','DONE')
           ORDER BY received_at ASC LIMIT 500`,
       )
-      .all(String(condition.threadKey ?? ""), since);
+      .all(scopeId, String(condition.threadKey ?? ""), since);
     for (const row of rows) {
       const text = readObjectContent(db, stateDir, row.payload_object_id);
       if (typeof text !== "string") continue;

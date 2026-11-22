@@ -16,7 +16,7 @@
 //   5.4-4 L3 Dreaming quiet-hours orchestration loop
 
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -190,19 +190,36 @@ const suite = makeSuite("phase5-batch2-scenarios");
 
 // A. Static structural gate: child entry files must never be imported by
 //    host modules (a top-level child entry that runs on import once EXITED
-//    the daemon mid-tick — this check pins the lesson).
+//    the daemon mid-tick — this check pins the lesson). F-9 (D-98): the scan
+//    covers EVERY host module under apps/daemon/src (not four files) and all
+//    import shapes — static single-quote, static double-quote, re-export and
+//    dynamic import() — for ANY *-child.mjs entry.
 {
-  const hostSources = [
-    "apps/daemon/src/daemon.mjs",
-    "apps/daemon/src/mail-adapter.mjs",
-    "apps/daemon/src/calendar-adapter.mjs",
-    "apps/daemon/src/adapters.mjs",
-  ].map((p) => ({ p, text: existsSync(join(process.cwd(), p)) ? readFileSync(join(process.cwd(), p), "utf8") : "" }));
-  const bad = hostSources.filter((f) => /import\s+[^;]*from\s+"[^"]*upstream-(?:mail|calendar)-child\.mjs"/.test(f.text));
+  const srcRoot = join(process.cwd(), "apps", "daemon", "src");
+  const walkMjs = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((d) => {
+      const p = join(dir, d.name);
+      return d.isDirectory() ? walkMjs(p) : p.endsWith(".mjs") ? [p] : [];
+    });
+  const allMjs = existsSync(srcRoot) ? walkMjs(srcRoot) : [];
+  const childEntries = allMjs.filter((p) => /-child\.mjs$/.test(p)).map((p) => p.split(/[\\/]/).pop());
+  const hostFiles = allMjs.filter((p) => !childEntries.includes(p.split(/[\\/]/).pop()));
+  const bad = [];
+  for (const f of hostFiles) {
+    const text = readFileSync(f, "utf8");
+    for (const c of childEntries) {
+      const esc = c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const staticHit = new RegExp(`from\\s*['"][^'"]*${esc}['"]`).test(text);
+      const dynamicHit = new RegExp(`import\\s*\\([^)]*['"][^'"]*${esc}['"]`).test(text);
+      if (staticHit || dynamicHit) bad.push(`${f.split(/[\\/]/).slice(-2).join("/")} -> ${c}`);
+    }
+  }
   suite.check(
     "child-entries-never-imported-by-host",
-    bad.length === 0,
-    bad.length === 0 ? "host modules import no child entry scripts (mail/calendar children run via spawn only)" : `hosts importing child entries: ${bad.map((b) => b.p).join(",")}`,
+    childEntries.length >= 5 && bad.length === 0,
+    bad.length === 0
+      ? `all ${hostFiles.length} host modules import none of the ${childEntries.length} child entry scripts (static single/double-quote, re-export and dynamic import)`
+      : `hosts importing child entries: ${bad.join(", ")}`,
   );
 }
 
@@ -981,6 +998,84 @@ let mailChain = null;
     refusedRow.state === "FAILED" && !/local_error/.test(refusedRow.last_error ?? "") && refusedRow.last_error.includes("AUTH refused"),
     `definitive server refusal (no message bytes of consequence; not requeueable): ${refusedRow.last_error}`,
   );
+
+  // --- B12 (F-5, D-98): the server grants DATA (354) and then destroys the
+  // connection WITHOUT a final reply. Whether any message byte was processed
+  // is unknowable from the client — the honest outcome is UNKNOWN, never the
+  // retryable "local" grade, and AT_MOST_ONCE auto-recovery never resends.
+  const dropChainIng = ingestInboundMail(db2, ws.stateDir, {
+    now: now + 4000,
+    account: MAIL_ACCOUNT,
+    message: {
+      uid: 212,
+      from: { name: "Erin Colleague", address: "erin@example.com" },
+      to: [{ name: "", address: MAIL_ACCOUNT }],
+      subject: "Fifth",
+      date: "Sat, 22 Nov 2026 15:00:00 +0800",
+      messageId: "<weekly-6@example.com>",
+      references: "<weekly-6@example.com>",
+      textPreview: "Fifth message.",
+      attachments: [],
+    },
+    ownerId: OWNER,
+    mailConfig: { allowedSenders: ["erin@example.com"] },
+  });
+  const dropInbox = db2.prepare("SELECT * FROM inbox WHERE id=?").get(dropChainIng.inboxId);
+  dispatchEventToTask(db2, {
+    inboxId: dropInbox.id,
+    dispatchKey: dispatchKeyForInbox(dropInbox),
+    now: now + 4000,
+    priority: 5,
+    maxSteps: 25,
+    deadlineAt: now + 4000 + 15 * 60 * 1000,
+    skillSetHash: "ss-mail",
+  });
+  const dropClaim = claimNextTask(db2, { now: now + 4000, leaseMs: 45000 });
+  const dropProposal = proposeMailReplyEffect(db2, ws.stateDir, {
+    now: now + 4000,
+    taskId: dropClaim.taskId,
+    attemptId: dropClaim.attemptId,
+    account: MAIL_ACCOUNT,
+    intent: buildMailSendIntent({
+      to: ["dest@example.com"],
+      subject: "Re: Fifth",
+      bodyText: "draft whose send breaks after DATA was granted",
+      sendingIdentity: FIXED_IDENTITY,
+      threadKey: dropChainIng.threadKey,
+    }),
+    mailConfig: TEST_MAIL,
+    adaptersConfig: ADAPTERS,
+    evidenceManifestHash: "evh-drop354",
+    parentObjectIds: [dropChainIng.objectId],
+    approverPrincipalId: OWNER,
+  });
+  decideApproval(db2, {
+    approvalId: dropProposal.approvalId,
+    decision: "approve",
+    actionHash: dropProposal.actionHash,
+    nonce: dropProposal.approvalNonce,
+    approverId: OWNER,
+    now: now + 4000,
+  });
+  await fx.smtpSet("dropAfterData354", true);
+  const beforeDrop = await fx.smtpCount();
+  const dropDispatch = dispatchEffect(db2, adapterUpstream, { effectId: dropProposal.effectId, now: now + 4000 });
+  await fx.smtpSet("dropAfterData354", false);
+  suite.check(
+    "5.3-12a data-granted-then-silent-drop-lands-unknown",
+    dropDispatch.state === "UNKNOWN" && db2.prepare("SELECT state FROM effects WHERE id=?").get(dropProposal.effectId).state === "UNKNOWN",
+    `dispatch=${dropDispatch.state} err=${String(dropDispatch.lastError ?? "").slice(0, 90)}`,
+  );
+  const dropRec1 = autoRecoverUnknown(db2, adapterUpstream, { effectId: dropProposal.effectId, now: now + 4100, backoffMs: 0 });
+  const dropRec2 = autoRecoverUnknown(db2, adapterUpstream, { effectId: dropProposal.effectId, now: now + 4200, backoffMs: 0 });
+  // The dot DID reach the server (bytes delivered, reply withheld) — the
+  // honest assertion is that NO recovery round resends it.
+  const sendsAfterDrop = await fx.smtpCount();
+  suite.check(
+    "5.3-12b at-most-once-zero-auto-resend-after-354-drop",
+    dropRec1.action === "none" && dropRec2.action === "none" && sendsAfterDrop === beforeDrop + 1,
+    `recover=[${dropRec1.action},${dropRec2.action}] messages=${sendsAfterDrop} after-dispatch=${beforeDrop + 1} (zero resends beyond the single delivered attempt)`,
+  );
   mailChain = { ws, db: db2, scopeId: ing.scopeId, threadKey: ing.threadKey, claim, proposed, draftEvidence };
 }
 
@@ -1024,6 +1119,9 @@ let mailChain = null;
     expectedSender: "client@example.org",
     sinceMs: 0,
     ownerAddresses: [MAIL_ACCOUNT],
+    // Detached (timer-less) evaluation carries the scope explicitly: the
+    // condition is judged ONLY inside its own scope (F-6).
+    scopeId: scope.id,
   };
   const payloadObj = insertObjectRow(db, {
     scopeId: scope.id,
@@ -1171,6 +1269,63 @@ let mailChain = null;
     "5.4-6a briefing-carries-structured-sections",
     Array.isArray(briefing.calendarEvents) && Array.isArray(briefing.pendingApprovals) && Array.isArray(briefing.pendingTimers) && Array.isArray(briefing.unrecoveredAlerts),
     `events=${briefing.calendarEvents.length} approvals=${briefing.pendingApprovals.length} timers=${briefing.pendingTimers.length} alerts=${briefing.unrecoveredAlerts.length}`,
+  );
+
+  // --- C7 (F-7, D-98): a foreign scope's WAITING approvals and audit_alerts
+  // never enter another scope's briefing composition (same-thread calendar
+  // and timer queries were already scope-filtered; these two were the leak).
+  const foreignScope = ensureScope(db, {
+    ownerId: OWNER,
+    kind: "owner_dm",
+    domainKey: "dm:telegram:702",
+    channel: "telegram",
+    conversationId: "702",
+    policyVersion: "pv1",
+  });
+  ensurePrincipal(db, { platform: "telegram", subject: "702" });
+  const foreignPayload = insertObjectRow(db, {
+    scopeId: foreignScope.id,
+    kind: "effect_payload",
+    sourceUri: "fixture://foreign-approval",
+    sourceActor: "prn:telegram:702",
+    content: "foreign scope payload",
+    observedAt: now,
+    requiredScopeIds: [foreignScope.id],
+  });
+  db.prepare(
+    `INSERT INTO inbox(id, source, source_event_id, principal_id, scope_id, payload_object_id, thread_key, priority, policy_version, verdict, state, received_at)
+     VALUES ('inb:foreign-702', 'telegram', 'evt-702', 'prn:telegram:702', ?, ?, 't-702', 5, 'pv1', 'ADMIT', 'DONE', ?)`,
+  ).run(foreignScope.id, foreignPayload.id, now);
+  db.prepare(
+    `INSERT INTO tasks(id, scope_id, principal_id, origin_event_id, dispatch_key, policy_version, scope_epoch, state, priority,
+      available_at, deadline_at, attempt_no, fence, max_steps, skill_set_hash, created_at, updated_at)
+     VALUES ('task:foreign-702', ?, 'prn:telegram:702', 'inb:foreign-702', 'dk:foreign-702', 'pv1', 1, 'RUNNING', 5, ?, ?, 1, 1, 25, 'ss', ?, ?)`,
+  ).run(foreignScope.id, now, now + 3600_000, now, now);
+  db.prepare(`INSERT INTO attempts(id, task_id, attempt_no, fence, state, started_at) VALUES ('att:foreign-702', 'task:foreign-702', 1, 1, 'ACTIVE', ?)`).run(now);
+  db.prepare(
+    `INSERT INTO effects(id, task_id, attempt_id, proposal_fence, scope_id, principal_id, scope_epoch, authorization_revision,
+      policy_version, action_json, action_hash, payload_object_id, provider, resource, operation, expires_at, retry_mode,
+      business_key, state, attempt_count, max_attempts, next_attempt_at, created_at, updated_at)
+     VALUES ('efx:foreign-702', 'task:foreign-702', 'att:foreign-702', 1, ?, 'prn:telegram:702', 1, 0, 'pv1',
+       '{"target_resource":"mail:x@example.test","operation":"mail.send"}', 'deadbeef70', ?, 'smtp', 'dm:mail:x', 'mail.send',
+       ?, 'AT_MOST_ONCE', 'bk:foreign-702', 'WAITING_APPROVAL', 0, 3, 0, ?, ?)`,
+  ).run(foreignScope.id, foreignPayload.id, now + 3600_000, now, now);
+  db.prepare(
+    `INSERT INTO approvals(id, effect_id, action_hash, approver_id, attempt_id, proposal_fence, scope_epoch, authorization_revision,
+      policy_version, expires_at, state, nonce_hash, created_at)
+     VALUES ('apr:foreign-702', 'efx:foreign-702', 'deadbeef70', 'prn:telegram:702', 'att:foreign-702', 1, 1, 0, 'pv1', ?, 'WAITING', 'noncehash70', ?)`,
+  ).run(now + 3600_000, now);
+  db.prepare(
+    `INSERT INTO stream_events(scope_id, event_type, entity_id, entity_version, payload_json, created_at)
+     VALUES (?, 'audit_alert', 'alert:foreign-702', 1, '{"alert":"private-scope-alert"}', ?)`,
+  ).run(foreignScope.id, now);
+  const briefingIsolated = composeMorningBriefing(db, { now, scopeId: scope.id, window: { horizonMs: 86400000 } });
+  const leakedApprovals = briefingIsolated.pendingApprovals.filter((a) => a.scope_id !== scope.id);
+  const leakedAlerts = briefingIsolated.unrecoveredAlerts.filter((r) => r.payload_json.includes("private-scope-alert"));
+  suite.check(
+    "5.4-6b briefing-excludes-foreign-scope-approvals-and-alerts",
+    leakedApprovals.length === 0 && leakedAlerts.length === 0,
+    `leaked approvals=${leakedApprovals.length} leaked alerts=${leakedAlerts.length}`,
   );
   db.close();
 }
@@ -1572,7 +1727,10 @@ let mailChain = null;
   // in scopeB (cross-scope proof).
   const a1 = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "pref.editor", factText: "uses vim bindings", category: "preference", sourceUri: "t:1", sourceActor: "contact:a", now });
   const a2 = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "pref.editor.plugins", factText: "prefers vim plugins", category: "preference", sourceUri: "t:2", sourceActor: "contact:a", now });
-  const aExpired = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "tmp.one", factText: "temporary fact", category: "note", sourceUri: "t:3", sourceActor: "contact:a", now, expiresAt: now - 1000 });
+  // Anchored to the FIXED quiet-window instant (not Date.now()): the pass
+  // runs at insideQuiet, so the expiry must be older than THAT — an anchor
+  // to the real clock would make the archive hour-of-day fragile.
+  const aExpired = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "tmp.one", factText: "temporary fact", category: "note", sourceUri: "t:3", sourceActor: "contact:a", now, expiresAt: insideQuiet - 1000 });
   proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "proj.status", factText: "phase one", category: "note", sourceUri: "t:4", sourceActor: "contact:a", now: now - 10 * 24 * 3600_000 });
   const aConflict = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "proj.status", factText: "phase two", category: "note", sourceUri: "t:5", sourceActor: "contact:a", now: now - 9 * 24 * 3600_000 });
   const aForbidden = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "ident.self", factText: "owner identity note", category: "identity", sourceUri: "t:6", sourceActor: "contact:a", now });
@@ -1647,6 +1805,31 @@ let mailChain = null;
     typeof refused.skipped === "string" && /reservation refused/.test(refused.skipped),
     String(refused.skipped).slice(0, 120),
   );
+
+  // --- E5 (F-8, D-98): with NO ledger the pass is refused — skipped with the
+  // reason on record AND a dreaming_budget_refused audit (the closure's
+  // §六.3 declaration is now true for the no-ledger case too).
+  const noLedger = runDreamingLoop(db, ws.stateDir, { now: insideQuiet + 120000, quietHours: quietHk, ledger: null });
+  const refusedAudits = db.prepare("SELECT count(*) c FROM audit_log WHERE code='dreaming_budget_refused'").get().c;
+  suite.check(
+    "5.4-12c no-ledger-pass-refused-and-audited",
+    typeof noLedger.skipped === "string" && /no budget ledger/.test(noLedger.skipped) && refusedAudits >= 1,
+    `skipped=${String(noLedger.skipped).slice(0, 80)} refused-audits=${refusedAudits}`,
+  );
+
+  // --- E6 (F-10, D-99): a suggestion the owner has already dismissed
+  // (expired/deleted) is history — re-running the loop must not mint a
+  // phantom merge proposal audit or stream event for it (BLIND-2 shape).
+  const dismissedSuggestion = pass.mergeSuggestions[0];
+  db.prepare("UPDATE objects SET status='expired' WHERE id=?").run(dismissedSuggestion);
+  const mergeAuditsBefore = db.prepare("SELECT count(*) c FROM audit_log WHERE code='memory_dreaming_merge_proposed'").get().c;
+  const rerun = runDreamingLoop(db, ws.stateDir, { now: insideQuiet + 180000, quietHours: quietHk, ledger });
+  const mergeAuditsAfter = db.prepare("SELECT count(*) c FROM audit_log WHERE code='memory_dreaming_merge_proposed'").get().c;
+  suite.check(
+    "5.4-12d expired-suggestion-never-re-proposed",
+    rerun.mergeSuggestions.length === 0 && mergeAuditsAfter === mergeAuditsBefore,
+    `rerun suggestions=${rerun.mergeSuggestions.length} merge_audits=${mergeAuditsBefore}->${mergeAuditsAfter}`,
+  );
   db.close();
 }
 
@@ -1675,6 +1858,191 @@ let mailChain = null;
     cfg.policy.allowRealExternalWrites === false,
     String(cfg.policy.allowRealExternalWrites),
   );
+}
+
+// ===========================================================================
+// G. Units 5.3/5.4 daemon runtime wiring (F-3, D-98): the daemon tick itself
+//    (real `daemon --once` child processes against this suite's loopback
+//    fixtures) must ① pull fixture IMAP mail into ingestInboundMail (a
+//    no-Message-ID mail lands on a deterministic fallback key instead of
+//    wedging the pass, P3-7), ② convert a FIRED follow-up timer into a
+//    followup-reminder READY effect + outbox row, and ③ convert a FIRED
+//    morning_briefing timer into a structured digest outbox row — then the
+//    next tick's cancelSatisfiedFollowUpReminders sweep cancels the reminder
+//    once the real reply has landed.
+{
+  const { ws, db } = freshDb("daemon-wiring");
+  const credentials = createCredentialService(db);
+  credentials.registerSlot({ slot: "mail", envName: "AEGISPI_TEST_MAIL_CREDENTIAL_FIXTURE", purpose: "mail", now: Date.now() });
+  ensurePrincipal(db, { platform: "local", subject: "owner" });
+  const daemonScope = ensureMailScope(db, { account: MAIL_ACCOUNT, ownerId: OWNER, policyVersion: "pv1" });
+  seedMailGrants(db, daemonScope.id, Date.now());
+  const now0 = Date.now();
+  const timerPayload = insertObjectRow(db, {
+    scopeId: daemonScope.id,
+    kind: "event_payload",
+    sourceUri: "fixture://daemon-origin",
+    sourceActor: OWNER,
+    content: "daemon wiring origin payload",
+    observedAt: now0,
+    requiredScopeIds: [daemonScope.id],
+  });
+  const SHARED = "mail:<daemon-thread@example.com>";
+  createTimer(db, {
+    id: "tmr:daemon-f6",
+    scopeId: daemonScope.id,
+    principalId: OWNER,
+    scopeEpoch: 1,
+    threadKey: SHARED,
+    condition: { type: "contact_no_reply", threadKey: SHARED, expectedSender: "erin@example.com", ownerAddresses: [MAIL_ACCOUNT], sinceMs: 0 },
+    dueAt: now0 - 1000,
+    payloadObjectId: timerPayload.id,
+    now: now0,
+  });
+  createTimer(db, {
+    id: "tmr:daemon-brief",
+    scopeId: daemonScope.id,
+    principalId: OWNER,
+    scopeEpoch: 1,
+    threadKey: "briefing",
+    condition: { type: "morning_briefing" },
+    dueAt: now0 - 1000,
+    payloadObjectId: timerPayload.id,
+    now: now0,
+  });
+  // Fixture mail for this workspace's pulls: a no-Message-ID mail (P3-7) and
+  // the human reply that must cancel the reminder on the next tick.
+  await fx.control("imapAdd", {
+    message: {
+      uid: 300,
+      from: { name: "No ID", address: "noid@example.com" },
+      to: [{ name: "", address: MAIL_ACCOUNT }],
+      cc: [],
+      subject: "no thread headers at all",
+      date: "Sat, 22 Nov 2026 18:00:00 +0800",
+      messageId: "",
+      inReplyTo: "",
+      references: "",
+      textPreview: "this mail carries no Message-ID/In-Reply-To/References",
+      attachments: [],
+    },
+  });
+  await fx.control("imapAdd", {
+    message: {
+      uid: 301,
+      from: { name: "Erin Colleague", address: "erin@example.com" },
+      to: [{ name: "", address: MAIL_ACCOUNT }],
+      cc: [],
+      subject: "Re: daemon thread",
+      date: "Sat, 22 Nov 2026 18:05:00 +0800",
+      messageId: "<daemon-reply@example.com>",
+      inReplyTo: "<daemon-thread@example.com>",
+      references: "<daemon-thread@example.com>",
+      textPreview: "sorry for the late reply",
+      attachments: [],
+    },
+  });
+  // The daemon config: defaults.json with the loopback mail fixture wired
+  // (read path only; the send gate stays closed).
+  const defaults = JSON.parse(readFileSync(join(process.cwd(), "apps", "daemon", "config", "defaults.json"), "utf8"));
+  defaults.mail = {
+    imapHost: "127.0.0.1",
+    imapPort: fx.imapPort,
+    imapTls: true,
+    smtpHost: null,
+    smtpPort: 465,
+    allowRealMailRead: true,
+    allowRealMailSend: false,
+    allowedFolders: ["INBOX"],
+    allowedSenders: ["erin@example.com", "noid@example.com"],
+    allowedRecipients: [],
+    approvalTtlMs: 14400000,
+    maxAttachmentBytes: 4194304,
+  };
+  const cfgPath = join(ws.stateDir, "daemon-config.json");
+  writeFileSync(cfgPath, JSON.stringify(defaults), "utf8");
+  db.close();
+
+  const runOnce = () =>
+    new Promise((resolve) => {
+      const child = spawn(
+        process.execPath,
+        [join(process.cwd(), "apps", "daemon", "src", "daemon.mjs"), "--once", `--data-dir=${ws.stateDir}`, `--config=${cfgPath}`, "--port=0"],
+        { cwd: process.cwd(), encoding: "utf8", timeout: 180000 },
+      );
+      let out = "";
+      child.stdout.on("data", (d) => { out += String(d); });
+      child.stderr.on("data", (d) => { out += String(d); });
+      child.on("close", (code) => resolve({ code, out }));
+    });
+
+  const run1 = await runOnce();
+  const db1 = openDatabase(ws.dbPath);
+  const mailRows = db1.prepare("SELECT id, source_event_id FROM inbox WHERE source='mail'").all();
+  const noIdRow = mailRows.find((r) => /^mail:no-id-/.test(r.source_event_id));
+  const payloadCount = db1.prepare("SELECT count(*) c FROM objects WHERE kind='event_payload'").get().c;
+  const taskCount = db1.prepare("SELECT count(*) c FROM tasks").get().c;
+  const refusedAudit = db1.prepare("SELECT count(*) c FROM audit_log WHERE code='mail_ingest_refused'").get().c;
+  suite.check(
+    "F3-1 daemon-pull-lands-inbox-payloads-tasks",
+    run1.code === 0 && mailRows.length === 3 && Boolean(noIdRow) && payloadCount >= 3 && taskCount >= 3,
+    `exit=${run1.code} mail_rows=${mailRows.length} no-id-key=${Boolean(noIdRow)} payloads=${payloadCount} tasks=${taskCount}`,
+  );
+  suite.check(
+    "F3-2 no-message-id-mail-deterministic-key",
+    Boolean(noIdRow) && noIdRow.source_event_id.startsWith("mail:no-id-") && noIdRow.source_event_id.length > "mail:no-id-".length,
+    String(noIdRow?.source_event_id ?? "none").slice(0, 60),
+  );
+  const followupOut = db1
+    .prepare(
+      `SELECT o.id AS outbox_id, e.id AS effect_id, e.state AS effect_state, e.last_error FROM outbox o JOIN effects e ON e.id=o.effect_id
+       WHERE o.notify_reason='followup:tmr:daemon-f6'`,
+    )
+    .get();
+  const briefingOut = db1
+    .prepare(
+      `SELECT o.id AS outbox_id, e.id AS effect_id, e.state AS effect_state FROM outbox o JOIN effects e ON e.id=o.effect_id
+       WHERE o.notify_reason='briefing:tmr:daemon-brief'`,
+    )
+    .get();
+  const briefingPayload = briefingOut
+    ? db1.prepare("SELECT count(*) c FROM objects WHERE kind='briefing_payload'").get().c
+    : 0;
+  suite.check(
+    "F3-3 fired-followup-timer-becomes-ready-reminder-outbox",
+    run1.code === 0 && followupOut && (followupOut.effect_state === "READY" || (followupOut.effect_state === "CANCELLED" && /satisfied/.test(followupOut.last_error ?? ""))),
+    `exit=${run1.code} outbox=${followupOut?.outbox_id ?? "none"} effect=${followupOut?.effect_state ?? "none"} (the in-run reply may already have triggered the stale cancellation)`,
+  );
+  suite.check(
+    "F3-4 fired-briefing-timer-becomes-ready-digest-outbox",
+    run1.code === 0 && briefingOut && briefingOut.effect_state === "READY" && briefingPayload >= 1,
+    `exit=${run1.code} outbox=${briefingOut?.outbox_id ?? "none"} effect=${briefingOut?.effect_state ?? "none"} digest_payloads=${briefingPayload}`,
+  );
+  db1.close();
+
+  // Second --once run: the re-pulled mails dedup (the no-ID mail keeps its
+  // fallback key), and the sweep cancels the now-stale reminder — the human
+  // reply landed in tick 1, before the reminder was submitted.
+  const run2 = await runOnce();
+  const db2 = openDatabase(ws.dbPath);
+  const mailRows2 = db2.prepare("SELECT count(*) c FROM inbox WHERE source='mail'").get().c;
+  const staleCancelled = db2
+    .prepare("SELECT state, last_error FROM effects WHERE id=?")
+    .get(followupOut.effect_id);
+  const staleAudit = db2.prepare("SELECT count(*) c FROM audit_log WHERE code='stale_reminder_cancelled'").get().c;
+  suite.check(
+    "F3-5 re-pull-dedups-no-id-mail",
+    run2.code === 0 && mailRows2 === 3,
+    `exit=${run2.code} mail_rows=${mailRows2} (the re-fetched no-ID mail must dedup on its fallback key)`,
+  );
+  suite.check(
+    "F3-6 reply-lands-stale-reminder-cancelled",
+    run2.code === 0 && staleCancelled.state === "CANCELLED" && /satisfied/.test(staleCancelled.last_error ?? "") && staleAudit >= 1,
+    `exit=${run2.code} effect=${staleCancelled?.state} err=${String(staleCancelled?.last_error ?? "").slice(0, 70)} audits=${staleAudit}`,
+  );
+  db2.close();
+  void run1.out;
+  void run2.out;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Phase 5 Unit 5.2 — Telegram 路线 1 拉取入站与跨通道 9 环节 Canary 隔离
 
-生成：2026-11-22T12:12:09.986Z；Node v22.23.5；suite `cross-channel`。
+生成：2026-11-22T17:09:25.306Z；Node v22.23.5；suite `cross-channel`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -27,7 +27,9 @@
 | PASS | rework-model-failure-returns-all-batch-deliveries | failed batch task returned ALL 2 deliveries (RETURNED,RETURNED) with zero stranded PENDING |
 | PASS | rework-pull-gate-proxy-idempotent-control-and-refused-closure | loopback allowRealPull=false skipped (calls=0); env proxy resolved (127.0.0.1:7897); duplicate /pause did not re-pause (paused=0); refused /stop closed (DONE) |
 | PASS | rework-fairness-no-dual-group-starvation-and-stop-cleans-deliveries | low-priority repo claimed in 9 turns despite dual-group saturation; /stop without active subscription closed delivery (DEAD) & inbox (DONE) |
+| PASS | f6-cross-scope-reply-never-satisfies-timer | scope A timer=FIRED fired=1 foreign-evidence=false (the scope B same-thread reply must not satisfy) |
+| PASS | f6-control-same-scope-reply-still-satisfies | same-scope timer=SATISFIED evidence=inb:f6-same-a |
 
-合计：23 PASS / 0 FAIL。
+合计：25 PASS / 0 FAIL。
 
 数据源：本地环回 Bot-API 夹具与本地 CONNECT 代理（零真实外联、零模型调用、零真实 Telegram）。

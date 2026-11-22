@@ -324,7 +324,19 @@ process.env.AEGISPI_TEST_MODEL_KEY = "loopback-fixture-placeholder";
   const db2 = openDatabase(ws.dbPath, { readOnly: true });
   const reqRow = requestId ? db2.prepare("SELECT * FROM model_requests WHERE request_id=?").get(requestId) : null;
   const resRow = reqRow?.reservation_id ? db2.prepare("SELECT * FROM budget_reservations WHERE id=?").get(reqRow.reservation_id) : null;
-  const settledAudit = db2.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+  // The L3 dreaming housekeeping pass settles its own purpose='summary'
+  // reservations (actual 0) inside quiet hours; this gate judges the WORKER
+  // settlement, so summary-purpose rows are excluded (hour-of-day safety).
+  const settledAudit = db2
+    .prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'")
+    .all()
+    .filter((row) => {
+      try {
+        return JSON.parse(row.details_json).purpose !== "summary";
+      } catch {
+        return false;
+      }
+    }).length;
   const resultObj = db2.prepare("SELECT storage_ref FROM objects WHERE kind='task_result' ORDER BY observed_at DESC LIMIT 1").get();
   const task = db2.prepare("SELECT state FROM tasks WHERE id=?").get(claim.taskId);
   db2.close();

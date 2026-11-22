@@ -48,12 +48,25 @@ export function mailScopeId(account) {
 // References chain if present, else In-Reply-To, else the message's own
 // Message-ID. Normalized lowercase; an escaping error in one component can
 // never merge two threads because the whole key is compared verbatim.
-export function mailThreadKey({ messageId, inReplyTo, references }) {
+// P3-7 (D-98): a message with NO thread headers at all no longer throws —
+// it gets a deterministic fallback key hashed from the message's own stable
+// content, so the same mail re-fetched maps to the same thread and inbox row
+// (dedup works), while two distinct no-ID mails never merge.
+export function mailThreadKey({ messageId, inReplyTo, references, from, subject, date, textPreview }) {
   const refs = String(references ?? "").trim().split(/\s+/).filter((s) => s.length > 0);
   const root = refs[0] ?? String(inReplyTo ?? "").trim() ?? "";
-  const base = root.length > 0 ? root : String(messageId ?? "").trim();
+  let base = root.length > 0 ? root : String(messageId ?? "").trim();
   if (base.length === 0) {
-    throw new MailTriageError("message has no Message-ID/In-Reply-To/References; cannot form a thread key");
+    const digest = createHash("sha256")
+      .update(JSON.stringify([
+        String(from?.address ?? ""),
+        String(subject ?? ""),
+        String(date ?? ""),
+        String(textPreview ?? ""),
+      ]))
+      .digest("hex")
+      .slice(0, 24);
+    base = `no-id-${digest}`;
   }
   return `mail:${base.toLowerCase()}`;
 }
@@ -146,7 +159,9 @@ export function ingestInboundMail(db, stateDir, {
   const received = receiveEvent(db, stateDir, {
     now,
     source: "mail",
-    sourceEventId: payload.messageId || null,
+    // P3-7: a no-Message-ID mail dedups on the deterministic fallback thread
+    // key instead of minting a fresh inbox row on every pull pass.
+    sourceEventId: payload.messageId || threadKey,
     principal: { platform: "mail", subject: envelopeFrom },
     scope: { kind: "owner_dm", domainKey: mailDomainKey(account), channel: "mail", conversationId: String(account).toLowerCase() },
     threadKey,

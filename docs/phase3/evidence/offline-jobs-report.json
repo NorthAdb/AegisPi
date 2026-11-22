@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-22T12:25:31.051Z",
+  "generatedAt": "2026-11-22T16:44:16.200Z",
   "nodeVersion": "v22.23.5",
   "suite": "offline-jobs",
   "label": "test:offline-jobs — 真实无网络 job 执行/超时/取消与配额强制（真实容器，digest 固定）",
@@ -46,7 +46,7 @@
     {
       "name": "startup-recovery-kills-orphan-container-and-marks-lost",
       "status": "PASS",
-      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"b9ad0020a5e402804931e6daf82384d40445757d2a342abe032225deb1674439\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
+      "detail": "reaped=[{\"jobId\":\"job:oj:recover:1:orphan\",\"container\":\"c3974be3924861d0e5ab6a73a1895f199db59c13713093cd7b5d37aca10aad0e\",\"killedOrphan\":true}] row=LOST containers-left=\"\""
     },
     {
       "name": "invalid-manifest-refused-nothing-executed",
@@ -86,5 +86,5 @@
   ],
   "dataSources": "真实 docker 容器（execution/agent 镜像按记录 digest 运行，--network none，cgroup 限额）+ 本地 SQLite；无模型调用、无外部写、无凭据入容器",
   "executionImage": "127.0.0.1:5000/aegispi/execution@sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050",
-  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:e33246a557d32002ea14a22d960e66e8cdd24bd3f5e34c70e9603c7c79b0ec3e"
+  "agentImage": "127.0.0.1:5000/aegispi/agent@sha256:eda55c19becc4379baa44b43e7eb3181985dd5c0600ed49ad102f0b1fb59c650"
 }

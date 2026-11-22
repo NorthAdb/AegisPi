@@ -67,6 +67,26 @@ function seed(tag) {
   return { ws, db, now, OWNER, READER };
 }
 
+// The L3 dreaming housekeeping loop settles its own purpose='summary'
+// reservations (actual 0) inside quiet hours; the worker gates below judge
+// the WORKER path's settlements, so the summary-purpose rows are excluded
+// instead of making the assertions hour-of-day fragile.
+function nonSummarySettlementRows(db) {
+  return db
+    .prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'")
+    .all()
+    .filter((row) => {
+      try {
+        return JSON.parse(row.details_json).purpose !== "summary";
+      } catch {
+        return false;
+      }
+    });
+}
+function nonSummarySettlements(db) {
+  return nonSummarySettlementRows(db).length;
+}
+
 // ---------------------------------------------------------------- CP1 identity
 {
   const secret = "feed-secret-canary-never-in-logs";
@@ -289,6 +309,83 @@ function seed(tag) {
     "console-admin-revocation-takes-effect-immediately",
     revokeOk.status === 200 && readerLostRead === false,
     `admin revoke -> ${revokeOk.status}; reader read grant gone=${readerLostRead === false}`,
+  );
+}
+
+// ------------------------------------------------- routine mode switch (F-2)
+// D-98 F-2: POST /api/routines/:id/mode used to select the nonexistent
+// objects.content column and 500 against every real database. The endpoint
+// now runs end-to-end on a real kind='routine' row: list, 422 without a
+// reviewReportRef, 409 on a stale expectedRevision, 200 observe->auto with
+// the auto-never-exempts-external-writes guarantee.
+{
+  const { db, ws, now, OWNER } = seed("su-routine");
+  const SCOPE = "scp:dm%3Atelegram%3A6101";
+  grantPermission(db, { scopeId: SCOPE, principalId: OWNER, permission: "read", now });
+  grantPermission(db, { scopeId: SCOPE, principalId: OWNER, permission: "admin", now });
+  const stored = putObjectContent(ws.stateDir, JSON.stringify({ id: "rt-weekly-digest", mode: "observe", policyVersion: "pv1" }));
+  const routine = insertObjectRow(db, {
+    scopeId: SCOPE,
+    kind: "routine",
+    sourceUri: "routine://weekly-digest",
+    sourceActor: OWNER,
+    contentHash: stored.contentHash,
+    storageRef: stored.storageRef,
+    observedAt: now,
+    metadata: { routineId: "rt-weekly-digest", mode: "observe", policyVersion: "pv1" },
+    requiredScopeIds: [SCOPE],
+  });
+  const { token } = ensureConsoleToken(ws.stateDir);
+  const app = createConsoleApp(db, {
+    recovery: { mode: "open", actions: [], failedStep: null },
+    mode: "open",
+    token,
+    port: 4310,
+    stateDir: ws.stateDir,
+    ownerPrincipalId: OWNER,
+  });
+  const fetch = consoleFetch(app);
+  const session = await (
+    await fetch("POST", "/api/session", {
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ token }),
+    })
+  ).body;
+  const auth = {
+    authorization: `Bearer ${session.sessionId}`,
+    "x-csrf-token": session.csrfToken,
+    "content-type": "application/json",
+  };
+  const list = await fetch("GET", "/api/routines", { headers: { authorization: `Bearer ${session.sessionId}` } });
+  suite.check(
+    "routine-list-real-row-200",
+    list.status === 200 && Array.isArray(list.body.routines) && list.body.routines.length === 1 && list.body.routines[0].mode === "observe",
+    `status=${list.status} rows=${list.body?.routines?.length ?? "n/a"}`,
+  );
+  const modeUrl = `/api/routines/${encodeURIComponent(routine.id)}/mode`;
+  const noReview = await fetch("POST", modeUrl, { headers: auth, body: JSON.stringify({ mode: "auto", expectedRevision: 1 }) });
+  suite.check(
+    "routine-auto-without-review-ref-422",
+    noReview.status === 422,
+    `status=${noReview.status} body=${JSON.stringify(noReview.body).slice(0, 120)}`,
+  );
+  const stale = await fetch("POST", modeUrl, { headers: auth, body: JSON.stringify({ mode: "auto", reviewReportRef: "review:r1", expectedRevision: 99 }) });
+  suite.check(
+    "routine-stale-expected-revision-409",
+    stale.status === 409 && stale.body?.code === "conflict",
+    `status=${stale.status} body=${JSON.stringify(stale.body).slice(0, 120)}`,
+  );
+  const okSwitch = await fetch("POST", modeUrl, { headers: auth, body: JSON.stringify({ mode: "auto", reviewReportRef: "review:2026-11-22", expectedRevision: 1 }) });
+  suite.check(
+    "routine-observe-to-auto-200",
+    okSwitch.status === 200 && okSwitch.body?.mode === "auto" && okSwitch.body?.autoStillApprovesExternalWrites === true,
+    `status=${okSwitch.status} body=${JSON.stringify(okSwitch.body).slice(0, 140)}`,
+  );
+  const persisted = JSON.parse(db.prepare("SELECT metadata_json FROM objects WHERE id=?").get(routine.id).metadata_json);
+  suite.check(
+    "routine-mode-persisted-with-review-ref",
+    persisted.mode === "auto" && persisted.reviewReportRef === "review:2026-11-22",
+    JSON.stringify(persisted),
   );
 }
 
@@ -641,7 +738,10 @@ function seed(tag) {
     const ws = seedDispatchable("su-worker-realpath");
     const r = spawnSync(process.execPath, [daemonPath, "--once", `--data-dir=${ws.stateDir}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
     const db = openDatabase(ws.dbPath, { readOnly: true });
-    const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+    // The L3 dreaming pass (purpose='summary') may settle its own deterministic
+    // scan reservation inside quiet hours — housekeeping, not model usage.
+    // These gates assert the WORKER path settles nothing without the flag.
+    const settled = nonSummarySettlements(db);
     const reservations = db.prepare("SELECT count(*) c FROM budget_reservations WHERE purpose='worker'").get().c;
     db.close();
     suite.check(
@@ -656,7 +756,7 @@ function seed(tag) {
     const ws = seedDispatchable("su-worker-fixture");
     const r = spawnSync(process.execPath, [daemonPath, "--once", "--fake-upstream", `--data-dir=${ws.stateDir}`], { cwd: repoRoot, encoding: "utf8", timeout: 60000 });
     const db = openDatabase(ws.dbPath, { readOnly: true });
-    const rows = db.prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'").all();
+    const rows = nonSummarySettlementRows(db);
     db.close();
     const fixtureLabeled = rows.some((row) => {
       try {
@@ -1505,7 +1605,7 @@ function seed(tag) {
     const db = openDatabase(ws.dbPath, { readOnly: true });
     const reqRow = db.prepare("SELECT * FROM model_requests WHERE request_id=?").get(requestId);
     const reservation = db.prepare("SELECT * FROM budget_reservations WHERE purpose='worker'").get();
-    const settledAudit = db.prepare("SELECT details_json FROM audit_log WHERE code='budget_settled'").all();
+    const settledAudit = nonSummarySettlementRows(db);
     const task = db.prepare("SELECT state, result_class FROM tasks ORDER BY created_at DESC LIMIT 1").get();
     const resultObj = db.prepare("SELECT storage_ref FROM objects WHERE kind='task_result' ORDER BY observed_at DESC LIMIT 1").get();
     db.close();
@@ -1566,7 +1666,7 @@ function seed(tag) {
     const db = openDatabase(ws.dbPath, { readOnly: true });
     const reqRow = db.prepare("SELECT state FROM model_requests WHERE request_id=?").get(requestId);
     const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
-    const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+    const settled = nonSummarySettlements(db);
     const notSettled = db.prepare("SELECT details_json FROM audit_log WHERE code='model_usage_not_settled'").all();
     db.close();
     const reasonOk = notSettled.some((row) => /no usage|missing totalFromProvider/.test(row.details_json));
@@ -1596,7 +1696,7 @@ function seed(tag) {
     const db = openDatabase(ws.dbPath, { readOnly: true });
     const reqRow = db.prepare("SELECT state FROM model_requests WHERE request_id=?").get(requestId);
     const reservation = db.prepare("SELECT state FROM budget_reservations WHERE purpose='worker'").get();
-    const settled = db.prepare("SELECT count(*) c FROM audit_log WHERE code='budget_settled'").get().c;
+    const settled = nonSummarySettlements(db);
     const notSettled = db.prepare("SELECT details_json FROM audit_log WHERE code='model_usage_not_settled'").all();
     db.close();
     const reasonOk = notSettled.some((row) => /category rate null/.test(row.details_json));

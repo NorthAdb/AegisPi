@@ -23,6 +23,7 @@ const KEY_PEM = readFileSync(join(here, "loopback-key.pem"));
 
 const smtpMessages = [];
 let smtpDropAfterDot = false;
+let smtpDropAfterData354 = false;
 let smtpRejectAuth = false;
 const imapMessages = [
   {
@@ -79,6 +80,10 @@ const smtpServer = tlsServer({ cert: CERT_PEM, key: KEY_PEM }, (sock) => {
             sock.destroy();
             return;
           }
+          if (smtpDropAfterData354) {
+            sock.destroy();
+            return;
+          }
           sock.write("250 OK queued as fixture\r\n");
         }
         continue;
@@ -88,7 +93,14 @@ const smtpServer = tlsServer({ cert: CERT_PEM, key: KEY_PEM }, (sock) => {
       else if (cmd.startsWith("AUTH PLAIN")) sock.write(smtpRejectAuth ? "535 authentication failed\r\n" : "235 ok\r\n");
       else if (cmd.startsWith("MAIL FROM")) sock.write("250 ok\r\n");
       else if (cmd.startsWith("RCPT TO")) sock.write("250 ok\r\n");
-      else if (cmd.startsWith("DATA")) { inData = true; sock.write("354 go ahead\r\n"); }
+      else if (cmd.startsWith("DATA")) {
+        inData = true;
+        sock.write("354 go ahead\r\n");
+        // F-5 fault shape (D-98 adversarial E1): the server grants DATA and
+        // never returns a final reply — when the message's final dot arrives
+        // the connection is destroyed WITHOUT a 250, so the client cannot
+        // know whether the message was accepted (unknown's definition domain).
+      }
       else if (cmd.startsWith("QUIT")) { sock.write("221 bye\r\n"); sock.end(); }
       else sock.write("500 unknown command\r\n");
     }
@@ -251,11 +263,24 @@ const controlServer = tcpServer((sock) => {
         case "smtpStats": reply({ count: smtpMessages.length }); break;
         case "smtpSet": {
           if (req.key === "dropAfterDot") smtpDropAfterDot = !!req.value;
+          if (req.key === "dropAfterData354") smtpDropAfterData354 = !!req.value;
           if (req.key === "rejectAuth") smtpRejectAuth = !!req.value;
           reply({ ok: true });
           break;
         }
         case "imapMessages": reply({ messages: imapMessages }); break;
+        // Daemon-wiring suite seam (F-3): add a message to the IMAP fixture
+        // at runtime (the fixed seed messages stay untouched for 5.3-0).
+        case "imapAdd": {
+          imapMessages.push(req.message);
+          reply({ ok: true, count: imapMessages.length });
+          break;
+        }
+        case "imapReset": {
+          while (imapMessages.length > 0) imapMessages.pop();
+          reply({ ok: true });
+          break;
+        }
         case "calSeed": {
           calEvents.set(req.href, { ics: req.ics, etag: createHash("sha256").update(req.ics).digest("hex").slice(0, 16) });
           reply({ ok: true });

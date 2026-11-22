@@ -60,6 +60,15 @@ export function canonicalActionJson({
   evidenceManifestHash,
   extra = {},
 }) {
+  // P3-1 (D-98): a caller that omits the evidence manifest used to crash deep
+  // inside canonicalJson ("undefined is not representable"). The honest
+  // canonical value for "no manifest quoted" is the well-known SHA-256 of the
+  // empty string — a distinguished constant the audit trail can read back as
+  // "this action binds no evidence manifest", never a fabricated manifest.
+  const manifestHash =
+    typeof evidenceManifestHash === "string" && evidenceManifestHash.length > 0
+      ? evidenceManifestHash
+      : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   return canonicalJson({
     schema_version: schemaVersion,
     principal: principalId,
@@ -77,7 +86,7 @@ export function canonicalActionJson({
     authorization_revision: authorizationRevisionValue,
     policy_version: policyVersion,
     expires_at: expiresAt,
-    evidence_manifest_hash: evidenceManifestHash,
+    evidence_manifest_hash: manifestHash,
     ...extra,
   });
 }

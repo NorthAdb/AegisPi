@@ -1,17 +1,17 @@
 {
-  "generatedAt": "2026-11-22T11:47:44.097Z",
+  "generatedAt": "2026-11-22T17:06:51.476Z",
   "nodeVersion": "v22.23.5",
   "suite": "scenarios",
   "label": "Phase 5 Batch 2 scenarios (5.3 mail + 5.4 timers/calendar/dreaming, loopback TLS fixtures)",
   "counts": {
-    "pass": 78,
+    "pass": 89,
     "fail": 0
   },
   "results": [
     {
       "name": "child-entries-never-imported-by-host",
       "status": "PASS",
-      "detail": "host modules import no child entry scripts (mail/calendar children run via spawn only)"
+      "detail": "all 55 host modules import none of the 6 child entry scripts (static single/double-quote, re-export and dynamic import)"
     },
     {
       "name": "5.3-0a pull-fails-closed-without-flag",
@@ -101,7 +101,7 @@
     {
       "name": "5.3-6a dispatch-succeeded",
       "status": "PASS",
-      "detail": "{\"state\":\"SUCCEEDED\",\"externalId\":\"<4485b2c0c40c0b044a3eda956ad2d8a2639787800af87a7cbe2cea178da53494@aegispi.local>\"}"
+      "detail": "{\"state\":\"SUCCEEDED\",\"externalId\":\"<cf66090b23dcf8b9a8af697474b745e0769c726ff70567a5ac6e630dc1eb6ed3@aegispi.local>\"}"
     },
     {
       "name": "5.3-6b smtp-sent-exactly-one",
@@ -111,7 +111,7 @@
     {
       "name": "5.3-6c external-id-recorded",
       "status": "PASS",
-      "detail": "{\"external_id\":\"<4485b2c0c40c0b044a3eda956ad2d8a2639787800af87a7cbe2cea178da53494@aegispi.local>\",\"state\":\"SUCCEEDED\"}"
+      "detail": "{\"external_id\":\"<cf66090b23dcf8b9a8af697474b745e0769c726ff70567a5ac6e630dc1eb6ed3@aegispi.local>\",\"state\":\"SUCCEEDED\"}"
     },
     {
       "name": "5.3-7a cp4-blocks-cross-scope-mail-payload",
@@ -204,6 +204,16 @@
       "detail": "definitive server refusal (no message bytes of consequence; not requeueable): AUTH refused (535/500)"
     },
     {
+      "name": "5.3-12a data-granted-then-silent-drop-lands-unknown",
+      "status": "PASS",
+      "detail": "dispatch=UNKNOWN err="
+    },
+    {
+      "name": "5.3-12b at-most-once-zero-auto-resend-after-354-drop",
+      "status": "PASS",
+      "detail": "recover=[none,none] messages=4 after-dispatch=4 (zero resends beyond the single delivered attempt)"
+    },
+    {
       "name": "5.4-1a bot-self-bounce-never-satisfy",
       "status": "PASS",
       "detail": "{\"satisfied\":false,\"evidence\":null}"
@@ -254,6 +264,11 @@
       "detail": "events=0 approvals=0 timers=0 alerts=0"
     },
     {
+      "name": "5.4-6b briefing-excludes-foreign-scope-approvals-and-alerts",
+      "status": "PASS",
+      "detail": "leaked approvals=0 leaked alerts=0"
+    },
+    {
       "name": "5.4-7a calendar-pull-fails-closed-without-flag",
       "status": "PASS",
       "detail": "calendar.allowRealCalendarRead is false; zero CalDAV calls"
@@ -291,7 +306,7 @@
     {
       "name": "5.4-9a remote-edit-changes-etag",
       "status": "PASS",
-      "detail": "new=ababfe37911c3129"
+      "detail": "new=ebe98001483b98b8"
     },
     {
       "name": "5.4-9b head-mismatch-refused-before-send",
@@ -306,7 +321,7 @@
     {
       "name": "5.4-9d head-change-mints-fresh-card",
       "status": "PASS",
-      "detail": "new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=ababfe37911c3129"
+      "detail": "new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=ebe98001483b98b8"
     },
     {
       "name": "5.4-9e reapproved-write-succeeds-on-fresh-etag",
@@ -326,7 +341,7 @@
     {
       "name": "5.4-10c 412-repropose-mints-fresh-card",
       "status": "PASS",
-      "detail": "{\"newApprovalId\":\"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2\",\"pinnedHead\":\"dcfa626b6de4c55c\",\"taskReparked\":true}"
+      "detail": "{\"newApprovalId\":\"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2\",\"pinnedHead\":\"48af3d82ebb9e7b7\",\"taskReparked\":true}"
     },
     {
       "name": "5.4-11a dreaming-skips-outside-quiet-hours",
@@ -379,6 +394,16 @@
       "detail": "summary-purpose reservation refused (account acct:day:2026-11-22 is frozen); the pass runs only under its independent bu"
     },
     {
+      "name": "5.4-12c no-ledger-pass-refused-and-audited",
+      "status": "PASS",
+      "detail": "skipped=no budget ledger; the dreaming pass runs only under its independent summary-purp refused-audits=2"
+    },
+    {
+      "name": "5.4-12d expired-suggestion-never-re-proposed",
+      "status": "PASS",
+      "detail": "rerun suggestions=0 merge_audits=1->1"
+    },
+    {
       "name": "F-1 mail-defaults-fail-closed",
       "status": "PASS",
       "detail": "{\"imapHost\":null,\"imapPort\":993,\"imapTls\":true,\"smtpHost\":null,\"smtpPort\":465,\"smtpTls\":true,\"allowRealMailRead\":false,\"allowRealMailSend\":false,\"allowedFolders\":[\"INBOX\"],\"allowedSenders\":[],\"allowedRecipients\":[],\"approvalTtlMs\":14400000,\"maxAttachmentBytes\":4194304}"
@@ -397,6 +422,36 @@
       "name": "F-4 policy-external-writes-still-closed",
       "status": "PASS",
       "detail": "false"
+    },
+    {
+      "name": "F3-1 daemon-pull-lands-inbox-payloads-tasks",
+      "status": "PASS",
+      "detail": "exit=0 mail_rows=3 no-id-key=true payloads=4 tasks=5"
+    },
+    {
+      "name": "F3-2 no-message-id-mail-deterministic-key",
+      "status": "PASS",
+      "detail": "mail:no-id-1431d20024f3902a8f7bec2a"
+    },
+    {
+      "name": "F3-3 fired-followup-timer-becomes-ready-reminder-outbox",
+      "status": "PASS",
+      "detail": "exit=0 outbox=obx:efx:notify%3Adm%25253amail%25253aowner@example.com%3Afollowup%253atmr%253adaemon-f6 effect=CANCELLED (the in-run reply may already have triggered the stale cancellation)"
+    },
+    {
+      "name": "F3-4 fired-briefing-timer-becomes-ready-digest-outbox",
+      "status": "PASS",
+      "detail": "exit=0 outbox=obx:efx:notify%3Adm%25253amail%25253aowner@example.com%3Abriefing%253atmr%253adaemon-brief%253abeat1 effect=READY digest_payloads=2"
+    },
+    {
+      "name": "F3-5 re-pull-dedups-no-id-mail",
+      "status": "PASS",
+      "detail": "exit=0 mail_rows=3 (the re-fetched no-ID mail must dedup on its fallback key)"
+    },
+    {
+      "name": "F3-6 reply-lands-stale-reminder-cancelled",
+      "status": "PASS",
+      "detail": "exit=0 effect=CANCELLED err=follow-up condition satisfied; stale reminder cancelled audits=1"
     }
   ],
   "dataSources": "本地环回 TLS SMTP/IMAP/CalDAV 夹具（独立 helper 进程）；零真实邮箱/日历/模型/Telegram 调用"

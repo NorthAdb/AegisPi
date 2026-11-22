@@ -21,8 +21,10 @@ import { currentSkillSetHash } from "./skills.mjs";
 import { dispatchKeyForInbox } from "./ingress.mjs";
 import { pullTelegramUpdates } from "./telegram-pull.mjs";
 import { createCredentialService } from "./credentials.mjs";
-import { pullMailMessages, createMailUpstream } from "./mail-adapter.mjs";
+import { pullMailMessages, createMailUpstream, splitMailCredential } from "./mail-adapter.mjs";
 import { pullCalendarEvents, createCalendarUpstream, reproposeAfter412 } from "./calendar-adapter.mjs";
+import { ingestInboundMail } from "./mail-triage.mjs";
+import { processFiredFollowUpTimers, processFiredBriefingTimers } from "./briefing-followup.mjs";
 import { runDreamingLoop } from "./dreaming.mjs";
 import { withTx } from "./db/tx.mjs";
 import {
@@ -476,7 +478,10 @@ export async function main(argv = process.argv.slice(2)) {
       } catch {}
     }
     expireApprovals(db, { now });
-    cancelSatisfiedFollowUpReminders(db, { now });
+    // The stateDir is REQUIRED: the sweep re-judges live follow-up reminders
+    // through the contact_no_reply condition, which reads thread payloads
+    // (fail closed without the reader — the F-3 wiring made this path live).
+    cancelSatisfiedFollowUpReminders(db, { now, stateDir: dataDir });
     expireStaleNotifications(db, { now });
     // 2. Timers generate durable inbox events.
     const timers = processDueTimers(db, { now, stateDir: dataDir });
@@ -506,7 +511,9 @@ export async function main(argv = process.argv.slice(2)) {
     }
     // 2b2. Unit 5.3 mail pull (IMAP over TLS child): every gate is config-
     //      owned and re-checked inside pullMailMessages — null host or
-    //      allowRealMailRead=false means zero IMAP calls.
+    //      allowRealMailRead=false means zero IMAP calls. Fetched messages
+    //      go straight into the triage ingest (F-3): one failed message is
+    //      audited and skipped, never wedging the rest of the pass.
     let mailPullResult = null;
     if (mailPullEnabled) {
       if (now - lastMailPullAt >= (config.mail.pullIntervalMs ?? 15000)) {
@@ -514,7 +521,42 @@ export async function main(argv = process.argv.slice(2)) {
         try {
           mailPullResult = pullMailMessages(db, { mail: config.mail, now });
           if (mailPullResult && typeof mailPullResult === "object" && "fetched" in mailPullResult) {
-            console.log(`mail-pull: fetched=${mailPullResult.fetched}`);
+            console.log(`mail-pull: fetched=${mailPullResult.fetched.length}`);
+            const resolved = credentials.resolve("mail");
+            const cred = resolved.ok ? splitMailCredential(resolved.value) : null;
+            if (!cred) {
+              console.error(`mail-ingest: skipped (${resolved.ok ? "credential slot unparseable" : resolved.reason}); the mailbox owner account is not resolvable`);
+            } else {
+              let ingested = 0;
+              let refused = 0;
+              for (const message of mailPullResult.fetched) {
+                try {
+                  const ing = ingestInboundMail(db, dataDir, {
+                    now,
+                    account: cred.user,
+                    message,
+                    mailConfig: config.mail,
+                  });
+                  if (ing.admitted && !ing.duplicate) ingested += 1;
+                } catch (e) {
+                  refused += 1;
+                  try {
+                    withTx(db, () => {
+                      writeAudit(db, {
+                        code: "mail_ingest_refused",
+                        details: { account: cred.user, error: String(e.message).slice(0, 200) },
+                        now,
+                      });
+                    });
+                  } catch {}
+                }
+              }
+              if (ingested > 0 || refused > 0) {
+                console.log(`mail-ingest: admitted=${ingested} refused=${refused}`);
+              }
+            }
+          } else if (mailPullResult && typeof mailPullResult === "object" && "failed" in mailPullResult) {
+            console.error(`mail-pull: failed: ${String(mailPullResult.failed).slice(0, 160)}`);
           }
         } catch (e) {
           console.error(`mail-pull: pass refused: ${String(e.message).slice(0, 160)}`);
@@ -578,6 +620,63 @@ export async function main(argv = process.argv.slice(2)) {
         // One scope's dispatch failure (e.g. a CP4-blocked cross-scope
         // proposal) must not stop the other scopes from routing.
         console.error(`router: scope ${pendingScopeId} dispatch refused: ${String(e.message).slice(0, 160)}`);
+      }
+    }
+    // 3b. Fired-timer orchestration (Unit 5.4, F-3): a FIRED follow-up timer
+    //     becomes the owner's reminder effect/outbox (contact_no_reply), a
+    //     FIRED morning_briefing timer becomes the structured digest — both
+    //     anchored on the task that owns the timer's inbox event, both
+    //     AT_MOST_ONCE, both cancelled as stale by the
+    //     cancelSatisfiedFollowUpReminders sweep when the reply has landed.
+    //     The wiring is STATE-driven, not tick-driven: the router anchors at
+    //     most one batch per scope per tick, so a timer's task can land a
+    //     tick AFTER the fire — the sweep below picks up every FIRED
+    //     narrow-routine timer that has no notification outbox row yet, and
+    //     the outbox-existence check makes the retry idempotent.
+    let followupOutbox = [];
+    let briefingOutbox = [];
+    {
+      const firedThisTick = new Set(timers.fired.map((f) => f.timer.id));
+      const firedBacklog = db
+        .prepare(
+          `SELECT * FROM timers
+           WHERE state='FIRED'
+             AND (condition_json LIKE '%"type":"contact_no_reply"%' OR condition_json LIKE '%"type":"morning_briefing"%')
+             AND NOT EXISTS (
+               SELECT 1 FROM outbox o
+               WHERE o.notify_reason = 'followup:' || timers.id OR o.notify_reason = 'briefing:' || timers.id
+             )
+           ORDER BY due_at ASC LIMIT 20`,
+        )
+        .all()
+        .filter((t) => !firedThisTick.has(t.id))
+        .map((t) => ({ timer: t, occurrence: t.occurrence_no, missedCount: 0 }));
+      const wiredTimers = [...timers.fired, ...firedBacklog];
+      if (wiredTimers.length > 0) {
+        try {
+          followupOutbox = processFiredFollowUpTimers(db, dataDir, {
+            now,
+            firedTimers: wiredTimers,
+            quietHours: config.calendar?.quietHours ?? null,
+          });
+        } catch (e) {
+          console.error(`followup: pass refused: ${String(e.message).slice(0, 160)}`);
+        }
+        try {
+          briefingOutbox = processFiredBriefingTimers(db, dataDir, {
+            now,
+            firedTimers: wiredTimers,
+            quietHours: config.calendar?.quietHours ?? null,
+          });
+        } catch (e) {
+          console.error(`briefing: pass refused: ${String(e.message).slice(0, 160)}`);
+        }
+        for (const r of followupOutbox) {
+          if (r.outboxId) console.log(`followup: timer ${r.timerId} -> outbox ${r.outboxId}${r.merged ? " (merged)" : ""}`);
+        }
+        for (const r of briefingOutbox) {
+          if (r.outboxId) console.log(`briefing: timer ${r.timerId} -> outbox ${r.outboxId}${r.merged ? " (merged)" : ""}`);
+        }
       }
     }
     // 4. Worker paths. The fixture worker exists EXCLUSIVELY under
@@ -1167,12 +1266,13 @@ export async function main(argv = process.argv.slice(2)) {
       }
     }
     const pendingScopeCount = pendingScopes.length;
-    if (timers.fired.length > 0 || pendingScopeCount > 0 || claim || proposalProcessed > 0 || due.length > 0) {
+    const scheduledNotifications = followupOutbox.filter((r) => r.outboxId).length + briefingOutbox.filter((r) => r.outboxId).length;
+    if (timers.fired.length > 0 || pendingScopeCount > 0 || claim || proposalProcessed > 0 || due.length > 0 || scheduledNotifications > 0) {
       console.log(
-        `tick: timers=${timers.fired.length} dispatched_scopes=${pendingScopeCount} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} due_notifications=${due.length}`,
+        `tick: timers=${timers.fired.length} dispatched_scopes=${pendingScopeCount} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} reminders=${followupOutbox.filter((r) => r.outboxId).length} briefings=${briefingOutbox.filter((r) => r.outboxId).length} due_notifications=${due.length}`,
       );
     }
-    return timers.fired.length + pendingScopeCount + (claim ? 1 : 0) + proposalProcessed + due.length;
+    return timers.fired.length + pendingScopeCount + (claim ? 1 : 0) + proposalProcessed + due.length + scheduledNotifications;
   };
 
   if (args.has("--once")) {

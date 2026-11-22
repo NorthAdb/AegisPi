@@ -55,7 +55,9 @@ export function runDreamingLoop(db, stateDir, {
   }
   // The independent purpose='summary' budget: a live reservation is the
   // permission slip. Without a ledger (or when the day account is frozen or
-  // full) the pass skips — never runs unaccounted.
+  // full) the pass skips — never runs unaccounted (F-8, D-98: the no-ledger
+  // path is audited and skipped exactly like a refused reservation, matching
+  // the batch-2 closure declaration).
   let reservationId = null;
   if (ledger) {
     try {
@@ -81,6 +83,15 @@ export function runDreamingLoop(db, stateDir, {
       });
       return { skipped: `summary-purpose reservation refused (${String(e.message).slice(0, 120)}); the pass runs only under its independent budget` };
     }
+  } else {
+    withTx(db, () => {
+      writeAudit(db, {
+        code: "dreaming_budget_refused",
+        details: { reason: "no budget ledger wired; the dreaming pass runs only under its independent summary-purpose budget" },
+        now,
+      });
+    });
+    return { skipped: "no budget ledger; the dreaming pass runs only under its independent summary-purpose budget" };
   }
   const out = { expired: [], mergeSuggestions: [], conflictAlerts: [], reservationId };
   try {
@@ -170,6 +181,12 @@ export function runDreamingLoop(db, stateDir, {
               neverActivates: true,
             },
           });
+          // F-10 (D-99): content-addressed reuse means an ALREADY-PRESENT row
+          // (the earlier suggestion was expired or deleted since) is not a
+          // new proposal — re-auditing it and re-emitting its stream event
+          // would mint phantom merge proposals for a suggestion the owner has
+          // already dismissed. Only a freshly inserted row is a proposal.
+          if (row.alreadyPresent) return;
           writeAudit(db, {
             code: "memory_dreaming_merge_proposed",
             details: { suggestion_id: row.id, scope_id: s.scope_id, family, members: objectIds.length },
@@ -215,6 +232,9 @@ export function runDreamingLoop(db, stateDir, {
           requiredScopeIds: [c.scope_id],
           metadata: { suggestionType: "conflicted_adjudication_needed", objectId: c.id, fingerprint: fp },
         });
+        // F-10: same discipline as merge suggestions — an already-present
+        // (previously expired/deleted) alert row is history, not a new alert.
+        if (row.alreadyPresent) return;
         writeAudit(db, {
           code: "memory_dreaming_conflict_alert",
           details: { suggestion_id: row.id, scope_id: c.scope_id, conflicted_object: c.id, waiting_ms: now - c.observed_at },

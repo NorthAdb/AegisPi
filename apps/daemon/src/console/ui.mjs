@@ -313,9 +313,34 @@ function renderApprovals() {
   var head = el("tr", null, [el("th", { text: "卡" }), el("th", { text: "scope / 任务" }), el("th", { text: "动作" }), el("th", { text: "action_hash" }), el("th", { text: "到期" }), el("th", { text: "操作" })]);
   t.appendChild(head);
   state.approvals.forEach(function (a) {
-    var detail = el("details", null, [el("summary", { text: "展开预览 / nonce" })]);
+    // F-11 (D-99): the preview card is MOUNTED in the first cell (under the
+    // approval id) and fills from GET /api/approvals/:id on first expand —
+    // the card fields (target resource, evidence manifest, ETag) were
+    // designed to show here, not dead code.
     var info = el("div", { class: "kv" });
-    detail.appendChild(info);
+    var detail = el("details", null, [el("summary", { text: "展开预览" }), info]);
+    detail.addEventListener("toggle", async function () {
+      if (!detail.open || info.dataset.loaded) return;
+      var card = await api("GET", "/api/approvals/" + encodeURIComponent(a.id));
+      var act = (card.data && card.data.action) || {};
+      var rows = [
+        ["动作", act.operation || ""],
+        ["目标资源", act.targetResource || ""],
+        ["发送身份", act.sendingIdentity || ""],
+        ["证据 manifest", shortHash(act.evidenceManifestHash || "")],
+        ["内容 hash", shortHash(act.contentHash || "")],
+        ["附件 hash", shortHash(act.attachmentHash || "")],
+        ["expected_head (ETag)", act.expectedHead || "—"],
+      ];
+      info.textContent = "";
+      rows.forEach(function (r) {
+        var line = el("div", { class: "row" });
+        line.appendChild(el("span", { class: "dim", text: r[0] + ": " }));
+        line.appendChild(el("span", { text: String(r[1]) }));
+        info.appendChild(line);
+      });
+      info.dataset.loaded = "1";
+    });
     var edit = el("div", { class: "hidden row" });
     var subj = el("input", { placeholder: "subject", style: "flex:1" });
     var body = el("textarea", { placeholder: "正文" });
@@ -348,11 +373,14 @@ function renderApprovals() {
       if (r.status !== 200) alert((r.data && r.data.reason) || (r.data && r.data.message) || r.status);
       refreshAll();
     } });
+    var idCell = el("td");
+    idCell.appendChild(el("span", { text: a.id }));
+    idCell.appendChild(detail);
     t.appendChild(el("tr", null, [
-      el("td", { text: a.id }),
+      idCell,
       el("td", { text: (a.scope_id || "") + " / " + (a.task_id || "") }),
       el("td", { text: a.operation || "" }),
-      el("td", { text: a.id }),
+      el("td", { text: shortHash(a.action_hash) }),
       el("td", { text: fmtTime(a.expires_at) }),
       el("td", null, [approve, showEdit, reject, edit]),
     ]));

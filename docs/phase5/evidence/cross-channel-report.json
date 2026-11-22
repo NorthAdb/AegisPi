@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-22T12:12:09.986Z",
+  "generatedAt": "2026-11-22T17:09:25.306Z",
   "nodeVersion": "v22.23.5",
   "suite": "cross-channel",
   "label": "Phase 5 Unit 5.2 — Telegram 路线 1 拉取入站与跨通道 9 环节 Canary 隔离",
   "counts": {
-    "pass": 23,
+    "pass": 25,
     "fail": 0
   },
   "results": [
@@ -122,6 +122,16 @@
       "name": "rework-fairness-no-dual-group-starvation-and-stop-cleans-deliveries",
       "status": "PASS",
       "detail": "low-priority repo claimed in 9 turns despite dual-group saturation; /stop without active subscription closed delivery (DEAD) & inbox (DONE)"
+    },
+    {
+      "name": "f6-cross-scope-reply-never-satisfies-timer",
+      "status": "PASS",
+      "detail": "scope A timer=FIRED fired=1 foreign-evidence=false (the scope B same-thread reply must not satisfy)"
+    },
+    {
+      "name": "f6-control-same-scope-reply-still-satisfies",
+      "status": "PASS",
+      "detail": "same-scope timer=SATISFIED evidence=inb:f6-same-a"
     }
   ],
   "dataSources": "本地环回 Bot-API 夹具与本地 CONNECT 代理（零真实外联、零模型调用、零真实 Telegram）"

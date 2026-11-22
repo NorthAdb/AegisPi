@@ -72,7 +72,9 @@ export function finalizeTaskWithNotification(db, opts) {
 // Digest merge: a newer summary supersedes a pending older one. The new
 // outbox row references the old row; the OLD READY effect is cancelled with
 // the reason recorded — the approved body is never edited in place.
-export function supersedeNotification(db, {
+// The InTx form composes inside a CALLER-OWNED transaction (withTx does not
+// nest); the wrapper is the standalone form.
+export function supersedeNotificationInTx(db, {
   oldOutboxId,
   newEffectId,
   channel,
@@ -81,25 +83,27 @@ export function supersedeNotification(db, {
   notifyReason,
   now,
 }) {
-  return withTx(db, () => {
-    const old = db.prepare("SELECT * FROM outbox WHERE id=?").get(oldOutboxId);
-    if (!old) throw new OutboxError(`outbox row ${oldOutboxId} not found`);
-    const newId = `obx:${newEffectId}`;
-    const changedEffect = db
-      .prepare(
-        "UPDATE effects SET state='CANCELLED', last_error='superseded by a newer digest', updated_at=? WHERE id=? AND state='READY'",
-      )
-      .run(now, old.effect_id).changes;
-    db.prepare(
-      "INSERT INTO outbox(id, effect_id, channel, destination, not_before, notify_reason, supersedes_outbox_id) VALUES (?,?,?,?,?,?,?)",
-    ).run(newId, newEffectId, channel, destination, notBefore, notifyReason, oldOutboxId);
-    writeAudit(db, {
-      code: "outbox_superseded",
-      details: { old_outbox_id: oldOutboxId, old_effect_id: old.effect_id, new_outbox_id: newId, effect_cancelled: changedEffect === 1 },
-      now,
-    });
-    return { outboxId: newId, oldEffectCancelled: changedEffect === 1 };
+  const old = db.prepare("SELECT * FROM outbox WHERE id=?").get(oldOutboxId);
+  if (!old) throw new OutboxError(`outbox row ${oldOutboxId} not found`);
+  const newId = `obx:${newEffectId}`;
+  const changedEffect = db
+    .prepare(
+      "UPDATE effects SET state='CANCELLED', last_error='superseded by a newer digest', updated_at=? WHERE id=? AND state='READY'",
+    )
+    .run(now, old.effect_id).changes;
+  db.prepare(
+    "INSERT INTO outbox(id, effect_id, channel, destination, not_before, notify_reason, supersedes_outbox_id) VALUES (?,?,?,?,?,?,?)",
+  ).run(newId, newEffectId, channel, destination, notBefore, notifyReason, oldOutboxId);
+  writeAudit(db, {
+    code: "outbox_superseded",
+    details: { old_outbox_id: oldOutboxId, old_effect_id: old.effect_id, new_outbox_id: newId, effect_cancelled: changedEffect === 1 },
+    now,
   });
+  return { outboxId: newId, oldEffectCancelled: changedEffect === 1 };
+}
+
+export function supersedeNotification(db, opts) {
+  return withTx(db, () => supersedeNotificationInTx(db, opts));
 }
 
 // Notifications whose quiet window has not opened yet are NOT dropped; they

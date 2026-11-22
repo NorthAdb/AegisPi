@@ -547,7 +547,14 @@ async function runSmtpSend(input, secrets) {
 
   const sock = await openSocket({ host, port, tls, timeoutMs });
   const wire = new Wire(sock, { secrets, timeoutMs });
-  let sentDot = false;
+  // dataAccepted: the server GRANTED the DATA command (354). From this point
+  // message bytes may hit the wire at any moment — whether any particular
+  // byte was transmitted is not provable from the client, so every break
+  // that is not an explicit server reply is "unknown" (06 section 6), the
+  // final-dot write itself included, exactly like the calendar child's
+  // requestWritten discipline. Only a definitive non-250 reply to the final
+  // response (flagged afterDot) is a remote refusal, not a mystery.
+  let dataAccepted = false;
   try {
     const greet = await smtpCommand(wire, null, { label: "greeting", timeoutMs });
     if (greet.code !== 220) throw Object.assign(new Error(`smtp greeting refused (${greet.code})`), { remote: true });
@@ -573,8 +580,8 @@ async function runSmtpSend(input, secrets) {
     }
     const data = await smtpCommand(wire, "DATA", { label: "data", timeoutMs });
     if (data.code !== 354) throw Object.assign(new Error(`DATA refused (${data.code})`), { remote: true });
+    dataAccepted = true;
     await wire.write(dataPayload + "\r\n.\r\n");
-    sentDot = true;
     const accepted = await smtpCommand(wire, null, { label: "data-accepted", timeoutMs });
     if (accepted.code !== 250) {
       throw Object.assign(new Error(`message rejected after DATA (${accepted.code})`), { remote: true, afterDot: true });
@@ -584,10 +591,11 @@ async function runSmtpSend(input, secrets) {
     } catch {}
     return { ok: true, messageId: finalMessageId, recipients: rcptAll.length };
   } catch (e) {
-    // The 06 section 6 honesty line: once the final '.' was written the
-    // message MAY have been accepted — a break here is "unknown", never a
-    // clean failure a scheduler could retry.
-    if (sentDot && e.afterDot !== true) {
+    // The 06 section 6 honesty line: once DATA was granted the message MAY
+    // have been accepted — a break here is "unknown", never a clean failure
+    // a scheduler could retry (F-5, D-98: the mid-DATA write failure and the
+    // final-reply timeout were both misclassified as retryable "local").
+    if (dataAccepted && e.afterDot !== true) {
       e.kindAfterDot = "unknown";
     }
     e.smtpStage = true;
@@ -624,8 +632,9 @@ try {
   process.exit(0);
 } catch (e) {
   // Classification, fail closed toward honesty (06 section 6):
-  //   unknown  — the DATA final '.' was written; the remote MAY have accepted
-  //              the message, so no clean failure is ever reported;
+  //   unknown  — DATA was granted (354) and the break carried no explicit
+  //              server reply; the remote MAY have accepted the message, so
+  //              no clean failure is ever reported;
   //   remote   — a definitive protocol refusal (4xx/5xx, LOGIN/SELECT/DATA
   //              rejected): the action did not happen and cannot silently
   //              become a retry;

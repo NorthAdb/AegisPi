@@ -1,10 +1,10 @@
 # 容器配额校准（06 §4 占位值实测，不宣称最优）
 
-生成：2026-11-22T12:27:27.883Z；Node v22.23.5；suite `quota-calibration`。
+生成：2026-11-22T16:45:25.430Z；Node v22.23.5；suite `quota-calibration`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
-| PASS | cpu-quota-has-measurable-effect | 2 worker threads: --cpus 1 实测 1880ms vs --cpus 2 实测 802ms (ratio 2.34) |
+| PASS | cpu-quota-has-measurable-effect | 2 worker threads: --cpus 1 实测 2439ms vs --cpus 2 实测 729ms (ratio 3.35) |
 | PASS | memory-2gib-placeholder-enforced-with-dirty-pages | 1.5GiB dirty -> exit 0 OK; 3GiB dirty -> exit 137 killed |
 | PASS | pids-256-placeholder-bounds-spawn-storm | spawn storm topped out at 249 (limit 256) |
 | PASS | tmpfs-work-volume-bounds-disk-writes | 512MiB bound: 8x64MiB ok (exit 0); 12x64MiB -> ENOSPC (exit 9) — the SIZE bound must be the killer, any other code means the mount contract broke |

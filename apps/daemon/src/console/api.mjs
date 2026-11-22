@@ -322,7 +322,7 @@ export function createConsoleApp(db, {
   app.get("/api/approvals", (c) => {
     const rows = db
       .prepare(
-        `SELECT a.id, a.effect_id, a.state, a.approver_id, a.expires_at, a.created_at,
+        `SELECT a.id, a.effect_id, a.state, a.approver_id, a.expires_at, a.created_at, a.action_hash,
                 e.task_id, e.scope_id, e.operation
          FROM approvals a JOIN effects e ON e.id = a.effect_id
          ORDER BY a.created_at DESC LIMIT 100`,
@@ -851,7 +851,7 @@ export function createConsoleApp(db, {
     if (!["observe", "auto"].includes(body?.mode)) {
       return c.json({ code: "invalid_field", message: "mode must be observe/auto" }, 422);
     }
-    const row = db.prepare("SELECT id, scope_id, kind, status, version, metadata_json, content FROM objects WHERE id=?").get(c.req.param("id"));
+    const row = db.prepare("SELECT id, scope_id, kind, status, version, metadata_json FROM objects WHERE id=?").get(c.req.param("id"));
     if (!row || row.kind !== "routine") return c.json({ code: "not_found", message: "no such routine" }, 404);
     const sessionPrincipal = c.get("session").principalId;
     const now = Date.now();

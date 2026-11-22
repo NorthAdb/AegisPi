@@ -54,6 +54,7 @@ import * as control from "../../../apps/daemon/src/control.mjs";
 import * as cp4 from "../../../apps/daemon/src/cp4.mjs";
 import * as memory from "../../../apps/daemon/src/memory.mjs";
 import * as spill from "../../../apps/daemon/src/spill.mjs";
+import { createTimer, processDueTimers } from "../../../apps/daemon/src/timers.mjs";
 import { createCredentialService } from "../../../apps/daemon/src/credentials.mjs";
 import { startupRecovery } from "../../../apps/daemon/src/recovery.mjs";
 
@@ -1053,6 +1054,70 @@ await withServices(async () => {
     `low-priority repo claimed in ${claimedScopes.length} turns despite dual-group saturation; /stop without active subscription closed delivery (${stopDeliv?.state}) & inbox (${stopInb?.state})`,
   );
 
+  db.close();
+}
+
+// ===========================================================================
+// Part 5 — conditional Timer scope isolation (F-6, D-98). A contact_no_reply
+// Timer frozen in scope A is judged ONLY against scope A's inbox: a real
+// human reply on the SAME thread_key in scope B (another mailbox account,
+// another owner_dm scope) must never SATISFY it — the timer FIRES and the
+// owner still gets the reminder. The control pair proves the same condition
+// still satisfies inside its own scope.
+{
+  const { ws, db } = freshWorkspace("timer-scope-f6");
+  const now = Date.now();
+  ensureModelRequestsTable(db);
+  const scopeA = seedScope(db, { ownerId: OWNER, kind: "owner_dm", domainKey: "dm:mail:acct-a@example.test" });
+  const scopeB = seedScope(db, { ownerId: OWNER, kind: "owner_dm", domainKey: "dm:mail:acct-b@example.test" });
+  const payloadA = insertObjectRow(db, {
+    scopeId: scopeA, kind: "event_payload", sourceUri: "fixture://origin-a", sourceActor: OWNER,
+    content: "origin payload for the scope A timer", observedAt: now, requiredScopeIds: [scopeA],
+  });
+  const SHARED_THREAD = "mail:<shared-root@example.test>";
+  const condition = { type: "contact_no_reply", threadKey: SHARED_THREAD, expectedSender: "buddy@example.org", ownerAddresses: ["acct-a@example.test"], sinceMs: 0 };
+
+  // scope B inbox row: a REAL human reply on the shared thread_key.
+  const st = putObjectContent(ws.stateDir, JSON.stringify({ kind: "mail", envelopeFrom: "buddy@example.org", sourceActor: "contact:buddy@example.org", systemNotification: false, messageId: "<cross-b@example.test>" }));
+  const foreignReply = insertObjectRow(db, { scopeId: scopeB, kind: "event_payload", sourceUri: "mail:<cross-b>", sourceActor: OWNER, contentHash: st.contentHash, storageRef: st.storageRef, observedAt: now, requiredScopeIds: [scopeB] });
+  db.prepare(
+    `INSERT INTO inbox(id, source, source_event_id, principal_id, scope_id, payload_object_id, thread_key, priority, policy_version, verdict, state, received_at)
+     VALUES ('inb:f6-cross-b', 'mail', 'mail:%3Ccross-b@example.test%3E', ?, ?, ?, ?, 5, 'pv1', 'ADMIT', 'DONE', ?)`,
+  ).run(OWNER, scopeB, foreignReply.id, SHARED_THREAD, now);
+
+  createTimer(db, {
+    id: "tmr:f6-cross", scopeId: scopeA, principalId: OWNER, scopeEpoch: 1,
+    threadKey: SHARED_THREAD, condition,
+    dueAt: now - 1000, payloadObjectId: payloadA.id, now,
+  });
+  const res = processDueTimers(db, { now: now + 1000, stateDir: ws.stateDir });
+  const timerA = db.prepare("SELECT state FROM timers WHERE id='tmr:f6-cross'").get().state;
+  const foreignEvidence = res.satisfied.some((s) => s.evidence === "inb:f6-cross-b");
+  suite.check(
+    "f6-cross-scope-reply-never-satisfies-timer",
+    timerA === "FIRED" && res.fired.length === 1 && foreignEvidence === false,
+    `scope A timer=${timerA} fired=${res.fired.length} foreign-evidence=${foreignEvidence} (the scope B same-thread reply must not satisfy)`,
+  );
+
+  // Control: a REAL reply in scope A itself satisfies a fresh timer on the
+  // same thread key (the isolation must not break the intended behavior).
+  const sameReply = insertObjectRow(db, { scopeId: scopeA, kind: "event_payload", sourceUri: "mail:<same-a>", sourceActor: OWNER, contentHash: st.contentHash, storageRef: st.storageRef, observedAt: now, requiredScopeIds: [scopeA] });
+  db.prepare(
+    `INSERT INTO inbox(id, source, source_event_id, principal_id, scope_id, payload_object_id, thread_key, priority, policy_version, verdict, state, received_at)
+     VALUES ('inb:f6-same-a', 'mail', 'mail:%3Csame-a@example.test%3E', ?, ?, ?, ?, 5, 'pv1', 'ADMIT', 'DONE', ?)`,
+  ).run(OWNER, scopeA, sameReply.id, SHARED_THREAD, now + 1);
+  createTimer(db, {
+    id: "tmr:f6-same", scopeId: scopeA, principalId: OWNER, scopeEpoch: 1,
+    threadKey: SHARED_THREAD, condition,
+    dueAt: now - 500, payloadObjectId: payloadA.id, now: now + 1,
+  });
+  const resSame = processDueTimers(db, { now: now + 2000, stateDir: ws.stateDir });
+  const timerSame = db.prepare("SELECT state FROM timers WHERE id='tmr:f6-same'").get().state;
+  suite.check(
+    "f6-control-same-scope-reply-still-satisfies",
+    timerSame === "SATISFIED" && resSame.satisfied.length === 1 && resSame.satisfied[0].evidence === "inb:f6-same-a",
+    `same-scope timer=${timerSame} evidence=${resSame.satisfied[0]?.evidence ?? "none"}`,
+  );
   db.close();
 }
 

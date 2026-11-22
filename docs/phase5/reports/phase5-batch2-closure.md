@@ -135,3 +135,72 @@
 ## 七、批次边界确认
 
 本批到此为止：**未实施** 5.6 实盘（`evals/phase5/scenarios-real/` 不存在）；未读 `.env`；未 `git push`；D 项公网 webhook 维持关闭；已验收的 Phase 4 仓库分诊闭环与第 1 批 5.1/5.2 能力零回归（全量复跑证据见 §三）。等待独立审计官整批验收后方可进入单元 5.6。
+
+---
+
+## 八、D-100 返工收口（D-98/D-99 双 HOLD 的 R1–R6 闭环）
+
+> **日期**：2026-11-23（Asia/Hong_Kong）
+> **范围**：按 [HANDOFF-BATCH2-AUDIT.md](../HANDOFF-BATCH2-AUDIT.md) R1–R6 + D-99 追记 F-10/F-11 的主人拍板返工（F-3 编排接线不允许 ADR 降级、全部接进 `daemon.mjs` tick；本轮仅本地提交不推送）。本节为实施者返工自测记录，供独立审计官轻量复核（diff 走读 + 反例重放 + gate 探针 rc=0）。
+
+### 1. 修复清单（按 R 编号）
+
+| 项 | 修复内容 | 反例入套件 |
+| --- | --- | --- |
+| **R1（P0·F-1）** | 当前提交树重建 `tools/build-app-images.mjs --only=agent` → **镜像纪元 15**：agent manifest `sha256:eda55c19becc4379baa44b43e7eb3181985dd5c0600ed49ad102f0b1fb59c650`（config `09de4044…`、context `13a1a89c…`，源码提交 `0eaddc0fba4b`，self-check exit 0）；`docs/phase3/reports/image-digest.md` v2 块已刷新。**验证口径纠正**：证据以 `evals/phase3/image-gate/probes/probe-evidence-holds.mjs`（**rc=0**）为准；`node evals/phase3/lib/image-gate.mjs` 直接运行是无 CLI 空跑，本节起不再作为证据引用 | 六套 Docker 套件终树全绿（见 §8.3） |
+| **R2（P1·F-2）** | [api.mjs](../../../apps/daemon/src/console/api.mjs) `POST /api/routines/:id/mode` 的 SELECT 删除 `objects.content` 幽灵列；security-unit 新增 routine 端到端用例 ×5：真实 `kind='routine'` 行上 `GET /api/routines` 200、缺 `reviewReportRef` 切 auto 422、`expectedRevision` 失配 409、带 ref 切 observe→auto 200（`autoStillApprovesExternalWrites: true`）、metadata 持久化复核 | `routine-list-real-row-200` / `routine-auto-without-review-ref-422` / `routine-stale-expected-revision-409` / `routine-observe-to-auto-200` / `routine-mode-persisted-with-review-ref` |
+| **R3（P1·F-3）+ F-7（P2）** | **邮件入库接线**：daemon tick 2b2 将 `pullMailMessages` 的 fetched 逐封送 `ingestInboundMail`（凭据槽解析邮箱账号为 scope owner；单封失败审计 `mail_ingest_refused` 不楔死整轮）。**跟进提醒/晨报编排接线**：daemon tick 新增 3b 步——`processFiredFollowUpTimers`（FIRED `contact_no_reply` Timer → `followup-reminder` READY effect/outbox）与 `processFiredBriefingTimers`（FIRED `morning_briefing` Timer → `composeMorningBriefing` 结构化晨报 → `mergeQuietBriefings` 静默合并 outbox）。接线为**状态驱动**：除本 tick fired 外，扫描所有仍无通知 outbox 行的 FIRED 窄例行 Timer（路由器每 scope 每 tick 只锚定一个批次，Timer 任务可能晚一拍落地）；两函数均以「宿主窄例行认领」（`claimForNarrowRoutine`：CAS QUEUED→RUNNING、fence+1、宿主 attempt 锚——effects.attempt_id NOT NULL，离线无模型下任务否则永远 QUEUED）+ `finalizeTaskWithNotificationInTx`/`completeTaskInTx` 让任务以提醒/晨报为证据收尾，并消费其全部 PENDING 投递。**F-7**：`composeMorningBriefing` 的 `pendingApprovals`/`unrecoveredAlerts` 查询补 `scope_id=?` 过滤。**顺带修复**：`outbox.mjs` 的 `supersedeNotification`/`mergeQuietBriefings` 拆出 `InTx` 形态——`withTx` 不可嵌套，原 `processFiredFollowUpTimers` 合并分支在自身事务内调用开新事务的 wrapper（真进程必炸「cannot start a transaction within a transaction」）；daemon 的 `cancelSatisfiedFollowUpReminders` 调用补上必填 `stateDir`（接线后该路径首次真实活跃） | scenarios 新增 G 节 ×6（`F3-1`…`F3-6`，真实 `daemon --once` 子进程 + 环回 IMAP 夹具：拉取→inbox/payload/任务落库、无 Message-ID 邮件确定性回退键、FIRED 跟进 Timer→提醒 outbox、FIRED 晨报 Timer→晨报 outbox、重复拉取去重、回信后 `stale_reminder_cancelled` 撤回）；C7（`5.4-6b` 跨 scope 审批/告警不进另一 scope 晨报） |
+| **R4（P1·F-5）** | [upstream-mail-child.mjs](../../../apps/daemon/src/upstream-mail-child.mjs) 以 `dataAccepted`（收到 354 即置位）取代 `sentDot` 边界：354 之后的一切中断（合并写失败、终局应答超时、断流）一律 `unknown`，唯一例外是服务器明确返回非 250 拒信（`remote`）。**夹具**：`serve-fixtures.mjs` 新增 `dropAfterData354`（授予 DATA 后对终局点静默销毁连接、不回 250）与 `imapAdd`/`imapReset` 控制面 | scenarios `5.3-12a`（UNKNOWN）+ `5.3-12b`（两轮 `autoRecoverUnknown` 均 none、零重发） |
+| **R5（P1·F-6）** | [timers.mjs](../../../apps/daemon/src/timers.mjs) `evaluateCondition` 的 `contact_no_reply` 查询按 `timer?.scope_id ?? condition.scopeId` 过滤（两者皆缺 fail closed 抛 `TimerError`）；`processDueTimers`/`markTimerSatisfied`/`cancelSatisfiedFollowUpReminders` 调用链均传冻结 scope 的 timer 行 | cross-channel 新增 Part 5 ×2（`f6-cross-scope-reply-never-satisfies-timer`：scope B 同 thread_key 真人回信不满足 scope A Timer→正常 FIRED；`f6-control-same-scope-reply-still-satisfies` 对照） |
+| **R6·F-8（P2）** | [dreaming.mjs](../../../apps/daemon/src/dreaming.mjs) `!ledger` 时审计 `dreaming_budget_refused` 并返回 `{ skipped }`——收口 §六.3 声明现对无 ledger 情形同样成立 | scenarios `5.4-12c` |
+| **R6·F-10（P2）** | dreaming 合并建议与冲突告警两处：`insertObjectRow` 返回 `alreadyPresent: true`（原建议已被置 expired/deleted）时跳过 `memory_dreaming_merge_proposed`/`memory_dreaming_conflict_alert` 审计、流事件与结果计数——不再为已处置建议生成幻影重提案 | scenarios `5.4-12d`（expired 建议重跑 `merge_audits 1→1`、零新建议） |
+| **R6·F-9（P2）** | `child-entries-never-imported-by-host` 扫描范围扩为 `apps/daemon/src` 全量 55 个宿主 .mjs（递归含 console/db/testing），同时拦截静态单/双引号 `from '…'`（含 re-export）与动态 `import('…')` 引用任何 6 个 `*-child.mjs` 入口 | scenarios A 节（55 模块 × 6 child，三形态正则） |
+| **F-11（P3）** | [ui.mjs](../../../apps/daemon/src/console/ui.mjs) 审批表第 4 列渲染 `shortHash(a.action_hash)`（原误渲染重复 `a.id`）；`detail` 预览卡挂载到首格并在展开时经 `GET /api/approvals/:id` 填充（目标资源/发送身份/证据 manifest/内容/附件 hash/expected_head——全部 `textContent`，零 innerHTML）；`/api/approvals` 列表查询补返回 `a.action_hash` | D-99 BLIND-3b 的静态断言现单点复核：`a.id` 仅渲染一次、第 4 列 `shortHash(a.action_hash)`、detail 已挂载 |
+| **P3-1（顺手修）** | [effects.mjs](../../../apps/daemon/src/effects.mjs) `canonicalActionJson`：`evidenceManifestHash` 缺失/null 时以空清单 SHA-256 常量（`e3b0c442…b855`，空串的标准哈希=「未绑定证据 manifest」的诚实可读值）入参，`canonicalJson: undefined is not representable` 神秘崩溃消除 | 复放的 `probe-parked-restart`/`probe-adversarial` B 段（`evidenceManifestHash: null` 提案）现全程跑通 |
+| **P3-6/P3-7（顺手修）** | P3-7：`mailThreadKey` 无 Message-ID/In-Reply-To/References 时以信封+主题+日期+正文预览的 SHA-256 生成确定性回退键（重复拉取同邮件去重、不同邮件不合并），ingest `sourceEventId` 同步回退。P3-6： dreaming 每 tick 预留行的静默期噪音使 4 处套件的 `budget_settled` 精确计数对运行时刻脆弱（23:00–07:00 静默窗内 dreaming settle actual=0 会挤入计数，D-98 已登记 P3-6；本轮终树复跑恰逢静默窗实证）——security-unit ×5 与 model-proposal ×1 的计数断言改为过滤 `purpose='summary'` 行，断言回归「工作路径结算」本意，任何时刻运行皆稳定 | `5.3-0*`（既有）+ `F3-2`（回退键）+ 全部套件任意时刻可复现 |
+
+### 2. 接线中暴露并修复的三个真问题（返工过程发现，超出清单）
+
+1. **`withTx` 不可嵌套下的 supersede 路径**：`processFiredFollowUpTimers` 合并分支在自身 `withTx` 内调用会再次 `BEGIN IMMEDIATE` 的 `supersedeNotification`——合并路径一触即炸。拆分 `supersedeNotificationInTx`/`mergeQuietBriefingsInTx`（wrapper 仅作独立入口）后根治。
+2. **路由批次时序**：路由器每 scope 每 tick 至多锚定一个批次，Timer 事件的任务可能晚于 fire 一拍；tick 驱动的接线会永久错过。改为状态驱动积压扫描（FIRED 且无通知 outbox 行的窄例行 Timer，outbox 存在性使重试幂等）。
+3. **`cancelSatisfiedFollowUpReminders` 缺 `stateDir`**：接线前该路径在 daemon 中从未真实命中；接线后首次执行即触发 `contact_no_reply` 的 fail-closed 硬错。补传 `stateDir` 并加注释。
+
+### 3. 终树全量复跑（镜像纪元 15 之后的最终提交树，锁定 Node v22.23.5 实跑，全部 rc=0）
+
+| 套件 | 结果 | 套件 | 结果 |
+| --- | --- | --- | --- |
+| `probe-evidence-holds.mjs` | **rc=0**（口径纠正后的唯一镜像证据） | `verify-hono-oracle-pair.mjs` | **rc=0**（hono exact 4.13.19） |
+| `eval:scenarios` | **89/89**（78 既有 + R3/R4/R6 新反例） | `test:security:unit` | **68/68**（63 + routine ×5） |
+| `test:cancel-approval` | **20/20** | `test:memory-lifecycle` | **47/47** |
+| `test:cross-channel` | **25/25**（23 + F-6 ×2） | `test:durability` | **164/164** |
+| `test:acl` | **15/15** | `test:budget` | **20/20** |
+| `test:restore` | **11/11** | `test:ingress-telegram` | **7/7** |
+| `test:contracts` | **rc=0**（15 probes） | `report:user-value` | **154/154，`defaultsFailClosed=true`** |
+| `test:model-proposal`（Docker） | **15/15** | `test:repo-observe`（Docker） | **7/7** |
+| `eval:triage`（Docker） | **7/7** | `test:offline-jobs`（Docker） | **14/14** |
+| `test:security:integration`（Docker） | **29/29** | `test:quota-calibration`（Docker） | **5/5** |
+
+5 个 `*-real` 入口（未设任何 `AEGISPI_ALLOW_*`，实测全部 **rc=4**）：`test:ingress-telegram:real`、`eval:triage:real`、`test:model:real`、`test:external-write:real`、`repo-observe-real`。`eval:triage` 曾两次出现容器竞态偶发（execution job `FAILED:null`），终树复跑 rc=0 全绿后如实记录为夹具偶发、非产品回归。
+
+### 4. 审计探针重放对照（只读重放，`.audit/` 零改动；日志在本机临时目录，未入库）
+
+| 探针 | D-98/99 时 | 本次 | 判读 |
+| --- | --- | --- | --- |
+| `probe-console-endpoints.mjs` | FAIL（`no such column: content` → 500） | **rc=0** | F-2 修复直接证明 |
+| `probe-adversarial.mjs` | 15 PASS / 3 FAIL（C1、D4、E1） | 18 PASS / 3 FAIL（C1、D2、D4） | **C1/D4 为修复翻转**：跨 scope 同 thread_key 不再满足（Timer FIRED）、无 ledger 不再照跑（`skipped` 且审计 `dreaming_budget_refused`）。**D2 为 F-8 修复后果**：该探针以 `ledger: null` 运行跨 scope 混合检查，修复后无 ledger 直接拒绝 → suggestions=0；跨 scope 不混合属性由套件 `5.4-11h`（带 ledger）继续覆盖。**E1 为探针自伤原样**：同进程 `spawnSync` 阻塞事件循环使夹具服务器无法完成 TLS 握手（`server-side bytes seen cumulative=0`，与 D-98 时完全相同）——F-5 修复由两进程夹具的套件反例 `5.3-12a/12b` 证实（UNKNOWN + 零自动重发），另以独立两进程探针实测 4/4 `unknown` |
+| `probe-briefing-and-childguard.mjs` | 1 PASS / 3 FAIL（G1、G2、H1） | 2 PASS / 1 FAIL（仅 H1） | **G1/G2 翻转为 PASS** = F-7 修复直接证明；H1 与 D-98 时逐字相同（探针以 `includes()` 裸匹配子进程文件名，把 spawn 路径常量误报为 import——D-98 原始日志即如此），新增套件防护为按 import 形态精确匹配 |
+| `probe-parked-restart.mjs` | 8/8 | **8/8，rc=0** | PARKED/fence/nonce/恰 1 封全链路不回归（且其 `evidenceManifestHash: null` 提案经 P3-1 修复后照常工作） |
+| `probe-nonce-debug.mjs` | rc=0 | **rc=0** | 不回归 |
+| `probe-second-audit.mjs` | rc=0（BLIND-2 复现 audits=2 幻影） | rc=1：**BLIND-2 段在 `r2.mergeSuggestions.length` 处 TypeError 崩溃** | 修复指纹：F-8 后 `ledger: null` 的 dreaming 返回 `{ skipped }`（无 `mergeSuggestions` 字段），探针在其「复现幻影」断言前即被失败关闭的 no-ledger 门禁拦截——幻影路径不可达。F-10 本体由套件 `5.4-12d` 覆盖；BLIND-3b 目标（ui.mjs 列渲染）经静态单点复核（`a.id` 单次渲染、第 4 列 `shortHash(a.action_hash)`、detail 已挂载）；其 CP4-NEW-1/2a/2b 与 BLIND-1 在崩溃前全部 PASS |
+| `probe-e2e-seed.mjs` | （E2E 播种助手，非断言探针） | 打印 E2E ENV READY 后长驻 | 不适用，跳过 |
+
+### 5. P3 登记（D-98 §二 P3 残留的处置状态）
+
+- **P3-1**（`evidenceManifestHash` 缺失神秘崩溃）：**本轮已修**（空清单常量默认值，见 §8.1）。
+- **P3-6**（静默窗 dreaming 每 tick 预留行噪音）：噪音本体保留（独立预算门禁的诚实记账），**其对套件计数断言的脆弱性已修**（purpose 过滤，见 §8.1）；若需消除 DB 噪音可在后续批次给 dreaming 预留加间隔记忆。
+- **P3-7**（无 Message-ID 邮件抛错楔死整轮）：**本轮已修**（确定性回退键）。
+- P3-2（scrub 无最小长度策略、不覆盖 base64 AUTH PLAIN 回显）、P3-3（`reproposeAfter412` 任务重停车 UPDATE 无 CAS）、P3-4（IMAP LOGIN 密码未拒 CRLF）、P3-5（RRULE 不展开）、P3-8（`GET /api/tasks/:id/checkpoints` 对不存在任务 200 空表）：维持登记，不阻断，随 5.6 前择机处置。
+
+### 6. 边界确认（本轮返工）
+
+未修改 `.audit/batch2-audit/`、`.audit/second-audit/` 及任何已落盘审计报告（探针只读重放，日志存本机临时目录）；未读 `.env`；未设置任何 `AEGISPI_ALLOW_*`；`evals/phase5/scenarios-real/` 不存在；`defaults.json` 零改动（本轮未新增任何配置键）；门禁文件（`schema-source.json`、canonical `schema.sql` 27 表、`recall.mjs`、5 个 `*-real` 守卫）零改动；零新增 npm 依赖（`package.json`/lockfile 零漂移）；`git push` 未执行（等待审计官轻量复核通过后统一推送）；终树复跑后清理 `workspace-state` 测试残留、确认 4310 无监听、无测试容器残留。
