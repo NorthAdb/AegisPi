@@ -10,6 +10,7 @@
 import { withTx } from "./db/tx.mjs";
 import { writeAudit, writeStreamEvent } from "./audit.mjs";
 import { cancelTask } from "./effects.mjs";
+import { completeInboxIfDone } from "./scheduler.mjs";
 
 export class ControlCommandRefused extends Error {}
 
@@ -44,16 +45,6 @@ function hasControlGrant(db, { scopeId, principalId, now }) {
   return row.c > 0;
 }
 
-function activeThreadTaskIds(db, { scopeId, threadKey }) {
-  return db
-    .prepare(
-      `SELECT t.id, t.state FROM thread_subscriptions s JOIN tasks t ON t.id=s.task_id
-       WHERE s.scope_id=? AND s.thread_key=? AND s.active=1 AND t.state NOT IN ('SUCCEEDED','FAILED','CANCELLED','DEAD')`,
-    )
-    .all(scopeId, threadKey)
-    .map((r) => r.id);
-}
-
 /**
  * Execute a control command. Each command runs through its own committed
  * transaction (cancelTask and friends own theirs — nested BEGIN would
@@ -82,11 +73,49 @@ export function handleDeterministicControl(db, {
 
   let outcome = {};
   if (bare === "stop") {
-    const targets = activeThreadTaskIds(db, { scopeId, threadKey });
+    // /stop cancels every non-terminal task this thread's work touched —
+    // the tasks subscribed to the thread AND the tasks carrying deliveries
+    // of this thread's events without a live subscription row (the
+    // subscription table is an index, the durable delivery is the truth;
+    // a deactivated or missing row must not shield running work). Other
+    // threads in the scope are not touched.
+    const targets = db
+      .prepare(
+        `SELECT DISTINCT t.id FROM tasks t
+         WHERE t.scope_id=? AND t.state IN ('QUEUED','RETRY_WAIT','RUNNING','WAITING_APPROVAL','WAITING_EFFECT')
+           AND (
+             EXISTS (SELECT 1 FROM thread_subscriptions s
+                     WHERE s.task_id=t.id AND s.scope_id=? AND s.thread_key=? AND s.active=1)
+             OR EXISTS (SELECT 1 FROM event_deliveries d JOIN inbox i ON i.id=d.event_id
+                         WHERE d.task_id=t.id AND i.scope_id=? AND i.thread_key=? AND d.state IN ('PENDING','ACKED'))
+           )`,
+      )
+      .all(scopeId, scopeId, threadKey, scopeId, threadKey);
     const cancelled = [];
-    for (const taskId of targets) {
-      const res = cancelTask(db, { taskId, now, actorId: principalId });
-      cancelled.push({ taskId, epochAfter: res.epochAfter, cancelledEffects: res.cancelledEffects });
+    for (const target of targets) {
+      const res = cancelTask(db, { taskId: target.id, now, actorId: principalId });
+      // Collapse the cancelled task's open deliveries in one transaction:
+      // DEAD is terminal, completeInboxIfDone closes the inbox row, and
+      // nothing lingers PENDING or ROUTED on cancelled work.
+      const open = db
+        .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state IN ('PENDING','ACKED')")
+        .all(target.id);
+      withTx(db, () => {
+        for (const d of open) {
+          db.prepare(
+            "UPDATE event_deliveries SET state='DEAD', updated_at=? WHERE event_id=? AND task_id=? AND state IN ('PENDING','ACKED')",
+          ).run(now, d.event_id, target.id);
+          writeAudit(db, {
+            code: "delivery_dead",
+            taskId: target.id,
+            eventId: d.event_id,
+            details: { reason: "task cancelled by /stop" },
+            now,
+          });
+          completeInboxIfDone(db, { eventId: d.event_id, now });
+        }
+      });
+      cancelled.push({ taskId: target.id, epochAfter: res.epochAfter, cancelledEffects: res.cancelledEffects });
     }
     outcome = { command: "/stop", cancelledTasks: cancelled.map((c) => c.taskId), cancelled };
   } else if (bare === "status") {

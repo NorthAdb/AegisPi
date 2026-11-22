@@ -130,3 +130,30 @@
 ## 六、批次边界确认
 
 本批到此为止：**未实施** 5.3（邮件）、5.4（日历）、5.5（Web 控制台前端）、5.6（实盘）；未读 `.env`（除事故申报如实记录的例外）；未 `git push`；D 项公网 webhook 维持关闭。等待独立审计官整批验收后，方可启动第 2 批。
+
+---
+
+## 七、独立对抗审计复核追记（2026-11-22，`D-95`）
+
+- **审计裁定**：**HOLD（不放行第 2 批，暂不推送 `52e223a`）**。独立重跑 `image-gate`、12 项本地/容器外检查与全部 5 个 `real` 入口 `exit 4` 守卫均通过，但对抗脚本实证了 **6 个 P0、9 个 P1 与 1 个 P2 缺陷**（详见 [HANDOFF-BATCH1-AUDIT.md](../HANDOFF-BATCH1-AUDIT.md) §四）：
+  - **P0**：`proposeMemoryFact` 丢父闭包与 L0 漏检；`insertObjectRow` 早退吞新闭包与 `deleted` 状态错位；`recovery.mjs` Step 3 早于 Step 3b 致恢复死锁及物理清理缺失；`adapters.allowedRecipients` 架空 CP4 披露校验；CP4 漏放 `telegram:<id>` / 第三方 DM / 同域多闭包 / 非 IM 写；`proposeEffectInTx` 丢血缘且 `payloadScopeClosure` 深度 `>6` 静默截断。
+  - **P1/P2**：13 类扫描器绕过与 `factKey`/`openScopeSession` 漏扫；`openScopeSession`/`frozenL0` 无 ACL 且 `assertSessionFresh` 未接线；`.bak` 损坏漏检与 `restoreFromBackup` 先写后检；`redactSecrets` 漏 JSON 密钥、`skills.mjs` 未锁 `skill_set_hash` 且 `humanReviewed` 恒 `false`；`router.mjs` `batch.slice(1)` 绕过检查且可挂进 `WAITING_APPROVAL`/`RUNNING` 任务；`model-requests.mjs` 失败漏退其余 deliveries；`daemon.mjs` UTF-16 切片超字节上限且无视 `model.maxInputBytes`；`telegram-pull.mjs` 重放重跑控制命令、拒行命令反派模型且缺 WinInet 代理探测；`scopeTurnCounts.clear()` 致双群饿死低优先级域。
+- **主人裁定（2026-11-22）**：
+  1. `D-94` 误触事故获主人豁免闭环归档，`real.mjs` 已补齐的 `exit 4` 结构守卫继续保留。
+  2. **L3 Dreaming 编排调度循环**（静默时段 + 独立预算 + 候选合并/冲突告警/过期归档）正式转入 **第 2 批（单元 5.4 / 5.5）**（已同步更新 [phase5-kickoff-plan.md](../phase5-kickoff-plan.md)）。第 1 批返工须修复上述 P0/P1/P2 缺陷并在 `test:memory-lifecycle` / `test:cross-channel` 中补入对应反例，重建 `agent` 并复核受影响套件后方进入第 2 批。
+
+---
+
+## 八、第 1 批返工修复与最终验收收口（2026-11-22，`D-96`）
+
+- **最终裁定**：**`PASS`（第 1 批 `5.1 + 5.2` 返工通过全量验收，放行第 2 批 `5.3 / 5.4 / 5.5`；本地提交，暂不 `git push`）**。
+- **核心修复落点**：
+  - **记忆与恢复（单元 5.1）**：`apps/daemon/src/objects.mjs` 修复内容寻址早退吞并新闭包/父边与 `deleted` 对象复活假象；`apps/daemon/src/memory.mjs` 修复 `proposeMemoryFact` 继承父对象闭包、`activeFactsInScope`/`exportL0Snapshot` 闭包与 `never_activatable` 校验、`quarantined_reasons` 数组处理、`openScopeSession`/`frozenL0` 强制读授权校验；`apps/daemon/src/memory-scanner.mjs` 补齐零宽/软连字符/全角/无空格中文/宿主路径/提权拦截与 `factKey` 扫描；`apps/daemon/src/deletion-manifest.mjs` 与 `backup-window.mjs` 修复 `.bak` 损坏门禁与先验清单再恢复；`apps/daemon/src/recovery.mjs` 调整 `deletion-manifest` 步先于 `object-references` 并补清物理文件与 L0 导出；`apps/daemon/src/spill.mjs` 与 `skills.mjs` 加固 JSON 密钥脱敏与 `skill_set_hash` 锁定。
+  - **CP4 与跨通道隔离（单元 5.2）**：`apps/daemon/src/cp4.mjs`（收紧所有非 `"none"` 目标形状经 `adjudicate()` 裁定、补全 `im-dm-legacy` 同主体校验与深度/规模超限失败关闭）、`apps/daemon/src/effects.mjs`（`proposeEffectInTx` 继承上游血缘，`dispatchEffect` 解析 `action_json.target_resource` 驱动完整 CP4 门禁，不再将 `adapters.allowedRecipients` 视作披露授权）；`apps/daemon/src/router.mjs` / `model-requests.mjs` / `daemon.mjs` / `telegram-pull.mjs` / `scheduler.mjs` / `control.mjs` 修复 `batch.slice(1)` 逐条校验与 `WAITING_APPROVAL`/`RUNNING` 拦截、失败路径全量退回 deliveries、UTF-8 字节上限与 `model.maxInputBytes` 协同、WinInet 代理自动探测、控制命令幂等去重与双群公平性防饥饿。
+  - **反例与夹具同步**：`evals/phase5/memory-lifecycle/run.mjs` 扩至 **47/47 PASS**；`evals/phase5/cross-channel/run.mjs` 扩至 **23/23 PASS**；同步修复 `evals/phase2/durability/run.mjs`（`proposeAndApprove` `targetResource` 取 scope `conversation_id`）、`evals/phase3/cancel-approval/run.mjs` 与 `evals/phase3/security-unit/run.mjs` 的显式 `disclosure_allowlist` 夹具预置。
+- **终树验证证据（镜像纪元 13：`agent` `sha256:21897255…`，`acquisition`/`execution` 携带沿用；锁定 Node `v22.23.5`）**：
+  - 门禁与预检：`evals/phase3/lib/image-gate.mjs` `exit 0`、`verify-hono-oracle-pair.mjs` `exit 0`。
+  - Phase 5 新增套件：`test:memory-lifecycle` **47/47**（`exit 0`）、`test:cross-channel` **23/23**（`exit 0`）。
+  - 既有纯本地/环回套件：`test:contracts`（`exit 0`）、`test:durability`（`exit 0`）、`test:acl`（`exit 0`）、`test:budget`（`exit 0`）、`test:cancel-approval`（`exit 0`）、`test:restore`（`exit 0`）、`test:ingress-telegram`（`exit 0`）、`test:security:unit` **48/48**（`exit 0`）。
+  - 宿主机联动 Docker 套件（5/5 重跑）：`test:model-proposal` **15/15**、`test:repo-observe` **7/7**、`eval:triage` **7/7**、`test:offline-jobs` **14/14**、`test:security:integration` **29/29**（全部 `exit 0`；`test:quota-calibration` 凭 `docker/` 零改动及 `image-gate` 一致性豁免重跑）。
+  - 聚合与守卫：`report:user-value` **134/134**（`defaultsFailClosed=true`，`exit 0`）；5 个 `*-real` 入口未设环境变量均直接拒绝返回 **`exit 4`**。

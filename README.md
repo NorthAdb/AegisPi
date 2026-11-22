@@ -7,8 +7,8 @@
 - Phase 1（底座契约）与 Phase 2（持久化只读链路）已收口；**Phase 3 出口 MET WITH RESIDUAL RISKS**，其中 `44b3514` 两项限定修复已独立验收关闭，不重开。
 - 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地、通过独立对抗审计并按路线 A 冻结于 `8943a10`（纪元 5）**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)、[独立审计报告](docs/phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）。
 - Phase 4 **全部单元（4.1–4.5）与终局对抗审计加固已完成收口**（证据聚合 `134/134`，镜像纪元 11.5；各单元收口报告见 [docs/phase4/reports/](docs/phase4/reports/)）。**`defaults.json` 保持全失败关闭：`telegram.allowRealSend=false`、`telegram.proxyUrl=null`、`triage.allowRealTriage=false`、`repo-observe-real` 与 `triage-real` 均受环境变量门禁守护（缺省 `exit 4`）。**
-- **Phase 5 第 1 批（单元 5.1 分层记忆 + 单元 5.2 Telegram 路线 1 与跨通道 Canary）已实施完毕并本地全量自测，送独立审计整批验收**（[收口报告](docs/phase5/reports/phase5-batch1-closure.md)）：新套件 `npm run test:memory-lifecycle`（34/34）与 `npm run test:cross-channel`（18/18），镜像**纪元 12**（重建 agent），既有 16 项离线/容器检查 + `report:user-value` 134/134 全绿；新增配置键全部失败关闭（`telegram.allowRealPull=false`、`telegram.allowedChatIds=[]`、`router`/`memory` 节仅数值有界参数）。第 2 批（5.3 邮件 + 5.4 日历 + 5.5 Web 控制台）待审计通过后启动；5.6 实盘未授权未实施。
-- **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。**守卫核验事故申报（D-94）**：2026-11-22 误触一次 `test:ingress-telegram:real` 真实只读（getMe+getUpdates 零外发零确认），已如实申报并为该入口补齐缺省 `exit 4` 守卫。
+- **Phase 5 第 1 批（单元 5.1 分层记忆 + 单元 5.2 Telegram 路线 1 与跨通道 Canary）已完成返工修复并通过全量验收（`D-96`，`PASS`）**（[收口报告](docs/phase5/reports/phase5-batch1-closure.md)、[交接与审计清单](docs/phase5/HANDOFF-BATCH1-AUDIT.md)）：`test:memory-lifecycle` **47/47**、`test:cross-channel` **23/23**、`image-gate`、`verify-hono-oracle-pair`、8 项既有纯本地套件、5 项宿主机联动 Docker 套件（`quota-calibration` 凭 `docker/` 零改动豁免）、`report:user-value` **134/134**（`defaultsFailClosed=true`）与全部 5 个 `real` 入口 `exit 4` 守卫均在锁定 Node `v22.23.5` 下通过，镜像为**纪元 13**（重建 `agent`），`defaults.json` 新增键保持失败关闭；L3 Dreaming 编排循环按主人裁定转入第 2 批，现已放行启动第 2 批（5.3 邮件 + 5.4 日历/Dreaming 编排 + 5.5 Web 控制台）；5.6 实盘未授权未实施。
+- **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。**`D-94` 事故归档**：2026-11-22 守卫核验误触一次 `test:ingress-telegram:real` 真实只读（`getMe`+`getUpdates` 零外发零确认），已补齐该入口缺省 `exit 4` 守卫，并经主人裁定豁免闭环归档（`D-95`）。
 - 任务预算 $0.80、日预算 $5 已定，不重开；真实运行前的价格目录、token 约束与单次预留确认属首跑检查表核对，不是重新讨论预算。
 - 真实验收 A（模型）/B（外部写）/C（Telegram 只读）各已执行一次且授权闭合，**无剩余额度**；**D（公网 webhook）按主人 2026-11-22 决定继续推迟**，后续阶段优先采用路线 1（`getUpdates` 主动长轮询 Pull 模式）入站（单元 5.2 已落地其许可 1 部分）；出站发送与实盘轮询另需授权。历史 A/B/C 缺证按既定口径归档不追补；原镜像按主人「本机验证通过即闭项」口径处理。
 - 现行权威状态：[docs/phase3/reports/phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md)；文档索引：[docs/README.md](docs/README.md)。
@@ -78,8 +78,8 @@
 | `test:durability` / `test:acl` / `test:budget`（Phase 2 三套件） | 否 | 164/164、15/15、20/20，exit 0 |
 | `test:cancel-approval` / `test:security:unit` / `test:restore` | 否 | 16/16、48/48、11/11，exit 0 |
 | `test:ingress-telegram`（本地夹具） | 否 | 7/7 + 1 NOTE，exit 0 |
-| `test:memory-lifecycle`（Phase 5.1 分层记忆/墓碑遗忘/技能与 Spill） | 否 | 34/34 PASS，exit 0（2026-11-22） |
-| `test:cross-channel`（Phase 5.2 Telegram 路线 1 拉取 + 9 环节 Canary） | 否 | 18/18 PASS，exit 0（2026-11-22） |
+| `test:memory-lifecycle`（Phase 5.1 分层记忆/墓碑遗忘/技能与 Spill） | 否 | 47/47 PASS，exit 0（2026-11-22，纪元 13） |
+| `test:cross-channel`（Phase 5.2 Telegram 路线 1 拉取 + 9 环节 Canary） | 否 | 23/23 PASS，exit 0（2026-11-22，纪元 13） |
 | `test:model-proposal`（4.1 锚点 E2E + T1–T10 + 生产启动器 + 空回复拦截） | 是 | 15/15 PASS，exit 0 |
 | `test:repo-observe`（4.2 离线 Observe + KV 前缀稳定 + 容量前置拦截） | 是 | 7/7 PASS，exit 0 |
 | `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 11.5） |

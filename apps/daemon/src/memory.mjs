@@ -26,7 +26,7 @@ import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync, openSyn
 import { dirname, join } from "node:path";
 
 import { withTx } from "./db/tx.mjs";
-import { putObjectContent, insertObjectRow, fsyncParentDir } from "./objects.mjs";
+import { putObjectContent, insertObjectRow, fsyncParentDir, objectRowId } from "./objects.mjs";
 import { writeAudit, writeStreamEvent, authorizationRevision } from "./audit.mjs";
 import { hasReadGrant } from "./acl.mjs";
 import { recall, recallShortTerm } from "./recall.mjs";
@@ -62,13 +62,20 @@ const NEVER_ACTIVATABLE_CATEGORIES = ["identity", "recipient", "payment", "appro
 // narrower than the scanner's quarantine tier on purpose: an exemption
 // CLAIM alone is quarantined evidence (01 section 4.2), while an exemption
 // claim joined to an execution/change imperative is a capture attempt and
-// is refused before insert.
+// is refused before insert. Both ORDERS match: claim-then-verb and
+// verb-then-claim (a leading imperative must not dodge the refusal).
 const FORBIDDEN_FACT_TEXT_RE =
   /(?:免审批|跳过审批|绕过审批|审批豁免|无需审批|自动批准|auto[- ]?approv\w*|approval\s*(?:exemption|bypass|not required|skip)|(?:no|without)\s+approval)[^\n]{0,80}(?:直接|立即|执行|发送|写入|外发|放行|run|execute|send|write|proceed|allow)/i;
+const FORBIDDEN_FACT_TEXT_RE_VERB_FIRST =
+  /(?:直接|立即|执行|发送|写入|外发|放行|run|execute|send|write|proceed|allow)[^\n]{0,80}(?:免审批|跳过审批|绕过审批|审批豁免|无需审批|自动批准|auto[- ]?approv\w*|approval\s*(?:exemption|bypass|not required|skip)|(?:no|without)\s+approval)/i;
 const FORBIDDEN_FACT_TEXT_RE_2 =
   /(?:收件人|白名单|recipient|allowedRecipients|whitelist)[^\n]{0,80}(?:加入|加上|添加|改为|换成|移除|add|change|set|update|remove)[^\n]{0,40}/i;
+const FORBIDDEN_FACT_TEXT_RE_2_VERB_FIRST =
+  /(?:加入|加上|添加|改为|换成|移除|add|change|set|update|remove)[^\n]{0,80}(?:收件人|白名单|recipient|allowedRecipients|whitelist)/i;
 const FORBIDDEN_FACT_TEXT_RE_3 =
   /(?:权限|授权|角色|scope|permission|acl|admin|role|grant)[^\n]{0,60}(?:提升|变更|修改|设为|授予|elevate|change|set|grant|promote)/i;
+const FORBIDDEN_FACT_TEXT_RE_3_VERB_FIRST =
+  /(?:提升|变更|修改|设为|授予|elevate|change|set|grant|promote)[^\n]{0,60}(?:权限|授权|角色|scope|permission|acl|admin|role)/i;
 
 // Windows-safe directory name for one scope's L0 exports (the scope id
 // itself contains ':' which is not a legal filename character on win32).
@@ -104,6 +111,11 @@ export function estimateTokens(text) {
 
 // ---- L0 ----------------------------------------------------------------
 
+// The single-scope L0 render set: active facts whose required-scope
+// closure is EXACTLY the exporting scope. A fact that carries any other
+// scope's permission requirement (a cross-scope derivative, e.g. a fact
+// derived from a dm object) never renders into a single-domain MEMORY.md —
+// its closure would silently widen every reader of the export.
 function activeFactsInScope(db, { scopeId, now }) {
   return db
     .prepare(
@@ -113,6 +125,12 @@ function activeFactsInScope(db, { scopeId, now }) {
     )
     .all(scopeId, FACT_KIND)
     .filter((row) => row.expires_at === null || row.expires_at > now)
+    .filter((row) => {
+      const extra = db
+        .prepare("SELECT count(*) c FROM object_required_scopes WHERE object_id=? AND scope_id != ?")
+        .get(row.id, scopeId).c;
+      return extra === 0;
+    })
     .map((row) => ({ ...row, metadata: JSON.parse(row.metadata_json || "{}") }));
 }
 
@@ -121,7 +139,7 @@ function renderFactList(facts, { maxChars, header }) {
   let used = header.length;
   let omitted = 0;
   for (const fact of facts) {
-    if (quarantinedReasons({ hits: fact.metadata.quarantined_reasons ?? [] }).length > 0) continue;
+    if (Array.isArray(fact.metadata.quarantined_reasons) && fact.metadata.quarantined_reasons.length > 0) continue;
     const line = `- ${fact.metadata.factKey ?? "fact"}: ${String(fact.metadata.factValue ?? "")}`;
     if (used + line.length + 1 > maxChars) {
       omitted += 1;
@@ -231,6 +249,13 @@ export function exportL0Snapshot(db, stateDir, { scopeId, now, actorId = "host",
       requiredScopeIds: [scopeId],
       parents: parentIds.map((id) => ({ parentId: id })),
     });
+    if (memoryRow.tombstoned === true) {
+      // The identical export content was forgotten earlier: the tombstone
+      // wins and the export refuses rather than resurrect the deleted row.
+      throw new MemoryL0Quarantined(
+        `the MEMORY export for ${scopeId} hashes to object ${memoryRow.id}, which was previously forgotten; re-export only after the forgotten facts change`,
+      );
+    }
     let userRow = null;
     if (storedUser !== null) {
       const userFacts = facts.filter((f) => f.metadata.category === "user_preference").map((f) => f.id);
@@ -248,6 +273,11 @@ export function exportL0Snapshot(db, stateDir, { scopeId, now, actorId = "host",
         requiredScopeIds: [scopeId],
         parents: (userFacts.length > 0 ? userFacts : parentIds.length > 0 ? parentIds : []).map((id) => ({ parentId: id })),
       });
+      if (userRow.tombstoned === true) {
+        throw new MemoryL0Quarantined(
+          `the USER export for ${scopeId} hashes to object ${userRow.id}, which was previously forgotten; re-export only after the forgotten facts change`,
+        );
+      }
     }
     writeAudit(db, {
       code: "l0_exported",
@@ -283,11 +313,34 @@ export function exportL0Snapshot(db, stateDir, { scopeId, now, actorId = "host",
  * records the CURRENT authorization_revision on the session row. Any later
  * revision bump (revoke!) makes the session stale and the caller must
  * rebuild a clean one — "please ignore" prompts are not a mechanism.
+ *
+ * The principal opening the session must hold a LIVE read grant on the
+ * scope (CP2: the freeze IS a retrieval), and the rendered products run
+ * the 13-class scanner before they are frozen — a poisoned L0 must never
+ * become a run's promised prefix.
  */
 export function openScopeSession(db, stateDir, { sessionId, scopeId, principalId, skillSetHash, now, memoryMaxChars = 2200, userMaxChars = 1375 }) {
   const scope = db.prepare("SELECT id, kind FROM scopes WHERE id=?").get(scopeId);
   if (!scope) throw new MemoryError(`scope ${scopeId} does not exist`);
+  if (!hasReadGrant(db, { scopeId, principalId, now })) {
+    writeAudit(db, {
+      code: "session_open_refused",
+      actorId: principalId,
+      details: { session_id: sessionId, scope_id: scopeId, reason: "no live read grant on the scope" },
+      now,
+    });
+    throw new MemoryError(`principal ${principalId} holds no live read grant on ${scopeId}; a session freeze is a retrieval and is refused`);
+  }
   const rendered = renderL0(db, { scopeId, now, memoryMaxChars, userMaxChars });
+  for (const [label, text] of [["L0 MEMORY freeze", rendered.memoryText], ["L0 USER freeze", rendered.userText]]) {
+    if (text === null) continue;
+    const scan = scanMemoryText(text, { capacityChars: memoryMaxChars * 2, label });
+    if (!scan.clean) {
+      throw new MemoryL0Quarantined(
+        `refusing to freeze the session prefix for ${scopeId}: ${label} hits injection classes ${quarantinedReasons(scan).join(",")}`,
+      );
+    }
+  }
   const freezeContent = canonicalJson({
     scopeId,
     memoryText: rendered.memoryText,
@@ -352,16 +405,28 @@ export function assertSessionFresh(db, { sessionId }) {
   return { fresh: true, sessionId, scopeId: session.scope_id, currentRevision: current };
 }
 
-/** Read a session's frozen L0 prefix (the texts the run was promised). */
-export function frozenL0(db, stateDir, { sessionId }) {
+/**
+ * Read a session's frozen L0 prefix (the texts the run was promised). The
+ * caller names its principal and must hold a LIVE read grant on the
+ * session's scope (CP2: this is a retrieval of frozen scope memory), and
+ * the freeze object itself must still be active — a forgotten or
+ * tombstoned freeze is refused, never served from a deleted row.
+ */
+export function frozenL0(db, stateDir, { sessionId, principalId, now }) {
   const session = db
     .prepare("SELECT id, scope_id, context_object_id FROM sessions WHERE id=?")
     .get(sessionId);
   if (!session || !session.context_object_id) throw new MemoryError(`session ${sessionId} has no frozen L0 context`);
+  if (!hasReadGrant(db, { scopeId: session.scope_id, principalId, now })) {
+    throw new MemoryError(`principal ${principalId} holds no live read grant on ${session.scope_id}; the frozen L0 is a retrieval and is refused`);
+  }
   const freeze = db
-    .prepare("SELECT content_hash, storage_ref, metadata_json FROM objects WHERE id=?")
+    .prepare("SELECT content_hash, storage_ref, status, deleted_at, metadata_json FROM objects WHERE id=?")
     .get(session.context_object_id);
   if (!freeze) throw new MemoryError(`freeze object ${session.context_object_id} is missing`);
+  if (freeze.status === "deleted" || freeze.deleted_at !== null) {
+    throw new MemoryError(`freeze object ${session.context_object_id} was forgotten; the session must be rebuilt from a fresh L0`);
+  }
   if (typeof freeze.storage_ref !== "string" || freeze.storage_ref.includes("\\") || freeze.storage_ref.includes("..")) {
     throw new MemoryError(`freeze object ${session.context_object_id} has an invalid storage ref`);
   }
@@ -475,8 +540,24 @@ export function proposeMemoryFact(db, stateDir, {
   if (!db.prepare("SELECT id FROM scopes WHERE id=?").get(scopeId)) {
     throw new MemoryError(`scope ${scopeId} does not exist`);
   }
+  // The factKey renders into L0 lines ("- <factKey>: ...") and into the
+  // frozen session prefix, so it is scanned exactly like the fact text —
+  // an injection carrier in the key would otherwise ride the render.
+  const keyScan = scanMemoryText(factKey, { capacityChars: 128, label: `factKey ${factKey}` });
+  if (!keyScan.clean) {
+    throw new MemoryError(
+      `factKey '${factKey}' hits injection classes ${quarantinedReasons(keyScan).join(",")}; refusing the proposal`,
+    );
+  }
   const text = factText.trim();
-  if (FORBIDDEN_FACT_TEXT_RE.test(text) || FORBIDDEN_FACT_TEXT_RE_2.test(text) || FORBIDDEN_FACT_TEXT_RE_3.test(text)) {
+  if (
+    FORBIDDEN_FACT_TEXT_RE.test(text) ||
+    FORBIDDEN_FACT_TEXT_RE_VERB_FIRST.test(text) ||
+    FORBIDDEN_FACT_TEXT_RE_2.test(text) ||
+    FORBIDDEN_FACT_TEXT_RE_2_VERB_FIRST.test(text) ||
+    FORBIDDEN_FACT_TEXT_RE_3.test(text) ||
+    FORBIDDEN_FACT_TEXT_RE_3_VERB_FIRST.test(text)
+  ) {
     writeAudit(db, {
       code: "memory_fact_refused",
       actorId,
@@ -492,7 +573,39 @@ export function proposeMemoryFact(db, stateDir, {
   const neverActivatable = NEVER_ACTIVATABLE_CATEGORIES.includes(category);
 
   const stored = putObjectContent(stateDir, text);
+  // Content addressing means identical text maps to one row id: if the
+  // owner previously FORGOT this exact content, the tombstone wins — no
+  // fake candidate/active, no resurrection. The refusal audit lands in
+  // its own transaction BEFORE the main one (withTx has no nesting, and
+  // an audit written inside a throwing transaction would roll back).
+  const factRowId = objectRowId(scopeId, stored.contentHash);
+  if (db.prepare("SELECT status FROM objects WHERE id=?").get(factRowId)?.status === "deleted") {
+    withTx(db, () => {
+      writeAudit(db, {
+        code: "memory_fact_refused",
+        actorId,
+        details: { scope_id: scopeId, fact_key: factKey, object_id: factRowId, reason: "identical content was previously forgotten (tombstoned)" },
+        now,
+      });
+    });
+    throw new MemoryError(
+      `fact '${factKey}' hashes to object ${factRowId}, which was previously forgotten; identical content may not silently re-activate`,
+    );
+  }
   return withTx(db, () => {
+    // Parent lineage closure (01 section 3: every derivative carries its
+    // sources' ACL): a fact derived from cross-scope parents inherits
+    // their required scopes, so it can never render into a single-domain
+    // L0 (activeFactsInScope filters it) — summarizing never
+    // de-classifies, and neither does extracting.
+    const closure = new Set([scopeId]);
+    for (const parentId of parentObjectIds) {
+      const parent = db.prepare("SELECT id FROM objects WHERE id=?").get(parentId);
+      if (!parent) throw new MemoryError(`parent source ${parentId} does not exist`);
+      for (const r of db.prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?").all(parentId)) {
+        closure.add(r.scope_id);
+      }
+    }
     const existing = factRowByFactKey(db, { scopeId, factKey });
     if (existing && existing.content_hash === stored.contentHash) {
       writeAudit(db, {
@@ -540,9 +653,18 @@ export function proposeMemoryFact(db, stateDir, {
         never_activatable: neverActivatable || quarantined.length > 0,
         confirmations: 0,
       },
-      requiredScopeIds: [scopeId],
+      requiredScopeIds: [...closure],
       parents: parentObjectIds.map((id) => ({ parentId: id })),
     });
+    if (row.tombstoned === true) {
+      // Unreachable while the pre-transaction tombstone check above runs
+      // first (single writer, no race); kept as the in-transaction
+      // fail-closed guard so the function can never hand back a fake
+      // candidate over a deleted row.
+      throw new MemoryError(
+        `fact '${factKey}' hashes to object ${row.id}, which was previously forgotten; identical content may not silently re-activate`,
+      );
+    }
     if (existing && conflicted) {
       db.prepare("UPDATE objects SET supersedes_id=? WHERE id=?").run(existing.id, row.id);
     }
@@ -582,7 +704,9 @@ export function activateMemoryFact(db, { objectId, actorId = "host", now }) {
     const row = db.prepare("SELECT id, scope_id, status, metadata_json FROM objects WHERE id=?").get(objectId);
     if (!row) throw new MemoryError(`object ${objectId} does not exist`);
     const metadata = JSON.parse(row.metadata_json || "{}");
-    const quarantined = quarantinedReasons({ hits: metadata.quarantined_reasons ?? [] });
+    const quarantined = Array.isArray(metadata.quarantined_reasons)
+      ? metadata.quarantined_reasons.filter((c) => typeof c === "string" && c.length > 0)
+      : [];
     if (quarantined.length > 0) {
       writeAudit(db, { code: "memory_activation_refused", actorId, details: { object_id: objectId, reason: "quarantined", classes: quarantined }, now });
       throw new MemoryError(`object ${objectId} is quarantined (${quarantined.join(",")}); human review owns the next step`);
@@ -656,6 +780,11 @@ export function writeSummaryDerivation(db, stateDir, {
       requiredScopeIds: [...closure],
       parents: parentObjectIds.map((id) => ({ parentId: id })),
     });
+    if (row.tombstoned === true) {
+      throw new MemoryError(
+        `the summary text hashes to object ${row.id}, which was previously forgotten; identical content may not silently re-activate`,
+      );
+    }
     writeAudit(db, {
       code: "summary_derived",
       actorId,
@@ -757,17 +886,36 @@ export function forgetObject(db, stateDir, { objectId, now, actorId = "host" }) 
     }
   });
 
-  // Phase 2: physical cleanup after the commit.
+  // Phase 2: physical cleanup after the commit. Content-addressed storage
+  // means two rows (different scopes, same bytes) share ONE file: a blob
+  // is removed only when no other non-deleted row still references it, and
+  // an export file only when no other live export object still points at
+  // the same path — forgetting one copy must never destroy a live twin.
   let filesRemoved = 0;
   for (const id of ids) {
     const row = closure.get(id);
     if (row.storage_ref) {
+      const stillLive = db
+        .prepare("SELECT count(*) c FROM objects WHERE storage_ref=? AND status != 'deleted'")
+        .get(row.storage_ref).c;
+      if (stillLive > 0) continue;
       const res = removeTombstonedContentFile(stateDir, { storageRef: row.storage_ref });
       if (res.removed) filesRemoved += 1;
     }
   }
   let exportFilesRemoved = 0;
+  const liveExportObjects = db
+    .prepare("SELECT metadata_json FROM objects WHERE kind IN (?,?,?) AND status != 'deleted'")
+    .all(L0_MEMORY_KIND, L0_USER_KIND, L0_FREEZE_KIND);
+  const liveExportPaths = new Set();
+  for (const r of liveExportObjects) {
+    try {
+      const meta = JSON.parse(r.metadata_json || "{}");
+      if (typeof meta.exportPath === "string") liveExportPaths.add(meta.exportPath);
+    } catch {}
+  }
   for (const relPath of affectedExportFiles) {
+    if (liveExportPaths.has(relPath)) continue;
     const path = join(stateDir, ...relPath.split("/"));
     if (existsSync(path)) {
       unlinkSync(path);

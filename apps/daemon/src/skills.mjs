@@ -128,10 +128,60 @@ export function registerSkillVersion(db, stateDir, {
 }
 
 /**
+ * Resolve the version a frozen skill_set_hash pins for one skill name.
+ * Fast path: the current ACTIVE set still hashes to the frozen value —
+ * the ACTIVE row IS the frozen version. Otherwise a bounded single-name
+ * reconstruction runs: replace this name's ACTIVE row with each of its
+ * RETIRED versions and keep the candidate whose set hashes to the frozen
+ * value. No unique match means the frozen set is no longer reconstructible
+ * — the read REFUSES instead of hot-swapping to whatever is ACTIVE now
+ * (a running task never sees a version its hash did not freeze).
+ */
+function resolveVersionForHash(db, { name, scopeId, skillSetHash }) {
+  if (typeof skillSetHash !== "string" || skillSetHash.length === 0) return { ok: false, reason: "no frozen skill_set_hash supplied" };
+  if (currentSkillSetHash(db, { scopeId }) === skillSetHash) {
+    const row = db
+      .prepare("SELECT * FROM skill_versions WHERE name=? AND scope_id=? AND state='ACTIVE'")
+      .get(name, scopeId);
+    if (!row) return { ok: false, reason: `skill ${name} is not part of the current active set` };
+    return { ok: true, version: row.version };
+  }
+  const activeRows = db
+    .prepare("SELECT name, version, content_hash FROM skill_versions WHERE scope_id=? AND state='ACTIVE' ORDER BY name ASC")
+    .all(scopeId);
+  const alternates = db
+    .prepare("SELECT version, content_hash FROM skill_versions WHERE name=? AND scope_id=? AND state='RETIRED' ORDER BY version DESC")
+    .all(name, scopeId);
+  const hashOfSet = (rows) =>
+    sha256LfHex(canonicalJson(rows.map((r) => ({ name: r.name, version: r.version, content_hash: r.content_hash }))));
+  const candidates = [];
+  for (const alt of [
+    { version: activeRows.find((r) => r.name === name)?.version, content_hash: activeRows.find((r) => r.name === name)?.content_hash },
+    ...alternates,
+  ]) {
+    if (alt.version === undefined || alt.version === null) continue;
+    const set = activeRows.filter((r) => r.name !== name);
+    set.push({ name, version: alt.version, content_hash: alt.content_hash });
+    set.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    if (hashOfSet(set) === skillSetHash) candidates.push(alt.version);
+  }
+  if (candidates.length === 1) return { ok: true, version: candidates[0] };
+  return {
+    ok: false,
+    reason: candidates.length === 0
+      ? `the frozen skill_set_hash does not resolve ${name} against the current or retired versions; refusing rather than hot-swapping`
+      : `the frozen skill_set_hash resolves ${name} ambiguously (${candidates.join(",")}); refusing rather than guessing`,
+  };
+}
+
+/**
  * Human-promoted activation (03 section 7.3: first-version promotion is
  * always human). The previous ACTIVE version retires in the SAME
  * transaction; running tasks keep their frozen skill_set_hash — only new
- * tasks see the new set.
+ * tasks see the new set. Activation is the human review moment: the
+ * version's script object drops its human_review_pending marker in the
+ * same transaction, so lockedScriptRef reports it as reviewed from the
+ * moment the version actually went live.
  */
 export function activateSkillVersion(db, { name, scopeId, version, reviewedBy, now, actorId = "host" }) {
   return withTx(db, () => {
@@ -146,6 +196,17 @@ export function activateSkillVersion(db, { name, scopeId, version, reviewedBy, n
       .prepare("UPDATE skill_versions SET state='ACTIVE' WHERE name=? AND scope_id=? AND version=? AND state='CANDIDATE'")
       .run(name, scopeId, version).changes;
     if (changes !== 1) throw new SkillError(`skill ${name} v${version} could not be activated`);
+    // The promotion IS the review: clear the pending marker on this
+    // version's script object (and only this version's).
+    const scripts = db
+      .prepare("SELECT id, metadata_json FROM objects WHERE kind=? AND scope_id=?")
+      .all(SKILL_SCRIPT_KIND, scopeId);
+    for (const s of scripts) {
+      const meta = JSON.parse(s.metadata_json || "{}");
+      if (meta.name !== name || meta.version !== version) continue;
+      const updated = { ...meta, human_review_pending: false, reviewed_by: reviewedBy, reviewed_at: now };
+      db.prepare("UPDATE objects SET metadata_json=? WHERE id=?").run(JSON.stringify(updated), s.id);
+    }
     writeAudit(db, {
       code: "skill_version_activated",
       actorId,
@@ -184,12 +245,21 @@ export function describeSkillIndex(db, { scopeId }) {
 }
 
 /** Level 2: the body, behind a live read-grant check on every required scope. */
-export function readSkillBody(db, stateDir, { name, scopeId, principalId, now, version = null }) {
-  const row = requireSkillRow(db, { name, scopeId, version });
+export function readSkillBody(db, stateDir, { name, scopeId, principalId, now, version = null, skillSetHash = null }) {
+  let resolvedVersion = version;
+  if (resolvedVersion === null && skillSetHash !== null && typeof skillSetHash === "string") {
+    const lock = resolveVersionForHash(db, { name, scopeId, skillSetHash });
+    if (!lock.ok) return { denied: true, reason: lock.reason };
+    resolvedVersion = lock.version;
+  }
+  const row = requireSkillRow(db, { name, scopeId, version: resolvedVersion });
   const body = db
-    .prepare("SELECT id, content_hash, storage_ref, metadata_json FROM objects WHERE id=?")
+    .prepare("SELECT id, content_hash, storage_ref, status, deleted_at, metadata_json FROM objects WHERE id=?")
     .get(row.object_id);
   if (!body) throw new SkillError(`skill body object ${row.object_id} is missing`);
+  if (body.status !== "active" || body.deleted_at !== null) {
+    return { denied: true, reason: `skill body ${row.object_id} is ${body.status ?? "missing"}` };
+  }
   const required = db.prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?").all(body.id);
   if (required.length === 0 || !required.every((r) => hasReadGrant(db, { scopeId: r.scope_id, principalId, now }))) {
     return { denied: true, reason: "no live read grant on every required scope of the skill body" };
@@ -206,11 +276,16 @@ export function readSkillBody(db, stateDir, { name, scopeId, principalId, now, v
   };
 }
 
-/** Level 3: the reviewed script hash. Script TEXT is never returned. */
-export function lockedScriptRef(db, { name, scopeId, version = null }) {
-  const row = requireSkillRow(db, { name, scopeId, version });
-  const body = db.prepare("SELECT metadata_json FROM objects WHERE id=?").get(row.object_id);
-  const metadata = JSON.parse(body?.metadata_json || "{}");
+/** Level 3: the reviewed script hash, behind the same read-grant gate.
+ * Script TEXT is never returned. */
+export function lockedScriptRef(db, { name, scopeId, principalId = null, now = 0, version = null, skillSetHash = null }) {
+  let resolvedVersion = version;
+  if (resolvedVersion === null && skillSetHash !== null && typeof skillSetHash === "string") {
+    const lock = resolveVersionForHash(db, { name, scopeId, skillSetHash });
+    if (!lock.ok) return { denied: true, reason: lock.reason };
+    resolvedVersion = lock.version;
+  }
+  const row = requireSkillRow(db, { name, scopeId, version: resolvedVersion });
   const script = db
     .prepare("SELECT id, metadata_json FROM objects WHERE kind=? AND scope_id=? ORDER BY observed_at DESC")
     .all(SKILL_SCRIPT_KIND, scopeId)
@@ -220,6 +295,12 @@ export function lockedScriptRef(db, { name, scopeId, version = null }) {
     });
   if (!script) {
     return { denied: true, reason: `skill ${name} has no registered script` };
+  }
+  if (principalId !== null) {
+    const required = db.prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?").all(script.id);
+    if (required.length === 0 || !required.every((r) => hasReadGrant(db, { scopeId: r.scope_id, principalId, now }))) {
+      return { denied: true, reason: "no live read grant on every required scope of the skill script" };
+    }
   }
   const m = JSON.parse(script.metadata_json || "{}");
   return {

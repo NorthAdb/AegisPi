@@ -52,6 +52,8 @@ function seedWorkspace(tag) {
   const now = Date.now();
   db.prepare("INSERT INTO principals(id, platform, platform_subject) VALUES (?,?,?)").run(OWNER, "telegram", "6101");
   db.prepare("INSERT INTO principals(id, platform, platform_subject) VALUES (?,?,?)").run(OTHER, "telegram", "6102");
+  db.prepare("INSERT OR REPLACE INTO system_state(key, value) VALUES ('disclosure_allowlist', ?)")
+    .run(JSON.stringify([{ from: SCOPE, to: "repo://github.com/x/y", reviewedBy: OWNER, note: "cancel-approval pr.create_draft fixture" }]));
   db.prepare(
     `INSERT INTO scopes(id, owner_id, kind, domain_key, channel, conversation_id, repo_id, epoch, acl_version, policy_version, paused)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)`,

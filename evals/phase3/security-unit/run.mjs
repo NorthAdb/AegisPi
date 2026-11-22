@@ -985,6 +985,10 @@ function seed(tag) {
       }
     }
     const storedMsg = putObjectContent(ws.stateDir, text);
+    if (target.startsWith("group:") || target === "dm:telegram:9999") {
+      db.prepare("INSERT OR REPLACE INTO system_state(key, value) VALUES ('disclosure_allowlist', ?)")
+        .run(JSON.stringify([{ from: "scp:dm%3Atelegram%3A6101", to: target, reviewedBy: ownerId, note: "security-unit notify fixture" }]));
+    }
     const card = proposeEffect(db, ws.stateDir, {
       now,
       taskId: task.id,

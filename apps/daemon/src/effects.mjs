@@ -14,7 +14,11 @@ import { writeAudit, writeStreamEvent, authorizationRevision } from "./audit.mjs
 import { canonicalJson, businessKey as encodeBusinessKey, escapeComponent } from "./keys.mjs";
 import { insertObjectRow } from "./objects.mjs";
 import { scopeId as scopeIdForDomainKey } from "./ingress.mjs";
-import { cp4Decision, recordCp4Block, GROUP_SHAPED_TARGET_RE } from "./cp4.mjs";
+import {
+  cp4EffectDecision,
+  cp4TargetShape,
+  recordCp4Block,
+} from "./cp4.mjs";
 import {
   createApprovalRow,
   approvalIdFor,
@@ -25,6 +29,7 @@ import { crashpoint } from "./testing/crashpoints.mjs";
 
 export class EffectError extends Error {}
 export class EffectConflict extends EffectError {}
+export class EffectCp4Blocked extends EffectError {}
 export class DispatcherRefused extends EffectError {}
 export class UnknownNotReconcilable extends EffectError {}
 
@@ -83,7 +88,7 @@ export function proposeEffectInTx(db, _stateDir, {
   effectType,
   domainKey,
   naturalKey,
-  operationIntent, // { targetResource, operation, contentHash, attachmentHash?, expectedHead?, evidenceManifestHash, extra? }
+  operationIntent, // { targetResource, operation, contentHash, attachmentHash?, expectedHead?, evidenceManifestHash, extra?, parentObjectIds?, extraRequiredScopeIds?, payloadContent? }
   retryMode,
   provider,
   resource,
@@ -102,6 +107,44 @@ export function proposeEffectInTx(db, _stateDir, {
   if (!task) throw new EffectError(`task ${taskId} not found`);
   const scope = db.prepare("SELECT * FROM scopes WHERE id=?").get(task.scope_id);
   const bkey = encodeBusinessKey(effectType, domainKey, naturalKey);
+  // Upstream lineage (02 section 3 CP4 / 01 section 3: every derivative
+  // carries its sources' ACL): a payload derived from other objects
+  // inherits their required scopes — direct parents' scopes here, and the
+  // object_edges recorded below let the CP4 closure walk reach every
+  // ancestor at decision time. Summarizing never de-classifies.
+  const parentObjectIds = Array.isArray(operationIntent.parentObjectIds) ? operationIntent.parentObjectIds : [];
+  const extraRequiredScopeIds = Array.isArray(operationIntent.extraRequiredScopeIds)
+    ? operationIntent.extraRequiredScopeIds
+    : [];
+  const lineageScopes = new Set([task.scope_id, ...extraRequiredScopeIds]);
+  for (const parentId of parentObjectIds) {
+    const parent = db.prepare("SELECT id FROM objects WHERE id=?").get(parentId);
+    if (!parent) throw new EffectError(`operationIntent parent object ${parentId} does not exist`);
+    for (const r of db.prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?").all(parentId)) {
+      lineageScopes.add(r.scope_id);
+    }
+  }
+  // CP4 proposal gate (02 section 3: "审批不能静默覆盖数据所有者没有授予的
+  // 披露权限" — the refusal happens BEFORE the row exists). The decision
+  // runs on the lineage closure, which is exactly what the dispatch-time
+  // walk of the inserted payload object yields. The public proposeEffect
+  // entry records the durable refusal audit in its own transaction before
+  // this point; direct in-tx callers abort their own transaction and their
+  // failure handling owns the visible record (the dispatch gate re-checks
+  // anything that still lands).
+  const cp4 = cp4EffectDecision(db, {
+    operation: operationIntent.operation,
+    resource: operationIntent.targetResource,
+    closure: [...lineageScopes],
+    parentObjectIds,
+    effectScopeId: task.scope_id,
+    now,
+  });
+  if (!cp4.allowed) {
+    throw new EffectCp4Blocked(
+      `CP4 blocked at proposal: ${operationIntent.operation} to ${JSON.stringify(operationIntent.targetResource)} — ${cp4.basis}`,
+    );
+  }
   const actionJson = canonicalActionJson({
     schemaVersion: 1,
     principalId: task.principal_id,
@@ -136,7 +179,8 @@ export function proposeEffectInTx(db, _stateDir, {
     sourceActor: task.principal_id,
     content: operationIntent.payloadContent ?? actionJson,
     observedAt: now,
-    requiredScopeIds: [task.scope_id],
+    requiredScopeIds: [...lineageScopes],
+    parents: parentObjectIds.map((id) => ({ parentId: id })),
   });
   const effectId = `efx:${escapeComponent(bkey, { allowSlash: true })}`;
   const state = requiresApproval ? "WAITING_APPROVAL" : "DRAFT";
@@ -240,6 +284,49 @@ export function proposeEffectInTx(db, _stateDir, {
 }
 
 export function proposeEffect(db, stateDir, opts) {
+  // CP4 proposal gate, durable before any row exists: the decision is pure
+  // (reads only), the refusal audit lands in its OWN transaction, and the
+  // throw stops the caller before a payload or effect row is written.
+  const gate = withTx(db, () => {
+    const task = db.prepare("SELECT scope_id FROM tasks WHERE id=?").get(opts.taskId);
+    if (!task) return null;
+    const parentObjectIds = Array.isArray(opts.operationIntent?.parentObjectIds)
+      ? opts.operationIntent.parentObjectIds
+      : [];
+    const extraRequired = Array.isArray(opts.operationIntent?.extraRequiredScopeIds)
+      ? opts.operationIntent.extraRequiredScopeIds
+      : [];
+    const lineage = new Set([task.scope_id, ...extraRequired]);
+    for (const pid of parentObjectIds) {
+      for (const r of db.prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?").all(pid)) {
+        lineage.add(r.scope_id);
+      }
+    }
+    return cp4EffectDecision(db, {
+      operation: opts.operationIntent?.operation,
+      resource: opts.operationIntent?.targetResource,
+      closure: [...lineage],
+      parentObjectIds,
+      effectScopeId: task.scope_id,
+      now: opts.now,
+    });
+  });
+  if (gate !== null && !gate.allowed) {
+    const shape = cp4TargetShape({ operation: opts.operationIntent?.operation, resource: opts.operationIntent?.targetResource });
+    withTx(db, () => {
+      recordCp4Block(db, {
+        payloadObjectId: null,
+        targetScopeId: shape.scopeDomainKey !== null ? scopeIdForDomainKey(shape.scopeDomainKey) : null,
+        targetResource: opts.operationIntent?.targetResource ?? null,
+        closure: gate.closure,
+        basis: `proposal refused: ${gate.basis}`,
+        now: opts.now,
+      });
+    });
+    throw new EffectCp4Blocked(
+      `CP4 blocked at proposal: ${opts.operationIntent?.operation} to ${JSON.stringify(opts.operationIntent?.targetResource)} — ${gate.basis}`,
+    );
+  }
   return withTx(db, () => proposeEffectInTx(db, stateDir, opts));
 }
 
@@ -273,17 +360,20 @@ function hashOfActionJson(actionJson) {
 // READY -> SUBMITTING; the upstream call happens after COMMIT, outside any
 // SQLite transaction.
 //
-// Unit 5.2 CP4 (02 section 3 / 01 section 3): before the CAS commits, a
-// scope-shaped Telegram target OUTSIDE the effect's own scope must be
-// authorized to RECEIVE the payload's full upstream closure. The
-// deployment's authorized recipient list (adapters.allowedRecipients,
-// passed by the daemon) and the system_state disclosure allowlist are the
-// two honest disclosure records; anything else is blocked BEFORE the
-// commitment point, the effect lands DEAD with the audit trail, and zero
-// bytes leave.
-export function dispatchEffect(db, upstream, { effectId, now, precondition = null, label = "dispatcher", submitMode = undefined, reservationId = null, authorizedRecipients = [] }) {
-  let cas;
-  cas = withTx(db, () => {
+// Unit 5.2 CP4 (02 section 3 / 01 section 3): before the CAS commits, the
+// payload's full upstream closure is re-adjudicated against the NORMALIZED
+// target audience — group:telegram:<id>, the prefix-less telegram:<id>
+// (worst case: a group), dm:telegram:<id>, the legacy single-person fixture
+// shapes, and repo:// writes. adapters.allowedRecipients is TRANSPORT
+// reachability only (the adapter still refuses unlisted targets with zero
+// bytes); it is NOT a disclosure authorization — a cross-scope disclosure
+// needs the system_state disclosure allowlist or an owner_dm audience whose
+// owner holds live read on every closure scope. The gate also fires when
+// the closure leaves the effect's own scope even though the target IS the
+// effect's own scope. Anything else is blocked BEFORE the commitment point,
+// the effect lands DEAD with the audit trail, and zero bytes leave.
+export function dispatchEffect(db, upstream, { effectId, now, precondition = null, label = "dispatcher", submitMode = undefined, reservationId = null }) {
+  const cas = withTx(db, () => {
     const e = db.prepare("SELECT * FROM effects WHERE id=?").get(effectId);
     if (!e) throw new DispatcherRefused(`effect ${effectId} not found`);
     if (e.state !== "READY") {
@@ -295,36 +385,41 @@ export function dispatchEffect(db, upstream, { effectId, now, precondition = nul
     if (now >= e.expires_at) {
       throw new DispatcherRefused(`effect ${effectId} expired`);
     }
-    // CP4 recipient reverse-check (only the GROUP-shaped targets — the
-    // multi-member audiences; unlisted DM targets stay under the Phase 4
-    // recipient-allowlist discipline and legacy fixture resources never
-    // match).
-    if (
-      (e.operation === "im.notify" || e.operation === "send_message") &&
-      GROUP_SHAPED_TARGET_RE.test(e.resource)
-    ) {
-      const targetScopeId = scopeIdForDomainKey(e.resource);
-      if (targetScopeId !== e.scope_id) {
-        const deploymentAuthorized = Array.isArray(authorizedRecipients) && authorizedRecipients.includes(e.resource);
-        const decision = deploymentAuthorized
-          ? { allowed: true, basis: "deployment-authorized recipient (adapters.allowedRecipients)", closure: [] }
-          : cp4Decision(db, { payloadObjectId: e.payload_object_id, targetScopeId, now });
-        if (!decision.allowed) {
-          // Block INSIDE the transaction so the refusal record commits:
-          // the effect goes DEAD (visible, demands a human), the audit
-          // and stream alert land with it, and no byte is ever built.
-          db.prepare("UPDATE effects SET state='DEAD', last_error=?, updated_at=? WHERE id=? AND state='READY'")
-            .run(`cp4_recipient_scope_leak_blocked: ${decision.basis}`, now, effectId);
-          recordCp4Block(db, {
-            payloadObjectId: e.payload_object_id,
-            targetScopeId,
-            closure: decision.closure,
-            basis: decision.basis,
-            now,
-          });
-          return { effectId, cp4Blocked: true, basis: decision.basis };
-        }
+    // CP4 recipient reverse-check, normalized for every outbound/write
+    // target shape (cp4.mjs owns the classification; multi-member GROUP
+    // audiences are always adjudicated, and any closure that leaves the
+    // effect's own scope is adjudicated regardless of the target shape).
+    const targetResource = (() => {
+      try {
+        const parsed = JSON.parse(e.action_json);
+        return parsed?.target_resource ?? parsed?.targetResource ?? parsed?.operationIntent?.targetResource ?? e.resource;
+      } catch {
+        return e.resource;
       }
+    })();
+    const decision = cp4EffectDecision(db, {
+      operation: e.operation,
+      resource: targetResource,
+      payloadObjectId: e.payload_object_id,
+      effectScopeId: e.scope_id,
+      now,
+    });
+    if (decision.needed && !decision.allowed) {
+      // Block INSIDE the transaction so the refusal record commits:
+      // the effect goes DEAD (visible, demands a human), the audit
+      // and stream alert land with it, and no byte is ever built.
+      const shape = cp4TargetShape({ operation: e.operation, resource: targetResource });
+      db.prepare("UPDATE effects SET state='DEAD', last_error=?, updated_at=? WHERE id=? AND state='READY'")
+        .run(`cp4_recipient_scope_leak_blocked: ${decision.basis}`, now, effectId);
+      recordCp4Block(db, {
+        payloadObjectId: e.payload_object_id,
+        targetScopeId: shape.scopeDomainKey !== null ? scopeIdForDomainKey(shape.scopeDomainKey) : null,
+        targetResource,
+        closure: decision.closure,
+        basis: decision.basis,
+        now,
+      });
+      return { effectId, cp4Blocked: true, basis: decision.basis };
     }
     const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(e.task_id);
     const scope = db.prepare("SELECT * FROM scopes WHERE id=?").get(e.scope_id);

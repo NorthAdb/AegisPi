@@ -30,7 +30,19 @@ export function redactSecrets(text) {
     .replace(/\b\d{8,10}:[A-Za-z0-9_-]{30,}\b/g, "[REDACTED_TG_TOKEN]")
     .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED_API_KEY]")
     .replace(/\b(?:Bearer|bearer)\s+[A-Za-z0-9._~+/=-]{16,}/g, "Bearer [REDACTED]")
-    .replace(/\b(password|passwd|secret|token|api[_-]?key|app[_-]?password)\b(\s*[:=]\s*)(["']?)[^\s"']{8,}\3/gi, "$1$2$3[REDACTED]$3");
+    // Quoted secret members (JSON/JS keep quotes around key AND value):
+    // the whole quoted value collapses to a quoted placeholder, so the
+    // scrubbed text stays parseable JSON instead of a corrupted fragment.
+    .replace(
+      /\b(password|passwd|secret|token|api[_-]?key|app[_-]?password)\b(["']?\s*[:=]\s*)(?:"[^"]{8,}"|'[^']{8,}')/gi,
+      "$1$2\"[REDACTED]\"",
+    )
+    // Unquoted (or single-unbalanced) assignments keep their original
+    // quoting shape around the placeholder.
+    .replace(
+      /\b(password|passwd|secret|token|api[_-]?key|app[_-]?password)\b(\s*[:=]\s*)(["']?)[^\s"']{8,}\3/gi,
+      "$1$2$3[REDACTED]$3",
+    );
 }
 
 function clipViewLines(lines, pick) {
@@ -107,6 +119,13 @@ export function captureToolSpill(db, stateDir, {
       requiredScopeIds: [scopeId, ...extraRequiredScopeIds],
       parents: parentObjectIds.map((id) => ({ parentId: id })),
     });
+    if (row.tombstoned === true) {
+      // The same spill content was previously forgotten: the tombstone
+      // wins and the capture refuses instead of resurrecting the row.
+      throw new SpillError(
+        `the spill content hashes to object ${row.id}, which was previously forgotten; identical content may not silently re-activate`,
+      );
+    }
     writeAudit(db, {
       code: "tool_spill_captured",
       actorId,
@@ -137,9 +156,18 @@ export function readSpillPage(db, stateDir, { objectId, principalId, offset = 0,
     throw new SpillError("offset must be a non-negative integer and limit an integer 1..2000");
   }
   const row = db
-    .prepare("SELECT id, scope_id, kind, content_hash, storage_ref, status, deleted_at FROM objects WHERE id=?")
+    .prepare("SELECT id, scope_id, kind, content_hash, storage_ref, status, deleted_at, expires_at FROM objects WHERE id=?")
     .get(objectId);
-  if (!row || row.status === "deleted" || row.deleted_at !== null) {
+  // Terminal hygiene: deleted, expired, and non-active rows (candidate /
+  // conflicted quarantines) are never readable through the paged view —
+  // only an ACTIVE, unexpired object serves.
+  if (
+    !row ||
+    row.status === "deleted" ||
+    row.deleted_at !== null ||
+    (row.expires_at !== null && row.expires_at <= now) ||
+    row.status !== "active"
+  ) {
     return { denied: true, reason: "object not readable" };
   }
   const required = db.prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?").all(row.id);

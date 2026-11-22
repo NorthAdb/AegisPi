@@ -82,6 +82,14 @@ export function fsyncParentDir(dir) {
 // The objects row is ALWAYS inserted by the caller's transaction; this module
 // never opens one. Own-scope closure is mandatory (01 section 3: "至少包含
 // 自身scope"), and missing closure fails closed.
+//
+// Content addressing means the SAME (scope, content) maps to one row id, so a
+// re-insert can arrive with a WIDER closure (a summary re-derived with one
+// more parent scope, a spill re-captured with extraRequiredScopeIds). The
+// alreadyPresent branch MERGES those instead of dropping them: required
+// scopes and parent edges only ever widen, never shrink. A tombstoned
+// (status='deleted') row is reported as tombstoned — the caller must refuse
+// to hand back a fake active/candidate for content the owner forgot.
 export function insertObjectRow(db, {
   scopeId,
   kind,
@@ -104,18 +112,29 @@ export function insertObjectRow(db, {
     contentHash = sha256Buffer(Buffer.isBuffer(content) ? content : Buffer.from(String(content), "utf8"));
   }
   const id = objectRowId(scopeId, contentHash);
+  if (!requiredScopeIds.includes(scopeId)) {
+    throw new Error(`object ${id} is missing its own scope ${scopeId} in the required closure`);
+  }
   const existing = db.prepare("SELECT id, status FROM objects WHERE id=?").get(id);
   if (existing) {
-    return { id, alreadyPresent: true, status: existing.status };
+    const seen = new Set();
+    for (const sid of requiredScopeIds) {
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+      db.prepare("INSERT OR IGNORE INTO object_required_scopes(object_id, scope_id) VALUES (?,?)").run(id, sid);
+    }
+    for (const edge of parents) {
+      db.prepare(
+        "INSERT OR IGNORE INTO object_edges(parent_id, child_id, relation) VALUES (?,?,?)",
+      ).run(edge.parentId, id, edge.relation ?? "derived_from");
+    }
+    return { id, alreadyPresent: true, status: existing.status, tombstoned: existing.status === "deleted" };
   }
   if (storageRef !== null && storageRef.includes("\\")) {
     // Storage refs are POSIX-shaped on every OS (see objectRelPath). A
     // backslash ref is a legacy/corrupt row at best; the writer refuses it
     // so the referenced-set comparison can never be surprised by one.
     throw new Error(`storage_ref must use forward slashes (got ${JSON.stringify(storageRef)})`);
-  }
-  if (!requiredScopeIds.includes(scopeId)) {
-    throw new Error(`object ${id} is missing its own scope ${scopeId} in the required closure`);
   }
   db.prepare(
     `INSERT INTO objects(id, scope_id, kind, source_uri, source_actor, content_hash, storage_ref,
@@ -159,7 +178,9 @@ export function gcUnreferencedContent(db, stateDir, { now = Date.now(), dryRun =
   const objectsRoot = join(stateDir, "objects");
   if (!existsSync(objectsRoot)) return { scanned: 0, trashed: 0, tmpRemoved: 0 };
   const referenced = new Set();
-  for (const row of db.prepare("SELECT storage_ref FROM objects WHERE storage_ref IS NOT NULL").all()) {
+  for (const row of db
+    .prepare("SELECT storage_ref FROM objects WHERE storage_ref IS NOT NULL AND status != 'deleted'")
+    .all()) {
     // Both the raw ref and its backslash-normalized twin count as
     // referenced: a legacy row written with Windows separators must never
     // let the GC treat the live file as an orphan.

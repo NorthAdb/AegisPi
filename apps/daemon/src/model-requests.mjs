@@ -21,6 +21,7 @@ import {
   deliveryReturnedInTx,
   heartbeat,
 } from "./scheduler.mjs";
+import { assertSessionFresh } from "./memory.mjs";
 import {
   assertValidModelBaseUrl,
   callModelOnce,
@@ -482,12 +483,15 @@ export function commitModelCallWriteback(db, {
           });
         }
         if (taskFailed) {
-          const openDelivery = db
+          // EVERY open delivery returns, not just the first: a batch task
+          // carries several, and one stranded PENDING on a terminal task
+          // would leave its inbox row unable to reach DONE.
+          const openDeliveries = db
             .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state IN ('PENDING','ACKED')")
-            .get(reqNow.task_id);
-          if (openDelivery) {
+            .all(reqNow.task_id);
+          for (const open of openDeliveries) {
             deliveryReturnedInTx(db, {
-              eventId: openDelivery.event_id,
+              eventId: open.event_id,
               taskId: reqNow.task_id,
               now,
               reason: mustSettleToComplete && !settled ? "settlement_held_uncompleted" : emptyErrorCode,
@@ -603,6 +607,49 @@ function validateAndAuthorizeModelProposal(db, { config, envelope, hostCommandsD
       now,
     });
     return { ok: false, result: { accepted: false, status: "refused", code: "invalid_model_config", reason: e.message, rowCreated: false } };
+  }
+  // CP2 session freshness (Unit 5.1 rework): an attempt anchored to a
+  // session must still be FRESH before the call is issued — a revoke
+  // bumps the authorization revision and kills the session immediately;
+  // the proposal is refused with zero call bytes instead of running on
+  // the frozen-but-stale context.
+  if (typeof envelope.attemptId === "string") {
+    const attempt = db.prepare("SELECT session_id FROM attempts WHERE id=?").get(envelope.attemptId);
+    if (attempt && typeof attempt.session_id === "string" && attempt.session_id.length > 0) {
+      const session = db.prepare("SELECT id FROM sessions WHERE id=?").get(attempt.session_id);
+      if (!session) {
+        recordRefusal(db, {
+          taskId: envelope.taskId,
+          requestId: envelope.requestId,
+          code: "session_missing",
+          reason: `attempt ${envelope.attemptId} anchors session ${attempt.session_id}, which no longer exists`,
+          hostCommandsDir,
+          now,
+        });
+        return { ok: false, result: { accepted: false, status: "refused", code: "session_missing", rowCreated: false } };
+      }
+      const fresh = assertSessionFresh(db, { sessionId: attempt.session_id });
+      if (!fresh.fresh) {
+        recordRefusal(db, {
+          taskId: envelope.taskId,
+          requestId: envelope.requestId,
+          code: "session_stale_authorization_changed",
+          reason: `session ${attempt.session_id} recorded revision ${fresh.sessionRevision}, current is ${fresh.currentRevision}; the attempt must be abandoned and rebuilt`,
+          hostCommandsDir,
+          now,
+        });
+        return {
+          ok: false,
+          result: {
+            accepted: false,
+            status: "refused",
+            code: "session_stale_authorization_changed",
+            reason: "authorization revision changed since the session froze",
+            rowCreated: false,
+          },
+        };
+      }
+    }
   }
   const capCheck = validateModelTokenCaps(config.model, envelope.messages);
   if (!capCheck.ok) {

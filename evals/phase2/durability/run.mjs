@@ -860,6 +860,7 @@ function crashDetail(done, ws) {
   };
   const proposeAndApprove = (seeded, { domainKey, naturalKey = "v1", retryMode = "IDEMPOTENCY_KEY" } = {}) => {
     const approverId = grantApprove(seeded.scopeId);
+    const convId = db.prepare("SELECT conversation_id FROM scopes WHERE id=?").get(seeded.scopeId)?.conversation_id ?? seeded.claim.taskId;
     const proposal = proposeEffect(db, ws.stateDir, {
       now,
       taskId: seeded.d.taskId,
@@ -868,7 +869,7 @@ function crashDetail(done, ws) {
       domainKey,
       naturalKey,
       operationIntent: {
-        targetResource: `telegram-dm:${seeded.claim.taskId}`,
+        targetResource: `telegram-dm:${convId}`,
         operation: "send_message",
         contentHash: "aa01",
         evidenceManifestHash: "bb02",

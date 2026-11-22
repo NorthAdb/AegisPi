@@ -27,17 +27,22 @@ import {
   completePendingDeliveryCheckpointInTx,
   completeTask,
   completeTaskInTx,
+  completeInboxIfDone,
   heartbeat,
   workerStep,
   reapExpiredLeases,
+  retryTask,
+  updateScopeTurnCounts,
   deliveryAckCheckpoint,
   deliveryDone,
+  deliveryReturnedInTx,
 } from "./scheduler.mjs";
+import { openScopeSession, assertSessionFresh } from "./memory.mjs";
+import { writeAudit, authorizationRevision } from "./audit.mjs";
 import { processDueTimers, cancelSatisfiedFollowUpReminders } from "./timers.mjs";
 import { expireApprovals } from "./approvals.mjs";
 import { expireStaleNotifications, dueNotifications } from "./outbox.mjs";
 import { insertObjectRow } from "./objects.mjs";
-import { writeAudit } from "./audit.mjs";
 import { createFakeRemote } from "./testing/fake-remote.mjs";
 import { createHttpUpstream } from "./upstream-http.mjs";
 import { createTelegramSendTransport } from "./telegram-send.mjs";
@@ -252,7 +257,18 @@ export async function main(argv = process.argv.slice(2)) {
     config.telegram?.allowRealPull === true;
   let lastPullAt = 0;
   const scopeTurnCounts = new Map();
-  let lastClaimedScope = null;
+  // The merged model-input byte bound (Unit 5.2 batch semantics): the
+  // ROUTER enforces it per attach, and the merge below re-checks it as
+  // defense in depth. Both take the tighter of config.model.maxInputBytes
+  // and the 128 KiB hard ceiling — a null config value means "no
+  // deployment override", never "unbounded".
+  const HARD_INPUT_CAP_BYTES = 128 * 1024;
+  const mergedInputByteCap = Math.min(
+    Number.isInteger(config.model.maxInputBytes) && config.model.maxInputBytes > 0
+      ? config.model.maxInputBytes
+      : HARD_INPUT_CAP_BYTES,
+    HARD_INPUT_CAP_BYTES,
+  );
 
   function parseImageLauncher(flagPrefix, label, createFn, { reapOnStart = false } = {}) {
     const flag = argv.find((a) => a.startsWith(flagPrefix));
@@ -387,6 +403,22 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
+  // Every OPEN delivery of a failed task RETURNS (PENDING/ACKED ->
+  // RETURNED, inbox closes if terminal) — a failed run never marks its
+  // unread events DONE, and never strands them either. Caller owns the
+  // transaction.
+  function returnOpenDeliveries(db, { taskId, now, reason }) {
+    const open = db
+      .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state IN ('PENDING','ACKED')")
+      .all(taskId);
+    for (const d of open) {
+      try {
+        deliveryReturnedInTx(db, { eventId: d.event_id, taskId, now, reason });
+      } catch {}
+    }
+    return open.length;
+  }
+
   // Watermark level changes stream an alert once per transition; the backup
   // runs once per window-day when the manifest key is configured.
   let lastDiskLevel = diskNow.level;
@@ -471,6 +503,11 @@ export async function main(argv = process.argv.slice(2)) {
           deadlineAt: now + config.budget.taskMaxWallClockMs,
           skillSetHash: currentSkillSetHash(db, { scopeId: pendingScopeId }),
           dispatchKeyFor: dispatchKeyForInbox,
+          // Byte-bounded, structured-exclusive merging: every attach
+          // re-validates grants, closure, thread, task state and the
+          // input cap; refusals stay PENDING and form their own task.
+          stateDir: dataDir,
+          inputByteCap: mergedInputByteCap,
         });
       } catch (e) {
         // One scope's dispatch failure (e.g. a CP4-blocked cross-scope
@@ -497,14 +534,24 @@ export async function main(argv = process.argv.slice(2)) {
         scopeConsecutiveTurnLimit: config.router?.scopeConsecutiveTurnLimit ?? null,
       });
     const trackTurn = (claimed) => {
-      if (!claimed) return;
-      if (claimed.scopeId === lastClaimedScope) {
-        scopeTurnCounts.set(claimed.scopeId, (scopeTurnCounts.get(claimed.scopeId) ?? 0) + 1);
-      } else {
-        scopeTurnCounts.clear();
-        scopeTurnCounts.set(claimed.scopeId, 1);
-        lastClaimedScope = claimed.scopeId;
-      }
+      // Per-scope consecutive-turn counting, never a whole-map wipe: two
+      // chatty groups alternating claims accumulate independently, so the
+      // saturated-filter eventually steps BOTH aside and the low-priority
+      // lane finally claims (the old scope-switch clear() let them reset
+      // each other forever — starvation).
+      const eligibleScopeIds = new Set(
+        db
+          .prepare(
+            `SELECT DISTINCT t.scope_id FROM tasks t JOIN scopes s ON s.id=t.scope_id
+             WHERE t.state IN ('QUEUED','RETRY_WAIT') AND t.available_at<=? AND s.paused=0 AND s.epoch=t.scope_epoch`,
+          )
+          .all(now)
+          .map((r) => r.scope_id),
+      );
+      updateScopeTurnCounts(scopeTurnCounts, {
+        claimedScopeId: claimed ? claimed.scopeId : null,
+        eligibleScopeIds,
+      });
     };
     if (fakeUpstream) {
       claim = claimWithFairness();
@@ -607,7 +654,7 @@ export async function main(argv = process.argv.slice(2)) {
         return false;
       };
       const awaitingModel = db
-        .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
+        .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELLED','DEAD')")
         .get().c;
       if (!canRunModel && !(canRunModelFreeTriage && peekNextClaimableIsTriage())) {
         if (awaitingModel > 0) {
@@ -621,19 +668,47 @@ export async function main(argv = process.argv.slice(2)) {
           trackTurn(claim);
           if (claim) {
             heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
-            const taskRow = db.prepare("SELECT scope_id, deadline_at FROM tasks WHERE id=?").get(claim.taskId);
+            const taskRow = db
+              .prepare("SELECT scope_id, principal_id, skill_set_hash, deadline_at FROM tasks WHERE id=?")
+              .get(claim.taskId);
             const scopeRow = db.prepare("SELECT domain_key FROM scopes WHERE id=?").get(taskRow.scope_id);
+            // Session anchor (CP2 freshness, Unit 5.1): the attempt freezes
+            // the scope's L0 + the CURRENT authorization_revision the
+            // moment it claims. A principal with a live read grant gets a
+            // real session (attempts.session_id; model-requests re-checks
+            // assertSessionFresh before the call is issued). Without a
+            // grant the run is memory-less and the anchor is the captured
+            // revision, re-compared before launch — either way a mid-flight
+            // revoke aborts the attempt instead of feeding a stale context.
+            let sessionAnchor = null;
+            try {
+              const session = openScopeSession(db, dataDir, {
+                sessionId: `ses:task:${claim.taskId}:${claim.attemptNo}`,
+                scopeId: taskRow.scope_id,
+                principalId: taskRow.principal_id,
+                skillSetHash: taskRow.skill_set_hash,
+                now,
+              });
+              withTx(db, () => {
+                db.prepare("UPDATE attempts SET session_id=? WHERE id=?").run(session.sessionId, claim.attemptId);
+              });
+              sessionAnchor = { sessionId: session.sessionId };
+            } catch {
+              sessionAnchor = { revision: authorizationRevision(db) };
+            }
             let callInput = null;
             // Unit 5.2 batch semantics: the model input joins EVERY pending
             // delivery's payload (a batch-merged task carries up to 8
-            // same-scope events), bounded so a merged batch can never blow
-            // the model's input budget. Single-delivery tasks — every
-            // pre-5.2 suite — read exactly as before.
-            const MAX_MERGED_INPUT_BYTES = 65536;
+            // same-scope events), byte-accounted against the SAME cap the
+            // router enforced at attach time — whole payloads only, never a
+            // mid-rune slice, so an unread event is never half-included.
+            // Single-delivery tasks — every pre-5.2 suite — read exactly
+            // as before.
             const pendingDeliveries = db
               .prepare("SELECT event_id FROM event_deliveries WHERE task_id=? AND state='PENDING' ORDER BY rowid ASC")
               .all(claim.taskId);
             const payloadTexts = [];
+            let mergedBytes = 0;
             for (const delivery of pendingDeliveries) {
               const inboxRow = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(delivery.event_id);
               const obj = inboxRow
@@ -642,17 +717,52 @@ export async function main(argv = process.argv.slice(2)) {
               const payloadPath = obj?.storage_ref ? join(dataDir, ...obj.storage_ref.split("/")) : null;
               if (payloadPath && existsSync(payloadPath)) {
                 try {
-                  payloadTexts.push(readFileSync(payloadPath, "utf8"));
+                  const text = readFileSync(payloadPath, "utf8");
+                  const bytes = Buffer.byteLength(text, "utf8");
+                  if (payloadTexts.length > 0 && mergedBytes + bytes > mergedInputByteCap) break;
+                  payloadTexts.push(text);
+                  mergedBytes += bytes;
                 } catch {}
               }
             }
             if (payloadTexts.length === 1) {
               callInput = payloadTexts[0];
             } else if (payloadTexts.length > 1) {
-              callInput = payloadTexts.join("\n").slice(0, MAX_MERGED_INPUT_BYTES);
+              callInput = payloadTexts.join("\n");
             }
             let launchInput = callInput;
             let skipLaunch = false;
+            // A single payload alone over the cap can never be launched:
+            // the task fails infra_error and its delivery dies visibly
+            // (never a silent half-truncation that would mark an unread
+            // event DONE).
+            if (callInput !== null && Buffer.byteLength(callInput, "utf8") > mergedInputByteCap) {
+              writeAudit(db, {
+                code: "event_payload_over_input_cap",
+                taskId: claim.taskId,
+                details: {
+                  bytes: Buffer.byteLength(callInput, "utf8"),
+                  cap: mergedInputByteCap,
+                  deliveries: pendingDeliveries.length,
+                },
+                now: Date.now(),
+              });
+              withTx(db, () => {
+                completeTaskInTx(db, {
+                  ...claim,
+                  now: Date.now(),
+                  resultClass: "infra_error",
+                  errorCode: "event_payload_over_input_cap",
+                });
+                for (const delivery of pendingDeliveries) {
+                  db.prepare(
+                    "UPDATE event_deliveries SET state='DEAD', updated_at=? WHERE event_id=? AND task_id=? AND state IN ('PENDING','ACKED')",
+                  ).run(Date.now(), delivery.event_id, claim.taskId);
+                  completeInboxIfDone(db, { eventId: delivery.event_id, now: Date.now() });
+                }
+              });
+              skipLaunch = true;
+            }
             const parsedTriage = parseRepoTriagePayload(callInput);
             if (parsedTriage.isTriage) {
               excludeTriageTaskIds.add(claim.taskId);
@@ -681,13 +791,10 @@ export async function main(argv = process.argv.slice(2)) {
                       resultClass: "infra_error",
                       errorCode: "triage_unexpected_error",
                     });
-                    completePendingDeliveryCheckpointInTx(db, {
-                      taskId: claim.taskId,
-                      scopeId: taskRow.scope_id,
-                      content: "repo_triage failed unexpectedly",
-                      insertObjectRowFn: insertObjectRow,
-                      now: Date.now(),
-                    });
+                    // A failed triage never marks its events DONE (they
+                    // were not processed): every open delivery RETURNS so
+                    // the honest state is visible and re-routable.
+                    returnOpenDeliveries(db, { taskId: claim.taskId, now: Date.now(), reason: "triage_unexpected_error" });
                   });
                 } catch {}
               }
@@ -738,6 +845,12 @@ export async function main(argv = process.argv.slice(2)) {
                     resultObjectId: acqOut.reportObjectId ?? null,
                     errorCode: acqOut.code,
                   });
+                  // A failed acquisition never strands its deliveries:
+                  // every OPEN delivery RETURNS, visibly, instead of
+                  // lingering PENDING on a terminal task.
+                  withTx(db, () => {
+                    returnOpenDeliveries(db, { taskId: claim.taskId, now: Date.now(), reason: acqOut.code });
+                  });
                   skipLaunch = true;
                 } else {
                   launchInput = acqOut.promptText;
@@ -745,34 +858,66 @@ export async function main(argv = process.argv.slice(2)) {
               }
             }
             if (!skipLaunch) {
-              const modelKey = config.model.provider && config.model.modelId
-                ? `${config.model.provider}/${config.model.modelId}`
-                : "deepseek/deepseek-flash";
-              const launched = agentLauncher.launchAttempt({
-                taskId: claim.taskId,
-                attemptId: claim.attemptId,
-                attemptNo: claim.attemptNo,
-                fence: claim.fence,
-                scopeDomainKey: scopeRow.domain_key,
-                modelRequest: {
-                  purpose: "worker",
-                  modelId: modelKey,
-                  messages: [{ role: "user", content: launchInput ?? `task ${claim.taskId}` }],
-                },
-                now,
-              });
-              try {
-                heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
-              } catch {}
-              activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
-                ...launched,
-                taskId: claim.taskId,
-                attemptId: claim.attemptId,
-                attemptNo: claim.attemptNo,
-                fence: claim.fence,
-                leaseOwner: claim.leaseOwner,
-                deadlineAt: taskRow.deadline_at,
-              });
+              // CP2 freshness gate before launch: a revoke since the claim
+              // (or since the acquisition await above) invalidates the
+              // attempt's anchor — the task requeues under the new
+              // authorization revision instead of running on a stale
+              // context ("please ignore" notes are not a mechanism).
+              const anchorFresh = sessionAnchor.sessionId !== undefined
+                ? assertSessionFresh(db, { sessionId: sessionAnchor.sessionId }).fresh
+                : authorizationRevision(db) === sessionAnchor.revision;
+              if (!anchorFresh) {
+                writeAudit(db, {
+                  code: "attempt_abandoned_authorization_changed",
+                  taskId: claim.taskId,
+                  details: {
+                    attempt_id: claim.attemptId,
+                    session_id: sessionAnchor.sessionId ?? null,
+                    anchor_revision: sessionAnchor.revision ?? null,
+                  },
+                  now: Date.now(),
+                });
+                try {
+                  retryTask(db, {
+                    ...claim,
+                    now: Date.now(),
+                    backoffMs: 1000,
+                    errorCode: "authorization_revision_changed_midflight",
+                  });
+                } catch (retryErr) {
+                  console.error(`worker: stale attempt ${claim.attemptId} could not requeue: ${retryErr.message}`);
+                }
+                skipLaunch = true;
+              } else {
+                const modelKey = config.model.provider && config.model.modelId
+                  ? `${config.model.provider}/${config.model.modelId}`
+                  : "deepseek/deepseek-flash";
+                const launched = agentLauncher.launchAttempt({
+                  taskId: claim.taskId,
+                  attemptId: claim.attemptId,
+                  attemptNo: claim.attemptNo,
+                  fence: claim.fence,
+                  scopeDomainKey: scopeRow.domain_key,
+                  modelRequest: {
+                    purpose: "worker",
+                    modelId: modelKey,
+                    messages: [{ role: "user", content: launchInput ?? `task ${claim.taskId}` }],
+                  },
+                  now,
+                });
+                try {
+                  heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
+                } catch {}
+                activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
+                  ...launched,
+                  taskId: claim.taskId,
+                  attemptId: claim.attemptId,
+                  attemptNo: claim.attemptNo,
+                  fence: claim.fence,
+                  leaseOwner: claim.leaseOwner,
+                  deadlineAt: taskRow.deadline_at,
+                });
+              }
             }
           }
         }
@@ -799,7 +944,7 @@ export async function main(argv = process.argv.slice(2)) {
       // No model path is configured: nothing is claimed, nothing settles.
       // Say so on the record instead of pretending the loop is production.
       const awaiting = db
-        .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','LOST')")
+        .prepare("SELECT count(*) c FROM tasks WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELLED','DEAD')")
         .get().c;
       if (awaiting > 0) {
         console.error(`worker: ${awaiting} task(s) await an execution path; no model baseUrl is configured (model.baseUrl is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
@@ -835,11 +980,6 @@ export async function main(argv = process.argv.slice(2)) {
           const precondition = adapterUpstream ? headPrecondition(adapterUpstream, row) : () => true;
           dispatchEffect(db, adapterUpstream, {
             effectId: e.id, now, precondition,
-            // CP4 disclosure record (Unit 5.2): the deployment's
-            // authorized recipients are the owner's explicit cross-scope
-            // disclosure decisions; everything else needs the system_state
-            // disclosure allowlist or stays same-scope.
-            authorizedRecipients: config.adapters.allowedRecipients,
           });
         } catch (err) {
           if (

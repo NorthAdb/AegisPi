@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-22T07:12:17.491Z",
+  "generatedAt": "2026-11-22T09:43:18.473Z",
   "nodeVersion": "v22.23.5",
   "suite": "cross-channel",
   "label": "Phase 5 Unit 5.2 — Telegram 路线 1 拉取入站与跨通道 9 环节 Canary 隔离",
   "counts": {
-    "pass": 18,
+    "pass": 23,
     "fail": 0
   },
   "results": [
@@ -51,7 +51,7 @@
     {
       "name": "control-stop-executes-deterministically-and-instantly",
       "status": "PASS",
-      "detail": "/stop cancelled the DM task (CANCELLED) in 186ms with zero model requests while the group lane kept its RUNNING slot (RUNNING)"
+      "detail": "/stop cancelled the DM task (CANCELLED) in 145ms with zero model requests while the group lane kept its RUNNING slot (RUNNING)"
     },
     {
       "name": "control-refuses-unauthorized-principal",
@@ -71,7 +71,7 @@
     {
       "name": "canary-link9-dispatcher-blocks-cross-group-send",
       "status": "PASS",
-      "detail": "the DM-canary summary approved toward group A dies at dispatch (state=DEAD, audits=1): CP4 blocked: effect efx:notify%3Adm%253atelegram%253a6101%3Acanary-leak-probe may not flow to its target — cross-scope d"
+      "detail": "the DM-canary summary toward group A is blocked at proposal (blocked=true) AND killed at dispatch even when adapters.allowedRecipients includes the group (state=DEAD, audits=2): CP4 blocked: effect efx:notify%3Adm%253atelegram%253a6101%3Acanary-leak-probe may not flow to its target — cross-scope d"
     },
     {
       "name": "canary-link9-adapter-allowlist-blocks-group-zero-bytes",
@@ -97,6 +97,31 @@
       "name": "fairness-consecutive-turn-limit-steps-aside",
       "status": "PASS",
       "detail": "with group B holding 3 consecutive turns at the limit, the equal-priority claim goes to the repo lane (repo)"
+    },
+    {
+      "name": "rework-batch-merge-rejects-ungranted-cross-thread-oversized-and-structured",
+      "status": "PASS",
+      "detail": "batch slice(1) refused all 4 ineligible events (stranger, cross-thread, 45KB CJK > 32KB cap, structured repo_triage); only anchor attached (1)"
+    },
+    {
+      "name": "rework-direct-deliver-refuses-waiting-approval-task",
+      "status": "PASS",
+      "detail": "directDeliverToThreadTask refused WAITING_APPROVAL task (no attachable live thread task (task is WAITING_APPROVAL; a new task takes the event))"
+    },
+    {
+      "name": "rework-model-failure-returns-all-batch-deliveries",
+      "status": "PASS",
+      "detail": "failed batch task returned ALL 2 deliveries (RETURNED,RETURNED) with zero stranded PENDING"
+    },
+    {
+      "name": "rework-pull-gate-proxy-idempotent-control-and-refused-closure",
+      "status": "PASS",
+      "detail": "loopback allowRealPull=false skipped (calls=0); env proxy resolved (127.0.0.1:7897); duplicate /pause did not re-pause (paused=0); refused /stop closed (DONE)"
+    },
+    {
+      "name": "rework-fairness-no-dual-group-starvation-and-stop-cleans-deliveries",
+      "status": "PASS",
+      "detail": "low-priority repo claimed in 9 turns despite dual-group saturation; /stop without active subscription closed delivery (DEAD) & inbox (DONE)"
     }
   ],
   "dataSources": "本地环回 Bot-API 夹具与本地 CONNECT 代理（零真实外联、零模型调用、零真实 Telegram）"

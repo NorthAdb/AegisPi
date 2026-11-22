@@ -29,6 +29,28 @@ const RESULT_CLASSES = new Set([
   "affected", "unaffected", "unknown", "infra_error", "not_applicable",
 ]);
 
+/**
+ * The per-scope consecutive-turn counter the daemon's fairness limiter
+ * reads (claimNextTask's scopeTurnState). The update NEVER wipes other
+ * scopes' counters: two chatty groups alternating claims must not reset
+ * each other's accumulated turns, or the saturated-filter never trips and
+ * a low-priority lane starves. A scope that had no eligible work this
+ * round cools down by one instead (resting lanes return to the front of
+ * the line over time).
+ */
+export function updateScopeTurnCounts(turnCounts, { claimedScopeId = null, eligibleScopeIds = new Set() } = {}) {
+  if (typeof claimedScopeId === "string") {
+    turnCounts.set(claimedScopeId, (turnCounts.get(claimedScopeId) ?? 0) + 1);
+  }
+  for (const [scopeId, count] of turnCounts) {
+    if (scopeId === claimedScopeId) continue;
+    if (eligibleScopeIds.has(scopeId)) continue;
+    if (count <= 1) turnCounts.delete(scopeId);
+    else turnCounts.set(scopeId, count - 1);
+  }
+  return turnCounts;
+}
+
 export function claimNextTask(db, {
   now,
   leaseMs,

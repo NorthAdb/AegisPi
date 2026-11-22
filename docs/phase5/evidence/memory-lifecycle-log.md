@@ -1,6 +1,6 @@
 # Phase 5 Unit 5.1 — 分层记忆生命周期（L0–L3 / 13 类注入 / 墓碑遗忘 / 技能与 Spill）
 
-生成：2026-11-22T07:12:01.879Z；Node v22.23.5；suite `memory-lifecycle`。
+生成：2026-11-22T09:42:53.864Z；Node v22.23.5；suite `memory-lifecycle`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -22,7 +22,7 @@
 | PASS | identity-category-facts-never-activatable | identity-category candidate stays candidate and activation is refused regardless of who asks |
 | PASS | revoke-session-fresh-before-revocation | pre-revoke: session fresh and recall sees the granted object (1 row) |
 | PASS | revoke-stale-session-detected-before-next-request | after revoke the session is stale (rev 1 < 2) and must be abandoned |
-| PASS | revoke-clean-context-excludes-object | the rebuilt clean session is fresh; recall and L1 no longer see the revoked object (0 rows, 0 graph objects) |
+| PASS | revoke-clean-context-excludes-object | the revoked principal cannot re-open a session (refused); recall and L1 no longer see the revoked object (0 rows, 0 graph objects) |
 | PASS | forget-fixture-has-fts-export-summary-spill | source fact live in FTS (rows=1), spill captured=true, summary=obj:scp:dm%3…, export=obj:scp:dm%3… |
 | PASS | forget-pre-forget-consistency-backup-taken | consistency backup recorded before the forget (image 339968 bytes, 0 deletion-ledger entries — nothing was forgotten yet) |
 | PASS | forget-phase1-cascade-deletes-derived-closure | source + export + summary + spill all status=deleted (deleted,deleted,deleted,deleted); every FTS row for them is gone (5 objects) |
@@ -38,7 +38,20 @@
 | PASS | skills-progressive-disclosure-levels | level 2 body reads behind the ACL (owner yes, stranger denied); level 3 exposes the reviewed hash only, never script text |
 | PASS | spill-50kb-boundary-and-redaction | under-bound output is not spilled; the >50KB output becomes a spill object with a bounded view and the credential shape redacted on disk |
 | PASS | spill-paged-read-acl-gated | cross-scope principal requesting the spillObjectId is denied; the owner reads 10 paged lines, never a host path |
+| PASS | spill-json-quoted-secret-redacted-parsably | the JSON member secret collapses to a quoted placeholder (parseable=true), the raw value never reaches disk |
+| PASS | spill-paged-read-refuses-expired-and-quarantined | an expired row (denied=true) and a quarantined candidate summary (denied=true) never serve through the paged view |
+| PASS | skills-frozen-hash-locks-version-and-review-marks | the hash-frozen task reads v1 while the live set serves v2; the promoted script reports humanReviewed=true and an unauthorized principal is denied |
+| PASS | closure-fact-inherits-parent-scopes-and-stays-out-of-single-scope-l0 | the cross-derived fact carries closure {dm,group} (2 scopes) and the single-scope group L0 never renders it |
+| PASS | objects-reinsert-merges-wider-closure-and-parent-edges | re-inserting identical content merges the new scope (scp:dm%3Aweb%3Acf,scp:group%3Aweb%3Acf) and the parent edge instead of silently dropping them |
+| PASS | objects-tombstoned-content-never-fake-reactivates | re-proposing forgotten content refuses (refused), the row stays deleted, the refusal is audited (1) |
+| PASS | cp4-every-target-shape-refused-at-proposal | group / bare / dm / legacy-dm / repo-write targets with a cross-scope closure all refuse at proposal with durable audits (all refused) |
+| PASS | cp4-same-scope-target-with-external-closure-blocked | a group task whose payload cites dm content cannot deliver even to its OWN group (CP4 blocked at proposal: im.notify to "group:telegram:-100777" — cross-scope disclosure to) |
+| PASS | cp4-closure-depth-exceeds-bound-fails-closed | a 9-deep ancestor chain refuses instead of silently dropping the ancestors (object obj:scp:dm%3Aweb%3Achain8:75f1f8be488043d3aa0e727f18835f74ce2f8288c1c9b3c) |
+| PASS | cp4-dispatch-gate-re-checks-approved-effect-after-allowlist-removal | removing the disclosure record kills the already-approved effect at dispatch (state=DEAD, one new block audit) |
+| PASS | manifest-read-picks-higher-verified-seq | a stale main (seq 1) with a verified .bak (seq 2) resolves to the .bak chain (manifest.bak, seq 2) |
+| PASS | manifest-corrupt-bak-missing-main-refuses | dbSeq 0 with a corrupt .bak and no main is a damaged deletion record, not a fresh install (deletion manifest unreadable while deletions may exist: manifest: missing; manifest.bak: manifest.bak is not valid JSON) |
+| PASS | recovery-replays-manifest-before-object-references-no-deadlock | the pre-forget image over deleted files opens clean (mode=open, fact=deleted, fts=0) — the manifest step repaired the image before the reference scan could deadlock it |
 
-合计：34 PASS / 0 FAIL。
+合计：47 PASS / 0 FAIL。
 
 数据源：本地 SQLite + 本地文件系统与设计包 schema.sql/recall.sql（零真实外联、零模型调用）。

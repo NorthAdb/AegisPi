@@ -38,6 +38,7 @@ import {
   DeletionManifestStale,
   verifyDeletionManifestInvariant,
   replayDeletionManifestInTx,
+  physicallyCleanDeletedObjects,
 } from "../deletion-manifest.mjs";
 
 export const DELETION_LEDGER_STATE_KEY = "deletion_ledger_object";
@@ -312,30 +313,13 @@ export function restoreFromBackup({
     db.close();
     throw new BackupError(`restored schema does not match the pinned canonical DDL: ${schema.reason}`);
   }
-  // 04 section 5: generation lives in system_state and MUST advance on a
-  // backup restore — clients reconnect with a reset, never replay a stale
-  // stream against restored state.
-  const currentGen = Number(
-    db.prepare("SELECT value FROM system_state WHERE key='stream_generation'").get()?.value ?? "1",
-  );
-  db.prepare("INSERT INTO system_state(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run("stream_generation", String(currentGen + 1));
-  // Apply the deletion ledger: entries the owner forgot before the backup
-  // must not resurrect from it.
-  const removed = [];
-  for (const entry of manifest.deletionLedger ?? []) {
-    const objectId = entry.object_id;
-    const gone = db.prepare("SELECT count(*) c FROM objects WHERE id=?").get(objectId).c;
-    if (gone === 1) {
-      db.prepare("UPDATE objects SET status='deleted', deleted_at=? WHERE id=?").run(now, objectId);
-      removed.push(objectId);
-    }
-  }
   // Unit 5.1: the protected deletion manifest is INDEPENDENT of this
-  // backup, so it can be newer than the restored image. Verify it against
-  // the restored DB and replay every tombstone the image has not seen.
-  // A missing/corrupt/stale manifest refuses the restore outright —
-  // execution cannot open on top of potentially resurrected data.
+  // backup, so it can be newer than the restored image. The manifest gate
+  // runs BEFORE any restored-state write (stream_generation, deletion
+  // ledger, tombstone replay): a missing/corrupt/stale manifest refuses
+  // the restore outright — execution can never open on top of potentially
+  // resurrected data, and a refused restore must not leave the image
+  // half-mutated either.
   let manifestReplay = null;
   if (stateDir !== null) {
     const invariant = verifyDeletionManifestInvariant(db, stateDir);
@@ -349,6 +333,36 @@ export function restoreFromBackup({
       manifestReplay = { applied: 0, latestSeq: invariant.fileLatestSeq };
     }
   }
+  // 04 section 5: generation lives in system_state and MUST advance on a
+  // backup restore — clients reconnect with a reset, never replay a stale
+  // stream against restored state.
+  const currentGen = Number(
+    db.prepare("SELECT value FROM system_state WHERE key='stream_generation'").get()?.value ?? "1",
+  );
+  db.prepare("INSERT INTO system_state(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    .run("stream_generation", String(currentGen + 1));
+  // Apply the deletion ledger: entries the owner forgot before the backup
+  // must not resurrect from it. The FTS index row dies with the row — the
+  // schema triggers clean fts_messages_lex/tri, but session_messages_index
+  // is a plain table and is dropped explicitly.
+  const removed = [];
+  for (const entry of manifest.deletionLedger ?? []) {
+    const objectId = entry.object_id;
+    const gone = db.prepare("SELECT count(*) c FROM objects WHERE id=?").get(objectId).c;
+    if (gone === 1) {
+      db.prepare("UPDATE objects SET status='deleted', deleted_at=? WHERE id=?").run(now, objectId);
+      db.prepare("DELETE FROM session_messages_index WHERE object_id=?").run(objectId);
+      removed.push(objectId);
+    }
+  }
+  // The replay and the ledger can both leave tombstoned rows whose blobs
+  // and L0 export files still sit on disk (the pre-forget image never ran
+  // phase-2 forget against THIS stateDir's files): sweep them, guarded
+  // against content shared with live rows.
+  let cleanup = null;
+  if (stateDir !== null) {
+    cleanup = physicallyCleanDeletedObjects(db, stateDir);
+  }
   // What did we actually get back? The Phase 3 acceptance cares about
   // pending-approval, ready-to-send and timer work surviving.
   const restored = {
@@ -358,7 +372,7 @@ export function restoreFromBackup({
     queuedInbox: db.prepare("SELECT count(*) c FROM inbox WHERE state='PENDING' AND verdict='ADMIT'").get().c,
   };
   db.close();
-  return { restored, manifest, appliedDeletions: removed, integrity: integrity.detail, manifestReplay };
+  return { restored, manifest, appliedDeletions: removed, integrity: integrity.detail, manifestReplay, cleanup };
 }
 
 // ---------------------------------------------------------------------------

@@ -46,7 +46,7 @@ flowchart LR
 
 | 单元 | 核心交付内容 | 许可级别 | 主验收脚本 / 门禁 |
 | --- | --- | --- | --- |
-| **单元 5.1** | 分域 L0 导出（`MEMORY.md`/`USER.md`）、L1 引用图展开、L2 双 FTS 召回 + 500-token 有界摘要、L3 Dreaming 候选/冲突、13 类注入扫描、两阶段遗忘 + 墓碑删除清单（备份恢复重放）、技能三级渐进披露与 50KB Spill | 许可 1（纯离线/本地容器） | `npm run test:memory-lifecycle`（及 `test:restore`、`test:acl` 回归） |
+| **单元 5.1** | 分域 L0 导出（`MEMORY.md`/`USER.md`）、L1 引用图展开、L2 双 FTS 召回 + 500-token 有界摘要、L3 候选/冲突/过期数据结构（编排循环经 `D-95` 转入第 2 批单元 5.4/5.5）、13 类注入扫描、两阶段遗忘 + 墓碑删除清单（备份恢复重放）、技能三级渐进披露与 50KB Spill | 许可 1（纯离线/本地容器） | `npm run test:memory-lifecycle`（及 `test:restore`、`test:acl` 回归） |
 | **单元 5.2** | Telegram 路线 1（`getUpdates` 代理长轮询 + 持久化 `offset` 游标）、按域单飞 Router + 优先级 Aging + `/stop` 控制旁路、跨私聊/群A/群B/多仓库/service 全派生链 9 环节 Canary 隔离 | 许可 1（本地环回夹具） | `npm run test:cross-channel`（及 `test:ingress-telegram` 回归） |
 | **单元 5.3** | 场景一（邮件分诊与草稿先行）：IMAP/TLS 只读拉取 + SMTP/TLS 提交子进程、草稿审批卡（To/Cc/Bcc/正文/附件 SHA-256）、4 小时持久停车释放容器、草稿在线编辑换新卡、`AT_MOST_ONCE` 发件箱 `UNKNOWN` 人工对账 | 许可 1（本地 TLS 邮件夹具） | `npm run eval:scenarios`（Scenario 1 邮件矩阵） |
 | **单元 5.4** | 场景二（晨间简报与条件跟进 + 日历）：带时区/DST/错过周期合并的条件 Timer、回信与到期竞争 + 提交前二次拦截过时提醒、撤权联动取消 Timer、CalDAV 日历只读简报与 `If-Match: <ETag>` 版本预条件写入审批 | 许可 1（本地 CalDAV 夹具） | `npm run eval:scenarios`（Scenario 1 + 2 全矩阵） |
@@ -72,7 +72,7 @@ flowchart LR
   - 模型抽取只允许写入 `objects(kind='memory_fact', status='candidate')`，必填 `source_uri`、`source_actor`、`observed_at`、`confidence`、`expires_at`、`version`、`supersedes_id` 与 `metadata_json`（事实键 `factKey` 与确认依据）。
   - **硬禁区**：涉及身份、收件人、支付、审批豁免或权限变更的候选条目**一律禁止自动激活**，且权限变更绝不走记忆接口。
   - 同一 `(scope_id, factKey)` 出现相斥值时，将新旧候选标为 `status='conflicted'` 并保留双版本供主人裁决，绝不按“最后一次文本”静默覆盖。
-  - L3 Dreaming 作为受静默时段与独立预算约束的低频整理流程，仅提议候选合并、冲突告警与过期归档，不直接改授权或晋升技能。
+  - **L3 Dreaming（`D-95` 范围切分）**：单元 5.1 仅落地 `candidate`/`conflicted`/`expires_at` 数据结构与提议/激活/冲突原语；**L3 Dreaming 编排调度循环**（静默时段触发、独立预算预留、候选合并提议、冲突告警生成、定期过期归档）正式转入**第 2 批单元 5.4 / 5.5**（与 `quietHours`、Timer 调度及记忆治理台合并落地）。
 - **13 类纵深注入扫描器**（新增 `apps/daemon/src/memory-scanner.mjs`）：
   - 对进入候选记忆、L0、技能描述与外部摘要的文本执行 13 类确定性扫描：①零宽字符、②BiDi 控制符、③Unicode Tags、④ANSI 转义序列、⑤隐藏 HTML/注释、⑥角色边界伪造标签（如伪造 `<system>`/`RequestScope`）、⑦覆盖指令祈使句、⑧宿主秘密路径、⑨外发命令、⑩超长 Base64/Hex 编码块、⑪网关/代理改写指令、⑫审批豁免声称、⑬容量超限。
   - 命中项不损坏原始证据对象，但强制阻断其进入 `active` L0，并打上 `quarantined_reasons` 标记交控制台人工核验。
@@ -111,7 +111,7 @@ flowchart LR
   - **同域线程直投防扩权**：复用已有 `(scope_id, thread_key, task_id)` 订阅直投时，强制核验新事件 `principal_id` 权限、Task 状态、`scope_epoch` 与事件 ACL；新事件只能保持或收紧权限，话题切换或权限不兼容时另建新 Task。
 - **场景三：跨私聊 / 群聊 / 仓库全派生链 Canary 隔离（CP1–CP4 闭环）**：
   - **群内主人身份不继承私聊权限（CP1/CP2）**：哪怕发言人的 `principal_id` 是主人本人，只要当前任务运行在 `group:telegram:<groupId>` scope，其上下文装配、L0 读取、L1 图展开、L2 FTS 召回、spill 读取与 session fork 均**严格锁死在当前群 scope 的授权闭包内**，无法读取 `dm:telegram:<owner>` 或未授权 `repo` 的任何对象。
-  - **输出目标接收人反向校验（CP4）**：在生成 `outbox` / `effects` 以及适配器发送前，宿主不仅检查发起人读权限，还强制检查**目标接收域（如 `group:telegram:<groupA>` 或外部收件人）是否被允许接收载荷所引用的全部上游 `object_required_scopes`**；一旦检测到私密域派生物流向公开群或非授权群，立即在建行/提交前以 `cp4_recipient_scope_leak_blocked` 拒绝并记审计告警。
+  - **输出目标接收人反向校验（CP4）**：在提案建行（`proposeEffect`）与分发提交（`dispatchEffect`）前，宿主不仅检查发起人读权限，还强制追踪载荷完整上游 `object_required_scopes` 闭包（含 `object_edges` 全祖先，深度超限必须失败关闭而非静默放行），并反向校验**目标接收域（含 `group:telegram:<id>`、无前缀 `telegram:<id>`、第三方 `dm:*`、带跨私域闭包的同域目标，以及第 2 批 `mail.send`/`calendar.write`）**是否被允许接收全部闭包 scope；**`adapters.allowedRecipients` 仅代表传输可达白名单，绝不自动视作跨私域披露授权**（跨私域披露须经 `system_state.disclosure_allowlist` 人工审查记录或目标确为对全闭包均有活读权限的单人 `owner_dm`）；一旦检测到未授权披露，立即在建行/提交前以 `cp4_recipient_scope_leak_blocked` 拒绝并记审计告警。
 
 #### 2. 单元 5.2 验收标准（新增 `evals/phase5/cross-channel/run.mjs`，脚本名 `npm run test:cross-channel`）
 1. **Telegram Pull 游标持久化与崩溃幂等**：本地环回 Telegram 服务 + 本地 `CONNECT` 代理下，验证 `getUpdates` 正常拉取私聊与群聊消息、未授权 `chat_id` 零正文入库、模拟在 `receiveEvent` 提交后 / `telegram_pull_offset` 更新前崩溃重启，验证重启后重拉同批 `update_id` 零重复 Task、游标最终准确推进。
@@ -162,11 +162,13 @@ flowchart LR
   - **默认配置失败关闭（`defaults.json` 新增 `calendar` 节）**：`caldavUrl: null`、`allowRealCalendarRead: false`、`allowRealCalendarWrite: false`、`allowedCalendars: []`、`defaultTimezone: "Asia/Hong_Kong"`、`quietHours: { start: "23:00", end: "07:00", timezone: "Asia/Hong_Kong" }`。
   - **只读晨间简报**：按授权拉取当日/未来窗口 `.ics` 事件（解析 `DTSTART`/`DTEND`/`TZID`/`RRULE`/`SUMMARY`/`ATTENDEE` 及 `ETag`），结合待审草稿、待跟进 Timer 与未恢复基础设施告警生成结构化晨报；遵守静默时段（`outbox.not_before`）与合并取代（`supersedes_outbox_id`），但**持续基础设施故障绝不因静默规则被永久隐藏**。
   - **日历修改（一次审批 + `ETag` 预条件）**：日历新增/改期绝不作为只读简报自动执行，必须生成 `operation='calendar.write'` 的审批卡，并在 `action_json.expected_head` 中绑定读取时的远端 **`ETag`**；审批通过后宿主子进程发送 `PUT / DELETE` 时携带 HTTP 头 `If-Match: "<expected_head>"`。若远端日程已被外部并发修改（返回 `412 Precondition Failed` 或 `headPrecondition` 校验失配），立即走 `reproposeHeadChanged` 使旧卡失效并提示用户按最新日程重审，绝不静默覆盖冲突日程。
+- **L3 Dreaming 编排调度循环（由单元 5.1 经 `D-95` 正式转入本批）**：复用本单元的 IANA 时区 `quietHours` 调度与 `purpose='summary'` 独立预算预留，实现低频后台整理循环：自动扫描 `expires_at <= now` 记忆归档为 `status='expired'`、对同域相似 `candidate` 提议合并（不直接绕过人工激活，也不碰 `NEVER_ACTIVATABLE_CATEGORIES`）、对久未裁决的 `conflicted` 记忆生成治理告警（交单元 5.5 控制台处理）。
 
 #### 2. 单元 5.4 验收标准（纳入 `evals/phase5/scenarios/run.mjs`，脚本名 `npm run eval:scenarios`）
 1. **条件 Timer 过滤与竞争闭环**：验证机器人回执、主人自发消息不会误触发 `SATISFIED`；真联系人回信在 Timer 到期前到达 → Timer 转 `SATISFIED` 零提醒；Timer 到期先赢生成 `READY` effect、但发送前联系人回信到达 → `cancelSatisfiedFollowUpReminders` 撤销 `READY` effect 零外发；停机跨 5 个周期重启 → 仅触发 1 次且 `missed_count=4`；撤销邮件 scope 权限 → 关联跟进 Timer 立即 `CANCELLED`。
 2. **时区、夏令时与静默期合并**：验证 `Asia/Hong_Kong` 与 `America/New_York`（跨越 DST 跳变日）定时计算准确；静默期内多条普通简报自动通过 `supersedes_outbox_id` 合并，而持续 `infra_error` 故障按规则可见。
 3. **日历只读与 `ETag` 并发冲突拦截**：本地环回 CalDAV 服务下，验证晨报读取日程与冲突检测；提交日历修改审批后携带 `If-Match` 写入成功；模拟审批等待期间外部客户端修改了同一日程（`ETag` 改变），验证点击批准后提交被 `412 / head_changed` 拦截并转需重审，远端新日程零被覆盖。
+4. **L3 Dreaming 静默时段编排循环**：验证仅在 `quietHours` 内按独立预算执行，正确归档过期条目、提议候选合并并生成冲突告警，且绝不自动激活受禁类别、绝不跨 scope 混合数据。
 
 ---
 

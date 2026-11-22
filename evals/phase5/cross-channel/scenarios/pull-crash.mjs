@@ -25,6 +25,7 @@ const credentials = createCredentialService(db);
 const res = pullTelegramUpdates(db, ws, {
   telegram: {
     apiBase,
+    allowRealPull: true,
     allowedChatIds,
     pullBatchLimit: 20,
     pullTimeoutSeconds: 0,

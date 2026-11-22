@@ -167,7 +167,11 @@ function readWindowsLoopbackProxy() {
   }
 }
 
-function resolveTelegramProxy({ normalizedBase, allowRealSend, parsedExplicitProxy }) {
+// Shared by the SEND and PULL paths: an explicit proxy wins, a loopback
+// base never needs one, otherwise the env probes and (on Windows) the
+// WinInet loopback registry probe decide — fail closed on unreadable
+// configuration.
+export function resolveTelegramProxy({ normalizedBase, allowRealSend, parsedExplicitProxy }) {
   if (parsedExplicitProxy) {
     return { ok: true, proxy: { host: parsedExplicitProxy.host, port: parsedExplicitProxy.port } };
   }

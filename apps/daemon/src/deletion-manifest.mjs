@@ -9,6 +9,15 @@
 // scopeId, deletedAt} chained by SHA-256 (entryHash covers the entry plus
 // the previous entry's hash; the chain root is all zeros).
 //
+// Key boundary (single-host, stated honestly): the chain is tamper-EVIDENT
+// against truncation, rollback and partial corruption — the use cases the
+// crash matrix names — not tamper-PROOF against a local attacker who can
+// rewrite BOTH copies consistently. Sealing it with an HMAC key would only
+// move the trust to a key stored on the same disk; the manifest therefore
+// carries NO secret material (content-free entries) and the boundary is
+// the host account's filesystem access, the same boundary the plaintext
+// SQLite database and the object store already live behind.
+//
 // Crash ordering (06 section 9): the FILE is appended BEFORE the DB rows are
 // marked deleted. A crash between the two leaves the file AHEAD of the DB,
 // which startup recovery repairs by replaying; the DB can never be ahead of
@@ -97,14 +106,18 @@ function parseDoc(rawText, source) {
 }
 
 /**
- * Read and chain-verify the manifest. Prefers the main file; falls back to
- * the .bak copy only if the main file is missing or fails verification.
- * Never throws for a missing manifest when nothing was ever deleted
- * (dbSeq 0) — that is the honest fresh-install state.
+ * Read and chain-verify the manifest. BOTH copies are read when present:
+ * among the copies that verify, the one with the HIGHEST latestSeq wins
+ * (the pair is written together, so a divergence means corruption —
+ * taking the longer verified chain heals from the intact copy instead of
+ * silently regressing to the stale one). A fresh install (no deletions,
+ * NEITHER file present) is the honest fresh state; a MISSING main with a
+ * CORRUPT .bak is NOT fresh and never reports ok.
  */
 export function readDeletionManifest(stateDir) {
   const { main, backup } = manifestPaths(stateDir);
   const tried = [];
+  const candidates = [];
   for (const [path, source] of [[main, "manifest"], [backup, "manifest.bak"]]) {
     if (!existsSync(path)) {
       tried.push(`${source}: missing`);
@@ -112,11 +125,23 @@ export function readDeletionManifest(stateDir) {
     }
     const parsed = parseDoc(readFileSync(path, "utf8"), source);
     if (parsed.ok) {
-      return { ok: true, latestSeq: parsed.latestSeq, entries: parsed.doc.entries, source, repairedFromBackup: source === "manifest.bak" };
+      candidates.push({ latestSeq: parsed.latestSeq, entries: parsed.doc.entries, source });
+    } else {
+      tried.push(`${source}: ${parsed.reason}`);
     }
-    tried.push(`${source}: ${parsed.reason}`);
   }
-  return { ok: false, reason: tried.join("; "), entries: [], latestSeq: null };
+  if (candidates.length === 0) {
+    return { ok: false, reason: tried.join("; "), entries: [], latestSeq: null };
+  }
+  candidates.sort((a, b) => b.latestSeq - a.latestSeq);
+  const best = candidates[0];
+  return {
+    ok: true,
+    latestSeq: best.latestSeq,
+    entries: best.entries,
+    source: best.source,
+    repairedFromBackup: best.source === "manifest.bak",
+  };
 }
 
 function atomicWriteManifest(stateDir, doc) {
@@ -212,13 +237,16 @@ export function setDeletionSeqInTx(db, { latestSeq, now }) {
 /**
  * The startup/restore invariant: the file may be ahead of the DB (crash
  * between append and tx — repaired by replay) but must never be missing,
- * corrupt, or behind a non-zero DB sequence.
+ * corrupt, or behind a non-zero DB sequence. "Fresh" requires NEITHER
+ * copy to exist: a corrupt .bak with a missing main is a damaged
+ * deletion record, not a fresh install.
  */
 export function verifyDeletionManifestInvariant(db, stateDir) {
   const dbSeq = deletionSeqInDb(db);
+  const { main, backup } = manifestPaths(stateDir);
   const file = readDeletionManifest(stateDir);
   if (!file.ok) {
-    if (dbSeq === 0 && !existsSync(manifestPaths(stateDir).main)) {
+    if (dbSeq === 0 && !existsSync(main) && !existsSync(backup)) {
       // Nothing was ever forgotten and no manifest exists yet — honest
       // fresh state, not a violation.
       return { ok: true, dbSeq, fileLatestSeq: 0, pendingReplay: [], fresh: true };
@@ -278,4 +306,58 @@ export function removeTombstonedContentFile(stateDir, { storageRef }) {
   if (!existsSync(path)) return { removed: false, reason: "already gone" };
   unlinkSync(path);
   return { removed: true };
+}
+
+/**
+ * Physical cleanup sweep for tombstoned objects (Unit 5.1 rework, 06
+ * section 9): a crash between the deletion transaction and phase-2
+ * forget leaves blobs and L0 export files on disk; a restored backup
+ * re-flips rows the manifest already tombstoned. This sweep walks every
+ * status='deleted' object and removes what only dead rows still
+ * reference: a content blob goes only when NO non-deleted row shares the
+ * content-addressed file, and an export file only when no live export
+ * object still points at the same path. FTS rows ride the deletion
+ * transaction itself (and replayDeletionManifestInTx drops them again).
+ */
+export function physicallyCleanDeletedObjects(db, stateDir) {
+  const rows = db
+    .prepare("SELECT id, kind, storage_ref, metadata_json FROM objects WHERE status='deleted'")
+    .all();
+  let blobsRemoved = 0;
+  let exportFilesRemoved = 0;
+  const liveExportPaths = new Set();
+  for (const r of db
+    .prepare("SELECT metadata_json FROM objects WHERE kind IN ('l0_memory','l0_user','l0_freeze') AND status != 'deleted'")
+    .all()) {
+    try {
+      const meta = JSON.parse(r.metadata_json || "{}");
+      if (typeof meta.exportPath === "string") liveExportPaths.add(meta.exportPath);
+    } catch {}
+  }
+  const touchedExportPaths = new Set();
+  for (const row of rows) {
+    if (typeof row.storage_ref === "string" && !row.storage_ref.includes("\\") && !row.storage_ref.includes("..")) {
+      const stillLive = db
+        .prepare("SELECT count(*) c FROM objects WHERE storage_ref=? AND status != 'deleted'")
+        .get(row.storage_ref).c;
+      if (stillLive === 0 && removeTombstonedContentFile(stateDir, { storageRef: row.storage_ref }).removed) {
+        blobsRemoved += 1;
+      }
+    }
+    if (row.kind === "l0_memory" || row.kind === "l0_user" || row.kind === "l0_freeze") {
+      try {
+        const meta = JSON.parse(row.metadata_json || "{}");
+        if (typeof meta.exportPath === "string") touchedExportPaths.add(meta.exportPath);
+      } catch {}
+    }
+  }
+  for (const relPath of touchedExportPaths) {
+    if (liveExportPaths.has(relPath)) continue;
+    const path = join(stateDir, ...relPath.split("/"));
+    if (existsSync(path)) {
+      unlinkSync(path);
+      exportFilesRemoved += 1;
+    }
+  }
+  return { swept: rows.length, blobsRemoved, exportFilesRemoved };
 }

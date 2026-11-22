@@ -62,3 +62,27 @@
 - **Antigravity `pstack` 适配**：使用任何 `pstack` / `/poteto-mode` 技能前先读 `C:\Users\1\.gemini\config\plugins\pstack\docs\harness\antigravity.md`
 - **本机规范包（只读）**：`D:\AegisPi\aegis-pi-design-pack-v1.4.1`（`schema.sql` SHA-256 LF `ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995`）
 - **`.env` 与代理纪律**：`.env` 严禁打印或入库；除单元 5.6 明确授权实盘外严禁读取 `.env`；本机 Windows WinInet 代理为 `127.0.0.1:7897`；D 项公网 Webhook 与常开保持关闭。
+
+---
+
+## 四、独立对抗审计结论与主人裁定（2026-11-22，`D-95`）
+
+1. **审计裁定：`HOLD / 不予放行第 2 批`**（不推送 `52e223a`）。独立 `/poteto-mode` 对抗审计重跑 `image-gate`、12 项本地检查（含 `test:memory-lifecycle` 34/34、`test:cross-channel` 18/18、`report:user-value` 134/134）与全部 5 个 `real` 入口 `exit 4` 守卫均通过，但执行复现脚本实证了 **6 项 P0 阻断缺陷、9 项 P1 缺陷与 1 项 P2 缺陷**：
+   - **P0-1**：`proposeMemoryFact`（`memory.mjs:543`）丢弃父对象 `object_required_scopes` 且 `activeFactsInScope`/`exportL0Snapshot` 不校验闭包，致跨私域派生事实注入单域 `MEMORY.md`。
+   - **P0-2**：`insertObjectRow`（`objects.mjs:106-110`）内容寻址早退吞掉新增 `requiredScopeIds`/`object_edges`，且对已 `deleted` 对象重提返回假 `candidate`/`active`。
+   - **P0-3**：`startupRecovery`（`recovery.mjs:70-98`）Step 3 早于 Step 3b 执行，导致恢复遗忘前备份后启动卡死在 `object-references`（`read-only`）；崩溃/重放均不补清物理文件与 L0 导出。
+   - **P0-4**：`effects.mjs:308-311` + `daemon.mjs:842` 将 `adapters.allowedRecipients` 传输白名单直接视作 CP4 披露授权，导致任一已放行出站的群均可绕过 CP4 接收 `dm` 私密派生物。
+   - **P0-5**：`effects.mjs:302-307` 仅校验带 `group:telegram:` 前缀的目标，漏放无前缀 `telegram:<id>`、第三方 `dm:*`、带跨私域闭包的同域目标及非 IM 操作。
+   - **P0-6**：`proposeEffectInTx`（`effects.mjs:132-140`）丢弃上游对象血缘且 `cp4.mjs:60` 在深度 `>6` 时静默丢弃祖先 scope。
+   - **P1/P2**：13 类扫描器绕过（`U+00AD`/全角/无空格中文/路径/提权）与 `factKey`/`openScopeSession` 漏扫；`openScopeSession`/`frozenL0` 无读权限校验且 `assertSessionFresh` 未接入 `daemon.mjs`/`model-requests.mjs`；`.bak` 损坏放行空库却阻断后续 `appendDeletionManifest`；`redactSecrets` 漏脱敏 JSON 引号密钥、`skills.mjs` 未按 `skill_set_hash` 锁定版本且 `humanReviewed` 恒 `false`；`router.mjs` `dispatchEventBatchToTask` 仅校验首条事件，其余 `batch.slice(1)` 绕过权限与线程收紧且可挂进 `WAITING_APPROVAL`/`RUNNING` 任务；`model-requests.mjs:487` 失败路径仅退回 1 条 delivery；`daemon.mjs:652` 按 UTF-16 切片超 128 KiB 字节上限且无视 `model.maxInputBytes`；`telegram-pull.mjs` 重放重复执行 `/pause` 等控制命令、被拒命令反派单给模型、且缺少 Windows WinInet 代理自动探测；双高优先级群交替清空 `scopeTurnCounts` 导致低优先级域饥饿。
+2. **主人 2026-11-22 拍板裁定**：
+   - **`D-94` 事故**：主人豁免并闭环归档（不再追究该次 2 次只读调用），`real.mjs` 已补齐的 `exit 4` 结构守卫继续保留。
+   - **L3 Dreaming 编排循环**：**正式转入第 2 批（单元 5.4 / 5.5）**（与时区 `quietHours`、Timer 调度及记忆治理台合并落地，已同步修订 [phase5-kickoff-plan.md](./phase5-kickoff-plan.md)）。第 1 批返工聚焦修清上述 6 P0 + 9 P1 + 1 P2 缺陷并补入反例测试后重审。
+
+---
+
+## 五、第 1 批返工验收结论（2026-11-22，`D-96`）
+
+- **最终裁定：`PASS`（第 1 批 `5.1 + 5.2` 返工完成并全量通过，放行第 2 批 `5.3 + 5.4 + 5.5`；本地提交，待主人指令再推送）**。
+- 上述 6 P0 + 9 P1 + 1 P2 缺陷已全部修复并合入返工反例，镜像重建至 **纪元 13**（`agent` `sha256:21897255...`，`acquisition`/`execution` 携带沿用）。
+- 在锁定 Node `v22.23.5` 下终树全量验证通过：`image-gate`、`verify-hono-oracle-pair`、`test:memory-lifecycle`（47/47）、`test:cross-channel`（23/23）、8 项既有本地/环回套件（`contracts`/`durability`/`acl`/`budget`/`cancel-approval`/`restore`/`ingress-telegram`/`security:unit` 48/48）、5 项宿主机联动 Docker 套件（`model-proposal` 15/15、`repo-observe` 7/7、`eval:triage` 7/7、`offline-jobs` 14/14、`security:integration` 29/29；`quota-calibration` 凭 `docker/` 零改动豁免）、`report:user-value`（134/134，`defaultsFailClosed=true`）及全部 5 个 `*-real` 入口 `exit 4` 守卫。详情见 [phase5-batch1-closure.md §八](./reports/phase5-batch1-closure.md)。

@@ -21,6 +21,7 @@ import { withTx } from "./db/tx.mjs";
 import {
   verifyDeletionManifestInvariant,
   replayDeletionManifestInTx,
+  physicallyCleanDeletedObjects,
 } from "./deletion-manifest.mjs";
 
 export function scanMissingObjectFiles(db, stateDir) {
@@ -67,27 +68,28 @@ export function startupRecovery(db, {
     return readonly("schema-verify", schema.reason);
   }
 
-  // 3. Object references: every activated object file must be on disk.
-  const missingFiles = scanMissingObjectFiles(db, stateDir);
-  if (!step("object-references", missingFiles.length === 0,
-    missingFiles.length === 0 ? "all activated object files present" : `missing: ${JSON.stringify(missingFiles.slice(0, 5))}`)) {
-    return readonly("object-references", `${missingFiles.length} missing object file(s)`);
-  }
-
-  // 3b. Deletion-manifest invariant (Unit 5.1): the tombstone file may be
+  // 3. Deletion-manifest invariant (Unit 5.1): the tombstone file may be
   // AHEAD of the DB (crash between append and tx — repaired by replay
   // below) but must never be missing, corrupt, or behind a non-zero DB
   // deletion sequence. A stale or rolled-back manifest means forgotten
   // data could resurrect from an old backup: execution stays closed.
+  //
+  // This step runs BEFORE the object-reference scan on purpose: a
+  // restored pre-forget backup describes objects whose files phase-2
+  // already removed — the replay re-marks them deleted first, and the
+  // reference scan (which excludes deleted rows) then passes instead of
+  // dead-locking the daemon in read-only before the repair could run.
   const manifestCheck = verifyDeletionManifestInvariant(db, stateDir);
   if (!manifestCheck.ok) {
     step("deletion-manifest", false, manifestCheck.reason);
     return readonly("deletion-manifest", manifestCheck.reason);
   }
+  let replayedCount = 0;
   if (manifestCheck.pendingReplay.length > 0) {
     const replayed = withTx(db, () =>
       replayDeletionManifestInTx(db, { entries: manifestCheck.pendingReplay, now }),
     );
+    replayedCount = replayed.applied;
     step("deletion-manifest", true,
       `manifest seq ${manifestCheck.fileLatestSeq} verified; replayed ${replayed.applied} tombstone(s) the DB had not committed yet`);
   } else {
@@ -95,6 +97,24 @@ export function startupRecovery(db, {
       manifestCheck.fresh
         ? "no deletions recorded and no manifest required"
         : `manifest seq ${manifestCheck.fileLatestSeq} verified, DB in sync`);
+  }
+  // The replay (or an earlier crash between the deletion transaction and
+  // phase-2 forget) can leave dead rows still holding disk blobs and L0
+  // export files: sweep them now, dedup-guarded against content shared
+  // with live rows.
+  const cleaned = physicallyCleanDeletedObjects(db, stateDir);
+  step("deletion-manifest-cleanup", true,
+    cleaned.blobsRemoved === 0 && cleaned.exportFilesRemoved === 0
+      ? `no leftover tombstoned content (${cleaned.swept} deleted row(s) checked)`
+      : `removed ${cleaned.blobsRemoved} leftover blob(s) and ${cleaned.exportFilesRemoved} export file(s) of ${cleaned.swept} tombstoned row(s)`);
+
+  // 4. Object references: every activated object file must be on disk.
+  // (Tombstoned rows are excluded: phase-2 forget and the sweep above are
+  // supposed to have removed their files.)
+  const missingFiles = scanMissingObjectFiles(db, stateDir);
+  if (!step("object-references", missingFiles.length === 0,
+    missingFiles.length === 0 ? "all activated object files present" : `missing: ${JSON.stringify(missingFiles.slice(0, 5))}`)) {
+    return readonly("object-references", `${missingFiles.length} missing object file(s)`);
   }
 
   // 4. Scope configuration and revocation versions are restorable from the

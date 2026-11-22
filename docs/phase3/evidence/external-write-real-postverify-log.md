@@ -1,6 +1,6 @@
 # test:external-write:postverify — 真实外部写 B 只读复核（同一对 scratch 库；零网络；修正断言词汇后重核五项通过标准）
 
-生成：2026-11-20T09:06:43.067Z；Node v22.23.5；suite `external-write-real-postverify`。
+生成：2026-11-22T09:47:27.688Z；Node v22.23.5；suite `external-write-real-postverify`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |

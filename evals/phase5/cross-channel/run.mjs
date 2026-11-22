@@ -37,13 +37,15 @@ import {
   repoRoot,
 } from "../lib/harness.mjs";
 import { openDatabase } from "../../../apps/daemon/src/db/connect.mjs";
-import { loadCanonicalSchema, migrate } from "../../../apps/daemon/src/db/migrate.mjs";
+import { loadCanonicalSchema, migrate, ensureModelRequestsTable } from "../../../apps/daemon/src/db/migrate.mjs";
 import { receiveEvent, scopeId, principalId, dispatchKeyForInbox } from "../../../apps/daemon/src/ingress.mjs";
 import { grantPermission, revokePermission } from "../../../apps/daemon/src/acl.mjs";
 import { putObjectContent, insertObjectRow } from "../../../apps/daemon/src/objects.mjs";
 import * as router from "../../../apps/daemon/src/router.mjs";
 import { claimNextTask } from "../../../apps/daemon/src/scheduler.mjs";
-import { proposeEffect, dispatchEffect, DispatcherRefused } from "../../../apps/daemon/src/effects.mjs";
+import { proposeEffect, dispatchEffect, DispatcherRefused, EffectCp4Blocked } from "../../../apps/daemon/src/effects.mjs";
+import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
+import { commitModelCallWriteback } from "../../../apps/daemon/src/model-requests.mjs";
 import { decideApproval } from "../../../apps/daemon/src/approvals.mjs";
 import { createFakeRemote } from "../../../apps/daemon/src/testing/fake-remote.mjs";
 import { createTelegramSendTransport } from "../../../apps/daemon/src/telegram-send.mjs";
@@ -162,6 +164,7 @@ await withServices(async () => {
 
   const telegramConfig = {
     apiBase,
+    allowRealPull: true,
     allowedChatIds: ["6101", "-100777"],
     pullBatchLimit: 20,
     pullTimeoutSeconds: 0,
@@ -277,6 +280,7 @@ await withServices(async () => {
   const resReplay = pullMod.pullTelegramUpdates(dbReopen, ws2.stateDir, {
     telegram: {
       apiBase: `http://127.0.0.1:${tgPort2}`,
+      allowRealPull: true,
       allowedChatIds: ["6101", "-100777"],
       pullBatchLimit: 20,
       pullTimeoutSeconds: 0,
@@ -491,7 +495,7 @@ await withServices(async () => {
     const sessionInfo = memory.openScopeSession(db, ws.stateDir, {
       sessionId: `ses:worker:${f.name}`, scopeId: f.scope, principalId: OWNER, skillSetHash: "ss:cc", now: Date.now(),
     });
-    const frozen = memory.frozenL0(db, ws.stateDir, { sessionId: `ses:worker:${f.name}` });
+    const frozen = memory.frozenL0(db, ws.stateDir, { sessionId: `ses:worker:${f.name}`, principalId: OWNER, now: Date.now() });
     const graph = memory.expandObjectGraph(db, { rootObjectIds: [f.rootObjectId], principalId: OWNER, now: Date.now(), maxHops: 2, maxObjects: 16 });
     const recalled = memory.recallScopedMemories(db, { scopeId: f.scope, principalId: OWNER, currentSessionId: `ses:worker:${f.name}`, now: Date.now(), query: "note" });
     let l2 = 0;
@@ -612,6 +616,30 @@ await withServices(async () => {
     return attemptId;
   })();
 
+  let proposalBlocked = false;
+  try {
+    proposeEffect(db, ws.stateDir, {
+      now: Date.now(), taskId: dmTask.id,
+      attemptId: dmAttemptId,
+      effectType: "notify", domainKey: "dm:telegram:6101", naturalKey: "canary-leak-proposal-probe",
+      operationIntent: {
+        targetResource: "group:telegram:-100777", operation: "im.notify",
+        contentHash: dmSummaryRow.content_hash, evidenceManifestHash: "e".repeat(64),
+        parentObjectIds: [dmSummary.objectId],
+        payloadContent: `DM digest referencing ${CANARY}`,
+      },
+      retryMode: "AT_MOST_ONCE", provider: "telegram", resource: "group:telegram:-100777",
+      requiresApproval: true, approverPrincipalId: OWNER, expiresAt: Date.now() + 3600000,
+    });
+  } catch (e) {
+    proposalBlocked = e instanceof EffectCp4Blocked;
+  }
+
+  // Temporarily allowlist DM -> GA for proposal & approval, then revoke the
+  // allowlist before dispatch: even if adapters.allowedRecipients includes
+  // the group, dispatch MUST kill the effect DEAD (P0-1).
+  db.prepare("INSERT OR REPLACE INTO system_state(key, value) VALUES ('disclosure_allowlist', ?)")
+    .run(JSON.stringify([{ from: DM, to: GA, reviewedBy: OWNER, note: "temp-for-dispatch-recheck" }]));
   const leakProposal = proposeEffect(db, ws.stateDir, {
     now: Date.now(), taskId: dmTask.id,
     attemptId: dmAttemptId,
@@ -619,6 +647,7 @@ await withServices(async () => {
     operationIntent: {
       targetResource: "group:telegram:-100777", operation: "im.notify",
       contentHash: dmSummaryRow.content_hash, evidenceManifestHash: "e".repeat(64),
+      parentObjectIds: [dmSummary.objectId],
       payloadContent: `DM digest referencing ${CANARY}`,
     },
     retryMode: "AT_MOST_ONCE", provider: "telegram", resource: "group:telegram:-100777",
@@ -630,14 +659,13 @@ await withServices(async () => {
     actionHash: leakProposal.actionHash, nonce: leakProposal.approvalNonce,
     approverId: OWNER, now: Date.now(),
   });
+  db.prepare("DELETE FROM system_state WHERE key='disclosure_allowlist'").run();
   let dispatchBlocked = false;
   let dispatchBlockReason = null;
   try {
     dispatchEffect(db, createFakeRemote(join(ws.stateDir, "leak-remote")), {
       effectId: leakProposal.effectId, now: Date.now(),
-      // The deployment did NOT authorize the group for cross-scope
-      // disclosure: the owner's authorized recipients cover only the DM.
-      authorizedRecipients: ["dm:telegram:6101"],
+      authorizedRecipients: ["dm:telegram:6101", "group:telegram:-100777"],
     });
   } catch (e) {
     dispatchBlocked = e instanceof DispatcherRefused;
@@ -647,8 +675,8 @@ await withServices(async () => {
   const cp4Audits = db.prepare("SELECT count(*) c FROM audit_log WHERE code='cp4_recipient_scope_leak_blocked'").get().c;
   suite.check(
     "canary-link9-dispatcher-blocks-cross-group-send",
-    dispatchBlocked === true && leakEffectAfter.state === "DEAD" && String(leakEffectAfter.last_error).includes("cp4_recipient_scope_leak_blocked") && cp4Audits >= 1,
-    `the DM-canary summary approved toward group A dies at dispatch (state=${leakEffectAfter.state}, audits=${cp4Audits}): ${dispatchBlockReason}`,
+    proposalBlocked === true && dispatchBlocked === true && leakEffectAfter.state === "DEAD" && String(leakEffectAfter.last_error).includes("cp4_recipient_scope_leak_blocked") && cp4Audits >= 2,
+    `the DM-canary summary toward group A is blocked at proposal (blocked=${proposalBlocked}) AND killed at dispatch even when adapters.allowedRecipients includes the group (state=${leakEffectAfter.state}, audits=${cp4Audits}): ${dispatchBlockReason}`,
   );
   void consumed;
 
@@ -796,6 +824,233 @@ await withServices(async () => {
     "fairness-consecutive-turn-limit-steps-aside",
     turnClaim !== null && turnClaim.taskId === repoFresh && turnClaim.taskId !== gbFresh,
     `with group B holding 3 consecutive turns at the limit, the equal-priority claim goes to the repo lane (${turnClaim?.taskId === repoFresh ? "repo" : "none"})`,
+  );
+
+  db.close();
+}
+
+// ===========================================================================
+// Part 5 — Unit 5.2 rework counterexamples (P1-11..P2-15).
+{
+  const { ws, db } = freshWorkspace("rework-u52");
+  ensureModelRequestsTable(db);
+  const GA = seedScope(db, { ownerId: OWNER, kind: "group", domainKey: "group:telegram:-100777" });
+  const GB = seedScope(db, { ownerId: OWNER, kind: "group", domainKey: "group:telegram:-100888" });
+  const DM = seedScope(db, { ownerId: OWNER, kind: "owner_dm", domainKey: "dm:telegram:6101" });
+  const REPO = seedScope(db, { ownerId: OWNER, kind: "repo", domainKey: "repo:gh/a/b" });
+  grantPermission(db, { scopeId: GA, principalId: OWNER, permission: "read", now: Date.now() });
+  grantPermission(db, { scopeId: GA, principalId: OWNER, permission: "request", now: Date.now() });
+  grantPermission(db, { scopeId: GB, principalId: OWNER, permission: "request", now: Date.now() });
+  grantPermission(db, { scopeId: DM, principalId: OWNER, permission: "read", now: Date.now() });
+  grantPermission(db, { scopeId: DM, principalId: OWNER, permission: "request", now: Date.now() });
+  grantPermission(db, { scopeId: REPO, principalId: OWNER, permission: "request", now: Date.now() });
+
+  // P1-11 + P1-13: batch merge validates slice(1) (no unauthorized / cross-thread
+  // / WAITING_APPROVAL / oversized CJK UTF-8 / structured JSON merge).
+  const eAnchor = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-anchor",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "group", domainKey: "group:telegram:-100777", channel: "telegram", conversationId: "-100777" },
+    threadKey: "t-rw", priority: 9, policyVersion: "pv1", payload: "anchor msg", verdict: "ADMIT",
+  });
+  const eStranger = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-stranger",
+    principal: { platform: "telegram", subject: "9999" },
+    scope: { kind: "group", domainKey: "group:telegram:-100777", channel: "telegram", conversationId: "-100777" },
+    threadKey: "t-rw", priority: 5, policyVersion: "pv1", payload: "ungranted msg", verdict: "ADMIT",
+  });
+  const eOtherThread = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-other-thread",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "group", domainKey: "group:telegram:-100777", channel: "telegram", conversationId: "-100777" },
+    threadKey: "t-other", priority: 4, policyVersion: "pv1", payload: "other thread", verdict: "ADMIT",
+  });
+  const eBigCjk = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-big-cjk",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "group", domainKey: "group:telegram:-100777", channel: "telegram", conversationId: "-100777" },
+    threadKey: "t-rw", priority: 3, policyVersion: "pv1", payload: "汉".repeat(15000), verdict: "ADMIT",
+  });
+  const eTriage = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-triage",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "group", domainKey: "group:telegram:-100777", channel: "telegram", conversationId: "-100777" },
+    threadKey: "t-rw", priority: 2, policyVersion: "pv1",
+    payload: JSON.stringify({ kind: "repo_triage", targetId: "hono" }), verdict: "ADMIT",
+  });
+  const batchRes = router.dispatchEventBatchToTask(db, {
+    scopeId: GA, now: Date.now(), agingStepMs: 60000, maxBatchEvents: 8,
+    maxSteps: 5, deadlineAt: Date.now() + 900000, skillSetHash: "ss:rw",
+    dispatchKeyFor: dispatchKeyForInbox, stateDir: ws.stateDir, inputByteCap: 32768,
+  });
+  const attachedDeliveries = db.prepare("SELECT event_id FROM event_deliveries WHERE task_id=?").all(batchRes.taskId).map((r) => r.event_id);
+  suite.check(
+    "rework-batch-merge-rejects-ungranted-cross-thread-oversized-and-structured",
+    attachedDeliveries.length === 1 &&
+      attachedDeliveries[0] === eAnchor.inboxId &&
+      Array.isArray(batchRes.refused) &&
+      batchRes.refused.length === 4,
+    `batch slice(1) refused all 4 ineligible events (stranger, cross-thread, 45KB CJK > 32KB cap, structured repo_triage); only anchor attached (${attachedDeliveries.length})`,
+  );
+  void eStranger; void eOtherThread; void eBigCjk; void eTriage;
+
+  // P1-11: WAITING_APPROVAL task refuses direct delivery.
+  db.prepare("UPDATE tasks SET state='WAITING_APPROVAL' WHERE id=?").run(batchRes.taskId);
+  const eWait = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-wait",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "group", domainKey: "group:telegram:-100777", channel: "telegram", conversationId: "-100777" },
+    threadKey: "t-rw", priority: 5, policyVersion: "pv1", payload: "followup during approval", verdict: "ADMIT",
+  });
+  const waitDirect = router.directDeliverToThreadTask(db, { inboxId: eWait.inboxId, now: Date.now() });
+  suite.check(
+    "rework-direct-deliver-refuses-waiting-approval-task",
+    waitDirect.directDelivered === false && /WAITING_APPROVAL/.test(waitDirect.reason),
+    `directDeliverToThreadTask refused WAITING_APPROVAL task (${waitDirect.reason})`,
+  );
+
+  // P1-12: model-requests failure returns ALL open deliveries on a batch task.
+  const b1 = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-fail-1",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+    threadKey: "t-fail", priority: 6, policyVersion: "pv1", payload: "fail batch 1", verdict: "ADMIT",
+  });
+  const b2 = receiveEvent(db, ws.stateDir, {
+    now: Date.now(), source: "telegram", sourceEventId: "rw-fail-2",
+    principal: { platform: "telegram", subject: "6101" },
+    scope: { kind: "owner_dm", domainKey: "dm:telegram:6101", channel: "telegram", conversationId: "6101" },
+    threadKey: "t-fail", priority: 5, policyVersion: "pv1", payload: "fail batch 2", verdict: "ADMIT",
+  });
+  const r1 = db.prepare("SELECT * FROM inbox WHERE id=?").get(b1.inboxId);
+  const failTask = router.dispatchEventToTask(db, {
+    inboxId: r1.id, dispatchKey: dispatchKeyForInbox(r1), now: Date.now(),
+    priority: 6, maxSteps: 5, deadlineAt: Date.now() + 900000, skillSetHash: "ss:rw",
+  });
+  router.attachEventToTask(db, { inboxId: b2.inboxId, taskId: failTask.taskId, now: Date.now(), batchReason: "test", stateDir: ws.stateDir, inputByteCap: 65536 });
+  const failClaim = claimNextTask(db, { now: Date.now(), leaseMs: 45000 });
+  const ledger = createBudgetLedger(db, { taskLimitMicrousd: 800000, dayLimitMicrousd: 5000000 });
+  const taskAcc = ledger.ensureTaskAccount({ taskId: failClaim.taskId, now: Date.now() }).accountId;
+  const dayAcc = ledger.ensureDayAccount({ now: Date.now() }).accountId;
+  const resv = ledger.reserve({
+    requestKey: "req-fail-batch", taskId: failClaim.taskId, purpose: "worker", provider: "deepseek", priceVersion: "v1",
+    accounts: [{ accountId: taskAcc, amountMicrousd: 500 }, { accountId: dayAcc, amountMicrousd: 500 }],
+    upperMicrousd: 1000, now: Date.now(),
+  });
+  const reqId = "11111111-1111-4111-8111-111111111111";
+  db.prepare(
+    `INSERT INTO model_requests(request_id, task_id, attempt_id, fence, scope_domain_key, purpose, model_id, state, reservation_id, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,'EXECUTING',?,?,?)`,
+  ).run(reqId, failClaim.taskId, failClaim.attemptId, failClaim.fence, "dm:telegram:6101", "worker", "deepseek/deepseek-flash", resv.reservationId, Date.now(), Date.now());
+  commitModelCallWriteback(db, {
+    stateDir: ws.stateDir,
+    requestId: reqId,
+    ledger,
+    priceCatalog: { inputPerMTokMicrousd: 300000, outputPerMTokMicrousd: 1200000, cacheReadPerMTokMicrousd: null, cacheWritePerMTokMicrousd: null },
+    call: { ok: true, finishReason: "length", replyText: "", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalFromProvider: true } },
+    completeActiveTask: true,
+    now: Date.now(),
+  });
+  const failDeliveries = db.prepare("SELECT state FROM event_deliveries WHERE task_id=?").all(failTask.taskId).map((r) => r.state);
+  suite.check(
+    "rework-model-failure-returns-all-batch-deliveries",
+    failDeliveries.length === 2 && failDeliveries.every((s) => s === "RETURNED"),
+    `failed batch task returned ALL ${failDeliveries.length} deliveries (${failDeliveries.join(",")}) with zero stranded PENDING`,
+  );
+
+  // P1-14: pull loopback requires allowRealPull, duplicate control does not re-execute,
+  // refused control closes DONE, and env proxy resolves when proxyUrl is null.
+  process.env.AEGISPI_TEST_TG_TOKEN = FAKE_TOKEN;
+  createCredentialService(db).registerSlot({ slot: "im", envName: "AEGISPI_TEST_TG_TOKEN", purpose: "tg", now: Date.now(), actorId: "suite" });
+  const cred = createCredentialService(db);
+  let runnerCalls = 0;
+  const skippedLoopback = pullMod.pullTelegramUpdates(db, ws.stateDir, {
+    telegram: { apiBase: "http://127.0.0.1:9", allowRealPull: false, allowedChatIds: ["6101"] },
+    credentials: cred, now: Date.now(),
+    runner: () => { runnerCalls += 1; return { ok: true, updates: [] }; },
+  });
+  let capturedProxy = "unset";
+  const prevHttpsProxy = process.env.HTTPS_PROXY;
+  process.env.HTTPS_PROXY = "http://127.0.0.1:7897";
+  try {
+    pullMod.pullTelegramUpdates(db, ws.stateDir, {
+      telegram: { apiBase: "https://api.telegram.org", allowRealPull: true, allowedChatIds: ["6101"], proxyUrl: null },
+      credentials: cred, now: Date.now(),
+      runner: (args) => { capturedProxy = args.proxy; return { ok: true, updates: [] }; },
+    });
+  } finally {
+    if (prevHttpsProxy === undefined) delete process.env.HTTPS_PROXY;
+    else process.env.HTTPS_PROXY = prevHttpsProxy;
+  }
+  const replayUpdates = [
+    mkUpdate(9101, 6101, "private", "/pause", 6101),
+    mkUpdate(9102, -100777, "group", "/stop", 88888),
+  ];
+  pullMod.pullTelegramUpdates(db, ws.stateDir, {
+    telegram: { apiBase: "http://127.0.0.1:9", allowRealPull: true, allowedChatIds: ["6101", "-100777"] },
+    credentials: cred, now: Date.now(),
+    runner: () => ({ ok: true, updates: replayUpdates }),
+  });
+  const pausedAfterFirst = db.prepare("SELECT paused FROM scopes WHERE id=?").get(DM).paused;
+  db.prepare("UPDATE scopes SET paused=0 WHERE id=?").run(DM);
+  pullMod.pullTelegramUpdates(db, ws.stateDir, {
+    telegram: { apiBase: "http://127.0.0.1:9", allowRealPull: true, allowedChatIds: ["6101", "-100777"] },
+    credentials: cred, now: Date.now() + 1000,
+    runner: () => ({ ok: true, updates: replayUpdates }),
+  });
+  const pausedAfterReplay = db.prepare("SELECT paused FROM scopes WHERE id=?").get(DM).paused;
+  const refusedCtrlInbox = db.prepare("SELECT state FROM inbox WHERE source_event_id='9102'").get();
+  suite.check(
+    "rework-pull-gate-proxy-idempotent-control-and-refused-closure",
+    "skipped" in skippedLoopback && runnerCalls === 0 &&
+      capturedProxy?.host === "127.0.0.1" && capturedProxy?.port === 7897 &&
+      pausedAfterFirst === 1 && pausedAfterReplay === 0 &&
+      refusedCtrlInbox?.state === "DONE",
+    `loopback allowRealPull=false skipped (calls=${runnerCalls}); env proxy resolved (127.0.0.1:7897); duplicate /pause did not re-pause (paused=${pausedAfterReplay}); refused /stop closed (${refusedCtrlInbox?.state})`,
+  );
+
+  // P2-15: dual-group turn-count persistence (no clear() ping-pong starvation) +
+  // /stop closes PENDING deliveries and non-thread tasks.
+  db.prepare("UPDATE tasks SET state='SUCCEEDED' WHERE state IN ('QUEUED','RUNNING','WAITING_APPROVAL')").run();
+  const mkSimpleTask = (scopeKind, domainKey, thread, eid, prio) => {
+    const ing = receiveEvent(db, ws.stateDir, {
+      now: Date.now(), source: "test", sourceEventId: eid,
+      principal: { platform: "telegram", subject: "6101" },
+      scope: { kind: scopeKind, domainKey, channel: "telegram", conversationId: domainKey.split(":").pop() },
+      threadKey: thread, priority: prio, policyVersion: "pv1", payload: eid, verdict: "ADMIT",
+    });
+    const r = db.prepare("SELECT * FROM inbox WHERE id=?").get(ing.inboxId);
+    return router.dispatchEventToTask(db, {
+      inboxId: r.id, dispatchKey: dispatchKeyForInbox(r), now: Date.now(),
+      priority: prio, maxSteps: 5, deadlineAt: Date.now() + 900000, skillSetHash: "ss:rw",
+    }).taskId;
+  };
+  for (let i = 0; i < 4; i += 1) {
+    mkSimpleTask("group", "group:telegram:-100777", `tg:ga:${i}`, `fair-ga-${i}`, 5);
+    mkSimpleTask("group", "group:telegram:-100888", `tg:gb:${i}`, `fair-gb-${i}`, 5);
+  }
+  const lowRepoTask = mkSimpleTask("repo", "repo:gh/a/b", "repo:fair", "fair-repo-1", 1);
+  const turnState = new Map();
+  const claimedScopes = [];
+  let repoClaimed = false;
+  for (let i = 0; i < 9; i += 1) {
+    const c = claimNextTask(db, { now: Date.now(), leaseMs: 45000, scopeTurnState: turnState, scopeConsecutiveTurnLimit: 3 });
+    if (!c) break;
+    claimedScopes.push(c.scopeId);
+    if (c.taskId === lowRepoTask) repoClaimed = true;
+    turnState.set(c.scopeId, (turnState.get(c.scopeId) ?? 0) + 1);
+    db.prepare("UPDATE tasks SET state='SUCCEEDED' WHERE id=?").run(c.taskId);
+    db.prepare("UPDATE attempts SET state='SUCCEEDED' WHERE task_id=?").run(c.taskId);
+  }
+  const stopGroupTask = mkSimpleTask("group", "group:telegram:-100888", "tg:stop-clean", "rw-stop-clean", 5);
+  db.prepare("UPDATE thread_subscriptions SET active=0 WHERE task_id=?").run(stopGroupTask);
+  control.handleDeterministicControl(db, { command: "/stop", scopeId: GB, threadKey: "tg:stop-clean", principalId: OWNER, now: Date.now() });
+  const stopDeliv = db.prepare("SELECT state FROM event_deliveries WHERE task_id=?").get(stopGroupTask);
+  const stopInb = db.prepare("SELECT state FROM inbox WHERE source_event_id='rw-stop-clean'").get();
+  suite.check(
+    "rework-fairness-no-dual-group-starvation-and-stop-cleans-deliveries",
+    repoClaimed === true && stopDeliv?.state === "DEAD" && stopInb?.state === "DONE",
+    `low-priority repo claimed in ${claimedScopes.length} turns despite dual-group saturation; /stop without active subscription closed delivery (${stopDeliv?.state}) & inbox (${stopInb?.state})`,
   );
 
   db.close();

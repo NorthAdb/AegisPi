@@ -34,6 +34,7 @@ import { buildSafeChildEnv } from "./model-call.mjs";
 import { classifyControlCommand, handleDeterministicControl } from "./control.mjs";
 import { writeAudit } from "./audit.mjs";
 import { crashpoint } from "./testing/crashpoints.mjs";
+import { parseTelegramProxyUrl, resolveTelegramProxy } from "./telegram-send.mjs";
 
 export const TELEGRAM_PULL_OFFSET_STATE_KEY = "telegram_pull_offset";
 const PULL_CHILD = join(dirname(fileURLToPath(import.meta.url)), "ingress-telegram-child.mjs");
@@ -96,23 +97,6 @@ function writePullOffsetInTx(db, { offset, now }) {
   });
 }
 
-function parseProxyConfig(rawUrl) {
-  if (rawUrl === null || rawUrl === undefined) return null;
-  let u;
-  try {
-    u = new URL(String(rawUrl));
-  } catch {
-    throw new TelegramPullError(`telegram.proxyUrl is not a valid URL for the pull path`);
-  }
-  if (u.protocol !== "http:") {
-    throw new TelegramPullError("telegram.proxyUrl must be an http:// CONNECT proxy origin for the pull path");
-  }
-  if (u.username || u.password || u.pathname !== "/" || u.search || u.hash) {
-    throw new TelegramPullError("telegram.proxyUrl must be a credential-free pathless origin");
-  }
-  return { host: u.hostname, port: Number(u.port || 80) };
-}
-
 /**
  * One pull pass. Returns an honest result object; throws nothing for
  * gated skips or failed reads (both are recorded and safe).
@@ -127,30 +111,48 @@ export function pullTelegramUpdates(db, stateDir, {
   const loopback = isLoopbackEndpoint(apiBase);
   const allowedChatIds = Array.isArray(telegram.allowedChatIds) ? telegram.allowedChatIds.map(String) : [];
   let botToken = null;
-  if (!loopback) {
-    if (telegram.allowRealPull !== true) {
-      return { skipped: "non-loopback telegram.apiBase requires telegram.allowRealPull=true; zero pull calls" };
-    }
-    if (allowedChatIds.length === 0) {
-      return { skipped: "telegram.allowedChatIds is empty; every chat would be refused; zero pull calls" };
-    }
-    const resolved = credentials ? credentials.resolve("im") : { ok: false };
-    if (!resolved.ok) {
-      return { skipped: `the 'im' credential slot is not resolvable (${resolved.reason ?? "not registered"}); zero pull calls` };
-    }
-    botToken = resolved.value;
-  } else {
-    // Local verification seam: the token comes from the same 'im' slot
-    // when registered (tests register a fake-token slot); without a slot
-    // the loopback pull still refuses — the adapter never guesses.
-    const resolved = credentials ? credentials.resolve("im") : { ok: false };
-    if (!resolved.ok) {
-      return { skipped: `the 'im' credential slot is not resolvable; even a loopback pull refuses (${resolved.reason ?? "not registered"})` };
-    }
-    botToken = resolved.value;
+  // The allowRealPull gate applies on EVERY apiBase, loopback included:
+  // "loopback + allowRealPull" is the explicit local verification seam
+  // (the same convention as model.baseUrl), never a silent bypass. Off
+  // loopback the whitelist must also be non-empty and the 'im' slot live.
+  if (telegram.allowRealPull !== true) {
+    return {
+      skipped: `telegram.allowRealPull is false${loopback ? " (a loopback apiBase is the local verification seam but still demands the explicit flag)" : ""}; zero pull calls`,
+    };
   }
+  if (!loopback && allowedChatIds.length === 0) {
+    return { skipped: "telegram.allowedChatIds is empty; every chat would be refused; zero pull calls" };
+  }
+  // The token comes from the 'im' slot in both worlds (tests register a
+  // fake-token slot); without a slot the pull refuses — the adapter never
+  // guesses.
+  const resolved = credentials ? credentials.resolve("im") : { ok: false };
+  if (!resolved.ok) {
+    return { skipped: `the 'im' credential slot is not resolvable (${resolved.reason ?? "not registered"}); zero pull calls` };
+  }
+  botToken = resolved.value;
 
-  const proxy = parseProxyConfig(telegram.proxyUrl ?? null);
+  // Proxy resolution mirrors the SEND path (02 section 4, and the Windows
+  // deployment reality behind it): an explicit telegram.proxyUrl wins; a
+  // loopback apiBase never needs one; otherwise the AEGISPI_TG_PROXY /
+  // HTTPS_PROXY / HTTP_PROXY env probes and the Windows WinInet loopback
+  // probe decide, fail closed on unreadable configuration.
+  let proxy = null;
+  const explicitProxyRaw = telegram.proxyUrl ?? null;
+  if (explicitProxyRaw !== null && explicitProxyRaw !== undefined) {
+    try {
+      const parsed = parseTelegramProxyUrl(String(explicitProxyRaw));
+      proxy = { host: parsed.host, port: parsed.port };
+    } catch (e) {
+      return { failed: `telegram pull proxy configuration refused: ${String(e.message).slice(0, 160)}`, offsetBefore: readPullOffset(db), offsetAfter: readPullOffset(db) };
+    }
+  } else {
+    const proxyRes = resolveTelegramProxy({ normalizedBase: apiBase, allowRealSend: true, parsedExplicitProxy: null });
+    if (!proxyRes.ok) {
+      return { failed: `telegram pull proxy configuration refused: ${String(proxyRes.error).slice(0, 160)}`, offsetBefore: readPullOffset(db), offsetAfter: readPullOffset(db) };
+    }
+    proxy = proxyRes.proxy;
+  }
   const offsetBefore = readPullOffset(db);
   const limit = Number.isInteger(telegram.pullBatchLimit) ? telegram.pullBatchLimit : 20;
   const timeoutSeconds = Number.isInteger(telegram.pullTimeoutSeconds) ? telegram.pullTimeoutSeconds : 0;
@@ -216,14 +218,25 @@ export function pullTelegramUpdates(db, stateDir, {
     } else {
       admitted += 1;
     }
-    // Deterministic control bypass: verified, executed, audited — and
-    // never dispatched to a model task.
     let text = null;
     try {
       text = JSON.parse(mapped.event.payload).text ?? null;
     } catch {}
     const command = classifyControlCommand(text);
     if (command !== null) {
+      // Idempotency anchor: the control bypass marks the inbox row DONE in
+      // its closing transaction, so a crash-window replay re-pulls the same
+      // update and the DONE row proves the command already executed — a
+      // duplicate /stop, /pause or /resume NEVER runs twice. A PENDING row
+      // (crash between receive and execute) re-runs safely: the bypass is
+      // itself idempotent against non-terminal work.
+      const inboxState = db
+        .prepare("SELECT state FROM inbox WHERE id=?")
+        .get(received.inboxId)?.state;
+      if (inboxState === "DONE" || inboxState === "DEAD") {
+        duplicates += received.duplicate ? 0 : 1;
+        continue;
+      }
       controlCommands += 1;
       const cmdScopeId = scopeId(mapped.event.scope.domainKey);
       const cmdPrincipalId = principalId(mapped.event.principal.platform, mapped.event.principal.subject);
@@ -237,8 +250,10 @@ export function pullTelegramUpdates(db, stateDir, {
           now,
         });
       } catch (e) {
-        // Refused control commands stay durable as ordinary inbox rows:
-        // the event itself was legitimate, only the bypass said no.
+        // A REFUSED control command is terminally adjudicated right here:
+        // the refusal is audited and the inbox row closes DONE, never
+        // left PENDING-ADMIT for the router to hand a control verb to the
+        // model path.
         controlCommands -= 1;
         withTx(db, () => {
           writeAudit(db, {
@@ -246,6 +261,7 @@ export function pullTelegramUpdates(db, stateDir, {
             details: { update_id: updateId, command, reason: String(e.message).slice(0, 160) },
             now,
           });
+          db.prepare("UPDATE inbox SET state='DONE' WHERE id=? AND state IN ('PENDING','ROUTED')").run(received.inboxId);
         });
       }
     }

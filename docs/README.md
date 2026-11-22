@@ -32,7 +32,7 @@
 
 | 资料 | 状态与用途 |
 | --- | --- |
-| [phase5/phase5-kickoff-plan.md](phase5/phase5-kickoff-plan.md) | **Phase 5 详细实施与验收规划（2026-11-22 主人共同裁定，`D-90`）**：将 Phase 5 拆分为单元 5.1（分层记忆 L0–L3、13 类注入扫描、墓碑遗忘清单、技能与 Spill）→ 5.2（Telegram 路线 1 `getUpdates` 轮询入站与跨通道 9 环节 Canary 隔离）→ 5.3（场景一邮件草稿审批、4h 停车与对账）→ 5.4（场景二晨报、带时区条件 Timer 与日历 ETag 审批）→ 5.5（控制台 API 补齐与 `127.0.0.1:4310/` 最小 Web 前端）→ 5.6（许可 2：Telegram + 真实邮箱 + 真实日历实盘验收与终局对抗审计）。**规划已定稿，尚未开工代码实施** |
+| [phase5/phase5-kickoff-plan.md](phase5/phase5-kickoff-plan.md) | **Phase 5 详细实施与验收规划（`D-90` 定稿，含 `D-95` 范围调整）**：将 Phase 5 拆分为单元 5.1（分层记忆 L0–L2/L3 数据结构、13 类注入扫描、墓碑遗忘清单、技能与 Spill）→ 5.2（Telegram 路线 1 `getUpdates` 轮询入站与跨通道 Canary 隔离）→ 5.3（场景一邮件草稿审批、4h 停车与对账）→ 5.4（场景二晨报、带时区条件 Timer、日历 ETag 审批与**转入的 L3 Dreaming 编排循环**）→ 5.5（控制台 API 补齐与 `127.0.0.1:4310/` 最小 Web 前端）→ 5.6（许可 2 实盘验收与终局对抗审计） |
 | [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**4.1 已通过独立审计冻结；4.2 许可 1 与许可 2 广度真实验收均已完成** |
 | [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md) | 单元 4.1 实施任务书（基线 `52354a8`，含 D-77/D-78 修订）。**4.1 实施并审计冻结，验收依据**：分步目标与产物、锚点用例、矩阵 T1–T10 与停止条件 |
 | [phase4/phase4-2-offline-task-spec.md](phase4/phase4-2-offline-task-spec.md) | **单元 4.2 许可 1 离线任务书**：只读 Repo Observe 离线编排、业务级 `maxInputBytes`/`maxOutputTokens` 硬上限、`HELD` 停机语义、4.1 延后 P2 项与 `model:real` opt-in 守卫（不含任何真实运行授权） |
@@ -42,8 +42,8 @@
 
 | 资料 | 用途 |
 | --- | --- |
-| [phase5/HANDOFF-BATCH1-AUDIT.md](phase5/HANDOFF-BATCH1-AUDIT.md) | **新对话接手交接文档（2026-11-22，待审计第 1 批 `5.1 + 5.2`）**：记录 `origin/main`（`45b7c03`）与本地未推送交付（`8a48c87` / `52e223a`，镜像纪元 12），列出 CP4 口径、D-94 事故整改、L3 Dreaming 残余与全量独立复测审计清单 |
-| [phase5/reports/phase5-batch1-closure.md](phase5/reports/phase5-batch1-closure.md) | **Phase 5 第 1 批收口报告（单元 5.1 分层记忆 + 5.2 Telegram 路线 1/跨通道 Canary，2026-11-22）**：`test:memory-lifecycle` 34/34、`test:cross-channel` 18/18，镜像纪元 12，既有 16 项回归 + `report:user-value` 134/134 全绿；含 D-94 事故申报与结构性守卫整改；待独立审计整批验收 |
+| [phase5/HANDOFF-BATCH1-AUDIT.md](phase5/HANDOFF-BATCH1-AUDIT.md) | **Phase 5 第 1 批交接与验收结论（2026-11-22，`D-95`/`D-96`）**：记录 `45b7c03..52e223a` 初版对抗审计（`HOLD`）、`D-94` 主人豁免归档、L3 Dreaming 转入第 2 批，以及 **`D-96` 返工修复后全量验收 `PASS`（放行第 2 批）** |
+| [phase5/reports/phase5-batch1-closure.md](phase5/reports/phase5-batch1-closure.md) | **Phase 5 第 1 批收口报告（单元 5.1 + 5.2，2026-11-22）**：含初版自测、`D-94` 声明、§七初版审计（`HOLD`）与 **§八返工修复与最终验收收口（`D-96 PASS`，纪元 13，`47/47` + `23/23`）** |
 | [phase4/reports/phase4-5-closure.md](phase4/reports/phase4-5-closure.md) | **单元 4.5 与 Phase 4 终局收口报告**（2026-11-21 纪元 11.4/11.5）：`eval:triage:real` 6/6 实盘验收（GitHub + DeepSeek + 无网 TS 执行 + `@aegispibot` TLS/CONNECT 私聊）、4 路对抗审计加固、SSRF IP 字面量保护、全量 16 项回归与 `report:user-value` 134/134 通过 |
 | [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md) | **单元 4.5 会话交接存档**（历史基线，2026-11-21 纪元 10）：已由单元 4.5 实盘与终局收口完成承接 |
 | [phase4/reports/phase4-4-closure.md](phase4/reports/phase4-4-closure.md) | **单元 4.4 收口报告**（2026-11-21 纪元 9 终版）：Scenario 4 `repo_triage` 双快照采集与四分类神谕裁定、`eval:triage` 7/7、`report:user-value` 125/125 与全量 17 项通过 |
@@ -54,7 +54,7 @@
 | [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-21 纪元 5 终版）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 5 镜像证据与自审计 19 项加固整改汇总 |
 | [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 审计冻结、4.2 许可 1 离线就绪）与 4.2 首跑待办汇总 |
 | [phase3/reports/round-closure-2026-11-20-limited-fixes.md](phase3/reports/round-closure-2026-11-20-limited-fixes.md) | 限定修复收口：daemon 用例崩溃根因（测试层修复、生产零改动）与纪元 2 选择性重建；终树三 docker 套件 14/14、29/29、5/5 |
-| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（**纪元 11.5**：重建 `acquisition`，携带 `agent` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
+| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（**纪元 13**：Phase 5 第 1 批返工重建 `agent`，携带 `acquisition` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
 | [phase3/reports/quota-calibration.md](phase3/reports/quota-calibration.md) | 容器配额占位值的实测依据（CPU/内存/pids/可写盘） |
 
 ## 历史收口与审计（史实身份，不作现行操作依据）
