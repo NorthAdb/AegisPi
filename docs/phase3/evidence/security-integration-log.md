@@ -1,6 +1,6 @@
 # test:security:integration — 真实容器隔离与逃逸矩阵（02 §8 第二组；探针经 bridge 对照证伪）
 
-生成：2026-11-22T06:56:47.930Z；Node v22.23.5；suite `security-integration`。
+生成：2026-11-22T07:20:56.837Z；Node v22.23.5；suite `security-integration`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -28,11 +28,11 @@
 | PASS | acquisition-enforces-download-size-cap | exit=1 reason=size cap exceeded: >1048576 bytes |
 | PASS | acquisition-refuses-scheme-changing-redirects | exit=1 reason=redirect changed scheme to file: |
 | PASS | acquisition-refuses-redirect-loops | exit=1 reason=more than 5 redirects |
-| PASS | acquisition-refuses-cross-host-redirects | exit=1 reason=redirect host allowlist-demo.host-gateway.local:49952 is not in the al |
+| PASS | acquisition-refuses-cross-host-redirects | exit=1 reason=redirect host allowlist-demo.host-gateway.local:63752 is not in the al |
 | PASS | acquisition-follows-plan-allowlisted-redirect-hosts | exit=0 failures=0 extracted=true (allowlist-demo.host-gateway.local explicitly allowlisted by the host-generated plan) |
 | PASS | acquisition-follows-same-host-http-redirects | exit=0 failures=0 |
 | PASS | acquisition-dead-source-is-not-a-security-refusal | exit=1 reason=fetch failed (ECONNREFUSED) — recorded as DEAD SOURCE, never counted as traversal/redirect/limit refusal above |
-| PASS | offline-jobs-suite-green-under-integration-gate | exit=0 (node:33124) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa |
+| PASS | offline-jobs-suite-green-under-integration-gate | exit=0 (node:18064) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa |
 
 合计：29 PASS / 0 FAIL。
 

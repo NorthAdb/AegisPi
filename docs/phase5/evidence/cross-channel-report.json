@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-22T06:44:27.358Z",
+  "generatedAt": "2026-11-22T07:12:17.491Z",
   "nodeVersion": "v22.23.5",
   "suite": "cross-channel",
   "label": "Phase 5 Unit 5.2 — Telegram 路线 1 拉取入站与跨通道 9 环节 Canary 隔离",
@@ -51,7 +51,7 @@
     {
       "name": "control-stop-executes-deterministically-and-instantly",
       "status": "PASS",
-      "detail": "/stop cancelled the DM task (CANCELLED) in 102ms with zero model requests while the group lane kept its RUNNING slot (RUNNING)"
+      "detail": "/stop cancelled the DM task (CANCELLED) in 186ms with zero model requests while the group lane kept its RUNNING slot (RUNNING)"
     },
     {
       "name": "control-refuses-unauthorized-principal",
