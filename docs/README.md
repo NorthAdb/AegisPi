@@ -42,6 +42,7 @@
 
 | 资料 | 用途 |
 | --- | --- |
+| [phase5/HANDOFF-BATCH1-AUDIT.md](phase5/HANDOFF-BATCH1-AUDIT.md) | **新对话接手交接文档（2026-11-22，待审计第 1 批 `5.1 + 5.2`）**：记录 `origin/main`（`45b7c03`）与本地未推送交付（`8a48c87` / `52e223a`，镜像纪元 12），列出 CP4 口径、D-94 事故整改、L3 Dreaming 残余与全量独立复测审计清单 |
 | [phase5/reports/phase5-batch1-closure.md](phase5/reports/phase5-batch1-closure.md) | **Phase 5 第 1 批收口报告（单元 5.1 分层记忆 + 5.2 Telegram 路线 1/跨通道 Canary，2026-11-22）**：`test:memory-lifecycle` 34/34、`test:cross-channel` 18/18，镜像纪元 12，既有 16 项回归 + `report:user-value` 134/134 全绿；含 D-94 事故申报与结构性守卫整改；待独立审计整批验收 |
 | [phase4/reports/phase4-5-closure.md](phase4/reports/phase4-5-closure.md) | **单元 4.5 与 Phase 4 终局收口报告**（2026-11-21 纪元 11.4/11.5）：`eval:triage:real` 6/6 实盘验收（GitHub + DeepSeek + 无网 TS 执行 + `@aegispibot` TLS/CONNECT 私聊）、4 路对抗审计加固、SSRF IP 字面量保护、全量 16 项回归与 `report:user-value` 134/134 通过 |
 | [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md) | **单元 4.5 会话交接存档**（历史基线，2026-11-21 纪元 10）：已由单元 4.5 实盘与终局收口完成承接 |
