@@ -8,7 +8,8 @@
 2. 本文：按类别找对资料，认清「现行」与「历史」身份。
 3. [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md)：现行权威状态清单（四项真实验收现状、审计归档、镜像、缺口、待办）。
 4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：Phase 4 设计、实施与收口报告（**单元 4.1–4.5 及终局对抗审计均已完成**）：单元 4.1 见 [phase4-1-closure.md](phase4/reports/phase4-1-closure.md) 与 [AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)；单元 4.2 见 [phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)；单元 4.3 见 [phase4-3-closure.md](phase4/reports/phase4-3-closure.md)；单元 4.4 见 [phase4-4-closure.md](phase4/reports/phase4-4-closure.md)；**单元 4.5 与 Phase 4 最终收口见 [phase4-5-closure.md](phase4/reports/phase4-5-closure.md) 与 [user-value-report.md](phase4/reports/user-value-report.md)**。
-5. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
+5. [phase5/phase5-kickoff-plan.md](phase5/phase5-kickoff-plan.md)：**Phase 5 详细实施与验收规划**（单元 5.1–5.6：分层记忆 L0–L3 与墓碑遗忘清单、Telegram 路线 1 `getUpdates` 轮询入站与跨通道 Canary 隔离、场景一邮件草稿审批、场景二晨报/条件 Timer 与日历 ETag 审批、`127.0.0.1:4310` 最小可用 Web 控制台前端，以及三大真实通道受控实盘验收）。
+6. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
 
 ## 现行规范（操作依据）
 
@@ -31,6 +32,7 @@
 
 | 资料 | 状态与用途 |
 | --- | --- |
+| [phase5/phase5-kickoff-plan.md](phase5/phase5-kickoff-plan.md) | **Phase 5 详细实施与验收规划（2026-11-22 主人共同裁定，`D-90`）**：将 Phase 5 拆分为单元 5.1（分层记忆 L0–L3、13 类注入扫描、墓碑遗忘清单、技能与 Spill）→ 5.2（Telegram 路线 1 `getUpdates` 轮询入站与跨通道 9 环节 Canary 隔离）→ 5.3（场景一邮件草稿审批、4h 停车与对账）→ 5.4（场景二晨报、带时区条件 Timer 与日历 ETag 审批）→ 5.5（控制台 API 补齐与 `127.0.0.1:4310/` 最小 Web 前端）→ 5.6（许可 2：Telegram + 真实邮箱 + 真实日历实盘验收与终局对抗审计）。**规划已定稿，尚未开工代码实施** |
 | [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md) | Phase 4 拆单元 4.1（模型链路实现）/ 4.2（真实仓库 Observe）；两种许可分列；七项首跑检查表。**4.1 已通过独立审计冻结；4.2 许可 1 与许可 2 广度真实验收均已完成** |
 | [phase4/phase4-1-implementation-task-spec.md](phase4/phase4-1-implementation-task-spec.md) | 单元 4.1 实施任务书（基线 `52354a8`，含 D-77/D-78 修订）。**4.1 实施并审计冻结，验收依据**：分步目标与产物、锚点用例、矩阵 T1–T10 与停止条件 |
 | [phase4/phase4-2-offline-task-spec.md](phase4/phase4-2-offline-task-spec.md) | **单元 4.2 许可 1 离线任务书**：只读 Repo Observe 离线编排、业务级 `maxInputBytes`/`maxOutputTokens` 硬上限、`HELD` 停机语义、4.1 延后 P2 项与 `model:real` opt-in 守卫（不含任何真实运行授权） |
@@ -86,6 +88,6 @@
 
 ## 纪律速记
 
-- 真实入口四类（A 模型 / B 外部写 / C Telegram / D 公网 webhook）：逐项书面授权「仅限本次」，闭合后零剩余额度，重跑即需新授权；D 延期至首次启用 Telegram 公网入站 webhook 前，不作为全部 Phase 4 的前置条件，出站发送另需授权。
+- 真实入口四类（A 模型 / B 外部写 / C Telegram / D 公网 webhook）：逐项书面授权「仅限本次」，闭合后零剩余额度，重跑即需新授权；D 延期至首次启用 Telegram 公网入站 webhook 前（2026-11-22 确认：在备齐公网 HTTPS 域名/端口材料前先走路线 1 `getUpdates` 主动长轮询入站，D 项继续推迟且不阻挡 Phase 5 及后续进度），出站发送与实盘轮询另需授权。
 - 不常开；`defaults.json` 失败关闭；任务 $0.80 / 日 $5 已定不重开（价格、token 上限与单次预留属首跑检查表核对，非预算重谈）。
 - 密钥只进本机 `.env`；审计原稿与证据字节不变；历史缺证不追补；任何阶段结论以「状态说明」类文档为准。

@@ -9,7 +9,7 @@
 | A 真实模型 | **已执行，待独立复核**（复核 33d6361：目录价算术成立，供应商账单未核对） | `ec23ef7` | 恰 1 次 DeepSeek 官方端点调用（完整 URL + 供应商模型名 deepseek-flash），先预留后结清 28 microUSD，无超限无冻结；**授权上限 ≤2（勘误：执行日曾误写 ≤5），实用 1，闭合无剩余额度**。**入口无一次性守卫（复核指出）：`model-real` 缺 key 时 exit 3，带 key 重跑会再次真实调用——闭合是文书口径+执行纪律，不是代码保证** |
 | B 真实外部写 | **已执行，待独立复核**（复核 33d6361：exit 1 与 postverify 分开属实；守卫表述已更正） | `26929a0` | 恰 1 次 POST 内部信封至可丢弃端点，effect SUCCEEDED、`external_id=ext-b-acceptance-001`；原始运行 exit 1（两处断言词汇错误）与只读 postverify exit 0 分开在案；主人端点侧见证已录入（只核请求头）；回执仅证明测试端点契约；**守卫更正（复核）：exit 4 守卫依赖证据文件存在，删除该文件后同脚本仍可再执行、URL 仍硬编码于脚本——「停用」与「仅限一次」是文书口径；URL 停用、1/1 已消耗** |
 | C Telegram 只读 | **已执行，待独立复核**（复核 33d6361：次数边界写对，不闭项） | `ec23ef7` | getMe+getUpdates 恰 2 次、零发送零 offset；账本勘误：**最少 6 / 可能 8 / 更早未知是既有报告与自述的计数口径，非独立证实的网络往返**；**T0 授权依据按复核更正为「依据不足」（移交条款是约束非授权，token 非授权，无主人逐项原文）**；T2 网络事实维持缺证不闭项（scratch 最小只读导出已入库）；**任何后续调用需主人新的逐项书面授权** |
-| D 公网 webhook | **主人决定延期至首次启用公网 Telegram webhook 前**（2026-11-20）：未授权、未验收 | 无 | 公网入口保持关闭：不注册 webhook、不建隧道、不申请新 secret；未做任何动作；`console/api.mjs` 的 `CONSOLE_BIND`/`allowedHosts` 硬编码现状未动（这是未改代码的现状，非漏洞修复） |
+| D 公网 webhook | **主人决定延期至首次启用公网 Telegram webhook 前**（2026-11-20；2026-11-22 再确认：因暂缺公网 HTTPS 域名/端口资源，后续阶段优先采用**路线 1 `getUpdates` 主动长轮询 Pull 模式**入站，D 项公网 webhook 待备齐材料后再补，**不阻挡 Phase 5 及后续进度**）：未授权、未验收 | 无 | 公网入口保持关闭：不注册 webhook、不建隧道、不申请新 secret；未做任何动作；`console/api.mjs` 的 `CONSOLE_BIND`/`allowedHosts` 硬编码现状未动（这是未改代码的现状，非漏洞修复） |
 
 ## 2. 独立复核（复核方另做，非实施者职责）
 
@@ -59,6 +59,7 @@
 
 1. 独立复核 A/B/C 后续（复核方）：**33d6361 已归档并回应**（`audit-response-rereview-33d6361.md`）；其「未闭项」清单（A 账单、B 正文、C 历史次数与 T2 网络事实）维持缺证口径，等待复核方裁量。
 2. 原镜像：**本机验证已完成（主人口径：通过即闭项）**。上轮两个开放残留已在本轮限定修复中闭合：daemon 级用例崩溃根因已定位修复（无 `node_modules` 树 + 测试层掩蔽；加固后失败现场可读，生产零改动）；当前树门禁经**纪元 2**（仅重建 agent，携带核验后沿用未受影响镜像）恢复放行，终树三套件全绿（`round-closure-2026-11-20-limited-fixes.md`）。原三 tar 与交付证据未动。
-3. D 项按主人决定**延期至首次启用公网 Telegram webhook 前**；届时按 `real-acceptance-plan.md` §D 同窗口口径另行申报。
+3. D 项按主人决定**延期至首次启用公网 Telegram webhook 前**（2026-11-22 追记：主人确认在备齐公网 HTTPS 域名/端口材料前，Telegram 入站先按**路线 1（`getUpdates` 长轮询 Pull 模式）**推进，D 项公网 webhook 继续推迟且不阻挡 Phase 5 及后续进度）；届时按 `real-acceptance-plan.md` §D 同窗口口径另行申报。
 4. 模型缺口 A/B **已收口 4.1 实施**：定夺载体为 ADR-0001（`docs/adr/0001-model-path-pi-host-execution.md`，已按 `docs/phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md` 落实四项更正，**主人已确认方案并正式授权单元 4.1 开工，现已完成实施与本机离线/容器全套验收，收口报告见 [docs/phase4/reports/phase4-1-closure.md](../../phase4/reports/phase4-1-closure.md)**）。价格目录（四项 `null`）与单次上限（`1000`）仍属单元 4.2 首跑检查表（主人核定，任何真实调用前）。
 5. Phase 4（真实仓库与端到端收口）：**已全部完成并收口（`D-79`–`D-89`）。单元 4.1 按 ADR-0001 落地并通过独立对抗审计冻结于 `8943a10`（[phase4-1-closure.md](../../phase4/reports/phase4-1-closure.md)、[AUDIT-PHASE4-UNIT4-1-8943a10.md](../../phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）；单元 4.2（`D-82`/`D-83`）、单元 4.3（`D-84`）、单元 4.4（`D-85`，`3e85c6d`）与单元 4.5 实盘验收及阶段终局对抗审计加固（[phase4-5-closure.md](../../phase4/reports/phase4-5-closure.md)，`D-87`–`D-89`，镜像**纪元 11.5**）均已收口。纪元 11.4 实跑 `eval:triage:real` 6/6 PASS，纪元 11.5 全量 16 项离线/容器检查与 `report:user-value` 134/134（含 `triage-real`、`defaultsFailClosed=true`）均以锁定 Node v22.23.5 `exit 0` 通过。`D` 项（公网入站 webhook）与常开运行仍保持禁用。**
+6. Phase 5（多场景、分层记忆、多通道隔离与最小 Web 控制台）：**详细实施与验收规划已由主人共同确认并落盘于 [docs/phase5/phase5-kickoff-plan.md](../../phase5/phase5-kickoff-plan.md)（`D-90`，拆分为单元 5.1–5.6；尚未进入代码实施，等待主人对单元 5.1 的开工指令）。**

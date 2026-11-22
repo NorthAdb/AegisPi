@@ -2,14 +2,15 @@
 
 自托管、事件驱动的个人常驻 Agent 系统（实现仓库）。边界原则：宿主 daemon 单点持有 ACL、预算、审批、凭据与外部提交器；模型文本与工具结果从不授予权限（`AGENTS.md` §5）。本仓库公开，密钥与人工判断标注一律不入库。
 
-## 当前位置（2026-11-21）
+## 当前位置（2026-11-22）
 
 - Phase 1（底座契约）与 Phase 2（持久化只读链路）已收口；**Phase 3 出口 MET WITH RESIDUAL RISKS**，其中 `44b3514` 两项限定修复已独立验收关闭，不重开。
 - 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地、通过独立对抗审计并按路线 A 冻结于 `8943a10`（纪元 5）**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)、[独立审计报告](docs/phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）。
 - Phase 4 **全部单元（4.1–4.5）与终局对抗审计加固已完成收口**：单元 4.2 许可 1 离线闭环（[4.2 离线收口报告](docs/phase4/reports/phase4-2-offline-closure.md)）及许可 2 广度真实 Repo Observe 验收（`8/8 PASS`，[4.2 实测验收报告](docs/phase4/reports/phase4-2-real-acceptance.md)），单元 4.3（[4.3 收口报告](docs/phase4/reports/phase4-3-closure.md)），单元 4.4（`3e85c6d`，[4.4 收口报告](docs/phase4/reports/phase4-4-closure.md)），以及 **单元 4.5 端到端实盘验收（`eval:triage:real` 6/6 PASS）与 Phase 4 终局对抗审计加固收口**（[4.5 与阶段终审收口报告](docs/phase4/reports/phase4-5-closure.md)、[用户价值报告](docs/phase4/reports/user-value-report.md)，镜像**纪元 11.5** 全量离线/容器套件 + 证据聚合 `134/134` 通过）。**`defaults.json` 保持全失败关闭：`telegram.allowRealSend=false`、`telegram.proxyUrl=null`、`triage.allowRealTriage=false`、`repo-observe-real` 与 `triage-real` 均受环境变量门禁守护（缺省 `exit 4`）。**
+- **Phase 5 详细实施与验收规划已定稿**：见 [docs/phase5/phase5-kickoff-plan.md](docs/phase5/phase5-kickoff-plan.md)（拆分为单元 5.1–5.6：分层记忆 L0–L3 与墓碑遗忘清单、Telegram 路线 1 `getUpdates` 轮询入站与跨通道 Canary 隔离、场景一邮件草稿审批、场景二晨报/条件 Timer 与日历 ETag 审批、`127.0.0.1:4310/` 最小 Web 控制台前端，以及 Telegram/真实邮箱/真实日历受控实盘验收；尚未进入代码实施）。
 - **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。
 - 任务预算 $0.80、日预算 $5 已定，不重开；真实运行前的价格目录、token 约束与单次预留确认属首跑检查表核对，不是重新讨论预算。
-- 真实验收 A（模型）/B（外部写）/C（Telegram 只读）各已执行一次且授权闭合，**无剩余额度**；D（公网 webhook）延期至首次启用 Telegram 公网入站 webhook 前，且不作为全部 Phase 4 的前置条件；出站发送另需授权。历史 A/B/C 缺证按既定口径归档不追补；原镜像按主人「本机验证通过即闭项」口径处理。
+- 真实验收 A（模型）/B（外部写）/C（Telegram 只读）各已执行一次且授权闭合，**无剩余额度**；**D（公网 webhook）按主人 2026-11-22 决定继续推迟至备齐公网 HTTPS 域名/端口材料并首次启用公网入站 webhook 前，后续阶段优先采用路线 1（`getUpdates` 主动长轮询 Pull 模式）入站，D 项不作为 Phase 4/5 及后续进度的阻塞前置**；出站发送与实盘轮询另需授权。历史 A/B/C 缺证按既定口径归档不追补；原镜像按主人「本机验证通过即闭项」口径处理。
 - 现行权威状态：[docs/phase3/reports/phase3-status-and-remaining.md](docs/phase3/reports/phase3-status-and-remaining.md)；文档索引：[docs/README.md](docs/README.md)。
 
 ## 规范来源
