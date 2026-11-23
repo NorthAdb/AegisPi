@@ -1,6 +1,6 @@
 # User-value and verification report
 
-> Generated: 2026-11-23T13:27:16.136Z from verified evidence JSON files; unmeasured quantities stay null / 未测
+> Generated: 2026-11-23T14:30:46.571Z from verified evidence JSON files; unmeasured quantities stay null / 未测
 
 - status: PASS (327 pass / 0 fail / 327 judged)
 - configured budgets: task=800000 microUSD (`$0.80`), day=5000000 microUSD (`$5.00`)
@@ -62,7 +62,7 @@
 
 | purpose | tested | requests | settledMicrousd | upperMicrousd | cacheReadTokens | cacheWriteTokens |
 | --- | --- | --- | --- | --- | --- | --- |
-| worker | measured | 1 | 483 | 50000 | 0 | 0 |
+| worker | measured | 6 | 12708 | 50000 | 0 | 0 |
 | router | 未测 | null | null | null | null | null |
 | summary | 未测 | null | null | null | null | null |
 | classify | 未测 | null | null | null | null | null |

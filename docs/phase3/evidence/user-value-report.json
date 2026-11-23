@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-23T13:27:16.136Z",
+  "generatedAt": "2026-11-23T14:30:46.571Z",
   "ok": true,
   "summary": {
     "passed": 327,
@@ -105,7 +105,7 @@
       "file": "docs/phase5/evidence/scenarios-report.json",
       "scope": "Scenario 1 mail + Scenario 2 briefing/calendar/timer matrix over loopback TLS fixtures",
       "present": true,
-      "generatedAt": "2026-11-23T13:12:20.980Z",
+      "generatedAt": "2026-11-23T14:30:46.301Z",
       "passed": 89,
       "failed": 0,
       "judged": 89,
@@ -222,12 +222,13 @@
   "purposeRows": [
     {
       "purpose": "worker",
-      "requests": 1,
-      "settledMicrousd": 483,
+      "requests": 6,
+      "settledMicrousd": 12708,
       "upperMicrousd": 50000,
       "cacheReadTokens": 0,
       "cacheWriteTokens": 0,
-      "tested": true
+      "tested": true,
+      "note": "scenarios-real: 1 req, 483u$ + triage-real: 5 req, 12225u$ (peak catalog)"
     },
     {
       "purpose": "router",

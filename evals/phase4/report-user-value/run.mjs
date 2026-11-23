@@ -90,7 +90,7 @@ const INTERCEPT_RE = /(refus|forg|block|intercept|reject|kill|dead|zero|leak|una
 function scenarioBlockFromChecks({ id, benefit, checks, live }) {
   const passed = checks.filter((c) => c.status === "PASS").length;
   const failed = checks.filter((c) => c.status === "FAIL").length;
-  const interception = checks.filter((c) => INTERCEPT_RE.test(c.name)).length;
+  const interception = checks.filter((c) => c.status === "PASS" && INTERCEPT_RE.test(c.name)).length;
   return {
     id,
     benefit,
@@ -145,7 +145,7 @@ const scenarioBlocks = [
   scenarioBlockFromChecks({
     id: "scenario3-cross-channel-isolation",
     benefit: "群聊任务永远读不到私聊内容：Canary 在 9 个派生环节零命中，跨群外发在建行与分发两层都被 CP4 击杀，/stop 秒级直达",
-    checks: (crossRaw?.results ?? []).map((r) => r),
+    checks: crossRaw?.results ?? [],
     live: realTelemetry?.telegram
       ? {
           status: realTelemetry.telegram.status ?? null,
@@ -161,7 +161,7 @@ const scenarioBlocks = [
   scenarioBlockFromChecks({
     id: "scenario4-repo-triage",
     benefit: "依赖公告进私聊即自动出裁定卡：真实容器双跑对比、四类裁定全由宿主事实决定、结论直达 @aegispibot 私聊",
-    checks: (triageRaw?.results ?? []).map((r) => r),
+    checks: triageRaw?.results ?? [],
     live: (() => {
       if (!triageRealRaw) return null;
       const tel = triageRealRaw.telemetry ?? [];
@@ -176,7 +176,7 @@ const scenarioBlocks = [
   scenarioBlockFromChecks({
     id: "memory-lifecycle",
     benefit: "跨域记忆互不串读、候选/冲突留人裁决、撤权即时失效、遗忘级联清干净且备份恢复不复活、超限输出进受 ACL 的 Spill",
-    checks: (memoryRaw?.results ?? []).map((r) => r),
+    checks: memoryRaw?.results ?? [],
     live: null,
   }),
 ];
@@ -184,34 +184,39 @@ const scenarioBlocks = [
 // Per-purpose cost attribution. Only measured numbers enter; every
 // untested purpose stays null and is labeled 未测.
 function purposeRow(purpose) {
-  const worker = realTelemetry?.budgetByPurpose?.worker ?? null;
-  if (purpose === "worker" && worker) {
-    return {
-      purpose,
-      requests: worker.requests ?? null,
-      settledMicrousd: worker.settledMicrousd ?? null,
-      upperMicrousd: worker.upperMicrousd ?? null,
-      cacheReadTokens: worker.cacheReadTokens ?? null,
-      cacheWriteTokens: worker.cacheWriteTokens ?? null,
-      tested: true,
-    };
-  }
+  const entry = realTelemetry?.budgetByPurpose?.[purpose] ?? null;
   if (purpose === "worker") {
     const tel = triageRealRaw?.telemetry ?? [];
-    const settled = tel.map((t) => t.settledPeakMicrousd ?? 0).reduce((a, b) => a + b, 0);
-    if (tel.length > 0) {
+    const triageSettled = tel.map((t) => t.settledPeakMicrousd ?? 0).reduce((a, b) => a + b, 0);
+    const scenariosReq = entry?.requests ?? 0;
+    const scenariosSettled = entry?.settledMicrousd ?? 0;
+    if (entry || tel.length > 0) {
+      const parts = [];
+      if (entry) parts.push(`scenarios-real: ${scenariosReq} req, ${scenariosSettled}u$`);
+      if (tel.length > 0) parts.push(`triage-real: ${tel.length} req, ${triageSettled}u$ (peak catalog)`);
       return {
         purpose,
-        requests: tel.length,
-        settledMicrousd: settled,
-        upperMicrousd: null,
-        cacheReadTokens: null,
-        cacheWriteTokens: null,
+        requests: scenariosReq + tel.length,
+        settledMicrousd: scenariosSettled + triageSettled,
+        upperMicrousd: entry?.upperMicrousd ?? null,
+        cacheReadTokens: entry?.cacheReadTokens ?? null,
+        cacheWriteTokens: entry?.cacheWriteTokens ?? null,
         tested: true,
-        note: "Phase 4 triage-real live settlements (peak catalog)",
+        note: parts.join(" + "),
       };
     }
     return { purpose, requests: null, settledMicrousd: null, upperMicrousd: null, cacheReadTokens: null, cacheWriteTokens: null, tested: false };
+  }
+  if (entry) {
+    return {
+      purpose,
+      requests: entry.requests ?? null,
+      settledMicrousd: entry.settledMicrousd ?? null,
+      upperMicrousd: entry.upperMicrousd ?? null,
+      cacheReadTokens: entry.cacheReadTokens ?? null,
+      cacheWriteTokens: entry.cacheWriteTokens ?? null,
+      tested: true,
+    };
   }
   return { purpose, requests: null, settledMicrousd: null, upperMicrousd: null, cacheReadTokens: null, cacheWriteTokens: null, tested: false };
 }
@@ -254,6 +259,11 @@ const defaultsFailClosedPreserved =
   defaults.adapters?.allowedRecipients !== undefined &&
   Array.isArray(defaults.adapters?.allowedRecipients) &&
   defaults.adapters.allowedRecipients.length === 0 &&
+  Array.isArray(defaults.adapters?.allowedRepos) &&
+  defaults.adapters.allowedRepos.length === 0 &&
+  Array.isArray(defaults.adapters?.allowedBranches) &&
+  defaults.adapters.allowedBranches.length === 0 &&
+  defaults.memory?.autoActivateCandidateFacts === false &&
   defaults.credentials?.mail === null &&
   defaults.credentials?.repo === null &&
   defaults.credentials?.im === null &&
@@ -267,7 +277,7 @@ const defaultsFailClosedPreserved =
 
 // ---------------------------------------------------------------------------
 // Zero-secret pattern scan over every evidence file this report includes.
-const FIXTURE_MARKERS = /(fixture|example\.com|example\.net|example\.org|\.example\b|not-a-real|redacted|\*\*\*|xxxx|aegispi\.local|test-)/i;
+const FIXTURE_MARKERS = /(fixture|example\.com|example\.net|example\.org|\.example\b|\.test\b|not-a-real|\[REDACTED|\*{3,}|aegispi\.local)/i;
 const SECRET_PATTERNS = [
   { label: "telegram-bot-token-shape", re: /\b\d{8,10}:[A-Za-z0-9_-]{34,}\b/ },
   { label: "llm-api-key-shape", re: /sk-[A-Za-z0-9]{20,}/ },
@@ -299,8 +309,10 @@ for (const spec of [...REQUIRED_SUITES, ...OPTIONAL_SUITES]) {
 }
 const zeroSecretScan = { scannedFiles: [...REQUIRED_SUITES, ...OPTIONAL_SUITES].filter((s) => existsSync(join(repoRoot, s.file))).length, hits: secretHits.length, hitsDetail: secretHits };
 
-// A present real suite is a verdict: its failures fail the aggregate.
-const presentRealWithFailures = records.filter((r) => OPTIONAL_SUITES.some((o) => o.id === r.id) && r.present && r.failed > 0);
+// A present real suite is a verdict: its failures or empty runs fail the aggregate.
+const presentRealWithFailures = records.filter(
+  (r) => OPTIONAL_SUITES.some((o) => o.id === r.id) && r.present && (r.failed > 0 || r.judged === 0 || r.exitCode !== 0),
+);
 
 const ok =
   totalFailed === 0 &&

@@ -147,6 +147,9 @@ for (const [name, value] of [["MAIL_USER", mailUser], ["MAIL_TEST_RECIPIENT", ma
 }
 
 // The single scrub gate every evidence string passes through.
+const caldavUrl = readEnv("CALDAV_URL");
+const caldavUser = readEnv("CALDAV_USER");
+const caldavPassword = readEnv("CALDAV_PASSWORD");
 const SECRET_MASKS = [
   [env.DEEPSEEK_API_KEY, "***"],
   [env.TELEGRAM_BOT_TOKEN, "[REDACTED_BOT_TOKEN]"],
@@ -157,9 +160,9 @@ const SECRET_MASKS = [
   [mailRecipient, "[REDACTED_MAIL_RECIPIENT]"],
   [env.MAIL_IMAP_HOST, "[REDACTED_MAIL_HOST]"],
   [env.MAIL_SMTP_HOST, "[REDACTED_MAIL_HOST]"],
-  [env.CALDAV_URL ?? "", "[REDACTED_CALDAV_URL]"],
-  [env.CALDAV_USER ?? "", "[REDACTED_CALDAV_USER]"],
-  [env.CALDAV_PASSWORD ?? "", "[REDACTED_CALDAV_PASSWORD]"],
+  [caldavUrl ?? "", "[REDACTED_CALDAV_URL]"],
+  [caldavUser ?? "", "[REDACTED_CALDAV_USER]"],
+  [caldavPassword ?? "", "[REDACTED_CALDAV_PASSWORD]"],
 ];
 const RAW_SECRETS = SECRET_MASKS.map(([v]) => v).filter((v) => typeof v === "string" && v.length >= 4);
 function scrub(text) {
@@ -256,6 +259,25 @@ function closeServer(server) {
       resolve();
     }
   });
+}
+
+function areDefaultsFailClosed(rawDefaults) {
+  return (
+    rawDefaults.model?.baseUrl === null &&
+    rawDefaults.model?.allowRealModelCalls === false &&
+    rawDefaults.policy?.allowRealExternalWrites === false &&
+    rawDefaults.telegram?.apiBase === null &&
+    rawDefaults.telegram?.allowRealPull === false &&
+    Array.isArray(rawDefaults.telegram?.allowedChatIds) &&
+    rawDefaults.telegram.allowedChatIds.length === 0 &&
+    rawDefaults.mail?.imapHost === null &&
+    rawDefaults.mail?.smtpHost === null &&
+    rawDefaults.mail?.allowRealMailRead === false &&
+    rawDefaults.mail?.allowRealMailSend === false &&
+    rawDefaults.calendar?.caldavUrl === null &&
+    rawDefaults.calendar?.allowRealCalendarRead === false &&
+    rawDefaults.calendar?.allowRealCalendarWrite === false
+  );
 }
 
 // ===========================================================================
@@ -406,6 +428,7 @@ if (process.argv.includes("--finalize-kept-workspace")) {
       effect?.state === "SUCCEEDED" &&
       typeof effect?.external_id === "string" &&
       effect.external_id.length > 0 &&
+      responseRow !== null &&
       responseRow !== undefined &&
       succeededAuditExternalId === effect.external_id &&
       effect.attempt_count === 1,
@@ -424,13 +447,7 @@ if (process.argv.includes("--finalize-kept-workspace")) {
   const rawDefaultsFinalize = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
   suite.check(
     "finalize-defaults-json-still-fully-fail-closed",
-    rawDefaultsFinalize.model?.baseUrl === null &&
-      rawDefaultsFinalize.policy?.allowRealExternalWrites === false &&
-      rawDefaultsFinalize.telegram?.allowRealPull === false &&
-      rawDefaultsFinalize.mail?.imapHost === null &&
-      rawDefaultsFinalize.mail?.allowRealMailRead === false &&
-      rawDefaultsFinalize.mail?.allowRealMailSend === false &&
-      rawDefaultsFinalize.calendar?.caldavUrl === null,
+    areDefaultsFailClosed(rawDefaultsFinalize),
     "repo defaults.json untouched (model / telegram-pull / mail / calendar gates all closed)",
   );
 
@@ -997,8 +1014,10 @@ const mailWsHolder = { ws: null, db: null };
         call.usage.inputTokens >= 0 &&
         Number.isInteger(call.usage.outputTokens) &&
         call.usage.outputTokens >= 0 &&
-        Number.isInteger(call.usage.cacheReadTokens ?? 0) &&
-        Number.isInteger(call.usage.cacheWriteTokens ?? 0);
+        Number.isInteger(call.usage.cacheReadTokens) &&
+        call.usage.cacheReadTokens >= 0 &&
+        Number.isInteger(call.usage.cacheWriteTokens) &&
+        call.usage.cacheWriteTokens >= 0;
       suite.check(
         "mail-budget-reserved-then-settled-four-field",
         resRow?.state === "SETTLED" && resRow.actual_microusd > 0 && resRow.actual_microusd <= CALL_UPPER_MICROUSD && priced === resRow.actual_microusd && usageOk && settleError === null,
@@ -1079,15 +1098,12 @@ const mailWsHolder = { ws: null, db: null };
           stateDir: ws.stateDir,
           ownerPrincipalId: OWNER_CONSOLE,
         });
-        const served = await new Promise((resolve) => {
-          let settled = false;
-          const done = (value) => {
-            if (settled) return;
-            settled = true;
-            resolve(value);
-          };
-          serveConsole(consoleApp, { port: CONSOLE_DEFAULT_PORT }).then(done, (e) => done({ error: String(e?.message ?? e) }));
-        });
+        let served;
+        try {
+          served = await serveConsole(consoleApp, { port: CONSOLE_DEFAULT_PORT });
+        } catch (e) {
+          served = { error: String(e?.message ?? e) };
+        }
         const consoleOk = served && !served.error;
         const base = `http://${CONSOLE_BIND}:${CONSOLE_DEFAULT_PORT}`;
         let healthOk = false;
@@ -1239,10 +1255,8 @@ const mailWsHolder = { ws: null, db: null };
 // ===========================================================================
 {
   const stageStart = Date.now();
-  const caldavUrl = readEnv("CALDAV_URL");
-  const caldavUser = readEnv("CALDAV_USER");
-  const caldavPassword = readEnv("CALDAV_PASSWORD");
   const configured = typeof caldavUrl === "string" && caldavUrl.length > 0 && typeof caldavUser === "string" && caldavUser.length > 0 && typeof caldavPassword === "string" && caldavPassword.length > 0;
+  let calPullOk = false;
   if (configured) {
     // Future optional execution: ONE read-only pull, its honest outcome
     // recorded as a note. Never a silent pass, never a write.
@@ -1261,17 +1275,17 @@ const mailWsHolder = { ws: null, db: null };
           defaultTimezone: "Asia/Hong_Kong",
         },
       });
-      outcome =
-        typeof res.stored === "number"
-          ? `read-only pull stored=${res.stored} event rows`
-          : scrub(`read refused/failed: ${String(res.skipped ?? res.failed ?? JSON.stringify(res)).slice(0, 140)}`);
+      calPullOk = typeof res.stored === "number";
+      outcome = calPullOk
+        ? `read-only pull stored=${res.stored} event rows`
+        : scrub(`read refused/failed: ${String(res.skipped ?? res.failed ?? JSON.stringify(res)).slice(0, 140)}`);
     } finally {
       delete process.env[credEnvName];
       try { db.close(); } catch {}
       rmSync(ws.stateDir, { recursive: true, force: true });
     }
     suite.note("calendar-optional-read-attempted", String(outcome));
-    telemetry.calendar = { status: "ATTEMPTED (read-only)", outcome: String(outcome) };
+    telemetry.calendar = { status: calPullOk ? "VERIFIED (read-only)" : "FAILED (read-only)", outcome: String(outcome) };
   } else {
     telemetry.calendar = {
       status: "DEFERRED / NOT VERIFIED",
@@ -1280,9 +1294,9 @@ const mailWsHolder = { ws: null, db: null };
   }
   suite.check(
     "calendar-registration-honest-never-faked",
-    configured ? telemetry.calendar.status === "ATTEMPTED (read-only)" : telemetry.calendar.status === "DEFERRED / NOT VERIFIED",
+    configured ? calPullOk : telemetry.calendar.status === "DEFERRED / NOT VERIFIED",
     configured
-      ? "CALDAV_* present: one read-only pull attempted, outcome recorded as a note (no calendar.write performed under this batch ruling)"
+      ? `CALDAV_* present: read-only pull ${calPullOk ? "succeeded" : "failed"} (${telemetry.calendar.outcome})`
       : "CALDAV_* absent on this host: registered as DEFERRED / NOT VERIFIED — never dressed as a pass",
   );
   telemetry.timings.calendarStageMs = Date.now() - stageStart;
@@ -1292,21 +1306,7 @@ const mailWsHolder = { ws: null, db: null };
 // Teardown + evidence + post-write plaintext tripwire.
 // ===========================================================================
 const rawDefaults = JSON.parse(readFileSync(join(repoRoot, "apps", "daemon", "config", "defaults.json"), "utf8"));
-const defaultsClosed =
-  rawDefaults.model?.baseUrl === null &&
-  rawDefaults.model?.allowRealModelCalls === false &&
-  rawDefaults.policy?.allowRealExternalWrites === false &&
-  rawDefaults.telegram?.apiBase === null &&
-  rawDefaults.telegram?.allowRealPull === false &&
-  Array.isArray(rawDefaults.telegram?.allowedChatIds) &&
-  rawDefaults.telegram.allowedChatIds.length === 0 &&
-  rawDefaults.mail?.imapHost === null &&
-  rawDefaults.mail?.smtpHost === null &&
-  rawDefaults.mail?.allowRealMailRead === false &&
-  rawDefaults.mail?.allowRealMailSend === false &&
-  rawDefaults.calendar?.caldavUrl === null &&
-  rawDefaults.calendar?.allowRealCalendarRead === false &&
-  rawDefaults.calendar?.allowRealCalendarWrite === false;
+const defaultsClosed = areDefaultsFailClosed(rawDefaults);
 suite.check(
   "defaults-json-still-fully-fail-closed",
   defaultsClosed,

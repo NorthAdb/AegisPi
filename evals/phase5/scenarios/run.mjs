@@ -45,7 +45,7 @@ import { pullMailMessages, createMailUpstream } from "../../../apps/daemon/src/m
 import { pullCalendarEvents, createCalendarUpstream, reproposeAfter412 } from "../../../apps/daemon/src/calendar-adapter.mjs";
 import { runDreamingLoop } from "../../../apps/daemon/src/dreaming.mjs";
 import { proposeMemoryFact } from "../../../apps/daemon/src/memory.mjs";
-import { ensureMailScope, ingestInboundMail, mailThreadKey, proposeMailReplyEffect, buildMailSendIntent, validateMailSendIntent, insertMailDraftEvidence } from "../../../apps/daemon/src/mail-triage.mjs";
+import { ensureMailScope, ingestInboundMail, proposeMailReplyEffect, buildMailSendIntent, validateMailSendIntent, insertMailDraftEvidence } from "../../../apps/daemon/src/mail-triage.mjs";
 import { insertObjectRow, readObjectContent } from "../../../apps/daemon/src/objects.mjs";
 import { createBudgetLedger } from "../../../apps/daemon/src/budget.mjs";
 import { loadDaemonConfig } from "../../../apps/daemon/src/config.mjs";
@@ -264,7 +264,6 @@ const suite = makeSuite("phase5-batch2-scenarios");
   db.close();
 }
 
-let mailChain = null;
 {
   const { ws, db } = freshDb("mail-5.3");
   process.env["AEGISPI_TEST_MAIL_CREDENTIAL_FIXTURE"] = `${MAIL_ACCOUNT}:fixture-app-password-not-a-real-secret`;
@@ -1079,7 +1078,7 @@ let mailChain = null;
     dropRec1.action === "none" && dropRec2.action === "none" && sendsAfterDrop === beforeDrop + 1,
     `recover=[${dropRec1.action},${dropRec2.action}] messages=${sendsAfterDrop} after-dispatch=${beforeDrop + 1} (zero resends beyond the single delivered attempt)`,
   );
-  mailChain = { ws, db: db2, scopeId: ing.scopeId, threadKey: ing.threadKey, claim, proposed, draftEvidence };
+  db2.close();
 }
 
 // ===========================================================================
@@ -1729,7 +1728,7 @@ let mailChain = null;
   // stale conflicted, one forbidden-category candidate, and the SAME family
   // in scopeB (cross-scope proof).
   const a1 = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "pref.editor", factText: "uses vim bindings", category: "preference", sourceUri: "t:1", sourceActor: "contact:a", now });
-  const a2 = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "pref.editor.plugins", factText: "prefers vim plugins", category: "preference", sourceUri: "t:2", sourceActor: "contact:a", now });
+  proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "pref.editor.plugins", factText: "prefers vim plugins", category: "preference", sourceUri: "t:2", sourceActor: "contact:a", now });
   // Anchored to the FIXED quiet-window instant (not Date.now()): the pass
   // runs at insideQuiet, so the expiry must be older than THAT — an anchor
   // to the real clock would make the archive hour-of-day fragile.
@@ -1737,9 +1736,7 @@ let mailChain = null;
   proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "proj.status", factText: "phase one", category: "note", sourceUri: "t:4", sourceActor: "contact:a", now: now - 10 * 24 * 3600_000 });
   const aConflict = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "proj.status", factText: "phase two", category: "note", sourceUri: "t:5", sourceActor: "contact:a", now: now - 9 * 24 * 3600_000 });
   const aForbidden = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeA.id, factKey: "ident.self", factText: "owner identity note", category: "identity", sourceUri: "t:6", sourceActor: "contact:a", now });
-  const bSame = proposeMemoryFact(db, ws.stateDir, { scopeId: scopeB.id, factKey: "pref.editor", factText: "uses vim bindings too", category: "preference", sourceUri: "t:7", sourceActor: "contact:b", now });
-  void a2;
-  void bSame;
+  proposeMemoryFact(db, ws.stateDir, { scopeId: scopeB.id, factKey: "pref.editor", factText: "uses vim bindings too", category: "preference", sourceUri: "t:7", sourceActor: "contact:b", now });
 
   // --- E2: inside the window the pass archives expiry, proposes merges,
   // alerts conflicts — never activates, never crosses scopes.
@@ -2044,14 +2041,10 @@ let mailChain = null;
     `exit=${run2.code} effect=${staleCancelled?.state} err=${String(staleCancelled?.last_error ?? "").slice(0, 70)} audits=${staleAudit}`,
   );
   db2.close();
-  void run1.out;
-  void run2.out;
 }
 
 // ---------------------------------------------------------------------------
 await fx.close();
-void mailChain;
-void mailThreadKey;
 
 const label = "Phase 5 Batch 2 scenarios (5.3 mail + 5.4 timers/calendar/dreaming, loopback TLS fixtures)";
 writeReport({ suiteId: "scenarios", extra: { dataSources: "本地环回 TLS SMTP/IMAP/CalDAV 夹具（独立 helper 进程）；零真实邮箱/日历/模型/Telegram 调用" }, suite, label });

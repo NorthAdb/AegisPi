@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-23T13:12:20.980Z",
+  "generatedAt": "2026-11-23T14:30:46.301Z",
   "nodeVersion": "v22.23.5",
   "suite": "scenarios",
   "label": "Phase 5 Batch 2 scenarios (5.3 mail + 5.4 timers/calendar/dreaming, loopback TLS fixtures)",
@@ -101,7 +101,7 @@
     {
       "name": "5.3-6a dispatch-succeeded",
       "status": "PASS",
-      "detail": "{\"state\":\"SUCCEEDED\",\"externalId\":\"<adb093e85a731eec6007e94b40d6b6d4db0a093d98c1ff6e565972e918c4558a@aegispi.local>\"}"
+      "detail": "{\"state\":\"SUCCEEDED\",\"externalId\":\"<c668e86b052ec1c5de9fc6df872a1eebde30655a79ea47a6269459078f0fe132@aegispi.local>\"}"
     },
     {
       "name": "5.3-6b smtp-sent-exactly-one",
@@ -111,7 +111,7 @@
     {
       "name": "5.3-6c external-id-recorded",
       "status": "PASS",
-      "detail": "{\"external_id\":\"<adb093e85a731eec6007e94b40d6b6d4db0a093d98c1ff6e565972e918c4558a@aegispi.local>\",\"state\":\"SUCCEEDED\"}"
+      "detail": "{\"external_id\":\"<c668e86b052ec1c5de9fc6df872a1eebde30655a79ea47a6269459078f0fe132@aegispi.local>\",\"state\":\"SUCCEEDED\"}"
     },
     {
       "name": "5.3-7a cp4-blocks-cross-scope-mail-payload",
@@ -306,7 +306,7 @@
     {
       "name": "5.4-9a remote-edit-changes-etag",
       "status": "PASS",
-      "detail": "new=3bb0e30b3667b4c5"
+      "detail": "new=2aba2d0a8a9d1ef7"
     },
     {
       "name": "5.4-9b head-mismatch-refused-before-send",
@@ -321,7 +321,7 @@
     {
       "name": "5.4-9d head-change-mints-fresh-card",
       "status": "PASS",
-      "detail": "new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=3bb0e30b3667b4c5"
+      "detail": "new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=2aba2d0a8a9d1ef7"
     },
     {
       "name": "5.4-9e reapproved-write-succeeds-on-fresh-etag",
@@ -341,7 +341,7 @@
     {
       "name": "5.4-10c 412-repropose-mints-fresh-card",
       "status": "PASS",
-      "detail": "{\"newApprovalId\":\"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2\",\"pinnedHead\":\"04e84040236cf1f9\",\"taskReparked\":true}"
+      "detail": "{\"newApprovalId\":\"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2\",\"pinnedHead\":\"26b489eae0df1d0a\",\"taskReparked\":true}"
     },
     {
       "name": "5.4-11a dreaming-skips-outside-quiet-hours",

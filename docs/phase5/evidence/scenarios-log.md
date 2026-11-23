@@ -1,6 +1,6 @@
 # Phase 5 Batch 2 scenarios (5.3 mail + 5.4 timers/calendar/dreaming, loopback TLS fixtures)
 
-生成：2026-11-23T13:12:20.980Z；Node v22.23.5；suite `scenarios`。
+生成：2026-11-23T14:30:46.301Z；Node v22.23.5；suite `scenarios`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -22,9 +22,9 @@
 | PASS | 5.3-4a park-survives-restart | {"attempt_state":"PARKED","task_state":"WAITING_APPROVAL"} |
 | PASS | 5.3-5a first-approve-consumes | {"accepted":true,"state":"CONSUMED","effectState":"READY","taskState":"WAITING_EFFECT"} |
 | PASS | 5.3-5b double-approve-idempotent | {"accepted":false,"reason":"already CONSUMED","state":"CONSUMED"} |
-| PASS | 5.3-6a dispatch-succeeded | {"state":"SUCCEEDED","externalId":"<adb093e85a731eec6007e94b40d6b6d4db0a093d98c1ff6e565972e918c4558a@aegispi.local>"} |
+| PASS | 5.3-6a dispatch-succeeded | {"state":"SUCCEEDED","externalId":"<c668e86b052ec1c5de9fc6df872a1eebde30655a79ea47a6269459078f0fe132@aegispi.local>"} |
 | PASS | 5.3-6b smtp-sent-exactly-one | messages=1 before=0 |
-| PASS | 5.3-6c external-id-recorded | {"external_id":"<adb093e85a731eec6007e94b40d6b6d4db0a093d98c1ff6e565972e918c4558a@aegispi.local>","state":"SUCCEEDED"} |
+| PASS | 5.3-6c external-id-recorded | {"external_id":"<c668e86b052ec1c5de9fc6df872a1eebde30655a79ea47a6269459078f0fe132@aegispi.local>","state":"SUCCEEDED"} |
 | PASS | 5.3-7a cp4-blocks-cross-scope-mail-payload | proposal refused with cp4_recipient_scope_leak gate |
 | PASS | 5.3-7b unauthorized-recipient-refused-pre-row | ["recipient stranger@example.org is not on mail.allowedRecipients"] |
 | PASS | 5.3-7c sending-identity-is-fixed | ["sending identity spoof@elsewhere.example is not the configured fixed identity aegispi@local"] |
@@ -63,14 +63,14 @@
 | PASS | 5.4-8a write-proposal-pins-etag | state=WAITING_APPROVAL |
 | PASS | 5.4-8b if-match-write-succeeds | {"state":"SUCCEEDED"} |
 | PASS | 5.4-8c server-required-if-match | {"putCount":1,"putWithoutIfMatch":0,"fourTwelves":0} |
-| PASS | 5.4-9a remote-edit-changes-etag | new=3bb0e30b3667b4c5 |
+| PASS | 5.4-9a remote-edit-changes-etag | new=2aba2d0a8a9d1ef7 |
 | PASS | 5.4-9b head-mismatch-refused-before-send | AdapterRefused(head_changed) |
 | PASS | 5.4-9c zero-silent-overwrite | fourTwelves=0 remoteIntact=true |
-| PASS | 5.4-9d head-change-mints-fresh-card | new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=3bb0e30b3667b4c5 |
+| PASS | 5.4-9d head-change-mints-fresh-card | new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=2aba2d0a8a9d1ef7 |
 | PASS | 5.4-9e reapproved-write-succeeds-on-fresh-etag | {"state":"SUCCEEDED"} |
 | PASS | 5.4-10a server-412-lands-failed-head-changed | {"state":"FAILED","last_error":"head_changed: server returned 412 Precondition Failed; the remote calendar changed under the approved action"} |
 | PASS | 5.4-10b 412-counted-remote-untouched-by-that-put | {"putCount":3,"putWithoutIfMatch":0,"fourTwelves":1} |
-| PASS | 5.4-10c 412-repropose-mints-fresh-card | {"newApprovalId":"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2","pinnedHead":"04e84040236cf1f9","taskReparked":true} |
+| PASS | 5.4-10c 412-repropose-mints-fresh-card | {"newApprovalId":"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2","pinnedHead":"26b489eae0df1d0a","taskReparked":true} |
 | PASS | 5.4-11a dreaming-skips-outside-quiet-hours | outside quiet hours; the dreaming loop runs only inside the window |
 | PASS | 5.4-11b dreaming-runs-inside-quiet-hours | {"expired":["obj:scp:dm%3Atelegram%3A701:d744c0fe05a1abda4e0326151097d3b06056577ff358210c6b4b8463df5993c8"],"mergeSuggestions":["obj:scp:dm%3Atelegram%3A701:31e |
 | PASS | 5.4-11c expired-fact-archived | expired |
