@@ -1,6 +1,6 @@
 # Phase 5 Unit 5.1 — 分层记忆生命周期（L0–L3 / 13 类注入 / 墓碑遗忘 / 技能与 Spill）
 
-生成：2026-11-22T17:09:01.485Z；Node v22.23.5；suite `memory-lifecycle`。
+生成：2026-11-23T13:11:22.984Z；Node v22.23.5；suite `memory-lifecycle`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |

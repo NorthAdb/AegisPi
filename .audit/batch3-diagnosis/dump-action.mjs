@@ -1,0 +1,11 @@
+import { DatabaseSync } from "node:sqlite";
+const db = new DatabaseSync("D:/AegisPi/aegis-pi/workspace-state/phase5/scenarios-real-mail/db/aegis.db", { readOnly: true });
+const e = db.prepare("SELECT action_json FROM effects WHERE state='FAILED'").get();
+const a = JSON.parse(e.action_json);
+console.log("target_resource:", a.target_resource);
+console.log("extra.to:", JSON.stringify(a.extra?.to));
+console.log("extra.cc:", JSON.stringify(a.extra?.cc));
+console.log("extra.recipients:", JSON.stringify(a.extra?.recipients));
+console.log("extra.sendingIdentity:", a.extra?.sendingIdentity);
+const t = db.prepare("SELECT content FROM objects WHERE kind='task_result' OR kind='event_payload' ORDER BY observed_at DESC LIMIT 3").all();
+db.close();

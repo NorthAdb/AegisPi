@@ -45,6 +45,7 @@
 | [phase5/HANDOFF-BATCH1-AUDIT.md](phase5/HANDOFF-BATCH1-AUDIT.md) | **Phase 5 第 1 批交接与验收结论（2026-11-22，`D-95`/`D-96`）**：记录 `45b7c03..52e223a` 初版对抗审计（`HOLD`）、`D-94` 主人豁免归档、L3 Dreaming 转入第 2 批，以及 **`D-96` 返工修复后全量验收 `PASS`（放行第 2 批）** |
 | [phase5/reports/phase5-batch1-closure.md](phase5/reports/phase5-batch1-closure.md) | **Phase 5 第 1 批收口报告（单元 5.1 + 5.2，2026-11-22）**：含初版自测、`D-94` 声明、§七初版审计（`HOLD`）与 **§八返工修复与最终验收收口（`D-96 PASS`，纪元 13，`47/47` + `23/23`）** |
 | [phase5/reports/phase5-batch2-closure.md](phase5/reports/phase5-batch2-closure.md) | **Phase 5 第 2 批收口报告（单元 5.3 邮件 + 5.4 日历/L3 Dreaming + 5.5 Web 控制台，2026-11-22，`D-97`）**：`eval:scenarios` `78/78`（环回 TLS SMTP/IMAP/CalDAV 夹具全矩阵）、security-unit `63/63`（+15 个 5.5 用例）、cancel-approval `20/20`（+4）、纪元 14、17 套全量回归 + real×5 exit 4 + `report:user-value` `149/149`，浏览器 E2E 四页签实测截图归档 `phase5/evidence/browser-e2e/` |
+| [phase5/reports/phase5-final-closure.md](phase5/reports/phase5-final-closure.md) | **Phase 5 终局收口报告（单元 5.6 许可 2 实盘 + `report:user-value` 升级，2026-11-23，`D-102`）**：`eval:scenarios:real`（缺省 `exit 4`）实盘验收真实 `getUpdates` 私聊/测试群 Canary 隔离 + 真实邮箱 IMAP→DeepSeek 草稿→`127.0.0.1:4310` 审批→SMTP 恰 1 封回信；**真实 CalDAV 按主人裁定登记 `DEFERRED / NOT VERIFIED`（不阻塞 Phase 5）**；`report:user-value` 升级 12 套必检 + 分场景/分 purpose 归因；D-101 两项非阻断瑕疵修复；第 4 次实盘 23/23 后收尾崩溃的 finalize 证据链如实登记 |
 | [phase4/reports/phase4-5-closure.md](phase4/reports/phase4-5-closure.md) | **单元 4.5 与 Phase 4 终局收口报告**（2026-11-21 纪元 11.4/11.5）：`eval:triage:real` 6/6 实盘验收（GitHub + DeepSeek + 无网 TS 执行 + `@aegispibot` TLS/CONNECT 私聊）、4 路对抗审计加固、SSRF IP 字面量保护、全量 16 项回归与 `report:user-value` 134/134 通过 |
 | [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md) | **单元 4.5 会话交接存档**（历史基线，2026-11-21 纪元 10）：已由单元 4.5 实盘与终局收口完成承接 |
 | [phase4/reports/phase4-4-closure.md](phase4/reports/phase4-4-closure.md) | **单元 4.4 收口报告**（2026-11-21 纪元 9 终版）：Scenario 4 `repo_triage` 双快照采集与四分类神谕裁定、`eval:triage` 7/7、`report:user-value` 125/125 与全量 17 项通过 |
@@ -55,7 +56,7 @@
 | [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-21 纪元 5 终版）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 5 镜像证据与自审计 19 项加固整改汇总 |
 | [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 审计冻结、4.2 许可 1 离线就绪）与 4.2 首跑待办汇总 |
 | [phase3/reports/round-closure-2026-11-20-limited-fixes.md](phase3/reports/round-closure-2026-11-20-limited-fixes.md) | 限定修复收口：daemon 用例崩溃根因（测试层修复、生产零改动）与纪元 2 选择性重建；终树三 docker 套件 14/14、29/29、5/5 |
-| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（**纪元 13**：Phase 5 第 1 批返工重建 `agent`，携带 `acquisition` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
+| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（**纪元 16**：Phase 5 第 3 批重建 `agent`（`phase3-cbdc86d5fe60`，`sha256:99938a36…`），携带 `acquisition` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
 | [phase3/reports/quota-calibration.md](phase3/reports/quota-calibration.md) | 容器配额占位值的实测依据（CPU/内存/pids/可写盘） |
 
 ## 历史收口与审计（史实身份，不作现行操作依据）
@@ -92,5 +93,6 @@
 ## 纪律速记
 
 - 真实入口四类（A 模型 / B 外部写 / C Telegram / D 公网 webhook）：逐项书面授权「仅限本次」，闭合后零剩余额度，重跑即需新授权；D 延期至首次启用 Telegram 公网入站 webhook 前（2026-11-22 确认：在备齐公网 HTTPS 域名/端口材料前先走路线 1 `getUpdates` 主动长轮询入站，D 项继续推迟且不阻挡 Phase 5 及后续进度），出站发送与实盘轮询另需授权。
+- 单元 5.6 许可 2 实盘（`eval:scenarios:real`，`AEGISPI_ALLOW_REAL_PHASE5_ACCEPTANCE=1`，缺省 `exit 4`）：`D-102` 裁定范围已执行一批（Telegram Pull 隔离 + 真实邮箱恰 1 封回信；授权闭合，重跑即需新授权）；**真实 CalDAV 实盘延后：`CALDAV_*` 未配置，登记为 `DEFERRED / NOT VERIFIED`，不阻塞 Phase 5**（场景二闭环由 Permit 1 环回夹具 `eval:scenarios` 89/89 验收在案）。
 - 不常开；`defaults.json` 失败关闭；任务 $0.80 / 日 $5 已定不重开（价格、token 上限与单次预留属首跑检查表核对，非预算重谈）。
 - 密钥只进本机 `.env`；审计原稿与证据字节不变；历史缺证不追补；任何阶段结论以「状态说明」类文档为准。

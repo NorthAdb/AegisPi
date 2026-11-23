@@ -8,6 +8,7 @@
 - 模型链路设计 [ADR-0001](docs/adr/0001-model-path-pi-host-execution.md) **已在单元 4.1 落地、通过独立对抗审计并按路线 A 冻结于 `8943a10`（纪元 5）**（[单元 4.1 收口报告](docs/phase4/reports/phase4-1-closure.md)、[独立审计报告](docs/phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)）。
 - Phase 4 **全部单元（4.1–4.5）与终局对抗审计加固已完成收口**（证据聚合 `134/134`，镜像纪元 11.5；各单元收口报告见 [docs/phase4/reports/](docs/phase4/reports/)）。**`defaults.json` 保持全失败关闭：`telegram.allowRealSend=false`、`telegram.proxyUrl=null`、`triage.allowRealTriage=false`、`repo-observe-real` 与 `triage-real` 均受环境变量门禁守护（缺省 `exit 4`）。**
 - **Phase 5 第 1 批（5.1+5.2）已通过 `D-96` 全量验收；第 2 批（单元 5.3 场景一邮件 + 5.4 场景二日历/L3 Dreaming 编排 + 5.5 `127.0.0.1:4310` 最小 Web 控制台）已完成许可 1 实现与自测收口（`D-97`，本地提交待独立审计）**（[第 1 批收口报告](docs/phase5/reports/phase5-batch1-closure.md)、[第 2 批收口报告](docs/phase5/reports/phase5-batch2-closure.md)、[交接与审计清单](docs/phase5/HANDOFF-BATCH1-AUDIT.md)）：本批新增 `eval:scenarios` **78/78**（环回 TLS SMTP/IMAP/CalDAV 夹具全矩阵）并将 security-unit/cancel-approval 扩编至 **63/63**（+15 个 5.5 用例）与 **20/20**（+4）；既有全部纯本地/容器套件与 6 项 Docker 套件（含 `quota-calibration` 重跑 5/5）终树全量回归 `exit 0`；5 个 `real` 入口 `exit 4` 守卫实测通过；`report:user-value` **149/149**（`defaultsFailClosed=true`）；镜像为**纪元 14**（第 2 批重建 `agent`，`sha256:e33246a5…`）；`defaults.json` 新增 mail/calendar 双节保持全失败关闭；浏览器 E2E 四页签实测（批准→环回 SMTP 恰 1 封投递、UNKNOWN 对账、XSS 纯文本渲染、成本/Trace）归档 `docs/phase5/evidence/browser-e2e/`；5.6 实盘未授权未实施，等待独立审计。
+- **Phase 5 第 3 批（单元 5.6 许可 2 实盘验收 + `report:user-value` 升级 + 终局收口，`D-102`）已完成**（[Phase 5 终局收口报告](docs/phase5/reports/phase5-final-closure.md)）：新增 `eval:scenarios:real`（缺省 `exit 4`），实盘跑通真实 `getUpdates` 私聊+测试群 Canary 隔离（CP4 击杀、游标落盘、回执零明文）与真实邮箱 IMAP→DeepSeek 草稿→4310 控制台审批→SMTP **恰 1 封**回信（`external_id` 入账、预算四字段结清）；真实 CalDAV 按主人裁定登记 `DEFERRED / NOT VERIFIED`；`report:user-value` 升级为 12 套必检 + 分场景/分 purpose 归因（未测保持 null），全绿 **defaultsFailClosed=true + 零密钥扫描 clean**；镜像重建至**纪元 16**；D-101 两项非阻断瑕疵（夹具 socket 循环、晨报证据 manifest 绑定）已修。
 | `eval:scenarios`（Phase 5 第 2 批：5.3 邮件 + 5.4 Timer/日历/Dreaming，环回 TLS 夹具） | 否 | 78/78 PASS，exit 0（2026-11-22，纪元 14） |
 - **不常开。** 无任何新增真实模型、Telegram、外部写或公网入口授权；默认配置保持失败关闭。**`D-94` 事故归档**：2026-11-22 守卫核验误触一次 `test:ingress-telegram:real` 真实只读（`getMe`+`getUpdates` 零外发零确认），已补齐该入口缺省 `exit 4` 守卫，并经主人裁定豁免闭环归档（`D-95`）。
 - 任务预算 $0.80、日预算 $5 已定，不重开；真实运行前的价格目录、token 约束与单次预留确认属首跑检查表核对，不是重新讨论预算。
@@ -53,11 +54,12 @@
 - Scenario 4 `repo_triage` 判定闭环与报告聚合：`repo-triage.mjs` 主机编排（双端只读快照采集与白名单 `stageSubpaths` → `pi-ai@1.5.2` 建议摘要 → 双无网执行容器验证 + 四分类 `job-oracle` 裁定 + 同事务 `outbox`/Telegram 通知与 `container-executor` 异步心跳续租/终态清理），`eval:triage`（7/7）与 `report:user-value`（134/134，defaults 失败关闭确认）。
 - Fail-closed Telegram Bot 出站适配器：`telegram-send.mjs` + `upstream-telegram-child.mjs`（`stdin` 传参、非空 `allowedRecipients` 门禁、`allowRealSend` 非环回门禁、动态 `im` 槽位解析、TLS+HTTP `CONNECT` 单次 Agent 代理转发、严格代理失败分类与全链脱敏；已通过环回、`eval:triage` 与 `eval:triage:real` 实盘验证）。
 
-**已执行过且仅限单次/按需授权的真实验收**（默认禁止重跑，均受环境变量/证据守卫或仅限本次纪律约束）：A 真实模型 1 次；B 真实外部写 1 次；C Telegram 只读 2 次；单元 4.2 广度真实 Repo Observe 1 轮（`8/8 PASS`，`repo-observe-real` 需 `AEGISPI_ALLOW_REAL_OBSERVE_ACCEPTANCE=1`）；**单元 4.5 真实端到端 `repo_triage` + `@aegispibot` 私聊 1 轮（纪元 11.4 实跑 `6/6 PASS`，`eval:triage:real` 需 `AEGISPI_ALLOW_REAL_TRIAGE_ACCEPTANCE=1`，缺省 `exit 4`）**。
+**已执行过且仅限单次/按需授权的真实验收**（默认禁止重跑，均受环境变量/证据守卫或仅限本次纪律约束）：A 真实模型 1 次；B 真实外部写 1 次；C Telegram 只读 2 次；单元 4.2 广度真实 Repo Observe 1 轮（`8/8 PASS`，`repo-observe-real` 需 `AEGISPI_ALLOW_REAL_OBSERVE_ACCEPTANCE=1`）；**单元 4.5 真实端到端 `repo_triage` + `@aegispibot` 私聊 1 轮（纪元 11.4 实跑 `6/6 PASS`，`eval:triage:real` 需 `AEGISPI_ALLOW_REAL_TRIAGE_ACCEPTANCE=1`，缺省 `exit 4`）**；**单元 5.6 许可 2 实盘验收 1 批（`D-102` 裁定范围：真实 `getUpdates` 3 轮私聊+测试群隔离、真实 IMAP 拉取→DeepSeek 草稿→4310 控制台审批→SMTP 恰 1 封回信 `external_id` 入账；CalDAV 实盘按主人裁定记 `DEFERRED / NOT VERIFIED` 不阻塞；第 4 次运行 23/23 全 PASS 后收尾崩溃于证据重写前，经 `--finalize-kept-workspace` 只读补齐证据 12/12 PASS，证据链见 [Phase 5 终局收口](docs/phase5/reports/phase5-final-closure.md)）**。
 
 **未实现 / 未授权**（不得当已实现或已放行）：
 
 - 公网入站 webhook（D 项，延期至首次启用 Telegram 公网入站 webhook 前）、常开运行。
+- 真实 CalDAV 日历实盘（主人 `D-102` 裁定延后：`CALDAV_*` 未配置，`eval:scenarios:real` 如实登记 `DEFERRED / NOT VERIFIED`；场景二闭环由 Permit 1 环回 TLS 夹具 `eval:scenarios` 89/89 验收在案）。
 
 ## 运行前置条件
 
@@ -81,6 +83,7 @@
 | `test:ingress-telegram`（本地夹具） | 否 | 7/7 + 1 NOTE，exit 0 |
 | `test:memory-lifecycle`（Phase 5.1 分层记忆/墓碑遗忘/技能与 Spill） | 否 | 47/47 PASS，exit 0（2026-11-22，纪元 13） |
 | `test:cross-channel`（Phase 5.2 Telegram 路线 1 拉取 + 9 环节 Canary） | 否 | 23/23 PASS，exit 0（2026-11-22，纪元 13） |
+| `eval:scenarios`（Phase 5.3+5.4 邮件/Timer/日历/Dreaming 环回 TLS 夹具） | 否 | 89/89 PASS，exit 0（2026-11-23，纪元 16 终树复跑） |
 | `test:model-proposal`（4.1 锚点 E2E + T1–T10 + 生产启动器 + 空回复拦截） | 是 | 15/15 PASS，exit 0 |
 | `test:repo-observe`（4.2 离线 Observe + KV 前缀稳定 + 容量前置拦截） | 是 | 7/7 PASS，exit 0 |
 | `test:offline-jobs` / `test:security:integration` / `test:quota-calibration`（Phase 3 三 docker 套件） | 是 | 14/14、29/29、5/5，exit 0（纪元 11.5） |
@@ -94,6 +97,7 @@
 
 - `npm run test:model:real`（A 真实模型）；`npm run test:external-write:real`（B 真实外部写，其 postverify 属实施者自查非独立审计）；`npm run test:ingress-telegram:real`（C Telegram 只读）。
 - `evals/phase4/repo-observe-real/run.mjs`（需显式 `AEGISPI_ALLOW_REAL_OBSERVE_ACCEPTANCE=1`，缺省 `exit 4`）；`npm run eval:triage:real`（需显式 `AEGISPI_ALLOW_REAL_TRIAGE_ACCEPTANCE=1`，缺省 `exit 4`）。
+- `npm run eval:scenarios:real`（单元 5.6 许可 2 实盘验收：Telegram Pull 隔离 + 真实邮箱草稿审批发送 + CalDAV 登记边界；需显式 `AEGISPI_ALLOW_REAL_PHASE5_ACCEPTANCE=1`，缺省 `exit 4`；`--finalize-kept-workspace` 为其零外部副作用的证据补齐模式）。
 
 任何真实模型调用、Telegram 调用、外部写或公网入口，须先获主人逐项书面授权（口径「仅限本次」）；授权闭合是文书纪律，不是代码保证。D 公网 webhook 未授权、未执行。详见[权威状态清单 §1](docs/phase3/reports/phase3-status-and-remaining.md)。
 

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-22T16:44:16.220Z",
+  "generatedAt": "2026-11-23T13:25:34.867Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-integration",
   "label": "test:security:integration — 真实容器隔离与逃逸矩阵（02 §8 第二组；探针经 bridge 对照证伪）",
@@ -131,7 +131,7 @@
     {
       "name": "acquisition-refuses-cross-host-redirects",
       "status": "PASS",
-      "detail": "exit=1 reason=redirect host allowlist-demo.host-gateway.local:62004 is not in the al"
+      "detail": "exit=1 reason=redirect host allowlist-demo.host-gateway.local:58121 is not in the al"
     },
     {
       "name": "acquisition-follows-plan-allowlisted-redirect-hosts",
@@ -151,13 +151,13 @@
     {
       "name": "offline-jobs-suite-green-under-integration-gate",
       "status": "PASS",
-      "detail": "exit=0 (node:38808) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
+      "detail": "exit=0 (node:37852) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-wa"
     }
   ],
   "dataSources": "真实 docker 容器（execution/agent/acquisition 按记录 manifest digest 运行）+ 本机一次性 HTTP 源（host.docker.internal 经 host-gateway，仅本机回环网关）+ bridge 对照容器（同镜像仅网络不同，证探针可见泄漏）；无模型调用、无真实外部写、无凭据入容器",
   "images": {
     "execution": "127.0.0.1:5000/aegispi/execution@sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050",
-    "agent": "127.0.0.1:5000/aegispi/agent@sha256:eda55c19becc4379baa44b43e7eb3181985dd5c0600ed49ad102f0b1fb59c650",
+    "agent": "127.0.0.1:5000/aegispi/agent@sha256:99938a3626e9dfabdcb3e39d5b575a8d3ef7bc1b9e68a5f1c2b2fd0d89de2e54",
     "acquisition": "127.0.0.1:5000/aegispi/acquisition@sha256:488cb3da47f98009fac76e76245dbb2f0dcfe57250f06100e82d41b5ca50d174"
   }
 }

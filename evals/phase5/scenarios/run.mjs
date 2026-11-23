@@ -142,14 +142,17 @@ const fx = (() => {
   const sock = netConnect({ host: "127.0.0.1", port: fixturePorts.controlPort });
   sock.on("data", (d) => {
     bufferParts.push(d);
-    const buf = Buffer.concat(bufferParts);
-    for (;;) {
+    // Coalesced TCP segments can carry several complete JSON lines in one
+    // chunk (D-101 non-blocking memo): consume EVERY complete line now and
+    // keep only the trailing partial bytes buffered, or a multi-line reply
+    // wedges its promise until a data event that never comes.
+    let buf = Buffer.concat(bufferParts);
+    bufferParts.length = 0;
+    while (true) {
       const idx = buf.indexOf(0x0a);
       if (idx === -1) break;
       const line = buf.subarray(0, idx).toString("utf8");
-      bufferParts.length = 0;
-      const rest = buf.subarray(idx + 1);
-      if (rest.length > 0) bufferParts.push(rest);
+      buf = buf.subarray(idx + 1);
       try {
         const msg = JSON.parse(line);
         if (msg.id !== undefined && pending.has(msg.id)) {
@@ -157,8 +160,8 @@ const fx = (() => {
           pending.delete(msg.id);
         }
       } catch {}
-      break;
     }
+    if (buf.length > 0) bufferParts.push(buf);
   });
   const control = (op, args = {}) =>
     new Promise((resolve) => {

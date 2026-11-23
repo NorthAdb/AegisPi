@@ -1,0 +1,155 @@
+{
+  "generatedAt": "2026-11-23T13:03:35.335Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "scenarios-real",
+  "label": "phase5:scenarios-real — 单元 5.6 许可 2 实盘验收（终局 finalize：自保留工作区只读重推 + 原始运行日志引用）",
+  "counts": {
+    "pass": 12,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "finalize-tg-canary-dm-home-only",
+      "status": "PASS",
+      "detail": "kept tg workspace: canary DM payload objects=1, group canary hits=0, canary in ALL object files=1, foreign-scope telegram inbox rows=0"
+    },
+    {
+      "name": "finalize-tg-group-reader-refused-dm-canary",
+      "status": "PASS",
+      "detail": "kept grant state: group-scope walk serves its own payload (objects=1); the same principal walking the DM canary object is refused (objects=0, skipped=1)"
+    },
+    {
+      "name": "finalize-tg-cp4-block-recorded",
+      "status": "PASS",
+      "detail": "kept tg workspace: cp4 audit rows=1, im.notify effect rows=0"
+    },
+    {
+      "name": "finalize-tg-offset-persisted",
+      "status": "PASS",
+      "detail": "kept telegram_pull_offset=500045908"
+    },
+    {
+      "name": "finalize-tg-receipts-clean",
+      "status": "PASS",
+      "detail": "kept tg audit: canary=false, token=false"
+    },
+    {
+      "name": "finalize-tg-flow-cited-from-originating-log",
+      "status": "NOTE",
+      "detail": "originating-run log .audit/batch3-real-run-4.log: PASS lines 1-18: fail-closed gate probe, flush/window/replay rounds=3 within the permit cap, group admission, zero unauthorized persistence, receipt scan"
+    },
+    {
+      "name": "finalize-mail-inbox-admitted-redacted",
+      "status": "PASS",
+      "detail": "kept mail workspace: admitted inbox row present; envelopeFrom=[REDACTED_MAIL_ADDRESS]; redacted subject=\"[NorthAdb/Piper] Run failed: Upstream su\""
+    },
+    {
+      "name": "finalize-mail-draft-bound-to-action",
+      "status": "PASS",
+      "detail": "kept draft evidence: body chars=280, action content_hash matches sha256(bodyText)=true, mail_draft evidence row present (yes); the mail_draft/effect_response rows are hash-bound hollow references by product design — their bytes live in action_json, so the draft text is re-derived from there"
+    },
+    {
+      "name": "finalize-mail-budget-settled",
+      "status": "PASS",
+      "detail": "kept reservation SETTLED actual=483u$ (upper 50000u$), budget_settled audit carries the identical actual (483); the four-field TOKEN counts were judged live in the originating log (usage-4field=true, in/out=175/358)"
+    },
+    {
+      "name": "finalize-mail-approval-consumed-via-console-cas",
+      "status": "PASS",
+      "detail": "kept approvals: CONSUMED card bound to the mail effect (approver=prn:local:owner), approval_consumed audit rows=1; the console session+CSRF flow is cited in the originating log"
+    },
+    {
+      "name": "finalize-mail-effect-succeeded-external-id-recorded",
+      "status": "PASS",
+      "detail": "kept effects: mail.send rows=1 (SUCCEEDED=1, attempts=1); external_id=<5fa4c939a025d8760b773ed7616d77ae66cfdd9a8a8 identical in the effect row and the effect_succeeded audit; effect_response reference row present (yes — hash-bound hollow row by product design, no file bytes)"
+    },
+    {
+      "name": "finalize-mail-task-waiting-effect-attempt-parked",
+      "status": "PASS",
+      "detail": "kept task state=WAITING_EFFECT, attempt=PARKED (the park survived; only the daemon's post-effect completion step is not part of this composed acceptance)"
+    },
+    {
+      "name": "finalize-mail-flow-cited-from-originating-log",
+      "status": "NOTE",
+      "detail": "originating-run log .audit/batch3-real-run-4.log: PASS lines 19-28: IMAP over TLS pull of 10 messages, envelope-sender admission, DeepSeek draft (reasoning:high), console session+CSRF consume=true (CONSUMED), smtp submits=1 with external_id recorded"
+    },
+    {
+      "name": "finalize-defaults-json-still-fully-fail-closed",
+      "status": "PASS",
+      "detail": "repo defaults.json untouched (model / telegram-pull / mail / calendar gates all closed)"
+    }
+  ],
+  "dataSources": "终局 finalize（--finalize-kept-workspace）：对第 4 次实盘运行（23/23 全 PASS、真实 SMTP 已发恰 1 封）因 Windows 收尾 EBUSY 崩溃未及重写的证据，从保留工作区只读重推全部可由状态验证的断言；零网络/零模型/零 SMTP 调用；全程脱敏；真实 CalDAV 按 D-102 登记 DEFERRED / NOT VERIFIED",
+  "permit": "AEGISPI_ALLOW_REAL_PHASE5_ACCEPTANCE=1",
+  "finalization": {
+    "mode": "--finalize-kept-workspace",
+    "originatingLog": ".audit/batch3-real-run-4.log",
+    "originatingRunChecks": "23 PASS / 0 FAIL (see the originating log; all external stages completed there)",
+    "originatingRunExit": "1 (teardown EBUSY crash AFTER all 23 checks passed, before evidence rewrite)",
+    "quotaNote": "恰 1 封真实回信已由原始运行发出；本批不允许为证据重写再执行一次实盘（那会发出第 2 封），故以只读 finalize 补齐证据"
+  },
+  "telegram": {
+    "status": "VERIFIED (finalized from kept workspace; originating log cited)",
+    "rounds": null,
+    "admitted": null,
+    "unauthorized": null,
+    "offsetBefore": null,
+    "offsetAfter": 500045908,
+    "canary": "dm-home-only"
+  },
+  "mail": {
+    "status": "VERIFIED (finalized from kept workspace; originating log cited)",
+    "inboxFetched": null,
+    "testEmail": null,
+    "draft": {
+      "chars": 280,
+      "sha256_12": "ca77802ee50a"
+    },
+    "model": {
+      "model": "deepseek/deepseek-flash",
+      "reasoning": "high",
+      "usage": {
+        "inputTokens": 175,
+        "outputTokens": 358,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "originSource": "originating run log (judged live: usage-4field=true)"
+      },
+      "settledMicrousd": 483,
+      "upperMicrousd": 50000
+    },
+    "approval": {
+      "via": "console-api 127.0.0.1:4310 (session+CSRF CAS)",
+      "decision": "approve",
+      "consumed": true
+    },
+    "smtp": {
+      "sends": 1,
+      "tls": true,
+      "externalIdMasked": "<5fa4c939a025d8760b773ed7616d77ae66cfdd9a8a8"
+    }
+  },
+  "calendar": {
+    "status": "DEFERRED / NOT VERIFIED",
+    "reason": "CALDAV_* 未配置；主人裁定（D-102）：真实日历实盘延后，不阻塞 Phase 5；场景二闭环已由 Permit 1 环回 TLS 夹具（eval:scenarios）验收在案"
+  },
+  "budgetByPurpose": {
+    "worker": {
+      "settledMicrousd": 483,
+      "upperMicrousd": 50000,
+      "requests": 1,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "originSource": "amounts re-derived from the kept reservation; token counts cited from the originating run log",
+      "note": "cacheWrite rate stays null (unauthorized price); a nonzero cacheWrite usage would keep the reservation HELD, never settle as zero"
+    },
+    "router": null,
+    "summary": null,
+    "classify": null
+  },
+  "timings": {
+    "telegramStageMs": null,
+    "mailStageMs": null,
+    "calendarStageMs": null
+  }
+}

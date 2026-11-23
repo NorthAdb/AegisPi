@@ -355,13 +355,20 @@ export function processFiredBriefingTimers(db, stateDir, {
     }
     const digest = composeMorningBriefing(db, { now, scopeId: taskRow.scope_id, window });
     const summaryText = `Morning briefing: ${digest.calendarEvents.length} calendar event(s), ${digest.pendingApprovals.length} pending approval(s), ${digest.pendingTimers.length} pending follow-up timer(s), ${digest.unrecoveredAlerts.length} unrecovered alert(s).`;
+    // insertObjectRow returns {id, alreadyPresent, status} — NOT the content
+    // hash it computed (D-101 non-blocking memo; the old code read a
+    // nonexistent .content_hash and the effect silently bound P3-1's
+    // empty-manifest constant). Hash the same content string here: identical
+    // to the row's stored content_hash.
+    const digestContent = JSON.stringify(digest);
+    const digestContentHash = createHash("sha256").update(digestContent).digest("hex");
     const outcome = withTx(db, () => {
       const digestObject = insertObjectRow(db, {
         scopeId: taskRow.scope_id,
         kind: "briefing_payload",
         sourceUri: `timer:${timerId}`,
         sourceActor: "host",
-        content: JSON.stringify(digest),
+        content: digestContent,
         observedAt: now,
         requiredScopeIds: [taskRow.scope_id],
       });
@@ -376,7 +383,7 @@ export function processFiredBriefingTimers(db, stateDir, {
           targetResource: destination,
           operation: "send_message",
           contentHash: createHash("sha256").update(summaryText).digest("hex"),
-          evidenceManifestHash: digestObject.content_hash,
+          evidenceManifestHash: digestContentHash,
           parentObjectIds: [digestObject.id],
           payloadContent: summaryText,
         },

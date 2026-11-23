@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-22T17:10:55.457Z",
+  "generatedAt": "2026-11-23T13:08:51.662Z",
   "nodeVersion": "v22.23.5",
   "suite": "budget",
   "label": "Phase 2 test:budget — HELD 账本、八种 purpose、并发预留与结算（06 §8）",

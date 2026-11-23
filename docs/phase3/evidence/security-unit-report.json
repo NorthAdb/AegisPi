@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-22T17:08:10.384Z",
+  "generatedAt": "2026-11-23T13:10:43.276Z",
   "nodeVersion": "v22.23.5",
   "suite": "security-unit",
   "label": "test:security:unit — 确定性安全门禁（02 §8 第一组）",
@@ -166,12 +166,12 @@
     {
       "name": "http-transport-carries-bytes-and-maps-outcomes",
       "status": "PASS",
-      "detail": "submit=succeeded(ext-1795367225354) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
+      "detail": "submit=succeeded(ext-1795439377238) lookup=true/true head=true dead=failed_local slow=unknown wire-seen=4 — dead is failed_local before any byte, hanging is unknown after the deadline"
     },
     {
       "name": "authorized-production-tick-submits-over-real-http-transport",
       "status": "PASS",
-      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795367228247 local-service-saw=true"
+      "detail": "daemon exit=0 effect=SUCCEEDED/ext-1795439380168 local-service-saw=true"
     },
     {
       "name": "unauthorized-production-tick-sends-zero-bytes-through-real-transport",
@@ -181,7 +181,7 @@
     {
       "name": "not-yet-due-effect-is-not-dispatched-even-when-authorized",
       "status": "PASS",
-      "detail": "daemon exit=0 effect=READY due-in=57986ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing)"
+      "detail": "daemon exit=0 effect=READY due-in=58511ms submitting-audits=0 zero-bytes=true (authorization without due time sends nothing)"
     },
     {
       "name": "dispatcher-refuses-before-due-time-and-commits-at-it",
@@ -196,17 +196,17 @@
     {
       "name": "telegram-outbound-connect-proxy-and-fail-closed",
       "status": "PASS",
-      "detail": "proxy=SUCCEEDED(connects=1) badCfgExit=2 deadProxy=FAILED(local_error: connect ECONNREFUSED 127.0.0.1:64702 ) leakFree=true"
+      "detail": "proxy=SUCCEEDED(connects=1) badCfgExit=2 deadProxy=FAILED(local_error: connect ECONNREFUSED 127.0.0.1:61098 ) leakFree=true"
     },
     {
       "name": "telegram-outbound-tls-connect-proxy-and-pre-http-fail-closed",
       "status": "PASS",
-      "detail": "tlsOk=SUCCEEDED ipSan=SUCCEEDED(httpsHits=1,proxyHits=1/5) badCert=FAILED(local_error: self-signed certificate (DEPTH_Z) eof=FAILED(1006ms) p407=FAILED leakFree=true"
+      "detail": "tlsOk=SUCCEEDED ipSan=SUCCEEDED(httpsHits=1,proxyHits=1/5) badCert=FAILED(local_error: self-signed certificate (DEPTH_Z) eof=FAILED(953ms) p407=FAILED leakFree=true"
     },
     {
       "name": "worker-reserves-before-call-and-settles-real-usage",
       "status": "PASS",
-      "detail": "daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795367272200 at=1795367273055 settled=1795367273093]"
+      "detail": "daemon exit=0 req=SETTLED reservation=SETTLED settled=100 microusd source=pi-ai wire=/chat/completions/deepseek-flash/thinking=enabled ordering[created=1795439426331 at=1795439427351 settled=1795439427392]"
     },
     {
       "name": "worker-no-usage-keeps-reservation-held-never-zero",
@@ -261,7 +261,7 @@
     {
       "name": "disk-watermark-critical-drill-opens-read-only",
       "status": "PASS",
-      "detail": "daemon exit=3 disk-line=disk: level=critical free=440GiB ratio=0.4728"
+      "detail": "daemon exit=3 disk-line=disk: level=critical free=440GiB ratio=0.4726"
     },
     {
       "name": "disk-watermark-alerts-once-per-level-transition",
