@@ -62,3 +62,10 @@
   - **F-10（P2，建议纳入 R6）**：`apps/daemon/src/dreaming.mjs:152-187` 对已转为 `expired`/`deleted` 的 `dreaming_suggestion` 未阻止重复审计与流事件（`alreadyPresent: true` 时仍写 `memory_dreaming_merge_proposed`），建议在 `insertObjectRow` 返回 `alreadyPresent` 时跳过审计/事件与计数。
   - **F-11（P3）**：`apps/daemon/src/console/ui.mjs:355` 审批表 `action_hash` 列误渲染为重复 `a.id`，且 `:316` `detail` 预览未挂载。
 - **第二轮证据**：`.audit/second-audit/report.md`、`.audit/second-audit/probes/probe-second-audit.mjs`、`.audit/second-audit/logs/`。
+
+## 六、返工轻量复核放行追记（`D-101`）
+
+- **复核对象**：`ec7def5`（`D-100` 返工提交）。
+- **最终裁定**：**PASS**（放行单元 5.6，允许推送 `origin/main`）。
+- **复核实测（锁定 Node `v22.23.5`）**：`probe-evidence-holds.mjs` **`rc=0`**、`verify-hono-oracle-pair.mjs` **`rc=0`**、`eval:scenarios` **89/89**、`test:security:unit` **68/68**、`test:cross-channel` **25/25**、`test:cancel-approval` **20/20**、`report:user-value` **154/154（`defaultsFailClosed=true`）**、6 套 Docker 套件（`model-proposal` 15/15、`repo-observe` 7/7、`eval:triage` 7/7、`offline-jobs` 14/14、`security:integration` 29/29、`quota-calibration` 5/5）**全 `rc=0`**、5 个 `*-real` 入口**全 `rc=4`**；探针重放 `probe-console` `rc=0`、`probe-briefing` G1/G2 `PASS`、`probe-parked-restart` 8/8 `rc=0`、独立两进程 `354` 后断流返回 `unknown`。
+- **非阻断备忘**：`evals/phase5/scenarios/run.mjs:160` 夹具控制 socket `break;` 曾致首次并行拉起偶发卡死（单独重跑稳定 89/89）；`briefing-followup.mjs:379` 传 `digestObject.content_hash`（`insertObjectRow` 返回 `contentHash`）经 P3-1 安全兜底。
