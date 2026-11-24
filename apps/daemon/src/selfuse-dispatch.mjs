@@ -1,3 +1,4 @@
+import { hasReadGrant } from "./acl.mjs";
 import { withTx } from "./db/tx.mjs";
 import { writeAudit } from "./audit.mjs";
 import { draftToReadyInTx, proposeEffectInTx } from "./effects.mjs";
@@ -42,6 +43,7 @@ function tryParsePlainObject(rawPayload) {
 export function translateTelegramCommandToPayload(rawPayload, { scopeDomainKey = null } = {}) {
   const obj = tryParsePlainObject(rawPayload);
   if (!obj || typeof obj.text !== "string") return rawPayload;
+  if (obj.kind !== undefined && obj.kind !== "web_chat") return rawPayload;
 
   const trimmed = obj.text.trim();
   const obsMatch = OBSERVE_CMD_RE.exec(trimmed);
@@ -77,10 +79,145 @@ export function translateTelegramCommandToPayload(rawPayload, { scopeDomainKey =
 
 export function formatGeneralUserPrompt(rawPayload) {
   const obj = tryParsePlainObject(rawPayload);
-  if (obj && obj.update_id !== undefined && typeof obj.text === "string" && obj.text.length > 0) {
+  if (
+    obj &&
+    (obj.kind === "web_chat" || obj.update_id !== undefined) &&
+    typeof obj.text === "string" &&
+    obj.text.length > 0
+  ) {
     return obj.text;
   }
   return rawPayload;
+}
+
+function trimCleanly(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const suffix = "\n...[truncated]";
+  if (maxChars <= suffix.length) return text.slice(0, maxChars);
+  let slice = text.slice(0, maxChars - suffix.length);
+  const lastCode = slice.charCodeAt(slice.length - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    slice = slice.slice(0, -1);
+  }
+  return slice + suffix;
+}
+
+function isObjectStrictlyInScope(db, objectId, scopeId) {
+  if (!objectId) return false;
+  const obj = db.prepare("SELECT id, scope_id, status FROM objects WHERE id=?").get(objectId);
+  if (!obj || obj.status === "deleted" || obj.scope_id !== scopeId) return false;
+  const foreign = db
+    .prepare("SELECT 1 FROM object_required_scopes WHERE object_id=? AND scope_id != ? LIMIT 1")
+    .get(objectId, scopeId);
+  return foreign === undefined;
+}
+
+export function buildScopedThreadMessages(
+  db,
+  stateDir,
+  {
+    scopeId,
+    principalId,
+    threadKey,
+    currentTaskId = null,
+    currentUserPrompt = "",
+    maxTurns = 6,
+    maxTotalBytes = 64 * 1024,
+    now = Date.now(),
+  },
+) {
+  const currentMsg = { role: "user", content: String(currentUserPrompt ?? "") };
+  if (!scopeId || !principalId || !threadKey || !hasReadGrant(db, { scopeId, principalId, now })) {
+    return [currentMsg];
+  }
+  const turnLimit = Number.isInteger(maxTurns) && maxTurns > 0 ? maxTurns : 0;
+  if (turnLimit === 0) {
+    return [currentMsg];
+  }
+  const effectiveMaxBytes = Math.min(
+    Number.isFinite(maxTotalBytes) && maxTotalBytes > 0 ? maxTotalBytes : 64 * 1024,
+    127 * 1024,
+  );
+  if (Buffer.byteLength(JSON.stringify([currentMsg]), "utf8") >= effectiveMaxBytes) {
+    return [currentMsg];
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT t.id AS task_id, t.result_object_id, t.updated_at AS task_updated_at,
+              i.id AS inbox_id, i.source AS inbox_source, i.payload_object_id, i.received_at
+       FROM tasks t
+       JOIN event_deliveries d ON d.task_id = t.id
+       JOIN inbox i ON i.id = d.event_id
+       WHERE t.scope_id = ?
+         AND (? IS NULL OR t.id != ?)
+         AND t.state = 'SUCCEEDED'
+         AND t.result_object_id IS NOT NULL
+         AND i.scope_id = ?
+         AND i.thread_key = ?
+         AND i.source IN ('console-chat', 'telegram')
+       ORDER BY t.updated_at DESC, i.received_at DESC, i.rowid DESC
+       LIMIT ?`,
+    )
+    .all(scopeId, currentTaskId, currentTaskId, scopeId, threadKey, turnLimit * 2);
+
+  const perMsgMaxChars = Math.min(8192, Math.max(512, Math.floor(effectiveMaxBytes / 4)));
+  const validTurnsNewestFirst = [];
+  const seenTaskIds = new Set();
+
+  for (const row of rows) {
+    if (seenTaskIds.has(row.task_id)) continue;
+    if (!isObjectStrictlyInScope(db, row.payload_object_id, scopeId)) continue;
+    if (!isObjectStrictlyInScope(db, row.result_object_id, scopeId)) continue;
+
+    const rawPayload = readObjectContent(db, stateDir, row.payload_object_id);
+    if (typeof rawPayload !== "string" || rawPayload.length === 0) continue;
+    const payloadObj = tryParsePlainObject(rawPayload);
+    if (payloadObj && (payloadObj.kind === "repo_observe" || payloadObj.kind === "repo_triage" || payloadObj.kind === "mail")) {
+      continue;
+    }
+
+    const userText = String(formatGeneralUserPrompt(rawPayload) ?? "").trim();
+    if (!userText) continue;
+
+    const rawReply = readObjectContent(db, stateDir, row.result_object_id);
+    if (typeof rawReply !== "string" || rawReply.length === 0) continue;
+    const replyObj = tryParsePlainObject(rawReply);
+    const assistantRaw = replyObj && typeof replyObj.reply === "string" ? replyObj.reply : rawReply;
+    const assistantText = String(assistantRaw).trim();
+    if (!assistantText) continue;
+
+    seenTaskIds.add(row.task_id);
+    validTurnsNewestFirst.push({
+      userContent: trimCleanly(userText, perMsgMaxChars),
+      assistantContent: trimCleanly(assistantText, perMsgMaxChars),
+    });
+    if (validTurnsNewestFirst.length >= turnLimit) break;
+  }
+
+  let packedChrono = [];
+  for (const turn of validTurnsNewestFirst) {
+    const candidateTurns = [turn, ...packedChrono];
+    const candidateMsgs = [];
+    for (const t of candidateTurns) {
+      candidateMsgs.push({ role: "user", content: t.userContent });
+      candidateMsgs.push({ role: "assistant", content: t.assistantContent });
+    }
+    candidateMsgs.push(currentMsg);
+    if (Buffer.byteLength(JSON.stringify(candidateMsgs), "utf8") <= effectiveMaxBytes) {
+      packedChrono = candidateTurns;
+    } else {
+      break;
+    }
+  }
+
+  const messages = [];
+  for (const t of packedChrono) {
+    messages.push({ role: "user", content: t.userContent });
+    messages.push({ role: "assistant", content: t.assistantContent });
+  }
+  messages.push(currentMsg);
+  return messages;
 }
 
 export function parseInboundMailPayload(rawPayload) {

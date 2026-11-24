@@ -1,6 +1,6 @@
 # test:model-proposal — Phase 4.1 模型提议链路全量本地闭环与 T1–T10 矩阵
 
-生成：2026-11-24T03:26:46.936Z；Node v22.23.5；suite `model-proposal`。
+生成：2026-11-24T11:23:09.495Z；Node v22.23.5；suite `model-proposal`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |

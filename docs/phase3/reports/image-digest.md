@@ -11,12 +11,12 @@
 
 | 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |
 | --- | --- | --- | --- | --- | --- |
-| agent | `127.0.0.1:5000/aegispi/agent:phase3-724018a12539` | `sha256:c11100e14f70d77fb58486f013041c9e9297349fc4df282381d3c684c0e391be` | `sha256:fab0b1a2fe5128519bb62a06fa6514b44c4e073a061c791066a17d75fb8b011f` | `sha256:ca18348ddc756633e71ccfc43d03cebc0078c4a81c92d43918ac58b886701fc0` | self-check exit 0 |
+| agent | `127.0.0.1:5000/aegispi/agent:phase3-289bd42268f6` | `sha256:97e9baeff5f7bb34389d8c65e8d11e81ed650e51ab84849967be3b8be46be1df` | `sha256:b920c5c67b1a513dd6f614e2ff564f3779f319dfe5ea0068c74bcb9658dd9305` | `sha256:0d8dccfe1a0790777c53618b983baf04ae12a821532a9239838fbc23fe0fc67e` | self-check exit 0 |
 | acquisition | `127.0.0.1:5000/aegispi/acquisition:phase3-2c612c810ddc` | `sha256:488cb3da47f98009fac76e76245dbb2f0dcfe57250f06100e82d41b5ca50d174` | `sha256:e7e4567514f1c8703d2c134f7435174127bdf0dac8ffcb3cc3c149ccdacf7fc3` | `sha256:88b5f512021048bd116e8f5fcaeaecd44af368ee5ae3a9be223aeaf11a3cdb52` | fail-closed fetch + report |
 | execution | `127.0.0.1:5000/aegispi/execution:phase3-52502432d21f` | `sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050` | `sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e` | `sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab` | no-network job completed clean |
 
-- 构建时间：24/11/2026, 11:13:39（Asia/Hong_Kong）；源码提交：724018a12539；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
-- 纪元说明：Phase 5 self-use prototype final tree
+- 构建时间：24/11/2026, 18:49:25（Asia/Hong_Kong）；源码提交：289bd42268f6；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
+- 纪元说明：Phase 5 self-use web chat, multi-turn history, and card UI
 - 冒烟记录（本纪元）：agent `--self-check` 退出码 0（本纪元实测）。
 - 携带镜像的 tag 与冒烟列沿用其原纪元记录（同一 digest 字节未变；context 复算不一致或 manifest 不可解析即拒绝携带，必须重建）。
 - 隔离与逃逸测试必须跑在 manifest digest 上（`docker run … 127.0.0.1:5000/aegispi/<name>@<digest>`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。
@@ -24,9 +24,9 @@
 机器可读块（image-gate.mjs 解析，勿手改格式）：
 
 <!-- app-image-digests v2
-agent: sha256:c11100e14f70d77fb58486f013041c9e9297349fc4df282381d3c684c0e391be
-agent.config: sha256:fab0b1a2fe5128519bb62a06fa6514b44c4e073a061c791066a17d75fb8b011f
-agent.context: sha256:ca18348ddc756633e71ccfc43d03cebc0078c4a81c92d43918ac58b886701fc0
+agent: sha256:97e9baeff5f7bb34389d8c65e8d11e81ed650e51ab84849967be3b8be46be1df
+agent.config: sha256:b920c5c67b1a513dd6f614e2ff564f3779f319dfe5ea0068c74bcb9658dd9305
+agent.context: sha256:0d8dccfe1a0790777c53618b983baf04ae12a821532a9239838fbc23fe0fc67e
 acquisition: sha256:488cb3da47f98009fac76e76245dbb2f0dcfe57250f06100e82d41b5ca50d174
 acquisition.config: sha256:e7e4567514f1c8703d2c134f7435174127bdf0dac8ffcb3cc3c149ccdacf7fc3
 acquisition.context: sha256:88b5f512021048bd116e8f5fcaeaecd44af368ee5ae3a9be223aeaf11a3cdb52
@@ -39,12 +39,12 @@ execution.context: sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811
 
 | 镜像 | tag | manifest digest | config digest | context digest | 构建冒烟 |
 | --- | --- | --- | --- | --- | --- |
-| agent | `127.0.0.1:5000/aegispi/agent:phase3-724018a12539` | `sha256:19de8e9f904a78bb477b7e8ed38157b55a2bda5aefee90cb5b500b8460956e59` | `sha256:cfdbad3a9891a4ba87bd711e49060b4a6f076162b6956c82af9454725a5cd1c4` | `sha256:bc6441f49cfe08610bd0981475c3dd1ac5eecf9012e54af62974d3ad0400dd39` | self-check exit 0 |
+| agent | `127.0.0.1:5000/aegispi/agent:phase3-724018a12539` | `sha256:c11100e14f70d77fb58486f013041c9e9297349fc4df282381d3c684c0e391be` | `sha256:fab0b1a2fe5128519bb62a06fa6514b44c4e073a061c791066a17d75fb8b011f` | `sha256:ca18348ddc756633e71ccfc43d03cebc0078c4a81c92d43918ac58b886701fc0` | self-check exit 0 |
 | acquisition | `127.0.0.1:5000/aegispi/acquisition:phase3-2c612c810ddc` | `sha256:488cb3da47f98009fac76e76245dbb2f0dcfe57250f06100e82d41b5ca50d174` | `sha256:e7e4567514f1c8703d2c134f7435174127bdf0dac8ffcb3cc3c149ccdacf7fc3` | `sha256:88b5f512021048bd116e8f5fcaeaecd44af368ee5ae3a9be223aeaf11a3cdb52` | fail-closed fetch + report |
 | execution | `127.0.0.1:5000/aegispi/execution:phase3-52502432d21f` | `sha256:202dfcd4fca204b1ed69298d31b724a7fbe21de0346afeaf2ee82ab2a21f5050` | `sha256:9f2ec84e696f07584abe5d54f3661ea0d923f1dd9a65aae335c0b649a1e21f8e` | `sha256:8183df14ff9b9de920d9bd297468c7c3418a38a0286b4effbc9811dbb95cc2ab` | no-network job completed clean |
 
-- 构建时间：24/11/2026, 11:06:41（Asia/Hong_Kong）；源码提交：724018a12539；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
-- 纪元说明：Phase 5 self-use prototype wiring
+- 构建时间：24/11/2026, 11:13:39（Asia/Hong_Kong）；源码提交：724018a12539；构建 Node：v22.23.5；Docker：Docker version 29.9.2, build a82e528。apt 安装的 git 随 bookworm 源浮动（执行镜像内的 git -c 边界夹具，审计 F5）；基础镜像仍按 digest 固定。
+- 纪元说明：Phase 5 self-use prototype final tree
 - 冒烟记录（本纪元）：agent `--self-check` 退出码 0（本纪元实测）。
 - 携带镜像的 tag 与冒烟列沿用其原纪元记录（同一 digest 字节未变；context 复算不一致或 manifest 不可解析即拒绝携带，必须重建）。
 - 隔离与逃逸测试必须跑在 manifest digest 上（`docker run … 127.0.0.1:5000/aegispi/<name>@<digest>`），不得使用浮动 tag。配额校准（06 §4 占位值）见 docs/phase3/reports/quota-calibration.md。

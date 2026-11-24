@@ -25,12 +25,13 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { decideApproval, hasApproveGrant, readConsoleNonce } from "../approvals.mjs";
 import { extraFieldsOfAction, reviseEffect, cancelTask, reconcileUnknown } from "../effects.mjs";
-import { grantPermission, revokePermission } from "../acl.mjs";
+import { grantPermission, revokePermission, hasReadGrant } from "../acl.mjs";
+import { classifyControlCommand, ControlCommandRefused, handleDeterministicControl } from "../control.mjs";
 import { createTelegramWebhookGuard, mapTelegramUpdate } from "../ingress-telegram.mjs";
-import { receiveEvent } from "../ingress.mjs";
+import { ensurePrincipal, ensureScope, receiveEvent, scopeId as scopeIdForDomainKey } from "../ingress.mjs";
 import { activateMemoryFact, forgetObject } from "../memory.mjs";
 import { readObjectContent } from "../objects.mjs";
-import { hasReadGrant } from "../acl.mjs";
+import { formatGeneralUserPrompt } from "../selfuse-dispatch.mjs";
 import { withTx } from "../db/tx.mjs";
 import { writeAudit } from "../audit.mjs";
 import { consoleIndexHtml } from "./ui.mjs";
@@ -323,12 +324,28 @@ export function createConsoleApp(db, {
     const rows = db
       .prepare(
         `SELECT a.id, a.effect_id, a.state, a.approver_id, a.expires_at, a.created_at, a.action_hash,
-                e.task_id, e.scope_id, e.operation
+                e.task_id, e.scope_id, e.operation, e.action_json
          FROM approvals a JOIN effects e ON e.id = a.effect_id
          ORDER BY a.created_at DESC LIMIT 100`,
       )
       .all();
-    return c.json({ approvals: rows });
+    const approvals = rows.map((r) => {
+      const summary = summarizeApprovalAction(r.action_json);
+      return {
+        id: r.id,
+        effect_id: r.effect_id,
+        state: r.state,
+        approver_id: r.approver_id,
+        expires_at: r.expires_at,
+        created_at: r.created_at,
+        actionHashShort: hashShort(r.action_hash),
+        task_id: r.task_id,
+        scope_id: r.scope_id,
+        operation: r.operation,
+        ...summary,
+      };
+    });
+    return c.json({ approvals });
   });
 
   app.get("/api/approvals/:id", (c) => {
@@ -947,6 +964,230 @@ export function createConsoleApp(db, {
     });
   });
 
+  // Chat console: visible-scope thread listing, same-scope message history,
+  // and authenticated owner Web Console chat ingress (/api/chat).
+  const webChatScopeId = scopeIdForDomainKey("dm:local:owner");
+
+  const isReadableObjectForPrincipal = (objectId, principalId, now, { requireActive = false } = {}) => {
+    if (!objectId) return false;
+    const objRow = db.prepare("SELECT id, scope_id, status FROM objects WHERE id=?").get(objectId);
+    if (!objRow || objRow.status === "deleted") return false;
+    if (requireActive && objRow.status !== "active") return false;
+    const reqScopes = db
+      .prepare("SELECT scope_id FROM object_required_scopes WHERE object_id=?")
+      .all(objectId)
+      .map((r) => r.scope_id);
+    const scopesToCheck = reqScopes.length > 0 ? reqScopes : [objRow.scope_id];
+    return scopesToCheck.every((s) => hasReadGrant(db, { scopeId: s, principalId, now }));
+  };
+
+  app.get("/api/chat", (c) => {
+    const principalId = c.get("principalId");
+    const now = Date.now();
+    const visible = visibleScopeIds(principalId, now);
+    const visibleSet = new Set(visible);
+    const reqScopeRaw = c.req.query("scopeId") ?? null;
+    const reqThreadRaw = c.req.query("threadKey") ?? null;
+    const reqScope = reqScopeRaw && reqScopeRaw.length > 0 ? reqScopeRaw : null;
+    const reqThread = reqThreadRaw && reqThreadRaw.length > 0 ? reqThreadRaw : null;
+
+    if (reqScope !== null && !visibleSet.has(reqScope)) {
+      return c.json({ code: "not_found", message: "no such scope" }, 404);
+    }
+
+    let threads = [];
+    if (visible.length > 0) {
+      const placeholders = visible.map(() => "?").join(",");
+      threads = db
+        .prepare(
+          `SELECT i.scope_id AS scopeId, i.thread_key AS threadKey, s.domain_key AS domainKey, s.channel AS channel,
+                  MAX(i.received_at) AS lastAt, COUNT(*) AS msgCount
+           FROM inbox i
+           JOIN scopes s ON s.id = i.scope_id
+           WHERE i.scope_id IN (${placeholders})
+           GROUP BY i.scope_id, i.thread_key
+           ORDER BY lastAt DESC
+           LIMIT 30`,
+        )
+        .all(...visible);
+    }
+
+    const activeScopeId =
+      reqScope ?? (visibleSet.has(webChatScopeId) ? webChatScopeId : threads[0]?.scopeId ?? null);
+    const activeThreadKey =
+      reqThread ??
+      (activeScopeId === webChatScopeId || threads.length === 0
+        ? "web:main"
+        : threads.find((t) => t.scopeId === activeScopeId)?.threadKey ?? "web:main");
+
+    const messages = [];
+    if (
+      activeScopeId &&
+      activeThreadKey &&
+      visibleSet.has(activeScopeId) &&
+      hasReadGrant(db, { scopeId: activeScopeId, principalId, now })
+    ) {
+      const rows = db
+        .prepare(
+          `SELECT i.id AS inboxId, i.source, i.principal_id AS principalId, i.scope_id AS scopeId,
+                  i.payload_object_id AS payloadObjectId, i.thread_key AS threadKey,
+                  i.state AS inboxState, i.verdict, i.received_at AS receivedAt,
+                  t.id AS taskId, t.state AS taskState, t.result_class AS resultClass,
+                  t.result_object_id AS resultObjectId, t.updated_at AS taskUpdatedAt
+           FROM inbox i
+           LEFT JOIN tasks t ON t.id = (
+             SELECT d.task_id FROM event_deliveries d
+             JOIN tasks dt ON dt.id = d.task_id
+             WHERE d.event_id = i.id
+             ORDER BY dt.created_at DESC, d.rowid DESC
+             LIMIT 1
+           )
+           WHERE i.scope_id = ? AND i.thread_key = ?
+           ORDER BY i.received_at DESC, i.rowid DESC
+           LIMIT 60`,
+        )
+        .all(activeScopeId, activeThreadKey)
+        .reverse();
+
+      for (const r of rows) {
+        let userText = null;
+        if (isReadableObjectForPrincipal(r.payloadObjectId, principalId, now)) {
+          const rawPayload = readObjectContent(db, stateDir ?? "", r.payloadObjectId);
+          if (typeof rawPayload === "string" && rawPayload.length > 0) {
+            userText = extractChatUserText(rawPayload);
+          }
+        }
+
+        let replyText = null;
+        if (r.resultObjectId && isReadableObjectForPrincipal(r.resultObjectId, principalId, now, { requireActive: true })) {
+          const rawReply = readObjectContent(db, stateDir ?? "", r.resultObjectId);
+          if (typeof rawReply === "string" && rawReply.length > 0) {
+            replyText = extractAssistantReplyText(rawReply);
+          }
+        }
+
+        let approval = null;
+        if (r.taskId) {
+          const aprRow = db
+            .prepare(
+              `SELECT a.id, a.state, a.expires_at AS expiresAt, e.operation, e.action_json
+               FROM approvals a
+               JOIN effects e ON e.id = a.effect_id
+               WHERE e.task_id = ?
+               ORDER BY a.created_at DESC
+               LIMIT 1`,
+            )
+            .get(r.taskId);
+          if (aprRow) {
+            const summary = summarizeApprovalAction(aprRow.action_json);
+            approval = {
+              id: aprRow.id,
+              state: aprRow.state,
+              operation: aprRow.operation,
+              subject: summary.subject,
+              bodyPreview: summary.bodyPreview,
+              targetResource: summary.targetResource,
+              expiresAt: aprRow.expiresAt,
+            };
+          }
+        }
+
+        messages.push({
+          inboxId: r.inboxId,
+          source: r.source,
+          scopeId: r.scopeId,
+          threadKey: r.threadKey,
+          receivedAt: r.receivedAt,
+          inboxState: r.inboxState,
+          taskId: r.taskId ?? null,
+          taskState: r.taskState ?? null,
+          resultClass: r.resultClass ?? null,
+          userText,
+          replyText,
+          approval,
+        });
+      }
+    }
+
+    return c.json({ activeScopeId, activeThreadKey, threads, messages });
+  });
+
+  app.post("/api/chat", mutationGuard, async (c) => {
+    let body;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ code: "invalid_json", message: "chat body must be JSON" }, 422);
+    }
+    const message = typeof body?.message === "string" ? body.message : "";
+    if (message.trim().length === 0 || message.length > 16384) {
+      return c.json({ code: "invalid_field", message: "chat needs a non-empty message of at most 16384 chars" }, 422);
+    }
+    const threadKey = body?.threadKey === undefined ? "web:main" : body.threadKey;
+    if (typeof threadKey !== "string" || !/^[a-zA-Z0-9:._-]{1,64}$/.test(threadKey)) {
+      return c.json({ code: "invalid_field", message: "threadKey must match /^[a-zA-Z0-9:._-]{1,64}$/" }, 422);
+    }
+
+    const sessionPrincipal = c.get("session").principalId;
+    const now = Date.now();
+    const ensured = ensureWebChatOwnerScope(db, {
+      ownerPrincipalId,
+      sessionPrincipal,
+      now,
+    });
+
+    const command = classifyControlCommand(message);
+    if (command !== null) {
+      try {
+        const outcome = handleDeterministicControl(db, {
+          command,
+          scopeId: ensured.scopeId,
+          threadKey,
+          principalId: sessionPrincipal,
+          inboxId: null,
+          now,
+        });
+        return c.json({ code: "control_executed", outcome, scopeId: ensured.scopeId, threadKey }, 200);
+      } catch (err) {
+        if (err instanceof ControlCommandRefused) {
+          return c.json({ code: "forbidden", message: err.message }, 403);
+        }
+        throw err;
+      }
+    }
+
+    const reqGrant = db
+      .prepare(
+        `SELECT 1 FROM acl_grants
+         WHERE scope_id=? AND principal_id=? AND permission='request'
+           AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)
+         LIMIT 1`,
+      )
+      .get(ensured.scopeId, sessionPrincipal, now);
+    if (!reqGrant) {
+      return c.json({ code: "forbidden", message: "web chat requires a live request grant on the scope" }, 403);
+    }
+
+    const received = receiveEvent(db, stateDir ?? "", {
+      now,
+      source: "console-chat",
+      sourceEventId: `chat-${now}-${randomBytes(6).toString("hex")}`,
+      principal: { platform: "local", subject: "owner" },
+      scope: {
+        kind: "owner_dm",
+        domainKey: "dm:local:owner",
+        channel: "console",
+        conversationId: "owner",
+      },
+      threadKey,
+      priority: 6,
+      policyVersion: "pv1",
+      payload: { kind: "web_chat", text: message, threadKey, by: sessionPrincipal },
+      verdict: "ADMIT",
+    });
+    return c.json({ code: "queued", inboxId: received.inboxId, scopeId: ensured.scopeId, threadKey }, 202);
+  });
+
   // Steer (04 section 4): the message becomes a durable inbox event in the
   // SAME scope; the reply is queued/accepted, never "the tool was
   // interrupted" — only the router's own rules attach it to a live task.
@@ -975,12 +1216,24 @@ export function createConsoleApp(db, {
     if (Number.isInteger(body?.expectedRevision) && Number(task.updated_at) !== body.expectedRevision) {
       return c.json({ code: "conflict", message: "task revision moved", currentRevision: task.updated_at }, 409);
     }
+    const scopeRow = db
+      .prepare("SELECT kind, domain_key, channel, conversation_id, repo_id FROM scopes WHERE id=?")
+      .get(task.scope_id);
+    if (!scopeRow) {
+      return c.json({ code: "not_found", message: "no such scope" }, 404);
+    }
     const received = receiveEvent(db, stateDir ?? "", {
       now,
       source: "console-steer",
       sourceEventId: `steer-${taskId}-${randomBytes(6).toString("hex")}`,
       principal: { platform: "console", subject: sessionPrincipal },
-      scope: { kind: "owner_dm", domainKey: db.prepare("SELECT domain_key FROM scopes WHERE id=?").get(task.scope_id)?.domain_key, channel: "console", conversationId: taskId },
+      scope: {
+        kind: scopeRow.kind,
+        domainKey: scopeRow.domain_key,
+        channel: scopeRow.channel,
+        conversationId: scopeRow.conversation_id ?? taskId,
+        ...(scopeRow.repo_id ? { repoId: scopeRow.repo_id } : {}),
+      },
       threadKey: `task:${taskId}`,
       priority: 8,
       policyVersion: "pv1",
@@ -1056,6 +1309,8 @@ export function createConsoleApp(db, {
   app.get("/", (c) => {
     return c.html(consoleIndexHtml({ port }));
   });
+
+  app.get("/favicon.ico", (c) => c.body(null, 204));
 
 
   //
@@ -1183,6 +1438,87 @@ export function createConsoleApp(db, {
   });
 
   return app;
+}
+
+function summarizeApprovalAction(actionJson) {
+  let action = {};
+  try {
+    action = JSON.parse(actionJson || "{}");
+  } catch {}
+  if (!action || typeof action !== "object" || Array.isArray(action)) action = {};
+  const extra = extraFieldsOfAction(action);
+  const rawBody =
+    typeof extra.bodyText === "string"
+      ? extra.bodyText
+      : typeof extra.body === "string"
+        ? extra.body
+        : typeof extra.description === "string"
+          ? extra.description
+          : typeof extra.text === "string"
+            ? extra.text
+            : null;
+  return {
+    targetResource: action.target_resource ?? null,
+    subject: typeof extra.subject === "string" ? extra.subject : typeof extra.title === "string" ? extra.title : null,
+    bodyPreview: rawBody !== null ? rawBody.slice(0, 240) : null,
+    sendingIdentity: extra.sendingIdentity ?? action.sending_identity ?? null,
+  };
+}
+
+function extractChatUserText(rawPayload) {
+  const formatted = formatGeneralUserPrompt(rawPayload);
+  if (formatted !== rawPayload) return formatted;
+  try {
+    const obj = JSON.parse(rawPayload);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
+      if (typeof obj.subject === "string" || typeof obj.summary === "string") {
+        const parts = [obj.subject, obj.summary]
+          .filter((s) => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim());
+        if (parts.length > 0) return parts.join("\n");
+      }
+      if (typeof obj.message === "string" && obj.message.length > 0) return obj.message;
+      if (typeof obj.question === "string" && obj.question.length > 0) return obj.question;
+    }
+  } catch {}
+  return rawPayload;
+}
+
+function extractAssistantReplyText(rawReply) {
+  try {
+    const parsed = JSON.parse(rawReply);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.reply === "string") {
+      return parsed.reply;
+    }
+  } catch {}
+  return rawReply;
+}
+
+function ensureWebChatOwnerScope(db, { ownerPrincipalId, sessionPrincipal, now }) {
+  const scope = withTx(db, () => {
+    const ownerRef = ensurePrincipal(db, { platform: "local", subject: "owner" });
+    const ownerId = ownerPrincipalId ?? ownerRef.id;
+    return ensureScope(db, {
+      ownerId,
+      kind: "owner_dm",
+      domainKey: "dm:local:owner",
+      channel: "console",
+      conversationId: "owner",
+      policyVersion: "pv1",
+    });
+  });
+  if (sessionPrincipal === ownerPrincipalId) {
+    for (const permission of ["read", "request", "approve", "admin"]) {
+      const existing = db
+        .prepare("SELECT 1 FROM acl_grants WHERE scope_id=? AND principal_id=? AND permission=? LIMIT 1")
+        .get(scope.id, sessionPrincipal, permission);
+      if (!existing) {
+        grantPermission(db, { scopeId: scope.id, principalId: sessionPrincipal, permission, now, actorId: ownerPrincipalId });
+      }
+    }
+  }
+  return { scopeId: scope.id };
 }
 
 function hasAdminGrant(db, { scopeId, principalId, now }) {

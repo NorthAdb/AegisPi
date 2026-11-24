@@ -61,6 +61,7 @@ import { parseRepoTriagePayload, executeRepoTriageTask } from "./repo-triage.mjs
 import {
   translateTelegramCommandToPayload,
   formatGeneralUserPrompt,
+  buildScopedThreadMessages,
   parseInboundMailPayload,
   maybeEnqueueTelegramTaskReply,
   executeMailTriageTask,
@@ -1145,6 +1146,19 @@ export async function main(argv = process.argv.slice(2)) {
                   ? `${config.model.provider}/${config.model.modelId}`
                   : "deepseek/deepseek-flash";
                 const userPrompt = formatGeneralUserPrompt(launchInput);
+                const firstEventId = pendingDeliveries[0]?.event_id ?? null;
+                const threadKey = firstEventId
+                  ? db.prepare("SELECT thread_key FROM inbox WHERE id=?").get(firstEventId)?.thread_key ?? null
+                  : null;
+                const messages = buildScopedThreadMessages(db, dataDir, {
+                  scopeId: taskRow.scope_id,
+                  principalId: taskRow.principal_id,
+                  threadKey,
+                  currentTaskId: claim.taskId,
+                  currentUserPrompt: userPrompt ?? `task ${claim.taskId}`,
+                  maxTotalBytes: Math.max(2048, mergedInputByteCap - 1024),
+                  now: Date.now(),
+                });
                 const launched = agentLauncher.launchAttempt({
                   taskId: claim.taskId,
                   attemptId: claim.attemptId,
@@ -1154,7 +1168,7 @@ export async function main(argv = process.argv.slice(2)) {
                   modelRequest: {
                     purpose: "worker",
                     modelId: modelKey,
-                    messages: [{ role: "user", content: userPrompt ?? `task ${claim.taskId}` }],
+                    messages,
                   },
                   now,
                 });

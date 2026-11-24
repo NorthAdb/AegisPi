@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport } from "../lib/harness.mjs";
-import { grantPermission } from "../../../apps/daemon/src/acl.mjs";
+import { grantPermission, revokePermission } from "../../../apps/daemon/src/acl.mjs";
 import { createAdapterUpstream } from "../../../apps/daemon/src/adapters.mjs";
 import { decideApproval } from "../../../apps/daemon/src/approvals.mjs";
 import { processFiredFollowUpTimers } from "../../../apps/daemon/src/briefing-followup.mjs";
@@ -24,6 +24,7 @@ import { insertObjectRow, putObjectContent } from "../../../apps/daemon/src/obje
 import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
 import { claimNextTask, completeTask } from "../../../apps/daemon/src/scheduler.mjs";
 import {
+  buildScopedThreadMessages,
   formatGeneralUserPrompt,
   maybeEnqueueTelegramTaskReply,
   translateTelegramCommandToPayload,
@@ -952,6 +953,590 @@ async function startFixtureHost() {
         recurrence,
         leakedCount: leaked.length,
         run2Out: (run2.stdout ?? "").trim(),
+      }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. buildScopedThreadMessages: multi-turn assembly, isolation, caps, revoke
+{
+  const { ws, db } = freshDb("scoped-history");
+  try {
+    const baseNow = Date.now() - 120_000;
+    withTx(db, () => ensurePrincipal(db, { platform: "local", subject: "owner" }));
+    const primaryScopeDef = {
+      kind: "owner_dm",
+      domainKey: "dm:local:owner",
+      channel: "console",
+      conversationId: "owner",
+    };
+    const foreignScopeDef = {
+      kind: "owner_dm",
+      domainKey: "dm:telegram:99999",
+      channel: "telegram",
+      conversationId: "99999",
+    };
+    const primaryScope = withTx(db, () =>
+      ensureScope(db, { ownerId: OWNER, ...primaryScopeDef, policyVersion: "pv1" }),
+    );
+    const foreignScope = withTx(db, () =>
+      ensureScope(db, { ownerId: OWNER, ...foreignScopeDef, policyVersion: "pv1" }),
+    );
+    seedOwnerGrants(db, primaryScope.id, baseNow);
+    seedOwnerGrants(db, foreignScope.id, baseNow);
+
+    let seq = 0;
+    const addCompletedTurn = ({
+      scope,
+      scopeDef,
+      source,
+      threadKey,
+      payload,
+      reply,
+      at,
+      deletePayload = false,
+      deleteResult = false,
+      extraRequiredScopeIds = [],
+    }) => {
+      seq += 1;
+      const ev = receiveEvent(db, ws.stateDir, {
+        now: at,
+        source,
+        sourceEventId: `hist-${seq}`,
+        principal: { platform: "local", subject: "owner" },
+        scope: scopeDef,
+        threadKey,
+        priority: 5,
+        policyVersion: "pv1",
+        payload,
+        verdict: "ADMIT",
+      });
+      const dispatched = dispatchEventToTask(db, {
+        inboxId: ev.inboxId,
+        dispatchKey: `hist-task-${seq}`,
+        now: at,
+        priority: 5,
+        maxSteps: 10,
+        deadlineAt: at + 3600_000,
+        skillSetHash: "history-test",
+      });
+      const claim = claimNextTask(db, { now: at, leaseMs: 60_000 });
+      const storedReply = putObjectContent(
+        ws.stateDir,
+        typeof reply === "string" ? reply : JSON.stringify(reply),
+      );
+      const resultObj = withTx(db, () =>
+        insertObjectRow(db, {
+          scopeId: scope.id,
+          kind: "agent_result",
+          sourceUri: `task:${dispatched.taskId}`,
+          sourceActor: "worker",
+          contentHash: storedReply.contentHash,
+          storageRef: storedReply.storageRef,
+          observedAt: at,
+          requiredScopeIds: [scope.id, ...extraRequiredScopeIds],
+        }),
+      );
+      completeTask(db, {
+        ...claim,
+        now: at + 1,
+        resultClass: "affected",
+        resultObjectId: resultObj.id,
+      });
+      if (deletePayload) {
+        const inboxRow = db.prepare("SELECT payload_object_id FROM inbox WHERE id=?").get(ev.inboxId);
+        db.prepare("UPDATE objects SET status='deleted' WHERE id=?").run(inboxRow.payload_object_id);
+      }
+      if (deleteResult) {
+        db.prepare("UPDATE objects SET status='deleted' WHERE id=?").run(resultObj.id);
+      }
+      return { taskId: dispatched.taskId, resultObjId: resultObj.id };
+    };
+
+    // Valid turns on primaryScope + web:main across console-chat and telegram
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "web_chat", text: "First web question", threadKey: "web:main" },
+      reply: { reply: "First web answer" },
+      at: baseNow + 10_000,
+    });
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "telegram",
+      threadKey: "web:main",
+      payload: { update_id: 201, text: "Second tg follow-up" },
+      reply: { reply: "Second tg answer" },
+      at: baseNow + 20_000,
+    });
+    // Excluded specialized / mail payloads
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "repo_observe", targetId: "r1", question: "skip observe" },
+      reply: { reply: "Observe reply" },
+      at: baseNow + 30_000,
+    });
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "repo_triage", presetId: "p1", question: "skip triage" },
+      reply: { reply: "Triage reply" },
+      at: baseNow + 40_000,
+    });
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "mail", envelopeFrom: "alice@example.test", subject: "skip mail" },
+      reply: { reply: "Mail reply" },
+      at: baseNow + 50_000,
+    });
+    // Excluded deleted payload / deleted result / foreign closure / other thread / other scope
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "web_chat", text: "skip deleted payload" },
+      reply: { reply: "Deleted payload reply" },
+      at: baseNow + 55_000,
+      deletePayload: true,
+    });
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "web_chat", text: "skip deleted result" },
+      reply: { reply: "Deleted result reply" },
+      at: baseNow + 60_000,
+      deleteResult: true,
+    });
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "web_chat", text: "skip foreign closure" },
+      reply: { reply: "Foreign closure reply" },
+      at: baseNow + 65_000,
+      extraRequiredScopeIds: [foreignScope.id],
+    });
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:other",
+      payload: { kind: "web_chat", text: "skip other thread" },
+      reply: { reply: "Other thread reply" },
+      at: baseNow + 70_000,
+    });
+    addCompletedTurn({
+      scope: foreignScope,
+      scopeDef: foreignScopeDef,
+      source: "telegram",
+      threadKey: "web:main",
+      payload: { update_id: 202, text: "skip foreign scope" },
+      reply: { reply: "Foreign scope reply" },
+      at: baseNow + 75_000,
+    });
+    // Latest valid turn on primaryScope + web:main
+    addCompletedTurn({
+      scope: primaryScope,
+      scopeDef: primaryScopeDef,
+      source: "console-chat",
+      threadKey: "web:main",
+      payload: { kind: "web_chat", text: "Third recent question", threadKey: "web:main" },
+      reply: { reply: "Third recent answer" },
+      at: baseNow + 80_000,
+    });
+
+    const queryNow = baseNow + 90_000;
+    const assembled = buildScopedThreadMessages(db, ws.stateDir, {
+      scopeId: primaryScope.id,
+      principalId: OWNER,
+      threadKey: "web:main",
+      currentUserPrompt: "Current prompt",
+      maxTurns: 6,
+      maxTotalBytes: 64 * 1024,
+      now: queryNow,
+    });
+    const expected = [
+      { role: "user", content: "First web question" },
+      { role: "assistant", content: "First web answer" },
+      { role: "user", content: "Second tg follow-up" },
+      { role: "assistant", content: "Second tg answer" },
+      { role: "user", content: "Third recent question" },
+      { role: "assistant", content: "Third recent answer" },
+      { role: "user", content: "Current prompt" },
+    ];
+    suite.check(
+      "scoped-history-chronological-and-isolation",
+      JSON.stringify(assembled) === JSON.stringify(expected),
+      JSON.stringify(assembled),
+    );
+
+    const oneTurnPlusCurrentBytes = Buffer.byteLength(
+      JSON.stringify([
+        { role: "user", content: "Third recent question" },
+        { role: "assistant", content: "Third recent answer" },
+        { role: "user", content: "Current prompt" },
+      ]),
+      "utf8",
+    );
+    const capped = buildScopedThreadMessages(db, ws.stateDir, {
+      scopeId: primaryScope.id,
+      principalId: OWNER,
+      threadKey: "web:main",
+      currentUserPrompt: "Current prompt",
+      maxTurns: 6,
+      maxTotalBytes: oneTurnPlusCurrentBytes + 8,
+      now: queryNow,
+    });
+    const tinyCapped = buildScopedThreadMessages(db, ws.stateDir, {
+      scopeId: primaryScope.id,
+      principalId: OWNER,
+      threadKey: "web:main",
+      currentUserPrompt: "Current prompt",
+      maxTurns: 6,
+      maxTotalBytes: 10,
+      now: queryNow,
+    });
+    suite.check(
+      "scoped-history-byte-cap",
+      Buffer.byteLength(JSON.stringify(capped), "utf8") <= oneTurnPlusCurrentBytes + 8 &&
+        JSON.stringify(capped) ===
+          JSON.stringify([
+            { role: "user", content: "Third recent question" },
+            { role: "assistant", content: "Third recent answer" },
+            { role: "user", content: "Current prompt" },
+          ]) &&
+        JSON.stringify(tinyCapped) === JSON.stringify([{ role: "user", content: "Current prompt" }]),
+      JSON.stringify({ capped, tinyCapped }),
+    );
+
+    revokePermission(db, {
+      scopeId: primaryScope.id,
+      principalId: OWNER,
+      permission: "read",
+      now: queryNow + 100,
+      actorId: OWNER,
+      reason: "verify immediate history drop",
+    });
+    const afterRevoke = buildScopedThreadMessages(db, ws.stateDir, {
+      scopeId: primaryScope.id,
+      principalId: OWNER,
+      threadKey: "web:main",
+      currentUserPrompt: "After revoke",
+      now: queryNow + 101,
+    });
+    suite.check(
+      "scoped-history-immediate-drop-on-read-revoke",
+      JSON.stringify(afterRevoke) === JSON.stringify([{ role: "user", content: "After revoke" }]),
+      JSON.stringify(afterRevoke),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. console web chat, /status control, approval redaction, group steer, HTML/favicon
+{
+  const { ws, db } = freshDb("console-chat");
+  try {
+    const now = Date.now();
+    withTx(db, () => ensurePrincipal(db, { platform: "local", subject: "owner" }));
+
+    const token = "fixture-console-token-0002";
+    const app = createConsoleApp(db, {
+      recovery: { failedStep: null, actions: [] },
+      mode: "open",
+      token,
+      port: 4310,
+      stateDir: ws.stateDir,
+      ownerPrincipalId: OWNER,
+    });
+    const req = async (path, { method = "GET", headers = {}, body } = {}) => {
+      const res = await app.fetch(
+        new Request(`http://127.0.0.1:4310${path}`, {
+          method,
+          headers: { host: "127.0.0.1:4310", ...headers },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        }),
+      );
+      const text = await res.text();
+      let json = null;
+      try {
+        json = JSON.parse(text);
+      } catch {}
+      return { status: res.status, json, text };
+    };
+
+    const faviconRes = await req("/favicon.ico");
+    const htmlRes = await req("/");
+    suite.check(
+      "console-html-chat-approval-ui-zero-innerhtml-and-favicon",
+      faviconRes.status === 204 &&
+        htmlRes.status === 200 &&
+        htmlRes.text.includes("chatInput") &&
+        htmlRes.text.includes("chatThreads") &&
+        htmlRes.text.includes("approvalList") &&
+        htmlRes.text.includes("thread-time") &&
+        !/innerHTML/i.test(htmlRes.text),
+      JSON.stringify({
+        faviconStatus: faviconRes.status,
+        htmlStatus: htmlRes.status,
+        hasInnerHtml: /innerHTML/i.test(htmlRes.text),
+      }),
+    );
+
+    const sess = await req("/api/session", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: { token },
+    });
+    const authHeaders = {
+      authorization: `Bearer ${sess.json?.sessionId ?? ""}`,
+      "x-csrf-token": sess.json?.csrfToken ?? "",
+      "content-type": "application/json",
+    };
+
+    const postChat = await req("/api/chat", {
+      method: "POST",
+      headers: authHeaders,
+      body: { message: "Hello from web chat", threadKey: "web:main" },
+    });
+    const chatDispatched = dispatchEventToTask(db, {
+      inboxId: postChat.json?.inboxId,
+      dispatchKey: "web-chat-1",
+      now: now + 10,
+      priority: 6,
+      maxSteps: 10,
+      deadlineAt: now + 3600_000,
+      skillSetHash: "web-chat-test",
+    });
+    const chatClaim = claimNextTask(db, { now: now + 10, leaseMs: 60_000 });
+    const storedChatReply = putObjectContent(ws.stateDir, JSON.stringify({ reply: "Hello back from assistant" }));
+    const chatResultObj = withTx(db, () =>
+      insertObjectRow(db, {
+        scopeId: postChat.json?.scopeId,
+        kind: "agent_result",
+        sourceUri: `task:${chatDispatched.taskId}`,
+        sourceActor: "worker",
+        contentHash: storedChatReply.contentHash,
+        storageRef: storedChatReply.storageRef,
+        observedAt: now + 20,
+        requiredScopeIds: [postChat.json?.scopeId],
+      }),
+    );
+    completeTask(db, {
+      ...chatClaim,
+      now: now + 20,
+      resultClass: "affected",
+      resultObjectId: chatResultObj.id,
+    });
+
+    const getChat = await req(
+      `/api/chat?scopeId=${encodeURIComponent(postChat.json?.scopeId ?? "")}&threadKey=web%3Amain`,
+      { headers: { authorization: `Bearer ${sess.json?.sessionId ?? ""}` } },
+    );
+    const chatMsg = getChat.json?.messages?.[0] ?? null;
+
+    const inboxCountBeforeStatus = db.prepare("SELECT count(*) c FROM inbox").get().c;
+    const statusCtrl = await req("/api/chat", {
+      method: "POST",
+      headers: authHeaders,
+      body: { message: "/status", threadKey: "web:main" },
+    });
+    const inboxCountAfterStatus = db.prepare("SELECT count(*) c FROM inbox").get().c;
+
+    suite.check(
+      "console-web-chat-roundtrip-and-status-control",
+      postChat.status === 202 &&
+        postChat.json?.code === "queued" &&
+        getChat.status === 200 &&
+        getChat.json?.threads?.some((t) => t.threadKey === "web:main") === true &&
+        chatMsg?.userText === "Hello from web chat" &&
+        chatMsg?.replyText === "Hello back from assistant" &&
+        chatMsg?.taskState === "SUCCEEDED" &&
+        statusCtrl.status === 200 &&
+        statusCtrl.json?.code === "control_executed" &&
+        statusCtrl.json?.outcome?.command === "/status" &&
+        typeof statusCtrl.json?.outcome?.running === "number" &&
+        typeof statusCtrl.json?.outcome?.paused === "boolean" &&
+        inboxCountAfterStatus === inboxCountBeforeStatus,
+      JSON.stringify({
+        postStatus: postChat.status,
+        getStatus: getChat.status,
+        chatMsg,
+        statusCtrl: statusCtrl.json,
+        inboxDelta: inboxCountAfterStatus - inboxCountBeforeStatus,
+      }),
+    );
+
+    // Approvals summary + redaction check
+    const mailScope = ensureMailScope(db, { account: "owner@example.test", ownerId: OWNER, policyVersion: "pv1" });
+    seedOwnerGrants(db, mailScope.id, now);
+    const mailEv = receiveEvent(db, ws.stateDir, {
+      now: now + 30,
+      source: "mail",
+      sourceEventId: "<redact-1@example.test>",
+      principal: { platform: "local", subject: "owner" },
+      scope: {
+        kind: "owner_dm",
+        domainKey: "dm:mail:owner@example.test",
+        channel: "mail",
+        conversationId: "owner@example.test",
+      },
+      threadKey: "mail:<redact-1@example.test>",
+      priority: 5,
+      policyVersion: "pv1",
+      payload: { kind: "mail", envelopeFrom: "alice@example.test", subject: "Redaction check" },
+      verdict: "ADMIT",
+    });
+    const mailDispatched = dispatchEventToTask(db, {
+      inboxId: mailEv.inboxId,
+      dispatchKey: "mail-redact",
+      now: now + 30,
+      priority: 5,
+      maxSteps: 10,
+      deadlineAt: now + 3600_000,
+      skillSetHash: "mail-redact",
+    });
+    const mailClaim = claimNextTask(db, { now: now + 30, leaseMs: 60_000 });
+    const mailEvidence = withTx(db, () =>
+      insertObjectRow(db, {
+        scopeId: mailScope.id,
+        kind: "mail_draft",
+        sourceUri: `task:${mailDispatched.taskId}`,
+        sourceActor: "host-triage",
+        content: JSON.stringify({ draft: "Approved summary text." }),
+        observedAt: now + 30,
+        requiredScopeIds: [mailScope.id],
+      }),
+    );
+    const mailEvidenceHash = db.prepare("SELECT content_hash FROM objects WHERE id=?").get(mailEvidence.id).content_hash;
+    const proposed = proposeMailReplyEffect(db, ws.stateDir, {
+      now: now + 30,
+      taskId: mailDispatched.taskId,
+      attemptId: mailClaim.attemptId,
+      account: "owner@example.test",
+      approverPrincipalId: OWNER,
+      intent: buildMailSendIntent({
+        to: ["alice@example.test"],
+        subject: "Re: Redaction check",
+        bodyText: "Approved summary text.",
+        sendingIdentity: "aegispi@local",
+        threadKey: "mail:<redact-1@example.test>",
+        messageId: "<redact-1@example.test>",
+      }),
+      mailConfig: { allowedRecipients: ["alice@example.test"], approvalTtlMs: 3600_000, maxAttachmentBytes: 4194304 },
+      adaptersConfig: { fixedSendingIdentity: "aegispi@local", allowedRecipients: ["alice@example.test"] },
+      evidenceManifestHash: mailEvidenceHash,
+      parentObjectIds: [mailEvidence.id],
+    });
+
+    const approvalsList = await req("/api/approvals", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const listedCard = approvalsList.json?.approvals?.find((a) => a.id === proposed.approvalId);
+    const bootstrapDetail = await req(`/api/approvals/${encodeURIComponent(proposed.approvalId)}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    suite.check(
+      "console-approvals-summary-and-redaction",
+      approvalsList.status === 200 &&
+        listedCard !== undefined &&
+        listedCard.subject === "Re: Redaction check" &&
+        listedCard.bodyPreview === "Approved summary text." &&
+        listedCard.targetResource === "mail:alice@example.test" &&
+        typeof listedCard.actionHashShort === "string" &&
+        listedCard.actionHashShort.length === 12 &&
+        !("action_hash" in listedCard) &&
+        !("nonce" in listedCard) &&
+        !("approval_nonce" in listedCard) &&
+        bootstrapDetail.status === 200 &&
+        bootstrapDetail.json?.decisionMaterials === null,
+      JSON.stringify({ listedCard, bootstrapDM: bootstrapDetail.json?.decisionMaterials }),
+    );
+
+    // Group-scope POST /api/tasks/:id/steer
+    const groupScopeDef = {
+      kind: "group",
+      domainKey: "group:telegram:-100555",
+      channel: "telegram",
+      conversationId: "-100555",
+    };
+    const groupScope = withTx(db, () =>
+      ensureScope(db, { ownerId: OWNER, ...groupScopeDef, policyVersion: "pv1" }),
+    );
+    seedOwnerGrants(db, groupScope.id, now);
+    const groupEv = receiveEvent(db, ws.stateDir, {
+      now: now + 40,
+      source: "telegram",
+      sourceEventId: "tg-group-555",
+      principal: { platform: "local", subject: "owner" },
+      scope: groupScopeDef,
+      threadKey: "tg:-100555",
+      priority: 5,
+      policyVersion: "pv1",
+      payload: { update_id: 555, text: "Group work" },
+      verdict: "ADMIT",
+    });
+    const groupDispatched = dispatchEventToTask(db, {
+      inboxId: groupEv.inboxId,
+      dispatchKey: "group-steer-target",
+      now: now + 40,
+      priority: 5,
+      maxSteps: 10,
+      deadlineAt: now + 3600_000,
+      skillSetHash: "group-steer",
+    });
+    const groupTaskRow = db.prepare("SELECT updated_at FROM tasks WHERE id=?").get(groupDispatched.taskId);
+    const steerConflict = await req(`/api/tasks/${encodeURIComponent(groupDispatched.taskId)}/steer`, {
+      method: "POST",
+      headers: authHeaders,
+      body: { message: "Stale steer", expectedRevision: groupTaskRow.updated_at - 1 },
+    });
+    const steerOk = await req(`/api/tasks/${encodeURIComponent(groupDispatched.taskId)}/steer`, {
+      method: "POST",
+      headers: authHeaders,
+      body: { message: "Focus on group tests", expectedRevision: groupTaskRow.updated_at },
+    });
+    const steerInbox = steerOk.json?.inboxId
+      ? db.prepare("SELECT scope_id, source, thread_key FROM inbox WHERE id=?").get(steerOk.json.inboxId)
+      : null;
+
+    suite.check(
+      "console-group-scope-task-steer",
+      steerConflict.status === 409 &&
+        steerOk.status === 202 &&
+        steerOk.json?.code === "queued" &&
+        steerInbox?.scope_id === groupScope.id &&
+        steerInbox?.source === "console-steer" &&
+        steerInbox?.thread_key === `task:${groupDispatched.taskId}`,
+      JSON.stringify({
+        conflictStatus: steerConflict.status,
+        okStatus: steerOk.status,
+        steerOk: steerOk.json,
+        steerInbox,
       }),
     );
   } finally {

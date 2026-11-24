@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-24T03:19:20.384Z",
+  "generatedAt": "2026-11-24T10:53:25.019Z",
   "nodeVersion": "v22.23.5",
   "suite": "selfuse",
   "label": "Selfuse behavior end-to-end",
   "counts": {
-    "pass": 14,
+    "pass": 21,
     "fail": 0
   },
   "results": [
@@ -76,7 +76,42 @@
     {
       "name": "selfuse-cli-init-idempotent-no-secret-leak",
       "status": "PASS",
-      "detail": "{\"s1\":0,\"s2\":0,\"slots\":[\"im\",\"mail\",\"model\"],\"grantsOk\":true,\"timerState\":\"SCHEDULED\",\"recurrence\":{\"type\":\"daily_wall_clock\",\"timeOfDay\":\"08:30\",\"timezone\":\"Asia/Hong_Kong\"},\"leakedCount\":0,\"run2Out\":\"init: ok db=D:\\\\AegisPi\\\\aegis-pi\\\\workspace-state\\\\phase5\\\\selfuse-cli\\\\data\\\\db\\\\aegis.db slots=model->DEEPSEEK_API_KEY,im->TELEGRAM_BOT_TOKEN,mail->AEGISPI_MAIL_CREDENTIAL scopes=3 grantsAdded=0\\ninit: briefingTimer=tmr:selfuse-morning-briefing created=false dueAt=1795566600000\"}"
+      "detail": "{\"s1\":0,\"s2\":0,\"slots\":[\"im\",\"mail\",\"model\"],\"grantsOk\":true,\"timerState\":\"SCHEDULED\",\"recurrence\":{\"type\":\"daily_wall_clock\",\"timeOfDay\":\"08:30\",\"timezone\":\"Asia/Hong_Kong\"},\"leakedCount\":0,\"run2Out\":\"init: ok db=D:\\\\AegisPi\\\\aegis-pi\\\\workspace-state\\\\phase5\\\\selfuse-cli\\\\data\\\\db\\\\aegis.db slots=model->DEEPSEEK_API_KEY,im->TELEGRAM_BOT_TOKEN,mail->AEGISPI_MAIL_CREDENTIAL scopes=4 grantsAdded=0\\ninit: briefingTimer=tmr:selfuse-morning-briefing created=false dueAt=1795566600000\"}"
+    },
+    {
+      "name": "scoped-history-chronological-and-isolation",
+      "status": "PASS",
+      "detail": "[{\"role\":\"user\",\"content\":\"First web question\"},{\"role\":\"assistant\",\"content\":\"First web answer\"},{\"role\":\"user\",\"content\":\"Second tg follow-up\"},{\"role\":\"assistant\",\"content\":\"Second tg answer\"},{\"role\":\"user\",\"content\":\"Third recent question\"},{\"role\":\"assistant\",\"content\":\"Third recent answer\"},{\"role\":\"user\",\"content\":\"Current prompt\"}]"
+    },
+    {
+      "name": "scoped-history-byte-cap",
+      "status": "PASS",
+      "detail": "{\"capped\":[{\"role\":\"user\",\"content\":\"Third recent question\"},{\"role\":\"assistant\",\"content\":\"Third recent answer\"},{\"role\":\"user\",\"content\":\"Current prompt\"}],\"tinyCapped\":[{\"role\":\"user\",\"content\":\"Current prompt\"}]}"
+    },
+    {
+      "name": "scoped-history-immediate-drop-on-read-revoke",
+      "status": "PASS",
+      "detail": "[{\"role\":\"user\",\"content\":\"After revoke\"}]"
+    },
+    {
+      "name": "console-html-chat-approval-ui-zero-innerhtml-and-favicon",
+      "status": "PASS",
+      "detail": "{\"faviconStatus\":204,\"htmlStatus\":200,\"hasInnerHtml\":false}"
+    },
+    {
+      "name": "console-web-chat-roundtrip-and-status-control",
+      "status": "PASS",
+      "detail": "{\"postStatus\":202,\"getStatus\":200,\"chatMsg\":{\"inboxId\":\"inb:console-chat:chat-1795517601876-40a5468e6b4c\",\"source\":\"console-chat\",\"scopeId\":\"scp:dm%3Alocal%3Aowner\",\"threadKey\":\"web:main\",\"receivedAt\":1795517601876,\"inboxState\":\"ROUTED\",\"taskId\":\"tsk:inb%3Aconsole-chat%3Achat-1795517601876-40a5468e6b4c:web-chat-1\",\"taskState\":\"SUCCEEDED\",\"resultClass\":\"affected\",\"userText\":\"Hello from web chat\",\"replyText\":\"Hello back from assistant\",\"approval\":null},\"statusCtrl\":{\"code\":\"control_executed\",\"outcome\":{\"command\":\"/status\",\"running\":0,\"queued\":0,\"waitingApprovals\":0,\"pendingInbox\":0,\"paused\":false},\"scopeId\":\"scp:dm%3Alocal%3Aowner\",\"threadKey\":\"web:main\"},\"inboxDelta\":0}"
+    },
+    {
+      "name": "console-approvals-summary-and-redaction",
+      "status": "PASS",
+      "detail": "{\"listedCard\":{\"id\":\"apr:efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570\",\"effect_id\":\"efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570\",\"state\":\"WAITING\",\"approver_id\":\"prn:local:owner\",\"expires_at\":1795521201842,\"created_at\":1795517601842,\"actionHashShort\":\"11adbef13b1a\",\"task_id\":\"tsk:inb%3Amail%3A<redact-1@example.test>:mail-redact\",\"scope_id\":\"scp:dm%3Amail%3Aowner@example.test\",\"operation\":\"mail.send\",\"targetResource\":\"mail:alice@example.test\",\"subject\":\"Re: Redaction check\",\"bodyPreview\":\"Approved summary text.\",\"sendingIdentity\":\"aegispi@local\"},\"bootstrapDM\":null}"
+    },
+    {
+      "name": "console-group-scope-task-steer",
+      "status": "PASS",
+      "detail": "{\"conflictStatus\":409,\"okStatus\":202,\"steerOk\":{\"code\":\"queued\",\"inboxId\":\"inb:console-steer:steer-tsk%3Ainb%253Atelegram%253Atg-group-555%3Agroup-steer-target-51f94078adef\",\"note\":\"the steer is queued as a durable inbox event; it does not interrupt an in-flight tool call\"},\"steerInbox\":{\"scope_id\":\"scp:group%3Atelegram%3A-100555\",\"source\":\"console-steer\",\"thread_key\":\"task:tsk:inb%3Atelegram%3Atg-group-555:group-steer-target\"}}"
     }
   ],
   "dataSources": "Offline loopback SMTP/DB/HTTP fixtures with example.test data only"

@@ -1,6 +1,6 @@
 # User-value and verification report
 
-> Generated: 2026-11-24T03:33:18.165Z from verified evidence JSON files; unmeasured quantities stay null / 未测
+> Generated: 2026-11-24T11:41:25.406Z from verified evidence JSON files; unmeasured quantities stay null / 未测
 
 - status: PASS (327 pass / 0 fail / 327 judged)
 - configured budgets: task=800000 microUSD (`$0.80`), day=5000000 microUSD (`$5.00`)

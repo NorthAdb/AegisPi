@@ -287,6 +287,19 @@ function runInit({ configPath, dataDir, envFilePath, briefingTime }) {
       }
     };
 
+    const webScopeRef = withTx(db, () =>
+      ensureScope(db, {
+        ownerId: ownerRef.id,
+        kind: "owner_dm",
+        domainKey: "dm:local:owner",
+        channel: "console",
+        conversationId: "owner",
+        policyVersion: "pv1",
+      }),
+    );
+    summary.scopes.push(webScopeRef.id);
+    grantAll(webScopeRef.id, ownerRef.id, ["read", "request", "approve", "admin"]);
+
     const tgOwnerIdRaw = typeof runtimeEnv.TELEGRAM_OWNER_USER_ID === "string" ? runtimeEnv.TELEGRAM_OWNER_USER_ID.trim() : "";
     for (const chatId of config.telegram.allowedChatIds) {
       const isGroup = /^-\d+$/.test(chatId);
