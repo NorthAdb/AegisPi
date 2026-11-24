@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-24T03:18:32.221Z",
+  "generatedAt": "2026-11-24T13:30:09.004Z",
   "nodeVersion": "v22.23.5",
   "suite": "memory-lifecycle",
   "label": "Phase 5 Unit 5.1 — 分层记忆生命周期（L0–L3 / 13 类注入 / 墓碑遗忘 / 技能与 Spill）",

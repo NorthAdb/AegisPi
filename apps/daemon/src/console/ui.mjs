@@ -209,6 +209,32 @@ export function consoleIndexHtml({ port }) {
   }
   .scope-grants { grid-column:1 / -1; padding-left:12px; }
   .field-label { font-size:12px; color:var(--dim); display:inline-flex; align-items:center; gap:6px; }
+
+  /* Settings tab & setup banner */
+  .setup-banner {
+    margin:10px 16px 0; padding:9px 12px; border:1px solid rgba(210,153,34,0.55);
+    background:rgba(210,153,34,0.12); color:#f2cc60; border-radius:6px;
+    display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; font-size:13px;
+  }
+  .settings-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px 14px; }
+  .settings-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
+  .settings-field.full { grid-column:1 / -1; }
+  .settings-field label {
+    font-size:12px; color:var(--dim); display:flex; align-items:center; justify-content:space-between; gap:6px;
+  }
+  .settings-checks { display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:8px 12px; }
+  .check-item {
+    display:flex; align-items:center; gap:8px; padding:7px 9px; background:#0d1117;
+    border:1px solid var(--line); border-radius:6px; font-size:12.5px; cursor:pointer;
+  }
+  .check-item:hover { border-color:var(--accent); }
+  .secret-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .secret-row input { flex:1; min-width:180px; }
+  .notice-box {
+    padding:9px 12px; border-radius:6px; font-size:12.5px; margin-bottom:12px;
+    border:1px solid rgba(210,153,34,0.45); background:rgba(210,153,34,0.1); color:var(--warn);
+  }
+  .test-result { font-size:12px; margin-top:4px; word-break:break-word; }
 </style>
 </head>
 <body>
@@ -230,7 +256,15 @@ export function consoleIndexHtml({ port }) {
     <button data-tab="approvals">② 待办与审批卡</button>
     <button data-tab="tasks">③ 任务与故障诊断台</button>
     <button data-tab="govcost">④ 记忆、治理与成本台</button>
+    <button data-tab="settings">⑤ 设置与接入</button>
   </nav>
+  <div id="setupBanner" class="setup-banner hidden">
+    <span>尚未完成接入配置，真实模型调用当前处于关闭状态。</span>
+    <div class="btn-group">
+      <button class="act primary" id="setupBannerGo" type="button">点击前往设置</button>
+      <button class="act" id="setupBannerClose" type="button" aria-label="关闭提示">×</button>
+    </div>
+  </div>
   <div id="errorBanner" class="error-banner hidden">
     <span id="errorBannerText"></span>
     <button id="errorBannerClose" type="button">关闭</button>
@@ -357,6 +391,8 @@ export function consoleIndexHtml({ port }) {
         <pre id="traceView" class="hidden"></pre>
       </div>
     </section>
+
+    <section id="tab-settings" class="hidden"></section>
   </main>
 </div>
 <script>
@@ -380,6 +416,11 @@ var state = {
   draftCustomThread: false,
   localControlOutcomes: {},
   approvalDetails: {},
+  settings: null,
+  setupBannerDismissed: false,
+  settingsDirty: false,
+  settingsClearSecrets: {},
+  settingsTestResults: {},
 };
 var streamAbort = null;
 var streamController = { lastEventId: null, closed: false };
@@ -512,13 +553,21 @@ function switchTab(tabName) {
   document.querySelectorAll("#tabs button").forEach(function (b) {
     b.classList.toggle("active", b.getAttribute("data-tab") === tabName);
   });
-  ["chat", "approvals", "tasks", "govcost"].forEach(function (t) {
+  ["chat", "approvals", "tasks", "govcost", "settings"].forEach(function (t) {
     document.getElementById("tab-" + t).classList.toggle("hidden", t !== tabName);
   });
+  if (tabName === "settings") {
+    loadSettings(false);
+  }
 }
 document.getElementById("tabs").addEventListener("click", function (e) {
   if (e.target.tagName !== "BUTTON") return;
   switchTab(e.target.getAttribute("data-tab"));
+});
+$("setupBannerGo").addEventListener("click", function () { switchTab("settings"); });
+$("setupBannerClose").addEventListener("click", function () {
+  state.setupBannerDismissed = true;
+  renderSetupBanner();
 });
 
 // ---------------------------------------------------------------- SSE
@@ -599,6 +648,10 @@ async function resync() {
   state.budget = null;
   state.health = null;
   state.approvalDetails = {};
+  state.settings = null;
+  state.settingsDirty = false;
+  state.settingsClearSecrets = {};
+  state.settingsTestResults = {};
   streamController.lastEventId = null;
   setConn("已重置，重新拉取快照", "warn");
   startStream(true);
@@ -636,9 +689,10 @@ async function refreshAll() {
     api("GET", "/api/routines"),
     api("GET", "/api/budget"),
     fetchChat(),
+    api("GET", "/api/settings"),
   ]);
   var snap = results[0], health = results[1], recovery = results[2], appr = results[3];
-  var unkn = results[4], tasks = results[5], mem = results[6], routines = results[7], budget = results[8];
+  var unkn = results[4], tasks = results[5], mem = results[6], routines = results[7], budget = results[8], settingsRes = results[10];
 
   var hadFatal = results.some(function (r) { return r.status === 0 || r.status >= 500; });
   if (!hadFatal) clearError();
@@ -668,6 +722,11 @@ async function refreshAll() {
   renderRoutines();
   renderGrants();
   renderBudget();
+  if (settingsRes && settingsRes.status === 200 && settingsRes.data) {
+    state.settings = settingsRes.data;
+    renderSetupBanner();
+    if (!state.settingsDirty) renderSettings();
+  }
 }
 
 function renderKpis() {
@@ -1534,6 +1593,608 @@ $("traceLoad").addEventListener("click", async function () {
   if (r.status !== 200 || !r.data) { v.textContent = (r.data && r.data.message) || ("HTTP " + r.status); return; }
   v.textContent = formatTraceTimeline(r.data);
 });
+
+// ---------------------------------------------------------------- Tab 5: Settings & Onboarding
+var settingsRefs = null;
+var SECRET_KEY_LIST = [
+  "DEEPSEEK_API_KEY",
+  "TELEGRAM_BOT_TOKEN",
+  "AEGISPI_REAL_TG_PROXY",
+  "MAIL_USER",
+  "MAIL_APP_PASSWORD",
+  "AEGISPI_BACKUP_MANIFEST_KEY",
+];
+
+function renderSetupBanner() {
+  var banner = $("setupBanner");
+  if (!banner) return;
+  var allowReal = Boolean(state.settings && state.settings.config && state.settings.config.model && state.settings.config.model.allowRealModelCalls === true);
+  var shouldShow = Boolean(state.settings && !allowReal && !state.setupBannerDismissed);
+  banner.classList.toggle("hidden", !shouldShow);
+}
+
+async function loadSettings(forceRender) {
+  if (!requireSession()) return;
+  var r = await api("GET", "/api/settings");
+  if (r.status === 200 && r.data) {
+    state.settings = r.data;
+    if (forceRender) {
+      state.settingsDirty = false;
+      state.settingsClearSecrets = {};
+    }
+    renderSetupBanner();
+    if (forceRender || !state.settingsDirty) {
+      renderSettings();
+    }
+  } else if (r.data && r.data.message) {
+    var host = $("tab-settings");
+    if (host && !state.settings) {
+      host.textContent = "";
+      host.appendChild(el("div", { class: "notice-box", text: "读取配置失败: " + r.data.message }));
+    }
+  }
+}
+
+function parseListInput(raw) {
+  return String(raw || "")
+    .split(/[,\\r\\n]+/)
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+}
+
+function parseOptionalIntField(raw, label, min, max) {
+  var trimmed = String(raw || "").trim();
+  if (trimmed === "") return { ok: true, value: null };
+  if (!/^-?\\d+$/.test(trimmed)) return { ok: false, message: label + " 必须为整数或留空" };
+  var n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    return { ok: false, message: label + " 必须为 " + min + " .. " + max + " 的整数" };
+  }
+  return { ok: true, value: n };
+}
+
+function parseRequiredIntField(raw, label, min, max, fallback) {
+  var trimmed = String(raw || "").trim();
+  if (trimmed === "") return { ok: true, value: fallback };
+  if (!/^-?\\d+$/.test(trimmed)) return { ok: false, message: label + " 必须为整数" };
+  var n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    return { ok: false, message: label + " 必须为 " + min + " .. " + max + " 的整数" };
+  }
+  return { ok: true, value: n };
+}
+
+function markSettingsDirty() {
+  state.settingsDirty = true;
+}
+
+function makeField(labelText, control, opts) {
+  var o = opts || {};
+  var wrap = el("div", { class: "settings-field" + (o.full ? " full" : "") });
+  var lbl = el("label");
+  lbl.appendChild(el("span", { text: labelText }));
+  if (o.badge) lbl.appendChild(o.badge);
+  wrap.appendChild(lbl);
+  wrap.appendChild(control);
+  if (o.hint) wrap.appendChild(el("div", { class: "dim", style: "font-size:11.5px;", text: o.hint }));
+  return wrap;
+}
+
+function makeTextInput(value, placeholder, opts) {
+  var o = opts || {};
+  var inp = el("input", {
+    type: o.type || "text",
+    placeholder: placeholder || "",
+    class: o.mono ? "mono" : "",
+  });
+  if (o.autocomplete) inp.setAttribute("autocomplete", o.autocomplete);
+  inp.value = value === null || value === undefined ? "" : String(value);
+  inp.addEventListener("input", markSettingsDirty);
+  return inp;
+}
+
+function makeSecretControl(secretKey, labelText, opts) {
+  var o = opts || {};
+  var meta = (state.settings && state.settings.secrets && state.settings.secrets[secretKey]) || {};
+  var configured = Boolean(meta.configured);
+  var badge = el("span", { class: "pill" });
+  var inp = el("input", {
+    type: o.type || "password",
+    autocomplete: o.type === "text" ? "off" : "new-password",
+    placeholder: o.placeholder || "已配置时留空保持不变",
+    class: "mono",
+  });
+  var clearBtn = el("button", { type: "button", class: "act danger" });
+
+  function syncSecretUi() {
+    var pendingClear = Boolean(state.settingsClearSecrets[secretKey]);
+    if (pendingClear) {
+      badge.className = "pill warn";
+      badge.textContent = "待保存清空";
+      clearBtn.className = "act";
+      clearBtn.textContent = "撤销清空";
+    } else if (configured) {
+      badge.className = "pill ok";
+      badge.textContent = "已配置";
+      clearBtn.className = "act danger";
+      clearBtn.textContent = "清空该密钥";
+    } else {
+      badge.className = "pill dim";
+      badge.textContent = "未配置";
+      clearBtn.className = "act danger";
+      clearBtn.textContent = "清空该密钥";
+    }
+    clearBtn.disabled = !state.settings || !state.settings.writable;
+  }
+
+  inp.addEventListener("input", function () {
+    markSettingsDirty();
+    if (inp.value.trim().length > 0 && state.settingsClearSecrets[secretKey]) {
+      delete state.settingsClearSecrets[secretKey];
+    }
+    syncSecretUi();
+  });
+  clearBtn.addEventListener("click", function () {
+    markSettingsDirty();
+    if (state.settingsClearSecrets[secretKey]) {
+      delete state.settingsClearSecrets[secretKey];
+    } else {
+      inp.value = "";
+      state.settingsClearSecrets[secretKey] = true;
+    }
+    syncSecretUi();
+  });
+
+  var row = el("div", { class: "secret-row" }, [inp]);
+  if (o.extraBtn) row.appendChild(o.extraBtn(inp, syncSecretUi));
+  row.appendChild(clearBtn);
+  syncSecretUi();
+
+  return {
+    input: inp,
+    sync: syncSecretUi,
+    node: makeField(labelText, row, { badge: badge, full: Boolean(o.full), hint: o.hint }),
+  };
+}
+
+function renderTestResultNode(res) {
+  var node = el("div", { class: "test-result" });
+  if (!res) return node;
+  if (res.pending) {
+    node.className = "test-result dim";
+    node.textContent = "正在测试连通性…";
+    return node;
+  }
+  if (res.ok) {
+    node.className = "test-result ok";
+    var detail = "连通成功";
+    if (res.latencyMs !== undefined) detail += " (" + res.latencyMs + " ms)";
+    if (res.modelCount !== undefined && res.modelCount !== null) detail += " · 模型数 " + res.modelCount;
+    if (res.botUsername) detail += " · @" + res.botUsername;
+    if (res.host) detail += " · " + res.host + ":" + res.port + (res.folder ? " (" + res.folder + ")" : "");
+    node.textContent = detail;
+    return node;
+  }
+  node.className = "test-result bad";
+  node.textContent = "连通失败" + (res.error ? " [" + res.error + "]" : "") + ": " + (res.message || "未知错误");
+  return node;
+}
+
+async function runConnectivityTest(target, hostEl, btnEl) {
+  if (!requireSession()) return;
+  btnEl.disabled = true;
+  state.settingsTestResults[target] = { pending: true };
+  hostEl.textContent = "";
+  hostEl.appendChild(renderTestResultNode(state.settingsTestResults[target]));
+  var r = await api("POST", "/api/settings/test", { target: target });
+  btnEl.disabled = false;
+  if (r.status === 200 && r.data) {
+    state.settingsTestResults[target] = r.data;
+  } else {
+    state.settingsTestResults[target] = {
+      ok: false,
+      error: (r.data && r.data.code) || ("HTTP_" + r.status),
+      message: (r.data && r.data.message) || ("HTTP " + r.status),
+    };
+  }
+  hostEl.textContent = "";
+  hostEl.appendChild(renderTestResultNode(state.settingsTestResults[target]));
+}
+
+function renderSettings() {
+  var host = $("tab-settings");
+  if (!host) return;
+  host.textContent = "";
+
+  if (!state.settings) {
+    host.appendChild(el("div", { class: "panel" }, [
+      el("h2", { text: "设置与接入" }),
+      el("div", { class: "dim", text: "正在加载配置…" }),
+    ]));
+    return;
+  }
+
+  var s = state.settings;
+  var cfg = s.config || {};
+  var model = cfg.model || {};
+  var priceCatalog = model.priceCatalog || {};
+  var tg = cfg.telegram || {};
+  var mail = cfg.mail || {};
+  var policy = cfg.policy || {};
+  var adapters = cfg.adapters || {};
+  var cal = cfg.calendar || {};
+  var writable = Boolean(s.writable);
+
+  if (!writable) {
+    host.appendChild(el("div", { class: "notice-box", text: "当前 daemon 未通过 --config 指定可写配置文件（处于 fail-closed 的 defaults.json 只读模式），“保存并热生效”已禁用。" }));
+  }
+
+  var refs = { switches: {}, model: {}, telegram: {}, mail: {}, adapters: {}, secrets: {}, briefingTimeOfDay: null };
+
+  // A. 快速总开关
+  var switchSpecs = [
+    ["model.allowRealModelCalls", "允许真实模型调用 (model.allowRealModelCalls)", Boolean(model.allowRealModelCalls)],
+    ["telegram.allowRealPull", "允许 Telegram 拉取入站 (telegram.allowRealPull)", Boolean(tg.allowRealPull)],
+    ["telegram.allowRealSend", "允许 Telegram 真实发送 (telegram.allowRealSend)", Boolean(tg.allowRealSend)],
+    ["telegram.autoReplyOnTask", "任务完成自动回复 Telegram (telegram.autoReplyOnTask)", Boolean(tg.autoReplyOnTask)],
+    ["mail.allowRealMailRead", "允许真实读取邮件 (mail.allowRealMailRead)", Boolean(mail.allowRealMailRead)],
+    ["mail.allowRealMailSend", "允许真实发送邮件 (mail.allowRealMailSend)", Boolean(mail.allowRealMailSend)],
+    ["mail.autoDraftReplies", "邮件自动生成回复草稿 (mail.autoDraftReplies)", Boolean(mail.autoDraftReplies)],
+    ["policy.allowRealExternalWrites", "允许真实外部写入 (policy.allowRealExternalWrites)", Boolean(policy.allowRealExternalWrites)],
+  ];
+  var checksWrap = el("div", { class: "settings-checks" });
+  switchSpecs.forEach(function (spec) {
+    var cb = el("input", { type: "checkbox" });
+    cb.checked = spec[2];
+    cb.addEventListener("change", markSettingsDirty);
+    refs.switches[spec[0]] = cb;
+    var item = el("label", { class: "check-item" }, [cb, el("span", { text: spec[1] })]);
+    checksWrap.appendChild(item);
+  });
+  host.appendChild(el("div", { class: "panel" }, [
+    el("h2", { text: "A. 快速总开关" }),
+    checksWrap,
+  ]));
+
+  // B. 模型接入 (Model)
+  refs.model.baseUrl = makeTextInput(model.baseUrl, "https://api.deepseek.com", { mono: true });
+  refs.model.modelId = makeTextInput(model.modelId, "deepseek-flash", { mono: true });
+  var thinkingSel = el("select");
+  var thinkingOpts = ["low", "high", "max", "minimal", "medium"];
+  if (model.thinkingLevel && thinkingOpts.indexOf(model.thinkingLevel) === -1) thinkingOpts.unshift(model.thinkingLevel);
+  thinkingOpts.forEach(function (opt) { thinkingSel.appendChild(el("option", { value: opt, text: opt })); });
+  thinkingSel.value = model.thinkingLevel || "high";
+  thinkingSel.addEventListener("change", markSettingsDirty);
+  refs.model.thinkingLevel = thinkingSel;
+  refs.model.maxInputBytes = makeTextInput(model.maxInputBytes, "65536 (留空为 null)", { type: "number", mono: true });
+  refs.model.maxOutputTokens = makeTextInput(model.maxOutputTokens, "2048 (留空为 null)", { type: "number", mono: true });
+  refs.model.inputPerMTokMicrousd = makeTextInput(priceCatalog.inputPerMTokMicrousd, "留空为 null", { type: "number", mono: true });
+  refs.model.outputPerMTokMicrousd = makeTextInput(priceCatalog.outputPerMTokMicrousd, "留空为 null", { type: "number", mono: true });
+  refs.model.cacheReadPerMTokMicrousd = makeTextInput(priceCatalog.cacheReadPerMTokMicrousd, "留空为 null", { type: "number", mono: true });
+  refs.model.cacheWritePerMTokMicrousd = makeTextInput(priceCatalog.cacheWritePerMTokMicrousd, "留空为 null", { type: "number", mono: true });
+  refs.secrets.DEEPSEEK_API_KEY = makeSecretControl("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY（仅写入 .env，不明文回显）", { full: true });
+
+  var modelGrid = el("div", { class: "settings-grid" }, [
+    makeField("model.baseUrl（SDK 根地址，不含 /chat/completions）", refs.model.baseUrl),
+    makeField("model.modelId", refs.model.modelId),
+    makeField("model.thinkingLevel", refs.model.thinkingLevel),
+    makeField("model.maxInputBytes (1..131072)", refs.model.maxInputBytes),
+    makeField("model.maxOutputTokens (1..1000000)", refs.model.maxOutputTokens),
+    makeField("priceCatalog.inputPerMTokMicrousd (microUSD/1M)", refs.model.inputPerMTokMicrousd),
+    makeField("priceCatalog.outputPerMTokMicrousd (microUSD/1M)", refs.model.outputPerMTokMicrousd),
+    makeField("priceCatalog.cacheReadPerMTokMicrousd (microUSD/1M)", refs.model.cacheReadPerMTokMicrousd),
+    makeField("priceCatalog.cacheWritePerMTokMicrousd (microUSD/1M)", refs.model.cacheWritePerMTokMicrousd),
+    refs.secrets.DEEPSEEK_API_KEY.node,
+  ]);
+  var modelTestResultHost = el("div");
+  if (state.settingsTestResults.model) modelTestResultHost.appendChild(renderTestResultNode(state.settingsTestResults.model));
+  var modelTestBtn = el("button", { type: "button", class: "act", text: "测试模型连通性", click: function () {
+    runConnectivityTest("model", modelTestResultHost, modelTestBtn);
+  } });
+  host.appendChild(el("div", { class: "panel" }, [
+    el("h2", { text: "B. 模型接入 (Model)" }),
+    modelGrid,
+    el("div", { class: "row", style: "margin-top:10px;" }, [
+      modelTestBtn,
+      el("span", { class: "dim", style: "font-size:12px;", text: "测试使用已保存配置，修改后请先保存并热生效" }),
+    ]),
+    modelTestResultHost,
+  ]));
+
+  // C. Telegram 接入
+  refs.telegram.apiBase = makeTextInput(tg.apiBase, "https://api.telegram.org", { mono: true });
+  refs.telegram.allowedChatIds = makeTextInput((tg.allowedChatIds || []).join(", "), "例如 123456789, -1001234567890", { mono: true });
+  refs.telegram.ownerDestination = makeTextInput(tg.ownerDestination, "dm:telegram:<chatId>", { mono: true });
+  var autoOwnerHint = el("span", { class: "dim", style: "font-size:11.5px;", text: "" });
+  var autoOwnerBtn = el("button", { type: "button", class: "act", text: "按首个 Chat ID 自动生成", click: function () {
+    var ids = parseListInput(refs.telegram.allowedChatIds.value);
+    if (ids.length === 0) {
+      autoOwnerHint.className = "bad";
+      autoOwnerHint.textContent = "请先填写 allowedChatIds";
+      return;
+    }
+    refs.telegram.ownerDestination.value = "dm:telegram:" + ids[0];
+    autoOwnerHint.className = "ok";
+    autoOwnerHint.textContent = "已生成 " + refs.telegram.ownerDestination.value;
+    markSettingsDirty();
+  } });
+  var ownerDestWrap = el("div", { class: "secret-row" }, [refs.telegram.ownerDestination, autoOwnerBtn, autoOwnerHint]);
+  refs.secrets.AEGISPI_REAL_TG_PROXY = makeSecretControl("AEGISPI_REAL_TG_PROXY", "AEGISPI_REAL_TG_PROXY（代理地址，留空保持不变）", {
+    type: "text",
+    placeholder: "http://127.0.0.1:7890（已配置时留空保持不变）",
+    full: true,
+  });
+  refs.secrets.TELEGRAM_BOT_TOKEN = makeSecretControl("TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN（Bot Token，留空保持不变）", { full: true });
+
+  var tgTestResultHost = el("div");
+  if (state.settingsTestResults.telegram) tgTestResultHost.appendChild(renderTestResultNode(state.settingsTestResults.telegram));
+  var tgTestBtn = el("button", { type: "button", class: "act", text: "测试 Telegram 连通性", click: function () {
+    runConnectivityTest("telegram", tgTestResultHost, tgTestBtn);
+  } });
+  host.appendChild(el("div", { class: "panel" }, [
+    el("h2", { text: "C. Telegram 接入" }),
+    el("div", { class: "settings-grid" }, [
+      makeField("telegram.apiBase", refs.telegram.apiBase),
+      makeField("telegram.allowedChatIds（逗号或换行分隔整数 ID）", refs.telegram.allowedChatIds),
+      makeField("telegram.ownerDestination", ownerDestWrap, { full: true }),
+      refs.secrets.AEGISPI_REAL_TG_PROXY.node,
+      refs.secrets.TELEGRAM_BOT_TOKEN.node,
+    ]),
+    el("div", { class: "row", style: "margin-top:10px;" }, [
+      tgTestBtn,
+      el("span", { class: "dim", style: "font-size:12px;", text: "测试使用已保存配置，修改后请先保存并热生效" }),
+    ]),
+    tgTestResultHost,
+  ]));
+
+  // D. 邮件与晨报 (Mail & Briefing)
+  refs.mail.imapHost = makeTextInput(mail.imapHost, "imap.example.com", { mono: true });
+  refs.mail.imapPort = makeTextInput(mail.imapPort ?? 993, "993", { type: "number", mono: true });
+  refs.mail.smtpHost = makeTextInput(mail.smtpHost, "smtp.example.com", { mono: true });
+  refs.mail.smtpPort = makeTextInput(mail.smtpPort ?? 465, "465", { type: "number", mono: true });
+  refs.secrets.MAIL_USER = makeSecretControl("MAIL_USER", "MAIL_USER（邮箱地址，服务端不回显，留空保持不变）", {
+    type: "text",
+    placeholder: "you@example.com（已配置时留空保持不变）",
+  });
+  refs.secrets.MAIL_APP_PASSWORD = makeSecretControl("MAIL_APP_PASSWORD", "MAIL_APP_PASSWORD（应用专用密码，留空保持不变）");
+  refs.mail.allowedSenders = makeTextInput((mail.allowedSenders || []).join(", "), "alice@example.com", { mono: true });
+  refs.mail.allowedRecipients = makeTextInput((mail.allowedRecipients || []).join(", "), "bob@example.com", { mono: true });
+  refs.adapters.fixedSendingIdentity = makeTextInput(adapters.fixedSendingIdentity, "aegispi@local", { mono: true });
+  refs.adapters.allowedRecipients = makeTextInput((adapters.allowedRecipients || []).join(", "), "carol@example.com, dm:telegram:123", { mono: true });
+  refs.briefingTimeOfDay = makeTextInput(s.briefingTimeOfDay || "", "HH:MM 如 08:30（留空关闭晨报）", { mono: true });
+
+  var qh = cal.quietHours || null;
+  var qhText = qh ? (qh.start + " ~ " + qh.end + " (" + qh.timezone + ")") : "未配置";
+  var qhView = el("input", { type: "text", class: "mono", readonly: "readonly", value: qhText });
+  qhView.readOnly = true;
+
+  var mailTestResultHost = el("div");
+  if (state.settingsTestResults.mail) mailTestResultHost.appendChild(renderTestResultNode(state.settingsTestResults.mail));
+  var mailTestBtn = el("button", { type: "button", class: "act", text: "测试 IMAP 连通性", click: function () {
+    runConnectivityTest("mail", mailTestResultHost, mailTestBtn);
+  } });
+  host.appendChild(el("div", { class: "panel" }, [
+    el("h2", { text: "D. 邮件与晨报 (Mail & Briefing)" }),
+    el("div", { class: "settings-grid" }, [
+      makeField("mail.imapHost", refs.mail.imapHost),
+      makeField("mail.imapPort (1..65535)", refs.mail.imapPort),
+      makeField("mail.smtpHost", refs.mail.smtpHost),
+      makeField("mail.smtpPort (1..65535)", refs.mail.smtpPort),
+      refs.secrets.MAIL_USER.node,
+      refs.secrets.MAIL_APP_PASSWORD.node,
+      makeField("mail.allowedSenders（逗号或换行分隔）", refs.mail.allowedSenders),
+      makeField("mail.allowedRecipients（逗号或换行分隔）", refs.mail.allowedRecipients),
+      makeField("adapters.fixedSendingIdentity", refs.adapters.fixedSendingIdentity),
+      makeField("adapters.allowedRecipients（逗号或换行分隔）", refs.adapters.allowedRecipients),
+      makeField("briefingTimeOfDay（晨报时间 HH:MM）", refs.briefingTimeOfDay),
+      makeField("静默时段 calendar.quietHours（只读）", qhView, {
+        hint: "quietHours 归属 calendar 段；当前 /api/settings 仅允许修改 model/telegram/mail/policy/adapters。",
+      }),
+    ]),
+    el("div", { class: "row", style: "margin-top:10px;" }, [
+      mailTestBtn,
+      el("span", { class: "dim", style: "font-size:12px;", text: "测试使用已保存配置，修改后请先保存并热生效" }),
+    ]),
+    mailTestResultHost,
+  ]));
+
+  // E. 备份密钥与运行状态
+  refs.secrets.AEGISPI_BACKUP_MANIFEST_KEY = makeSecretControl("AEGISPI_BACKUP_MANIFEST_KEY", "AEGISPI_BACKUP_MANIFEST_KEY（64 位十六进制密钥）", {
+    full: true,
+    extraBtn: function (inp, syncFn) {
+      return el("button", { type: "button", class: "act", text: "本地生成 64 位密钥", click: function () {
+        var bytes = new Uint8Array(32);
+        crypto.getRandomValues(bytes);
+        var hex = "";
+        for (var i = 0; i < bytes.length; i++) {
+          var h = bytes[i].toString(16);
+          hex += h.length < 2 ? "0" + h : h;
+        }
+        inp.value = hex;
+        delete state.settingsClearSecrets.AEGISPI_BACKUP_MANIFEST_KEY;
+        markSettingsDirty();
+        syncFn();
+      } });
+    },
+  });
+
+  var slotsWrap = el("div", { class: "btn-group" });
+  var slots = Array.isArray(s.credentialSlots) ? s.credentialSlots : [];
+  if (slots.length === 0) {
+    slotsWrap.appendChild(el("span", { class: "dim", text: "暂无已注册凭据槽位" }));
+  } else {
+    slots.forEach(function (sl) {
+      var isRevoked = sl.revoked_at !== null && sl.revoked_at !== undefined;
+      var cls = isRevoked ? "bad" : (sl.registered_at ? "ok" : "dim");
+      var statusText = isRevoked ? "已吊销" : (sl.registered_at ? "已注册" : "未注册");
+      slotsWrap.appendChild(el("span", {
+        class: "pill mono " + cls,
+        text: sl.slot + " (" + (sl.env_name || "-") + ") · " + statusText,
+      }));
+    });
+  }
+
+  var imgWrap = el("div", { class: "btn-group" });
+  var imgStatus = s.imageStatus || {};
+  ["agent", "execution", "acquisition"].forEach(function (role) {
+    var st = imgStatus[role];
+    var ok = Boolean(st && st.configured);
+    var label = role + ": " + (ok ? ("已配置 (" + st.image + ")") : "未配置");
+    imgWrap.appendChild(el("span", { class: "pill mono " + (ok ? "ok" : "dim"), text: label }));
+  });
+
+  host.appendChild(el("div", { class: "panel" }, [
+    el("h2", { text: "E. 备份密钥与运行状态" }),
+    el("div", { class: "settings-grid" }, [
+      refs.secrets.AEGISPI_BACKUP_MANIFEST_KEY.node,
+      makeField("credentialSlots（凭据槽位状态，只读）", slotsWrap, { full: true }),
+      makeField("imageStatus（容器镜像状态，只读）", imgWrap, { full: true }),
+    ]),
+  ]));
+
+  // F. 操作栏
+  var saveMsg = el("span", { class: "dim", style: "font-size:12.5px;", text: "" });
+  var saveBtn = el("button", { type: "button", class: "act primary", text: "保存并热生效", disabled: !writable });
+  var reloadBtn = el("button", { type: "button", class: "act", text: "重新加载", click: function () {
+    loadSettings(true);
+  } });
+  saveBtn.addEventListener("click", function () {
+    saveSettings(saveMsg, saveBtn);
+  });
+  host.appendChild(el("div", { class: "panel" }, [
+    el("h2", { text: "F. 操作栏" }),
+    el("div", { class: "row", style: "margin:0;" }, [saveBtn, reloadBtn, saveMsg]),
+  ]));
+
+  refs.saveMsg = saveMsg;
+  settingsRefs = refs;
+}
+
+async function saveSettings(statusEl, saveBtn) {
+  if (!requireSession() || !settingsRefs || !state.settings || !state.settings.writable) return;
+  statusEl.className = "dim";
+  statusEl.textContent = "";
+
+  var r = settingsRefs;
+  var maxIn = parseOptionalIntField(r.model.maxInputBytes.value, "model.maxInputBytes", 1, 131072);
+  if (!maxIn.ok) { statusEl.className = "bad"; statusEl.textContent = maxIn.message; return; }
+  var maxOut = parseOptionalIntField(r.model.maxOutputTokens.value, "model.maxOutputTokens", 1, 1000000);
+  if (!maxOut.ok) { statusEl.className = "bad"; statusEl.textContent = maxOut.message; return; }
+
+  var pIn = parseOptionalIntField(r.model.inputPerMTokMicrousd.value, "priceCatalog.inputPerMTokMicrousd", 0, Number.MAX_SAFE_INTEGER);
+  if (!pIn.ok) { statusEl.className = "bad"; statusEl.textContent = pIn.message; return; }
+  var pOut = parseOptionalIntField(r.model.outputPerMTokMicrousd.value, "priceCatalog.outputPerMTokMicrousd", 0, Number.MAX_SAFE_INTEGER);
+  if (!pOut.ok) { statusEl.className = "bad"; statusEl.textContent = pOut.message; return; }
+  var pCR = parseOptionalIntField(r.model.cacheReadPerMTokMicrousd.value, "priceCatalog.cacheReadPerMTokMicrousd", 0, Number.MAX_SAFE_INTEGER);
+  if (!pCR.ok) { statusEl.className = "bad"; statusEl.textContent = pCR.message; return; }
+  var pCW = parseOptionalIntField(r.model.cacheWritePerMTokMicrousd.value, "priceCatalog.cacheWritePerMTokMicrousd", 0, Number.MAX_SAFE_INTEGER);
+  if (!pCW.ok) { statusEl.className = "bad"; statusEl.textContent = pCW.message; return; }
+
+  var imapPort = parseRequiredIntField(r.mail.imapPort.value, "mail.imapPort", 1, 65535, 993);
+  if (!imapPort.ok) { statusEl.className = "bad"; statusEl.textContent = imapPort.message; return; }
+  var smtpPort = parseRequiredIntField(r.mail.smtpPort.value, "mail.smtpPort", 1, 65535, 465);
+  if (!smtpPort.ok) { statusEl.className = "bad"; statusEl.textContent = smtpPort.message; return; }
+
+  var briefingRaw = r.briefingTimeOfDay.value.trim();
+  if (briefingRaw !== "" && !/^(?:[01]\\d|2[0-3]):[0-5]\\d$/.test(briefingRaw)) {
+    statusEl.className = "bad";
+    statusEl.textContent = "briefingTimeOfDay 必须为 HH:MM (24小时制) 或留空关闭";
+    return;
+  }
+
+  var secrets = {};
+  var clearSecrets = [];
+  SECRET_KEY_LIST.forEach(function (key) {
+    var ctrl = r.secrets[key];
+    var rawVal = ctrl ? ctrl.input.value : "";
+    if (state.settingsClearSecrets[key]) {
+      clearSecrets.push(key);
+    } else if (rawVal.trim().length > 0) {
+      secrets[key] = rawVal.trim();
+    }
+  });
+  if (secrets.MAIL_USER && !/^[^@\\s]+@[^@\\s]+$/.test(secrets.MAIL_USER.toLowerCase())) {
+    statusEl.className = "bad";
+    statusEl.textContent = "MAIL_USER 必须为有效邮箱地址";
+    return;
+  }
+
+  var baseUrlVal = r.model.baseUrl.value.trim();
+  var tgApiBaseVal = r.telegram.apiBase.value.trim();
+  var tgOwnerVal = r.telegram.ownerDestination.value.trim();
+  var imapHostVal = r.mail.imapHost.value.trim();
+  var smtpHostVal = r.mail.smtpHost.value.trim();
+  var fixedIdVal = r.adapters.fixedSendingIdentity.value.trim();
+
+  var payload = {
+    configPatch: {
+      model: {
+        allowRealModelCalls: Boolean(r.switches["model.allowRealModelCalls"].checked),
+        baseUrl: baseUrlVal === "" ? null : baseUrlVal,
+        modelId: r.model.modelId.value.trim(),
+        thinkingLevel: r.model.thinkingLevel.value,
+        maxInputBytes: maxIn.value,
+        maxOutputTokens: maxOut.value,
+        priceCatalog: {
+          inputPerMTokMicrousd: pIn.value,
+          outputPerMTokMicrousd: pOut.value,
+          cacheReadPerMTokMicrousd: pCR.value,
+          cacheWritePerMTokMicrousd: pCW.value,
+        },
+      },
+      telegram: {
+        allowRealPull: Boolean(r.switches["telegram.allowRealPull"].checked),
+        allowRealSend: Boolean(r.switches["telegram.allowRealSend"].checked),
+        autoReplyOnTask: Boolean(r.switches["telegram.autoReplyOnTask"].checked),
+        apiBase: tgApiBaseVal === "" ? null : tgApiBaseVal,
+        allowedChatIds: parseListInput(r.telegram.allowedChatIds.value),
+        ownerDestination: tgOwnerVal === "" ? null : tgOwnerVal,
+      },
+      mail: {
+        allowRealMailRead: Boolean(r.switches["mail.allowRealMailRead"].checked),
+        allowRealMailSend: Boolean(r.switches["mail.allowRealMailSend"].checked),
+        autoDraftReplies: Boolean(r.switches["mail.autoDraftReplies"].checked),
+        imapHost: imapHostVal === "" ? null : imapHostVal,
+        imapPort: imapPort.value,
+        smtpHost: smtpHostVal === "" ? null : smtpHostVal,
+        smtpPort: smtpPort.value,
+        allowedSenders: parseListInput(r.mail.allowedSenders.value),
+        allowedRecipients: parseListInput(r.mail.allowedRecipients.value),
+      },
+      policy: {
+        allowRealExternalWrites: Boolean(r.switches["policy.allowRealExternalWrites"].checked),
+      },
+      adapters: {
+        fixedSendingIdentity: fixedIdVal || (state.settings.config && state.settings.config.adapters && state.settings.config.adapters.fixedSendingIdentity) || "aegispi@local",
+        allowedRecipients: parseListInput(r.adapters.allowedRecipients.value),
+      },
+    },
+    secrets: secrets,
+    clearSecrets: clearSecrets,
+    briefingTimeOfDay: briefingRaw,
+  };
+
+  saveBtn.disabled = true;
+  statusEl.className = "dim";
+  statusEl.textContent = "正在保存并热生效…";
+  var res = await api("POST", "/api/settings", payload);
+  saveBtn.disabled = !state.settings.writable;
+
+  if (res.status === 200 && res.data) {
+    state.settings = res.data;
+    state.settingsDirty = false;
+    state.settingsClearSecrets = {};
+    renderSetupBanner();
+    renderSettings();
+    if (settingsRefs && settingsRefs.saveMsg) {
+      settingsRefs.saveMsg.className = "ok";
+      settingsRefs.saveMsg.textContent = "已保存并热生效";
+    }
+  } else {
+    statusEl.className = "bad";
+    statusEl.textContent = "保存失败: " + ((res.data && res.data.message) || ("HTTP " + res.status));
+  }
+}
 
 setInterval(function () {
   if (!session) return;

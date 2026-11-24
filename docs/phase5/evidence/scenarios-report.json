@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-24T10:52:54.825Z",
+  "generatedAt": "2026-11-24T13:31:04.086Z",
   "nodeVersion": "v22.23.5",
   "suite": "scenarios",
   "label": "Phase 5 Batch 2 scenarios (5.3 mail + 5.4 timers/calendar/dreaming, loopback TLS fixtures)",
@@ -11,7 +11,7 @@
     {
       "name": "child-entries-never-imported-by-host",
       "status": "PASS",
-      "detail": "all 56 host modules import none of the 6 child entry scripts (static single/double-quote, re-export and dynamic import)"
+      "detail": "all 58 host modules import none of the 6 child entry scripts (static single/double-quote, re-export and dynamic import)"
     },
     {
       "name": "5.3-0a pull-fails-closed-without-flag",
@@ -101,7 +101,7 @@
     {
       "name": "5.3-6a dispatch-succeeded",
       "status": "PASS",
-      "detail": "{\"state\":\"SUCCEEDED\",\"externalId\":\"<8a851c0aa8d005bb3ab9e49afdc073dc25c5fd8313c3dc73e15d4ca23f0840f3@aegispi.local>\"}"
+      "detail": "{\"state\":\"SUCCEEDED\",\"externalId\":\"<1f837eafd5706f9f46c8721da114e89f6d6c4c36d0ceaf05604f51e9d299d552@aegispi.local>\"}"
     },
     {
       "name": "5.3-6b smtp-sent-exactly-one",
@@ -111,7 +111,7 @@
     {
       "name": "5.3-6c external-id-recorded",
       "status": "PASS",
-      "detail": "{\"external_id\":\"<8a851c0aa8d005bb3ab9e49afdc073dc25c5fd8313c3dc73e15d4ca23f0840f3@aegispi.local>\",\"state\":\"SUCCEEDED\"}"
+      "detail": "{\"external_id\":\"<1f837eafd5706f9f46c8721da114e89f6d6c4c36d0ceaf05604f51e9d299d552@aegispi.local>\",\"state\":\"SUCCEEDED\"}"
     },
     {
       "name": "5.3-7a cp4-blocks-cross-scope-mail-payload",
@@ -306,7 +306,7 @@
     {
       "name": "5.4-9a remote-edit-changes-etag",
       "status": "PASS",
-      "detail": "new=145eefd1ff1bb5a6"
+      "detail": "new=8a64d0c8b477697d"
     },
     {
       "name": "5.4-9b head-mismatch-refused-before-send",
@@ -321,7 +321,7 @@
     {
       "name": "5.4-9d head-change-mints-fresh-card",
       "status": "PASS",
-      "detail": "new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=145eefd1ff1bb5a6"
+      "detail": "new=apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-2~rev1 pinned=8a64d0c8b477697d"
     },
     {
       "name": "5.4-9e reapproved-write-succeeds-on-fresh-etag",
@@ -341,7 +341,7 @@
     {
       "name": "5.4-10c 412-repropose-mints-fresh-card",
       "status": "PASS",
-      "detail": "{\"newApprovalId\":\"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2\",\"pinnedHead\":\"8b0505f169c1bb72\",\"taskReparked\":true}"
+      "detail": "{\"newApprovalId\":\"apr:efx:calendar%3Adm%253acalendar%253apersonal%3Aevt-1-move-3~head2\",\"pinnedHead\":\"6deb756f53d0d27b\",\"taskReparked\":true}"
     },
     {
       "name": "5.4-11a dreaming-skips-outside-quiet-hours",

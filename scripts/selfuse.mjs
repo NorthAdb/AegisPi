@@ -1,23 +1,16 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { grantPermission } from "../apps/daemon/src/acl.mjs";
 import { ConfigError, loadDaemonConfig } from "../apps/daemon/src/config.mjs";
-import { createCredentialService } from "../apps/daemon/src/credentials.mjs";
 import { openDatabase } from "../apps/daemon/src/db/connect.mjs";
 import { ensureModelRequestsTable, loadCanonicalSchema, migrate } from "../apps/daemon/src/db/migrate.mjs";
-import { withTx } from "../apps/daemon/src/db/tx.mjs";
 import {
-  ensurePrincipal,
-  ensureScope,
-  kindForDomainKey,
-  scopeId as scopeIdForDomainKey,
-} from "../apps/daemon/src/ingress.mjs";
-import { insertObjectRow, putObjectContent } from "../apps/daemon/src/objects.mjs";
-import { nextWallClockOccurrence } from "../apps/daemon/src/quiet-time.mjs";
-import { parseTelegramTargetResource } from "../apps/daemon/src/telegram-send.mjs";
-import { createTimer, timerIdFor, timerRow } from "../apps/daemon/src/timers.mjs";
+  ensureLocalConfigFile,
+  readDotEnvFile,
+  syncSelfUseDatabase,
+  synthesizeEnvVars,
+} from "../apps/daemon/src/selfuse-bootstrap.mjs";
 import { APP_IMAGES, ImageGateError, imageRef, parseAppImageDigests } from "../evals/phase3/lib/image-gate.mjs";
 
 const LOCKED_NODE = "v22.23.5";
@@ -31,22 +24,22 @@ if (process.version !== LOCKED_NODE) {
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, "..");
 const DAEMON_ENTRY = join(REPO_ROOT, "apps", "daemon", "src", "daemon.mjs");
+const EXAMPLE_CONFIG_PATH = join(REPO_ROOT, "apps", "daemon", "config", "selfuse.example.json");
 const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
-const CHAT_ID_RE = /^-?\d+$/;
-const EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
 
 function usage() {
   return [
     "Usage:",
-    "  D:\\AegisPi\\tools\\node-v22.23.5\\node.exe scripts/selfuse.mjs <init|check|start> --config=<path> [--data-dir=workspace-state] [--env-file=.env] [--port=4310] [--briefing-time=HH:MM] [--dry-run]",
+    "  D:\\AegisPi\\tools\\node-v22.23.5\\node.exe scripts/selfuse.mjs <init|check|start> [--config=selfuse.local.json] [--data-dir=workspace-state] [--env-file=.env] [--port=4310] [--briefing-time=HH:MM] [--dry-run]",
   ].join("\n");
 }
 
 function parseCliArgs(argv) {
   const positionals = [];
-  let configPath = null;
-  let dataDir = resolve(process.cwd(), "workspace-state");
-  let envFilePath = resolve(process.cwd(), ".env");
+  let configPath = resolve(REPO_ROOT, "selfuse.local.json");
+  let configExplicit = false;
+  let dataDir = resolve(REPO_ROOT, "workspace-state");
+  let envFilePath = resolve(REPO_ROOT, ".env");
   let port = 4310;
   let briefingTime = null;
   let dryRun = false;
@@ -73,6 +66,7 @@ function parseCliArgs(argv) {
     if (key === "--config") {
       if (!val) throw new Error("--config requires a non-empty path");
       configPath = resolve(process.cwd(), val);
+      configExplicit = true;
     } else if (key === "--data-dir") {
       if (!val) throw new Error("--data-dir requires a non-empty path");
       dataDir = resolve(process.cwd(), val);
@@ -99,96 +93,11 @@ function parseCliArgs(argv) {
   if (!command || !["init", "check", "start"].includes(command) || positionals.length !== 1) {
     throw new Error("first argument must be one of: init, check, start");
   }
-  if (!configPath) {
-    throw new Error("--config=<path> is required");
-  }
-  return { command, configPath, dataDir, envFilePath, port, briefingTime, dryRun };
-}
-
-export function parseDotEnvFile(envFilePath) {
-  if (!existsSync(envFilePath)) {
-    return { exists: false, vars: {} };
-  }
-  const text = readFileSync(envFilePath, "utf8");
-  const vars = {};
-  for (const rawLine of text.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const match = rawLine.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (!match) continue;
-    const name = match[1];
-    let val = match[2].trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
-      (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
-    ) {
-      val = val.slice(1, -1);
-    }
-    vars[name] = val;
-  }
-  return { exists: true, vars };
-}
-
-function buildRuntimeEnv(dotEnvVars) {
-  const env = { ...process.env, ...dotEnvVars };
-  const mailUser = String(env.MAIL_USER ?? "").trim().toLowerCase();
-  const mailPass = typeof env.MAIL_APP_PASSWORD === "string" ? env.MAIL_APP_PASSWORD : "";
-  if (!env.AEGISPI_MAIL_CREDENTIAL && mailUser.length > 0 && mailPass.length > 0) {
-    env.AEGISPI_MAIL_CREDENTIAL = `${mailUser}:${mailPass}`;
-  }
-  return env;
+  return { command, configPath, configExplicit, dataDir, envFilePath, port, briefingTime, dryRun };
 }
 
 function hasEnvKey(env, key) {
   return typeof env[key] === "string" && env[key].trim().length > 0;
-}
-
-function ensureCredentialSlot(creds, { slot, purpose, source, envName, actorId, now }) {
-  const existing = creds.slotRow(slot);
-  if (
-    existing &&
-    existing.revoked_at === null &&
-    existing.purpose === purpose &&
-    existing.source === source &&
-    existing.env_name === envName
-  ) {
-    return { slot, envName, created: false };
-  }
-  creds.registerSlot({ slot, purpose, source, envName, actorId, now });
-  return { slot, envName, created: true };
-}
-
-function ensureLiveGrant(db, { scopeId, principalId, permission, now, actorId }) {
-  const existing = db
-    .prepare(
-      `SELECT 1 FROM acl_grants
-       WHERE scope_id=? AND principal_id=? AND permission=?
-         AND revoked_at IS NULL AND expires_at IS NULL
-       LIMIT 1`,
-    )
-    .get(scopeId, principalId, permission);
-  if (existing) return false;
-  grantPermission(db, { scopeId, principalId, permission, now, actorId });
-  return true;
-}
-
-function resolveBriefingDomainKey(config) {
-  const ownerDest = config.telegram?.ownerDestination ?? null;
-  if (ownerDest) {
-    if (ownerDest.startsWith("dm:telegram:") || ownerDest.startsWith("group:telegram:")) {
-      return ownerDest;
-    }
-    const chatId = parseTelegramTargetResource(ownerDest);
-    if (chatId) {
-      return chatId.startsWith("-") ? `group:telegram:${chatId}` : `dm:telegram:${chatId}`;
-    }
-  }
-  for (const chatId of config.telegram?.allowedChatIds ?? []) {
-    if (CHAT_ID_RE.test(chatId) && !chatId.startsWith("-")) {
-      return `dm:telegram:${chatId}`;
-    }
-  }
-  return null;
 }
 
 function loadValidatedConfig(configPath) {
@@ -202,225 +111,47 @@ function loadValidatedConfig(configPath) {
   }
 }
 
-function runInit({ configPath, dataDir, envFilePath, briefingTime }) {
-  const config = loadValidatedConfig(configPath);
-  const dotEnv = parseDotEnvFile(envFilePath);
-  const runtimeEnv = buildRuntimeEnv(dotEnv.vars);
+function loadRuntimeEnv(envFilePath) {
+  const exists = existsSync(envFilePath);
+  const dotEnvVars = readDotEnvFile(envFilePath);
+  const runtimeEnv = synthesizeEnvVars({ ...process.env, ...dotEnvVars });
+  return { exists, runtimeEnv };
+}
 
-  for (const id of config.telegram.allowedChatIds) {
-    if (!CHAT_ID_RE.test(id)) {
-      throw new Error(
-        `telegram.allowedChatIds contains non-numeric entry ${JSON.stringify(id)}; replace placeholders with numeric chat IDs first`,
-      );
+function runInit({ configPath, configExplicit, dataDir, envFilePath, briefingTime }) {
+  if (!configExplicit) {
+    const ensured = ensureLocalConfigFile({ configPath, examplePath: EXAMPLE_CONFIG_PATH });
+    if (ensured.created) {
+      console.log(`init: created default config ${configPath} from ${EXAMPLE_CONFIG_PATH}`);
     }
   }
+  const config = loadValidatedConfig(configPath);
+  const { runtimeEnv } = loadRuntimeEnv(envFilePath);
 
   mkdirSync(join(dataDir, "db"), { recursive: true });
   const dbPath = join(dataDir, "db", "aegis.db");
   const db = openDatabase(dbPath);
-  const now = Date.now();
-  const summary = {
-    dbPath,
-    slots: [],
-    scopes: [],
-    grantsAdded: 0,
-    briefingTimer: null,
-  };
-
   try {
     migrate(db, loadCanonicalSchema());
     ensureModelRequestsTable(db);
-
-    const creds = createCredentialService(db);
-    const ownerRef = withTx(db, () => ensurePrincipal(db, { platform: "local", subject: "owner" }));
-
-    if (config.model.baseUrl !== null || hasEnvKey(runtimeEnv, "DEEPSEEK_API_KEY")) {
-      summary.slots.push(
-        ensureCredentialSlot(creds, {
-          slot: "model",
-          purpose: "model",
-          source: config.model.provider ?? "deepseek",
-          envName: "DEEPSEEK_API_KEY",
-          actorId: ownerRef.id,
-          now,
-        }),
-      );
-    }
-    if (
-      config.telegram.apiBase !== null ||
-      config.telegram.allowedChatIds.length > 0 ||
-      hasEnvKey(runtimeEnv, "TELEGRAM_BOT_TOKEN")
-    ) {
-      summary.slots.push(
-        ensureCredentialSlot(creds, {
-          slot: "im",
-          purpose: "im",
-          source: "telegram",
-          envName: "TELEGRAM_BOT_TOKEN",
-          actorId: ownerRef.id,
-          now,
-        }),
-      );
-    }
-    if (
-      config.mail.imapHost !== null ||
-      config.mail.smtpHost !== null ||
-      hasEnvKey(runtimeEnv, "AEGISPI_MAIL_CREDENTIAL")
-    ) {
-      summary.slots.push(
-        ensureCredentialSlot(creds, {
-          slot: "mail",
-          purpose: "mail",
-          source: "imap-smtp",
-          envName: "AEGISPI_MAIL_CREDENTIAL",
-          actorId: ownerRef.id,
-          now,
-        }),
-      );
-    }
-
-    const grantAll = (scopeId, principalId, permissions) => {
-      for (const permission of permissions) {
-        if (ensureLiveGrant(db, { scopeId, principalId, permission, now, actorId: ownerRef.id })) {
-          summary.grantsAdded += 1;
-        }
-      }
-    };
-
-    const webScopeRef = withTx(db, () =>
-      ensureScope(db, {
-        ownerId: ownerRef.id,
-        kind: "owner_dm",
-        domainKey: "dm:local:owner",
-        channel: "console",
-        conversationId: "owner",
-        policyVersion: "pv1",
-      }),
-    );
-    summary.scopes.push(webScopeRef.id);
-    grantAll(webScopeRef.id, ownerRef.id, ["read", "request", "approve", "admin"]);
-
-    const tgOwnerIdRaw = typeof runtimeEnv.TELEGRAM_OWNER_USER_ID === "string" ? runtimeEnv.TELEGRAM_OWNER_USER_ID.trim() : "";
-    for (const chatId of config.telegram.allowedChatIds) {
-      const isGroup = /^-\d+$/.test(chatId);
-      const domainKey = isGroup ? `group:telegram:${chatId}` : `dm:telegram:${chatId}`;
-      const kind = isGroup ? "group" : "owner_dm";
-      const scopeRef = withTx(db, () =>
-        ensureScope(db, {
-          ownerId: ownerRef.id,
-          kind,
-          domainKey,
-          channel: "telegram",
-          conversationId: chatId,
-          policyVersion: "pv1",
-        }),
-      );
-      summary.scopes.push(scopeRef.id);
-      grantAll(scopeRef.id, ownerRef.id, ["read", "request", "approve", "admin"]);
-      if (!isGroup) {
-        const tgPrincipal = withTx(db, () => ensurePrincipal(db, { platform: "telegram", subject: chatId }));
-        grantAll(scopeRef.id, tgPrincipal.id, ["read", "request"]);
-      } else if (/^\d+$/.test(tgOwnerIdRaw)) {
-        const tgOwnerPrincipal = withTx(db, () => ensurePrincipal(db, { platform: "telegram", subject: tgOwnerIdRaw }));
-        grantAll(scopeRef.id, tgOwnerPrincipal.id, ["read", "request"]);
-      }
-    }
-
-    if (hasEnvKey(runtimeEnv, "MAIL_USER")) {
-      const mailUser = runtimeEnv.MAIL_USER.trim().toLowerCase();
-      if (!EMAIL_RE.test(mailUser)) {
-        throw new Error("MAIL_USER in env must be a valid email address");
-      }
-      const mailDomain = `dm:mail:${mailUser}`;
-      const mailScopeRef = withTx(db, () =>
-        ensureScope(db, {
-          ownerId: ownerRef.id,
-          kind: "owner_dm",
-          domainKey: mailDomain,
-          channel: "mail",
-          conversationId: mailUser,
-          policyVersion: "pv1",
-        }),
-      );
-      summary.scopes.push(mailScopeRef.id);
-      grantAll(mailScopeRef.id, ownerRef.id, ["read", "request", "approve", "admin"]);
-    }
-
-    if (briefingTime !== null) {
-      const briefingDomain = resolveBriefingDomainKey(config);
-      if (!briefingDomain) {
-        throw new Error(
-          "--briefing-time requires a Telegram owner DM scope (set telegram.ownerDestination or a non-negative id in telegram.allowedChatIds)",
-        );
-      }
-      const targetScopeId = scopeIdForDomainKey(briefingDomain);
-      let scopeRow = db.prepare("SELECT id, epoch FROM scopes WHERE id=?").get(targetScopeId);
-      if (!scopeRow) {
-        const chatId = parseTelegramTargetResource(briefingDomain);
-        const created = withTx(db, () =>
-          ensureScope(db, {
-            ownerId: ownerRef.id,
-            kind: kindForDomainKey(briefingDomain),
-            domainKey: briefingDomain,
-            channel: "telegram",
-            conversationId: chatId,
-            policyVersion: "pv1",
-          }),
-        );
-        grantAll(created.id, ownerRef.id, ["read", "request", "approve", "admin"]);
-        scopeRow = db.prepare("SELECT id, epoch FROM scopes WHERE id=?").get(created.id);
-      }
-      const timerId = timerIdFor("selfuse-morning-briefing");
-      const existingTimer = timerRow(db, timerId);
-      if (existingTimer) {
-        summary.briefingTimer = { id: timerId, created: false, state: existingTimer.state, dueAt: existingTimer.due_at };
-      } else {
-        const timeZone = config.calendar.defaultTimezone;
-        const dueAt = nextWallClockOccurrence(now, { timeOfDay: briefingTime, timeZone, exactOk: false });
-        const seedContent = JSON.stringify({
-          kind: "morning_briefing_seed",
-          timeOfDay: briefingTime,
-          timeZone,
-        });
-        const stored = putObjectContent(dataDir, seedContent);
-        const payloadObj = withTx(db, () =>
-          insertObjectRow(db, {
-            scopeId: scopeRow.id,
-            kind: "event_payload",
-            sourceUri: "selfuse://morning-briefing",
-            sourceActor: ownerRef.id,
-            contentHash: stored.contentHash,
-            storageRef: stored.storageRef,
-            observedAt: now,
-            requiredScopeIds: [scopeRow.id],
-          }),
-        );
-        createTimer(db, {
-          id: timerId,
-          scopeId: scopeRow.id,
-          principalId: ownerRef.id,
-          scopeEpoch: scopeRow.epoch,
-          threadKey: "briefing",
-          condition: { type: "morning_briefing" },
-          dueAt,
-          recurrence: { type: "daily_wall_clock", timeOfDay: briefingTime, timezone: timeZone },
-          payloadObjectId: payloadObj.id,
-          now,
-        });
-        summary.briefingTimer = { id: timerId, created: true, state: "SCHEDULED", dueAt };
-      }
-    }
+    const summary = syncSelfUseDatabase(db, {
+      config,
+      dataDir,
+      envMap: runtimeEnv,
+      briefingTime,
+    });
+    return { config, runtimeEnv, summary: { dbPath, ...summary } };
   } finally {
     db.close();
   }
-
-  return { config, runtimeEnv, summary };
 }
 
 async function runCheck({ configPath, dataDir, envFilePath, port }) {
+  if (!existsSync(configPath)) {
+    throw new Error(`config file not found (${configPath})`);
+  }
   const config = loadValidatedConfig(configPath);
-  const dotEnv = parseDotEnvFile(envFilePath);
-  const runtimeEnv = buildRuntimeEnv(dotEnv.vars);
+  const { exists: envExists, runtimeEnv } = loadRuntimeEnv(envFilePath);
   let ok = true;
 
   console.log(`check: config OK (${configPath})`);
@@ -429,11 +160,16 @@ async function runCheck({ configPath, dataDir, envFilePath, port }) {
   );
 
   const requiredKeys = [];
-  if (config.model.baseUrl !== null) requiredKeys.push("DEEPSEEK_API_KEY");
+  if (config.model.baseUrl !== null && config.model.allowRealModelCalls) {
+    requiredKeys.push("DEEPSEEK_API_KEY");
+  }
   if (config.telegram.apiBase !== null && (config.telegram.allowRealPull || config.telegram.allowRealSend)) {
     requiredKeys.push("TELEGRAM_BOT_TOKEN");
   }
-  if (config.mail.imapHost !== null || config.mail.smtpHost !== null) {
+  if (
+    (config.mail.imapHost !== null || config.mail.smtpHost !== null) &&
+    (config.mail.allowRealMailRead || config.mail.allowRealMailSend)
+  ) {
     requiredKeys.push("AEGISPI_MAIL_CREDENTIAL");
   }
   const trackedKeys = [
@@ -443,8 +179,10 @@ async function runCheck({ configPath, dataDir, envFilePath, port }) {
     "MAIL_USER",
     "MAIL_APP_PASSWORD",
     "AEGISPI_MAIL_CREDENTIAL",
+    "AEGISPI_BACKUP_MANIFEST_KEY",
+    "AEGISPI_REAL_TG_PROXY",
   ];
-  console.log(`check: envFile=${dotEnv.exists ? "present" : "missing"} (${envFilePath})`);
+  console.log(`check: envFile=${envExists ? "present" : "missing"} (${envFilePath})`);
   for (const key of trackedKeys) {
     const present = hasEnvKey(runtimeEnv, key);
     const reqMark = requiredKeys.includes(key) ? "required" : "optional";
@@ -467,7 +205,14 @@ async function runCheck({ configPath, dataDir, envFilePath, port }) {
   const daemonCheck = spawnSync(
     process.execPath,
     [DAEMON_ENTRY, "--check", `--data-dir=${dataDir}`, `--config=${configPath}`, `--port=${port}`],
-    { encoding: "utf8", env: runtimeEnv },
+    {
+      encoding: "utf8",
+      env: {
+        ...runtimeEnv,
+        AEGISPI_CONFIG_PATH: configPath,
+        AEGISPI_ENV_FILE: envFilePath,
+      },
+    },
   );
   if (daemonCheck.stdout) process.stdout.write(daemonCheck.stdout);
   if (daemonCheck.stderr) process.stderr.write(daemonCheck.stderr);
@@ -479,8 +224,8 @@ async function runCheck({ configPath, dataDir, envFilePath, port }) {
   return ok ? 0 : 1;
 }
 
-async function runStart({ configPath, dataDir, envFilePath, port, briefingTime, dryRun }) {
-  const { runtimeEnv, summary } = runInit({ configPath, dataDir, envFilePath, briefingTime });
+async function runStart({ configPath, configExplicit, dataDir, envFilePath, port, briefingTime, dryRun }) {
+  const { runtimeEnv, summary } = runInit({ configPath, configExplicit, dataDir, envFilePath, briefingTime });
   console.log(
     `init: db=${summary.dbPath} slots=${summary.slots.map((s) => `${s.slot}->${s.envName}`).join(",") || "none"} scopes=${summary.scopes.length} grantsAdded=${summary.grantsAdded}`,
   );
@@ -528,7 +273,11 @@ async function runStart({ configPath, dataDir, envFilePath, port, briefingTime, 
 
   const child = spawn(process.execPath, daemonArgs, {
     stdio: "inherit",
-    env: runtimeEnv,
+    env: {
+      ...runtimeEnv,
+      AEGISPI_CONFIG_PATH: configPath,
+      AEGISPI_ENV_FILE: envFilePath,
+    },
   });
 
   const forwardSignal = (sig) => {

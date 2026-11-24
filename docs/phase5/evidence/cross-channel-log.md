@@ -1,6 +1,6 @@
 # Phase 5 Unit 5.2 — Telegram 路线 1 拉取入站与跨通道 9 环节 Canary 隔离
 
-生成：2026-11-24T10:52:12.982Z；Node v22.23.5；suite `cross-channel`。
+生成：2026-11-24T13:30:43.912Z；Node v22.23.5；suite `cross-channel`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -12,7 +12,7 @@
 | PASS | pull-crashpoint-killed-in-the-cursor-window | the scenario child died by the armed crashpoint (marker fresh, exit {"code":1,"signal":null}) |
 | PASS | pull-crash-committed-events-cursor-untouched | after the crash the two receiveEvents are committed (2 rows) and the cursor is still 0 |
 | PASS | pull-restart-replay-zero-duplicate-tasks | the restart re-pulled the same update_ids: 2 duplicates absorbed, cursor advanced 0->8003, exactly 2 tasks (zero duplicates) |
-| PASS | control-stop-executes-deterministically-and-instantly | /stop cancelled the DM task (CANCELLED) in 160ms with zero model requests while the group lane kept its RUNNING slot (RUNNING) |
+| PASS | control-stop-executes-deterministically-and-instantly | /stop cancelled the DM task (CANCELLED) in 267ms with zero model requests while the group lane kept its RUNNING slot (RUNNING) |
 | PASS | control-refuses-unauthorized-principal | a principal with no live grant cannot /pause; the scope stays unpaused (0) |
 | PASS | canary-links-1-5-zero-hits | router history / worker context / L0 export / L1 graph / L2 FTS+LIKE all zero across the four foreign scopes (①groupA=0, ②groupA=0, ③groupA=0, ④groupA=0, ⑤groupA=0, ①groupB=0, ②groupB=0, ③groupB=0, ④groupB=0, ⑤groupB=0, ①repo=0, ②repo=0, ③repo=0, ④repo=0, ⑤repo=0, ①service=0, ②service=0, ③service=0, ④service=0, ⑤service=0) |
 | PASS | canary-links-6-8-zero-hits | scope-local summaries carry no canary and the DM spill + fork checkpoint are denied to every foreign principal (⑥groupA=0, ⑦groupA=denied:true, ⑧groupA=denied:true, ⑥groupB=0, ⑦groupB=denied:true, ⑧groupB=denied:true, ⑥repo=0, ⑦repo=denied:true, ⑧repo=denied:true, ⑥service=0, ⑦service=denied:true, ⑧service=denied:true) |

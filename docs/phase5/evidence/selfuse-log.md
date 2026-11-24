@@ -1,6 +1,6 @@
 # Selfuse behavior end-to-end
 
-生成：2026-11-24T10:53:25.019Z；Node v22.23.5；suite `selfuse`。
+生成：2026-11-24T13:31:21.758Z；Node v22.23.5；suite `selfuse`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
@@ -22,10 +22,20 @@
 | PASS | scoped-history-byte-cap | {"capped":[{"role":"user","content":"Third recent question"},{"role":"assistant","content":"Third recent answer"},{"role":"user","content":"Current prompt"}],"tinyCapped":[{"role":"user","content":"Current prompt"}]} |
 | PASS | scoped-history-immediate-drop-on-read-revoke | [{"role":"user","content":"After revoke"}] |
 | PASS | console-html-chat-approval-ui-zero-innerhtml-and-favicon | {"faviconStatus":204,"htmlStatus":200,"hasInnerHtml":false} |
-| PASS | console-web-chat-roundtrip-and-status-control | {"postStatus":202,"getStatus":200,"chatMsg":{"inboxId":"inb:console-chat:chat-1795517601876-40a5468e6b4c","source":"console-chat","scopeId":"scp:dm%3Alocal%3Aowner","threadKey":"web:main","receivedAt":1795517601876,"inboxState":"ROUTED","taskId":"tsk:inb%3Aconsole-chat%3Achat-1795517601876-40a5468e6b4c:web-chat-1","taskState":"SUCCEEDED","resultClass":"affected","userText":"Hello from web chat","replyText":"Hello back from assistant","approval":null},"statusCtrl":{"code":"control_executed","outcome":{"command":"/status","running":0,"queued":0,"waitingApprovals":0,"pendingInbox":0,"paused":false},"scopeId":"scp:dm%3Alocal%3Aowner","threadKey":"web:main"},"inboxDelta":0} |
-| PASS | console-approvals-summary-and-redaction | {"listedCard":{"id":"apr:efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570","effect_id":"efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570","state":"WAITING","approver_id":"prn:local:owner","expires_at":1795521201842,"created_at":1795517601842,"actionHashShort":"11adbef13b1a","task_id":"tsk:inb%3Amail%3A<redact-1@example.test>:mail-redact","scope_id":"scp:dm%3Amail%3Aowner@example.test","operation":"mail.send","targetResource":"mail:alice@example.test","subject":"Re: Redaction check","bodyPreview":"Approved summary text.","sendingIdentity":"aegispi@local"},"bootstrapDM":null} |
-| PASS | console-group-scope-task-steer | {"conflictStatus":409,"okStatus":202,"steerOk":{"code":"queued","inboxId":"inb:console-steer:steer-tsk%3Ainb%253Atelegram%253Atg-group-555%3Agroup-steer-target-51f94078adef","note":"the steer is queued as a durable inbox event; it does not interrupt an in-flight tool call"},"steerInbox":{"scope_id":"scp:group%3Atelegram%3A-100555","source":"console-steer","thread_key":"task:tsk:inb%3Atelegram%3Atg-group-555:group-steer-target"}} |
+| PASS | console-web-chat-roundtrip-and-status-control | {"postStatus":202,"getStatus":200,"chatMsg":{"inboxId":"inb:console-chat:chat-1795527079218-d5ef71bdcc52","source":"console-chat","scopeId":"scp:dm%3Alocal%3Aowner","threadKey":"web:main","receivedAt":1795527079218,"inboxState":"ROUTED","taskId":"tsk:inb%3Aconsole-chat%3Achat-1795527079218-d5ef71bdcc52:web-chat-1","taskState":"SUCCEEDED","resultClass":"affected","userText":"Hello from web chat","replyText":"Hello back from assistant","approval":null},"statusCtrl":{"code":"control_executed","outcome":{"command":"/status","running":0,"queued":0,"waitingApprovals":0,"pendingInbox":0,"paused":false},"scopeId":"scp:dm%3Alocal%3Aowner","threadKey":"web:main"},"inboxDelta":0} |
+| PASS | console-approvals-summary-and-redaction | {"listedCard":{"id":"apr:efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570","effect_id":"efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570","state":"WAITING","approver_id":"prn:local:owner","expires_at":1795530679172,"created_at":1795527079172,"actionHashShort":"b32c19f94611","task_id":"tsk:inb%3Amail%3A<redact-1@example.test>:mail-redact","scope_id":"scp:dm%3Amail%3Aowner@example.test","operation":"mail.send","targetResource":"mail:alice@example.test","subject":"Re: Redaction check","bodyPreview":"Approved summary text.","sendingIdentity":"aegispi@local"},"bootstrapDM":null} |
+| PASS | console-group-scope-task-steer | {"conflictStatus":409,"okStatus":202,"steerOk":{"code":"queued","inboxId":"inb:console-steer:steer-tsk%3Ainb%253Atelegram%253Atg-group-555%3Agroup-steer-target-716ecf242232","note":"the steer is queued as a durable inbox event; it does not interrupt an in-flight tool call"},"steerInbox":{"scope_id":"scp:group%3Atelegram%3A-100555","source":"console-steer","thread_key":"task:tsk:inb%3Atelegram%3Atg-group-555:group-steer-target"}} |
+| PASS | bootstrap-upsert-dotenv-keys | {"rejectedDisallowed":true,"rejectedCtrl":true,"parsedKeys":["UNRELATED_KEEP","DEEPSEEK_API_KEY","TELEGRAM_BOT_TOKEN"],"preservedComment":true} |
+| PASS | bootstrap-synthesize-env-vars | {"parsedCred":{"user":"owner@example.test","password":"mail-pass-fake-001"},"clearedPass":true,"clearedUser":true} |
+| PASS | bootstrap-ensure-local-config-file | {"firstCreated":true,"failClosed":true,"secondCreated":false} |
+| PASS | bootstrap-sync-selfuse-database | {"slots":["im","mail","model"],"sync2Grants":0,"updatedRec":{"type":"daily_wall_clock","timeOfDay":"09:15","timezone":"Asia/Hong_Kong"},"cancelledState":"CANCELLED"} |
+| PASS | settings-api-get-auth-and-redaction | {"unauth":401,"bootstrap":401,"badOrigin":403,"owner":200,"secretValuesAllBool":true,"leakedInGet":[]} |
+| PASS | settings-api-post-422-validation-no-disk-mutation | {"badStatuses":[422,422,422,422,422],"filesUntouched":true} |
+| PASS | settings-api-post-atomic-save-sync-and-reload | {"status":200,"reloadCount":1,"briefing":"07:45","auditCodes":["host_settings_updated","host_secrets_updated"],"auditLeaked":[],"tgScopeGrant":4} |
+| PASS | settings-api-connectivity-test-loopback-and-scrubbing | {"modelOk":true,"model401":"auth_failed","tgOk":true,"tg401":"auth_failed","mailOk":true,"imapPassCommands":["LOGIN","SELECT","LOGOUT"],"mailFail":"auth_failed","testScrubOk":true} |
+| PASS | selfuse-cold-start-check-and-daemon-check | {"checkMissingStatus":1,"helpStatus":0,"daemonCheckStatus":0,"daemonStdout":"check: mode=open steps=12 disk=ok GREEN"} |
+| PASS | console-ui-settings-tab-setup-banner-and-valid-js | {"hasSettingsTab":true,"hasSettingsLabel":true,"hasSetupBanner":true,"hasForbiddenSink":false,"jsValid":true,"jsErr":null} |
 
-合计：21 PASS / 0 FAIL。
+合计：31 PASS / 0 FAIL。
 
-数据源：Offline loopback SMTP/DB/HTTP fixtures with example.test data only。
+数据源：Offline loopback SMTP/IMAP/HTTP/DB fixtures with example.test data only。

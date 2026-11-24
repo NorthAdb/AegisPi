@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { connect as netConnect } from "node:net";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { connect as netConnect, createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
 import { lockedNodeGuard, makeSuite, makeWorkspace, suiteExit, writeReport } from "../lib/harness.mjs";
 import { grantPermission, revokePermission } from "../../../apps/daemon/src/acl.mjs";
@@ -12,17 +15,25 @@ import { decideApproval } from "../../../apps/daemon/src/approvals.mjs";
 import { processFiredFollowUpTimers } from "../../../apps/daemon/src/briefing-followup.mjs";
 import { ConfigError, loadDaemonConfig } from "../../../apps/daemon/src/config.mjs";
 import { createConsoleApp } from "../../../apps/daemon/src/console/api.mjs";
+import { consoleIndexHtml } from "../../../apps/daemon/src/console/ui.mjs";
 import { createCredentialService } from "../../../apps/daemon/src/credentials.mjs";
 import { openDatabase } from "../../../apps/daemon/src/db/connect.mjs";
 import { ensureModelRequestsTable, loadCanonicalSchema, migrate } from "../../../apps/daemon/src/db/migrate.mjs";
 import { withTx } from "../../../apps/daemon/src/db/tx.mjs";
 import { dispatchEffect, extraFieldsOfAction, proposeEffect } from "../../../apps/daemon/src/effects.mjs";
 import { ensurePrincipal, ensureScope, receiveEvent } from "../../../apps/daemon/src/ingress.mjs";
-import { createMailUpstream } from "../../../apps/daemon/src/mail-adapter.mjs";
+import { createMailUpstream, splitMailCredential } from "../../../apps/daemon/src/mail-adapter.mjs";
 import { buildMailSendIntent, ensureMailScope, proposeMailReplyEffect } from "../../../apps/daemon/src/mail-triage.mjs";
 import { insertObjectRow, putObjectContent } from "../../../apps/daemon/src/objects.mjs";
 import { dispatchEventToTask } from "../../../apps/daemon/src/router.mjs";
 import { claimNextTask, completeTask } from "../../../apps/daemon/src/scheduler.mjs";
+import {
+  ensureLocalConfigFile,
+  readDotEnvFile,
+  syncSelfUseDatabase,
+  synthesizeEnvVars,
+  upsertDotEnvKeys,
+} from "../../../apps/daemon/src/selfuse-bootstrap.mjs";
 import {
   buildScopedThreadMessages,
   formatGeneralUserPrompt,
@@ -30,7 +41,7 @@ import {
   translateTelegramCommandToPayload,
 } from "../../../apps/daemon/src/selfuse-dispatch.mjs";
 import { resolveVerifiedNotificationText } from "../../../apps/daemon/src/telegram-send.mjs";
-import { createTimer, processDueTimers, timerIdFor } from "../../../apps/daemon/src/timers.mjs";
+import { createTimer, processDueTimers, timerIdFor, timerRow } from "../../../apps/daemon/src/timers.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, "..", "..", "..");
@@ -1544,11 +1555,716 @@ async function startFixtureHost() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 9. selfuse-bootstrap.mjs: .env upsert, credential synthesis, cold-start config, DB sync
+async function withTempDir(prefix, fn) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    return await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withSavedEnv(keys, fn) {
+  const snapshot = new Map();
+  for (const key of keys) {
+    snapshot.set(key, Object.hasOwn(process.env, key) ? process.env[key] : undefined);
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, val] of snapshot.entries()) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  }
+}
+
+function freshIsolatedDb(tmpDir) {
+  const stateDir = join(tmpDir, "state");
+  mkdirSync(join(stateDir, "db"), { recursive: true });
+  const db = openDatabase(join(stateDir, "db", "aegis.db"));
+  migrate(db, loadCanonicalSchema());
+  ensureModelRequestsTable(db);
+  return { stateDir, db };
+}
+
+await withTempDir("aegispi-bootstrap-", async (tmpDir) => {
+  // 9a. upsertDotEnvKeys validation & preservation
+  const envPath = join(tmpDir, ".env");
+  writeFileSync(
+    envPath,
+    [
+      "# Local self-use secrets",
+      "UNRELATED_KEEP=keep-value-1",
+      "DEEPSEEK_API_KEY=sk-test-fake-old",
+      "TELEGRAM_BOT_TOKEN=1001:fake-tg-keep",
+      "AEGISPI_BACKUP_MANIFEST_KEY=" + "a".repeat(64),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  let rejectedDisallowed = false;
+  try {
+    upsertDotEnvKeys(envPath, { set: { NOT_ALLOWED_KEY: "val" } });
+  } catch {
+    rejectedDisallowed = true;
+  }
+
+  let rejectedNewline = false;
+  let rejectedCr = false;
+  let rejectedNull = false;
+  try {
+    upsertDotEnvKeys(envPath, { set: { DEEPSEEK_API_KEY: "bad\nLINE=1" } });
+  } catch {
+    rejectedNewline = true;
+  }
+  try {
+    upsertDotEnvKeys(envPath, { set: { DEEPSEEK_API_KEY: "bad\rLINE=1" } });
+  } catch {
+    rejectedCr = true;
+  }
+  try {
+    upsertDotEnvKeys(envPath, { set: { DEEPSEEK_API_KEY: "bad\0val" } });
+  } catch {
+    rejectedNull = true;
+  }
+
+  const afterRejectRaw = readFileSync(envPath, "utf8");
+  upsertDotEnvKeys(envPath, {
+    set: {
+      DEEPSEEK_API_KEY: "sk-test-fake-001",
+      TELEGRAM_BOT_TOKEN: "",
+      MAIL_USER: undefined,
+    },
+    clear: ["AEGISPI_BACKUP_MANIFEST_KEY"],
+  });
+  const afterUpdateRaw = readFileSync(envPath, "utf8");
+  const parsedEnv = readDotEnvFile(envPath);
+
+  suite.check(
+    "bootstrap-upsert-dotenv-keys",
+    rejectedDisallowed &&
+      rejectedNewline &&
+      rejectedCr &&
+      rejectedNull &&
+      afterRejectRaw.includes("sk-test-fake-old") &&
+      afterUpdateRaw.includes("# Local self-use secrets") &&
+      afterUpdateRaw.includes("UNRELATED_KEEP=keep-value-1") &&
+      parsedEnv.DEEPSEEK_API_KEY === "sk-test-fake-001" &&
+      parsedEnv.TELEGRAM_BOT_TOKEN === "1001:fake-tg-keep" &&
+      !("AEGISPI_BACKUP_MANIFEST_KEY" in parsedEnv),
+    JSON.stringify({
+      rejectedDisallowed,
+      rejectedCtrl: rejectedNewline && rejectedCr && rejectedNull,
+      parsedKeys: Object.keys(parsedEnv),
+      preservedComment: afterUpdateRaw.includes("# Local self-use secrets"),
+    }),
+  );
+
+  // 9b. synthesizeEnvVars compatibility with splitMailCredential & refresh clear
+  const synthEnv = synthesizeEnvVars({
+    MAIL_USER: "  Owner@Example.Test ",
+    MAIL_APP_PASSWORD: "mail-pass-fake-001",
+  });
+  const parsedCred = splitMailCredential(synthEnv.AEGISPI_MAIL_CREDENTIAL);
+  const clearMissingPass = synthesizeEnvVars(
+    { MAIL_USER: "owner@example.test", AEGISPI_MAIL_CREDENTIAL: synthEnv.AEGISPI_MAIL_CREDENTIAL },
+    { refresh: true },
+  );
+  const clearMissingUser = synthesizeEnvVars(
+    { MAIL_APP_PASSWORD: "mail-pass-fake-001", AEGISPI_MAIL_CREDENTIAL: synthEnv.AEGISPI_MAIL_CREDENTIAL },
+    { refresh: true },
+  );
+  suite.check(
+    "bootstrap-synthesize-env-vars",
+    parsedCred.user === "owner@example.test" &&
+      parsedCred.password === "mail-pass-fake-001" &&
+      !("AEGISPI_MAIL_CREDENTIAL" in clearMissingPass) &&
+      !("AEGISPI_MAIL_CREDENTIAL" in clearMissingUser),
+    JSON.stringify({ parsedCred, clearedPass: !("AEGISPI_MAIL_CREDENTIAL" in clearMissingPass), clearedUser: !("AEGISPI_MAIL_CREDENTIAL" in clearMissingUser) }),
+  );
+
+  // 9c. ensureLocalConfigFile creates fail-closed config once without overwriting edits
+  const examplePath = join(REPO_ROOT, "apps", "daemon", "config", "selfuse.example.json");
+  const localCfgPath = join(tmpDir, "selfuse.local.json");
+  const firstEnsure = ensureLocalConfigFile({ configPath: localCfgPath, examplePath });
+  const loadedLocal = loadDaemonConfig({ path: localCfgPath });
+  const failClosed =
+    loadedLocal.model.allowRealModelCalls === false &&
+    loadedLocal.policy.allowRealExternalWrites === false &&
+    loadedLocal.telegram.allowRealPull === false &&
+    loadedLocal.telegram.allowRealSend === false &&
+    loadedLocal.mail.allowRealMailRead === false &&
+    loadedLocal.mail.allowRealMailSend === false &&
+    loadedLocal.calendar.allowRealCalendarRead === false &&
+    loadedLocal.calendar.allowRealCalendarWrite === false;
+  const editedRaw = JSON.parse(readFileSync(localCfgPath, "utf8"));
+  editedRaw.budget.taskMaxSteps = 17;
+  writeFileSync(localCfgPath, JSON.stringify(editedRaw, null, 2) + "\n", "utf8");
+  const secondEnsure = ensureLocalConfigFile({ configPath: localCfgPath, examplePath });
+  const reloadedAfterSecond = loadDaemonConfig({ path: localCfgPath });
+  suite.check(
+    "bootstrap-ensure-local-config-file",
+    firstEnsure.created === true &&
+      failClosed &&
+      secondEnsure.created === false &&
+      reloadedAfterSecond.budget.taskMaxSteps === 17 &&
+      JSON.parse(readFileSync(localCfgPath, "utf8")).budget.taskMaxSteps === 17,
+    JSON.stringify({ firstCreated: firstEnsure.created, failClosed, secondCreated: secondEnsure.created }),
+  );
+
+  // 9d. syncSelfUseDatabase idempotent slots, owner ACLs, and briefing timer create/update/cancel
+  const { stateDir, db } = freshIsolatedDb(tmpDir);
+  try {
+    const cfgPath = join(tmpDir, "sync.json");
+    writeFileSync(
+      cfgPath,
+      JSON.stringify(
+        baseDefaults({
+          model: { baseUrl: "http://127.0.0.1:4901", allowedPurposes: ["worker"], allowedModelIds: ["deepseek/deepseek-flash"] },
+          telegram: { apiBase: "http://127.0.0.1:4902", allowedChatIds: ["12345", "-100888"], ownerDestination: "dm:telegram:12345" },
+          mail: { imapHost: "127.0.0.1", smtpHost: "127.0.0.1", allowedSenders: ["alice@example.test"], allowedRecipients: ["alice@example.test"] },
+          adapters: { fixedSendingIdentity: "aegispi@local", allowedRecipients: ["dm:telegram:12345", "group:telegram:-100888", "alice@example.test"] },
+        }),
+        null,
+        2,
+      ),
+    );
+    const syncCfg = loadDaemonConfig({ path: cfgPath });
+    const syncEnv = {
+      DEEPSEEK_API_KEY: "sk-test-fake-001",
+      TELEGRAM_BOT_TOKEN: "1001:fake-tg-token",
+      TELEGRAM_OWNER_USER_ID: "12345",
+      MAIL_USER: "owner@example.test",
+      MAIL_APP_PASSWORD: "mail-pass-fake-001",
+      AEGISPI_MAIL_CREDENTIAL: JSON.stringify({ user: "owner@example.test", password: "mail-pass-fake-001" }),
+    };
+
+    const sync1 = syncSelfUseDatabase(db, { config: syncCfg, dataDir: stateDir, envMap: syncEnv, briefingTime: "08:30", now: 1_700_000_000_000 });
+    const sync2 = syncSelfUseDatabase(db, { config: syncCfg, dataDir: stateDir, envMap: syncEnv, briefingTime: "08:30", now: 1_700_000_001_000 });
+    const sync3 = syncSelfUseDatabase(db, { config: syncCfg, dataDir: stateDir, envMap: syncEnv, briefingTime: "09:15", now: 1_700_000_002_000 });
+    const updatedTimer = timerRow(db, timerIdFor("selfuse-morning-briefing"));
+    const sync4 = syncSelfUseDatabase(db, { config: syncCfg, dataDir: stateDir, envMap: syncEnv, briefingTime: "", now: 1_700_000_003_000 });
+    const cancelledTimer = timerRow(db, timerIdFor("selfuse-morning-briefing"));
+
+    const slots = db.prepare("SELECT slot FROM credential_slots WHERE revoked_at IS NULL ORDER BY slot").all().map((r) => r.slot);
+    const grantsFor = (domainKey) =>
+      db
+        .prepare(
+          `SELECT g.permission FROM acl_grants g JOIN scopes s ON s.id=g.scope_id
+           WHERE s.domain_key=? AND g.principal_id=? AND g.revoked_at IS NULL`,
+        )
+        .all(domainKey, OWNER)
+        .map((r) => r.permission)
+        .sort();
+    const expectedPerms = ["admin", "approve", "read", "request"];
+    const updatedRec = updatedTimer?.recurrence_json ? JSON.parse(updatedTimer.recurrence_json) : null;
+
+    suite.check(
+      "bootstrap-sync-selfuse-database",
+      JSON.stringify(slots) === JSON.stringify(["im", "mail", "model"]) &&
+        JSON.stringify(grantsFor("dm:local:owner")) === JSON.stringify(expectedPerms) &&
+        JSON.stringify(grantsFor("dm:telegram:12345")) === JSON.stringify(expectedPerms) &&
+        JSON.stringify(grantsFor("group:telegram:-100888")) === JSON.stringify(expectedPerms) &&
+        JSON.stringify(grantsFor("dm:mail:owner@example.test")) === JSON.stringify(expectedPerms) &&
+        sync1.briefingTimer?.created === true &&
+        sync2.grantsAdded === 0 &&
+        sync2.briefingTimer?.updated === false &&
+        sync3.briefingTimer?.updated === true &&
+        updatedTimer?.state === "SCHEDULED" &&
+        updatedRec?.timeOfDay === "09:15" &&
+        sync4.briefingTimer?.state === "CANCELLED" &&
+        cancelledTimer?.state === "CANCELLED",
+      JSON.stringify({ slots, sync2Grants: sync2.grantsAdded, updatedRec, cancelledState: cancelledTimer?.state }),
+    );
+  } finally {
+    db.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 10. Settings API (GET /api/settings, POST /api/settings, POST /api/settings/test)
+await withTempDir("aegispi-settings-api-", async (tmpDir) => {
+  const envKeys = [
+    "DEEPSEEK_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "MAIL_USER",
+    "MAIL_APP_PASSWORD",
+    "AEGISPI_MAIL_CREDENTIAL",
+    "AEGISPI_BACKUP_MANIFEST_KEY",
+    "AEGISPI_REAL_TG_PROXY",
+  ];
+  await withSavedEnv(envKeys, async () => {
+    for (const k of envKeys) delete process.env[k];
+
+    const { stateDir, db } = freshIsolatedDb(tmpDir);
+    const configPath = join(tmpDir, "selfuse.local.json");
+    const envFilePath = join(tmpDir, ".env");
+    const examplePath = join(REPO_ROOT, "apps", "daemon", "config", "selfuse.example.json");
+    ensureLocalConfigFile({ configPath, examplePath });
+
+    const initialSecrets = {
+      DEEPSEEK_API_KEY: "sk-test-fake-initial-001",
+      TELEGRAM_BOT_TOKEN: "111222:fake-tg-initial-001",
+      MAIL_USER: "owner@example.test",
+      MAIL_APP_PASSWORD: "mail-pass-fake-initial-001",
+      AEGISPI_BACKUP_MANIFEST_KEY: "b".repeat(64),
+    };
+    upsertDotEnvKeys(envFilePath, { set: initialSecrets });
+
+    let reloadCount = 0;
+    const token = "fixture-console-token-settings-0001";
+    const imageStatus = {
+      agent: { image: "aegispi/agent@sha256:0123456789abcdef", configured: true },
+      execution: { image: null, configured: false },
+      acquisition: { image: null, configured: false },
+    };
+
+    const mockState = {
+      modelStatus: 200,
+      modelAuthHeader: null,
+      tgStatus: 200,
+      tgPath: null,
+      imapMode: "ok",
+      imapCommands: [],
+      onImapLogout: null,
+    };
+    const httpMock = createHttpServer((req, res) => {
+      const url = req.url ?? "/";
+      if (url === "/models" || url === "/v1/models") {
+        mockState.modelAuthHeader = req.headers.authorization ?? null;
+        if (mockState.modelStatus === 200) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ data: [{ id: "deepseek-flash" }] }));
+        } else {
+          res.writeHead(mockState.modelStatus, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: `bad auth ${mockState.modelAuthHeader ?? ""}` } }));
+        }
+        return;
+      }
+      if (url.includes("/getMe")) {
+        mockState.tgPath = url;
+        if (mockState.tgStatus === 200) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, result: { id: 98765, username: "mock_aegis_bot" } }));
+        } else {
+          res.writeHead(mockState.tgStatus, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, description: `Unauthorized on ${url}` }));
+        }
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found" }));
+    });
+    await new Promise((resolve) => httpMock.listen(0, "127.0.0.1", resolve));
+    const httpPort = httpMock.address().port;
+
+    const imapMock = createNetServer((socket) => {
+      let buf = "";
+      socket.write("* OK Mock IMAP ready\r\n");
+      socket.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        for (;;) {
+          const idx = buf.indexOf("\n");
+          if (idx === -1) break;
+          const line = buf.slice(0, idx + 1).replace(/\r?\n$/, "");
+          buf = buf.slice(idx + 1);
+          const space = line.indexOf(" ");
+          const tag = space === -1 ? "a0" : line.slice(0, space);
+          const rest = space === -1 ? line : line.slice(space + 1);
+          const cmd = rest.split(" ")[0]?.toUpperCase() ?? "";
+          mockState.imapCommands.push(cmd);
+          if (cmd === "LOGIN") {
+            if (mockState.imapMode === "auth_fail") {
+              socket.write(`${tag} NO [AUTHENTICATIONFAILED] invalid credentials ${rest}\r\n`);
+            } else {
+              socket.write(`${tag} OK LOGIN completed\r\n`);
+            }
+          } else if (cmd === "SELECT") {
+            socket.write(`* 1 EXISTS\r\n${tag} OK [READ-ONLY] SELECT completed\r\n`);
+          } else if (cmd === "LOGOUT") {
+            socket.write(`* BYE Mock IMAP logging out\r\n${tag} OK LOGOUT completed\r\n`);
+            socket.end();
+            if (typeof mockState.onImapLogout === "function") {
+              mockState.onImapLogout();
+              mockState.onImapLogout = null;
+            }
+          } else {
+            socket.write(`${tag} BAD unsupported ${cmd}\r\n`);
+          }
+        }
+      });
+    });
+    await new Promise((resolve) => imapMock.listen(0, "127.0.0.1", resolve));
+    const imapPort = imapMock.address().port;
+
+    try {
+      const app = createConsoleApp(db, {
+        recovery: { failedStep: null, actions: [] },
+        mode: "open",
+        token,
+        port: 4310,
+        stateDir,
+        ownerPrincipalId: OWNER,
+        configPath,
+        envFilePath,
+        imageStatus,
+        onConfigReload: async () => {
+          reloadCount += 1;
+        },
+      });
+
+      const req = async (path, { method = "GET", headers = {}, body } = {}) => {
+        const res = await app.fetch(
+          new Request(`http://127.0.0.1:4310${path}`, {
+            method,
+            headers: { host: "127.0.0.1:4310", ...headers },
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+          }),
+        );
+        const text = await res.text();
+        let json = null;
+        try {
+          json = JSON.parse(text);
+        } catch {}
+        return { status: res.status, json, text };
+      };
+
+      // 10a. GET /api/settings auth & zero secret leakage
+      const unauthGet = await req("/api/settings");
+      const bootstrapGet = await req("/api/settings", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const badOriginGet = await req("/api/settings", {
+        headers: { authorization: `Bearer ${token}`, origin: "http://evil.example.test" },
+      });
+
+      const sess = await req("/api/session", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: { token },
+      });
+      const authHeaders = {
+        authorization: `Bearer ${sess.json?.sessionId ?? ""}`,
+        "x-csrf-token": sess.json?.csrfToken ?? "",
+        "content-type": "application/json",
+      };
+
+      const ownerGet = await req("/api/settings", {
+        headers: { authorization: `Bearer ${sess.json?.sessionId ?? ""}` },
+      });
+      const secretLeakNeedles = [
+        initialSecrets.DEEPSEEK_API_KEY,
+        "sk-test-fake",
+        initialSecrets.TELEGRAM_BOT_TOKEN,
+        "fake-tg-initial",
+        initialSecrets.MAIL_APP_PASSWORD,
+        "mail-pass-fake",
+        initialSecrets.AEGISPI_BACKUP_MANIFEST_KEY,
+        "bbbbbbbbbbbb",
+      ];
+      const leakedInGet = secretLeakNeedles.filter((needle) => ownerGet.text.includes(needle));
+      const secretValuesAllBool = Object.values(ownerGet.json?.secrets ?? {}).every(
+        (entry) => typeof entry.configured === "boolean" && typeof entry.inEnvFile === "boolean" && !("length" in entry) && !("value" in entry),
+      );
+      suite.check(
+        "settings-api-get-auth-and-redaction",
+        unauthGet.status === 401 &&
+          bootstrapGet.status === 401 &&
+          badOriginGet.status === 403 &&
+          ownerGet.status === 200 &&
+          ownerGet.json?.writable === true &&
+          ownerGet.json?.briefingTimeOfDay === null &&
+          Array.isArray(ownerGet.json?.credentialSlots) &&
+          ownerGet.json?.imageStatus?.agent?.configured === true &&
+          ownerGet.json?.secrets?.DEEPSEEK_API_KEY?.configured === true &&
+          secretValuesAllBool &&
+          leakedInGet.length === 0,
+        JSON.stringify({
+          unauth: unauthGet.status,
+          bootstrap: bootstrapGet.status,
+          badOrigin: badOriginGet.status,
+          owner: ownerGet.status,
+          secretValuesAllBool,
+          leakedInGet,
+        }),
+      );
+
+      // 10b. POST /api/settings validation failures leave files untouched
+      const cfgBeforeInvalid = readFileSync(configPath, "utf8");
+      const envBeforeInvalid = readFileSync(envFilePath, "utf8");
+      const badPayloads = [
+        { configPatch: { budget: { dayMicroUsd: 100 } } },
+        { configPatch: { model: { baseUrl: "not-a-valid-url" } } },
+        { configPatch: { mail: { imapPort: 70000 } } },
+        { secrets: { UNKNOWN_SECRET: "sk-test-fake-000" } },
+        { briefingTimeOfDay: "25:99" },
+      ];
+      const badStatuses = [];
+      for (const payload of badPayloads) {
+        const r = await req("/api/settings", { method: "POST", headers: authHeaders, body: payload });
+        badStatuses.push(r.status);
+      }
+      const filesUntouched =
+        readFileSync(configPath, "utf8") === cfgBeforeInvalid &&
+        readFileSync(envFilePath, "utf8") === envBeforeInvalid;
+      suite.check(
+        "settings-api-post-422-validation-no-disk-mutation",
+        badStatuses.every((s) => s === 422) && filesUntouched,
+        JSON.stringify({ badStatuses, filesUntouched }),
+      );
+
+      // 10c. POST /api/settings valid atomic save, blank-preserve, clear, audit redaction, DB sync, reload
+      const updatedModelKey = "sk-test-fake-updated-002";
+      const updatedMailPass = "mail-pass-fake-updated-002";
+      const saveRes = await req("/api/settings", {
+        method: "POST",
+        headers: authHeaders,
+        body: {
+          configPatch: {
+            model: {
+              baseUrl: `http://127.0.0.1:${httpPort}`,
+              allowRealModelCalls: false,
+            },
+            telegram: {
+              apiBase: `http://127.0.0.1:${httpPort}`,
+              allowedChatIds: ["12345"],
+              ownerDestination: "dm:telegram:12345",
+            },
+            mail: {
+              imapHost: "127.0.0.1",
+              imapPort,
+              imapTls: false,
+              smtpHost: "127.0.0.1",
+            },
+            adapters: {
+              allowedRecipients: ["dm:telegram:12345", "alice@example.test"],
+            },
+          },
+          secrets: {
+            DEEPSEEK_API_KEY: updatedModelKey,
+            TELEGRAM_BOT_TOKEN: "",
+            MAIL_USER: "owner@example.test",
+            MAIL_APP_PASSWORD: updatedMailPass,
+          },
+          clearSecrets: ["AEGISPI_BACKUP_MANIFEST_KEY"],
+          briefingTimeOfDay: "07:45",
+        },
+      });
+
+      const savedDotEnv = readDotEnvFile(envFilePath);
+      const savedConfig = loadDaemonConfig({ path: configPath });
+      const auditRows = db
+        .prepare("SELECT code, details_json FROM audit_log WHERE code IN ('host_settings_updated','host_secrets_updated') ORDER BY rowid")
+        .all();
+      const auditText = auditRows.map((r) => r.details_json).join("\n");
+      const auditLeaked = [
+        updatedModelKey,
+        updatedMailPass,
+        initialSecrets.TELEGRAM_BOT_TOKEN,
+        initialSecrets.AEGISPI_BACKUP_MANIFEST_KEY,
+      ].filter((s) => auditText.includes(s));
+      const tgScopeGrant = db
+        .prepare(
+          `SELECT count(*) c FROM acl_grants g JOIN scopes s ON s.id=g.scope_id
+           WHERE s.domain_key='dm:telegram:12345' AND g.principal_id=? AND g.revoked_at IS NULL`,
+        )
+        .get(OWNER).c;
+      const timerAfterSave = timerRow(db, timerIdFor("selfuse-morning-briefing"));
+      const parsedSynthMail = splitMailCredential(process.env.AEGISPI_MAIL_CREDENTIAL ?? "");
+
+      suite.check(
+        "settings-api-post-atomic-save-sync-and-reload",
+        saveRes.status === 200 &&
+          saveRes.json?.reloadOk === true &&
+          reloadCount === 1 &&
+          saveRes.json?.briefingTimeOfDay === "07:45" &&
+          saveRes.json?.secrets?.AEGISPI_BACKUP_MANIFEST_KEY?.configured === false &&
+          savedConfig.model.baseUrl === `http://127.0.0.1:${httpPort}` &&
+          savedConfig.mail.imapPort === imapPort &&
+          savedDotEnv.DEEPSEEK_API_KEY === updatedModelKey &&
+          savedDotEnv.TELEGRAM_BOT_TOKEN === initialSecrets.TELEGRAM_BOT_TOKEN &&
+          !("AEGISPI_BACKUP_MANIFEST_KEY" in savedDotEnv) &&
+          process.env.DEEPSEEK_API_KEY === updatedModelKey &&
+          parsedSynthMail.user === "owner@example.test" &&
+          parsedSynthMail.password === updatedMailPass &&
+          auditRows.some((r) => r.code === "host_settings_updated") &&
+          auditRows.some((r) => r.code === "host_secrets_updated") &&
+          auditLeaked.length === 0 &&
+          tgScopeGrant === 4 &&
+          timerAfterSave?.state === "SCHEDULED",
+        JSON.stringify({
+          status: saveRes.status,
+          reloadCount,
+          briefing: saveRes.json?.briefingTimeOfDay,
+          auditCodes: auditRows.map((r) => r.code),
+          auditLeaked,
+          tgScopeGrant,
+        }),
+      );
+
+      // 10d. POST /api/settings/test for model, telegram, mail (pass + fail secret scrubbing)
+      const modelPass = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "model" } });
+      mockState.modelStatus = 401;
+      const modelFail401 = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "model" } });
+      mockState.modelStatus = 500;
+      const modelFail500 = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "model" } });
+
+      const tgPass = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "telegram" } });
+      mockState.tgStatus = 401;
+      const tgFail401 = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "telegram" } });
+
+      mockState.imapMode = "ok";
+      mockState.imapCommands.length = 0;
+      const logoutPromise = new Promise((resolve) => {
+        const timer = setTimeout(resolve, 1000);
+        mockState.onImapLogout = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      const mailPass = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "mail" } });
+      await logoutPromise;
+      const imapPassCommands = [...mockState.imapCommands];
+      mockState.imapMode = "auth_fail";
+      const mailFail = await req("/api/settings/test", { method: "POST", headers: authHeaders, body: { target: "mail" } });
+
+      const testScrubOk =
+        !modelFail401.text.includes(updatedModelKey) &&
+        !modelFail500.text.includes(updatedModelKey) &&
+        !tgFail401.text.includes(initialSecrets.TELEGRAM_BOT_TOKEN) &&
+        !mailFail.text.includes(updatedMailPass);
+
+      suite.check(
+        "settings-api-connectivity-test-loopback-and-scrubbing",
+        modelPass.status === 200 &&
+          modelPass.json?.ok === true &&
+          modelPass.json?.modelCount === 1 &&
+          mockState.modelAuthHeader === `Bearer ${updatedModelKey}` &&
+          modelFail401.json?.ok === false &&
+          modelFail401.json?.error === "auth_failed" &&
+          modelFail500.json?.ok === false &&
+          tgPass.status === 200 &&
+          tgPass.json?.ok === true &&
+          tgPass.json?.botUsername === "mock_aegis_bot" &&
+          tgFail401.json?.ok === false &&
+          tgFail401.json?.error === "auth_failed" &&
+          mailPass.status === 200 &&
+          mailPass.json?.ok === true &&
+          mailPass.json?.folder === "INBOX" &&
+          JSON.stringify(imapPassCommands) === JSON.stringify(["LOGIN", "SELECT", "LOGOUT"]) &&
+          mailFail.json?.ok === false &&
+          mailFail.json?.error === "auth_failed" &&
+          testScrubOk,
+        JSON.stringify({
+          modelOk: modelPass.json?.ok,
+          model401: modelFail401.json?.error,
+          tgOk: tgPass.json?.ok,
+          tg401: tgFail401.json?.error,
+          mailOk: mailPass.json?.ok,
+          imapPassCommands,
+          mailFail: mailFail.json?.error,
+          testScrubOk,
+        }),
+      );
+    } finally {
+      await new Promise((resolve) => httpMock.close(resolve));
+      await new Promise((resolve) => imapMock.close(resolve));
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. UI settings tab + Cold start check (zero-arg default config + daemon --check)
+await withTempDir("aegispi-coldstart-", async (tmpDir) => {
+  const missingCfg = join(tmpDir, "missing.json");
+  const checkMissing = spawnSync(
+    process.execPath,
+    [join(REPO_ROOT, "scripts", "selfuse.mjs"), "check", `--config=${missingCfg}`],
+    { encoding: "utf8" },
+  );
+
+  const helpOut = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "selfuse.mjs"), "--help"], {
+    encoding: "utf8",
+  });
+
+  const autoCfg = join(tmpDir, "selfuse.local.json");
+  const examplePath = join(REPO_ROOT, "apps", "daemon", "config", "selfuse.example.json");
+  const ensured = ensureLocalConfigFile({ configPath: autoCfg, examplePath });
+  const daemonDataDir = join(tmpDir, "daemon-data");
+  const daemonCheck = spawnSync(
+    process.execPath,
+    [
+      join(REPO_ROOT, "apps", "daemon", "src", "daemon.mjs"),
+      "--check",
+      `--data-dir=${daemonDataDir}`,
+      `--config=${autoCfg}`,
+      "--port=0",
+    ],
+    { encoding: "utf8" },
+  );
+
+  suite.check(
+    "selfuse-cold-start-check-and-daemon-check",
+    checkMissing.status === 1 &&
+      helpOut.status === 0 &&
+      (helpOut.stdout ?? "").includes("selfuse.local.json") &&
+      ensured.created === true &&
+      daemonCheck.status === 0 &&
+      /GREEN/.test(daemonCheck.stdout ?? ""),
+    JSON.stringify({
+      checkMissingStatus: checkMissing.status,
+      helpStatus: helpOut.status,
+      daemonCheckStatus: daemonCheck.status,
+      daemonStdout: (daemonCheck.stdout ?? "").trim().split("\n").pop(),
+    }),
+  );
+
+  const html = consoleIndexHtml({ port: 4310 });
+  const scriptStart = html.indexOf("<script>");
+  const scriptEnd = html.lastIndexOf("</script>");
+  const inlineJs = scriptStart !== -1 && scriptEnd > scriptStart ? html.slice(scriptStart + "<script>".length, scriptEnd) : "";
+  let jsValid = false;
+  let jsErr = null;
+  try {
+    new vm.Script(inlineJs);
+    jsValid = inlineJs.length > 0;
+  } catch (err) {
+    jsErr = err.message;
+  }
+  const hasForbiddenSink = /innerHTML|outerHTML|insertAdjacentHTML/i.test(html);
+  suite.check(
+    "console-ui-settings-tab-setup-banner-and-valid-js",
+    html.includes('data-tab="settings"') &&
+      html.includes("设置与接入") &&
+      html.includes("setupBanner") &&
+      html.includes("保存并热生效") &&
+      html.includes("清空该密钥") &&
+      html.includes("测试模型连通性") &&
+      html.includes("测试 Telegram 连通性") &&
+      html.includes("测试 IMAP 连通性") &&
+      !hasForbiddenSink &&
+      jsValid,
+    JSON.stringify({
+      hasSettingsTab: html.includes('data-tab="settings"'),
+      hasSettingsLabel: html.includes("设置与接入"),
+      hasSetupBanner: html.includes("setupBanner"),
+      hasForbiddenSink,
+      jsValid,
+      jsErr,
+    }),
+  );
+});
+
 writeReport({
   suiteId: "selfuse",
   label: "Selfuse behavior end-to-end",
   suite,
-  extra: { dataSources: "Offline loopback SMTP/DB/HTTP fixtures with example.test data only" },
+  extra: { dataSources: "Offline loopback SMTP/IMAP/HTTP/DB fixtures with example.test data only" },
 });
 
 process.exit(suiteExit(suite, { label: "selfuse" }));

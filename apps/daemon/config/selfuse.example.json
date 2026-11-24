@@ -59,7 +59,7 @@
     "pullIntervalMs": 5000,
     "pullTimeoutSeconds": 20,
     "pullBatchLimit": 20,
-    "allowedChatIds": ["<TELEGRAM_OWNER_USER_ID>"],
+    "allowedChatIds": [],
     "autoReplyOnTask": true,
     "ownerDestination": null
   },
@@ -79,17 +79,17 @@
     "spillMaxLines": 2000
   },
   "mail": {
-    "imapHost": "<MAIL_IMAP_HOST>",
+    "imapHost": null,
     "imapPort": 993,
     "imapTls": true,
-    "smtpHost": "<MAIL_SMTP_HOST>",
+    "smtpHost": null,
     "smtpPort": 465,
     "smtpTls": true,
     "allowRealMailRead": false,
     "allowRealMailSend": false,
     "allowedFolders": ["INBOX"],
-    "allowedSenders": ["<TRUSTED_SENDER_EMAIL>"],
-    "allowedRecipients": ["<ALLOWED_RECIPIENT_EMAIL>"],
+    "allowedSenders": [],
+    "allowedRecipients": [],
     "pullIntervalMs": 15000,
     "autoDraftReplies": true,
     "approvalTtlMs": 14400000,
@@ -110,8 +110,8 @@
     "im": "env:TELEGRAM_BOT_TOKEN"
   },
   "adapters": {
-    "fixedSendingIdentity": "<YOUR_EMAIL_ADDRESS>",
-    "allowedRecipients": ["dm:telegram:<TELEGRAM_OWNER_USER_ID>", "<ALLOWED_RECIPIENT_EMAIL>"],
+    "fixedSendingIdentity": "aegispi@local",
+    "allowedRecipients": [],
     "allowedRepos": [],
     "allowedBranches": []
   },

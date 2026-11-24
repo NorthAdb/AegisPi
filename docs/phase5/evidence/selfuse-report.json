@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-24T10:53:25.019Z",
+  "generatedAt": "2026-11-24T13:31:21.758Z",
   "nodeVersion": "v22.23.5",
   "suite": "selfuse",
   "label": "Selfuse behavior end-to-end",
   "counts": {
-    "pass": 21,
+    "pass": 31,
     "fail": 0
   },
   "results": [
@@ -101,18 +101,68 @@
     {
       "name": "console-web-chat-roundtrip-and-status-control",
       "status": "PASS",
-      "detail": "{\"postStatus\":202,\"getStatus\":200,\"chatMsg\":{\"inboxId\":\"inb:console-chat:chat-1795517601876-40a5468e6b4c\",\"source\":\"console-chat\",\"scopeId\":\"scp:dm%3Alocal%3Aowner\",\"threadKey\":\"web:main\",\"receivedAt\":1795517601876,\"inboxState\":\"ROUTED\",\"taskId\":\"tsk:inb%3Aconsole-chat%3Achat-1795517601876-40a5468e6b4c:web-chat-1\",\"taskState\":\"SUCCEEDED\",\"resultClass\":\"affected\",\"userText\":\"Hello from web chat\",\"replyText\":\"Hello back from assistant\",\"approval\":null},\"statusCtrl\":{\"code\":\"control_executed\",\"outcome\":{\"command\":\"/status\",\"running\":0,\"queued\":0,\"waitingApprovals\":0,\"pendingInbox\":0,\"paused\":false},\"scopeId\":\"scp:dm%3Alocal%3Aowner\",\"threadKey\":\"web:main\"},\"inboxDelta\":0}"
+      "detail": "{\"postStatus\":202,\"getStatus\":200,\"chatMsg\":{\"inboxId\":\"inb:console-chat:chat-1795527079218-d5ef71bdcc52\",\"source\":\"console-chat\",\"scopeId\":\"scp:dm%3Alocal%3Aowner\",\"threadKey\":\"web:main\",\"receivedAt\":1795527079218,\"inboxState\":\"ROUTED\",\"taskId\":\"tsk:inb%3Aconsole-chat%3Achat-1795527079218-d5ef71bdcc52:web-chat-1\",\"taskState\":\"SUCCEEDED\",\"resultClass\":\"affected\",\"userText\":\"Hello from web chat\",\"replyText\":\"Hello back from assistant\",\"approval\":null},\"statusCtrl\":{\"code\":\"control_executed\",\"outcome\":{\"command\":\"/status\",\"running\":0,\"queued\":0,\"waitingApprovals\":0,\"pendingInbox\":0,\"paused\":false},\"scopeId\":\"scp:dm%3Alocal%3Aowner\",\"threadKey\":\"web:main\"},\"inboxDelta\":0}"
     },
     {
       "name": "console-approvals-summary-and-redaction",
       "status": "PASS",
-      "detail": "{\"listedCard\":{\"id\":\"apr:efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570\",\"effect_id\":\"efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570\",\"state\":\"WAITING\",\"approver_id\":\"prn:local:owner\",\"expires_at\":1795521201842,\"created_at\":1795517601842,\"actionHashShort\":\"11adbef13b1a\",\"task_id\":\"tsk:inb%3Amail%3A<redact-1@example.test>:mail-redact\",\"scope_id\":\"scp:dm%3Amail%3Aowner@example.test\",\"operation\":\"mail.send\",\"targetResource\":\"mail:alice@example.test\",\"subject\":\"Re: Redaction check\",\"bodyPreview\":\"Approved summary text.\",\"sendingIdentity\":\"aegispi@local\"},\"bootstrapDM\":null}"
+      "detail": "{\"listedCard\":{\"id\":\"apr:efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570\",\"effect_id\":\"efx:mail%3Adm%253amail%253aowner@example.test%3Areply-9a75f9126749-cfe7d524e570\",\"state\":\"WAITING\",\"approver_id\":\"prn:local:owner\",\"expires_at\":1795530679172,\"created_at\":1795527079172,\"actionHashShort\":\"b32c19f94611\",\"task_id\":\"tsk:inb%3Amail%3A<redact-1@example.test>:mail-redact\",\"scope_id\":\"scp:dm%3Amail%3Aowner@example.test\",\"operation\":\"mail.send\",\"targetResource\":\"mail:alice@example.test\",\"subject\":\"Re: Redaction check\",\"bodyPreview\":\"Approved summary text.\",\"sendingIdentity\":\"aegispi@local\"},\"bootstrapDM\":null}"
     },
     {
       "name": "console-group-scope-task-steer",
       "status": "PASS",
-      "detail": "{\"conflictStatus\":409,\"okStatus\":202,\"steerOk\":{\"code\":\"queued\",\"inboxId\":\"inb:console-steer:steer-tsk%3Ainb%253Atelegram%253Atg-group-555%3Agroup-steer-target-51f94078adef\",\"note\":\"the steer is queued as a durable inbox event; it does not interrupt an in-flight tool call\"},\"steerInbox\":{\"scope_id\":\"scp:group%3Atelegram%3A-100555\",\"source\":\"console-steer\",\"thread_key\":\"task:tsk:inb%3Atelegram%3Atg-group-555:group-steer-target\"}}"
+      "detail": "{\"conflictStatus\":409,\"okStatus\":202,\"steerOk\":{\"code\":\"queued\",\"inboxId\":\"inb:console-steer:steer-tsk%3Ainb%253Atelegram%253Atg-group-555%3Agroup-steer-target-716ecf242232\",\"note\":\"the steer is queued as a durable inbox event; it does not interrupt an in-flight tool call\"},\"steerInbox\":{\"scope_id\":\"scp:group%3Atelegram%3A-100555\",\"source\":\"console-steer\",\"thread_key\":\"task:tsk:inb%3Atelegram%3Atg-group-555:group-steer-target\"}}"
+    },
+    {
+      "name": "bootstrap-upsert-dotenv-keys",
+      "status": "PASS",
+      "detail": "{\"rejectedDisallowed\":true,\"rejectedCtrl\":true,\"parsedKeys\":[\"UNRELATED_KEEP\",\"DEEPSEEK_API_KEY\",\"TELEGRAM_BOT_TOKEN\"],\"preservedComment\":true}"
+    },
+    {
+      "name": "bootstrap-synthesize-env-vars",
+      "status": "PASS",
+      "detail": "{\"parsedCred\":{\"user\":\"owner@example.test\",\"password\":\"mail-pass-fake-001\"},\"clearedPass\":true,\"clearedUser\":true}"
+    },
+    {
+      "name": "bootstrap-ensure-local-config-file",
+      "status": "PASS",
+      "detail": "{\"firstCreated\":true,\"failClosed\":true,\"secondCreated\":false}"
+    },
+    {
+      "name": "bootstrap-sync-selfuse-database",
+      "status": "PASS",
+      "detail": "{\"slots\":[\"im\",\"mail\",\"model\"],\"sync2Grants\":0,\"updatedRec\":{\"type\":\"daily_wall_clock\",\"timeOfDay\":\"09:15\",\"timezone\":\"Asia/Hong_Kong\"},\"cancelledState\":\"CANCELLED\"}"
+    },
+    {
+      "name": "settings-api-get-auth-and-redaction",
+      "status": "PASS",
+      "detail": "{\"unauth\":401,\"bootstrap\":401,\"badOrigin\":403,\"owner\":200,\"secretValuesAllBool\":true,\"leakedInGet\":[]}"
+    },
+    {
+      "name": "settings-api-post-422-validation-no-disk-mutation",
+      "status": "PASS",
+      "detail": "{\"badStatuses\":[422,422,422,422,422],\"filesUntouched\":true}"
+    },
+    {
+      "name": "settings-api-post-atomic-save-sync-and-reload",
+      "status": "PASS",
+      "detail": "{\"status\":200,\"reloadCount\":1,\"briefing\":\"07:45\",\"auditCodes\":[\"host_settings_updated\",\"host_secrets_updated\"],\"auditLeaked\":[],\"tgScopeGrant\":4}"
+    },
+    {
+      "name": "settings-api-connectivity-test-loopback-and-scrubbing",
+      "status": "PASS",
+      "detail": "{\"modelOk\":true,\"model401\":\"auth_failed\",\"tgOk\":true,\"tg401\":\"auth_failed\",\"mailOk\":true,\"imapPassCommands\":[\"LOGIN\",\"SELECT\",\"LOGOUT\"],\"mailFail\":\"auth_failed\",\"testScrubOk\":true}"
+    },
+    {
+      "name": "selfuse-cold-start-check-and-daemon-check",
+      "status": "PASS",
+      "detail": "{\"checkMissingStatus\":1,\"helpStatus\":0,\"daemonCheckStatus\":0,\"daemonStdout\":\"check: mode=open steps=12 disk=ok GREEN\"}"
+    },
+    {
+      "name": "console-ui-settings-tab-setup-banner-and-valid-js",
+      "status": "PASS",
+      "detail": "{\"hasSettingsTab\":true,\"hasSettingsLabel\":true,\"hasSetupBanner\":true,\"hasForbiddenSink\":false,\"jsValid\":true,\"jsErr\":null}"
     }
   ],
-  "dataSources": "Offline loopback SMTP/DB/HTTP fixtures with example.test data only"
+  "dataSources": "Offline loopback SMTP/IMAP/HTTP/DB fixtures with example.test data only"
 }

@@ -2,6 +2,18 @@
 
 自托管、事件驱动的个人常驻 Agent 系统（实现仓库）。边界原则：宿主 daemon 单点持有 ACL、预算、审批、凭据与外部提交器；模型文本与工具结果从不授予权限（`AGENTS.md` §5）。本仓库公开，密钥与人工判断标注一律不入库。
 
+## 本地启动控制台
+
+安装锁定依赖后，在仓库根目录用默认配置启动。以下命令使用独立的本地数据目录，不需要 Docker 或 `.env`，真实模型、Telegram、邮件和日历集成默认关闭。
+
+```powershell
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' apps/daemon/src/daemon.mjs --data-dir=workspace-state/console-preview
+```
+
+终端出现 `daemon: open` 后，打开 [本地控制台](http://127.0.0.1:4310/)，用 `workspace-state/console-preview/console/token` 文件里的凭据登录。可以在聊天区输入 `/status` 查看运行状态。按 `Ctrl+C` 停止前台进程。
+
+需要接入外部服务时，参见 [个人自用指南](docs/SELF-USE-GUIDE.md)。
+
 ## 当前位置（2026-11-22）
 
 - Phase 1（底座契约）与 Phase 2（持久化只读链路）已收口；**Phase 3 出口 MET WITH RESIDUAL RISKS**，其中 `44b3514` 两项限定修复已独立验收关闭，不重开。

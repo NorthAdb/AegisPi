@@ -19,9 +19,9 @@
 // semantics; later-phase endpoints still answer 501 with no fake data.
 
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Hono } from "hono";
 import { decideApproval, hasApproveGrant, readConsoleNonce } from "../approvals.mjs";
 import { extraFieldsOfAction, reviseEffect, cancelTask, reconcileUnknown } from "../effects.mjs";
@@ -34,6 +34,18 @@ import { readObjectContent } from "../objects.mjs";
 import { formatGeneralUserPrompt } from "../selfuse-dispatch.mjs";
 import { withTx } from "../db/tx.mjs";
 import { writeAudit } from "../audit.mjs";
+import { ConfigError, loadDaemonConfig } from "../config.mjs";
+import { createCredentialService } from "../credentials.mjs";
+import {
+  ALLOWED_SECRET_KEYS,
+  readDotEnvFile,
+  syncSelfUseDatabase,
+  synthesizeEnvVars,
+  upsertDotEnvKeys,
+} from "../selfuse-bootstrap.mjs";
+import { parseTelegramTargetResource } from "../telegram-send.mjs";
+import { timerIdFor } from "../timers.mjs";
+import { testConnectivity } from "../connectivity-test.mjs";
 import { consoleIndexHtml } from "./ui.mjs";
 
 export const CONSOLE_BIND = "127.0.0.1";
@@ -69,6 +81,10 @@ export function createConsoleApp(db, {
   // secret (<16 chars) refuses to start the console at all rather than
   // accepting a weak guard.
   telegramWebhookSecret = null,
+  configPath = null,
+  envFilePath = null,
+  imageStatus = null,
+  onConfigReload = null,
 } = {}) {
   const app = new Hono();
   const allowedHosts = new Set([
@@ -172,6 +188,19 @@ export function createConsoleApp(db, {
     const csrf = c.req.header("x-csrf-token") ?? "";
     if (csrf !== c.get("session").csrfToken) {
       return c.json({ code: "csrf_mismatch", message: "state-changing requests carry the session CSRF token" }, 403);
+    }
+    return next();
+  };
+
+  const requireOwnerSession = async (c, next) => {
+    if (c.get("authKind") !== "session") {
+      return c.json(
+        { code: "unauthenticated", error: "unauthenticated", message: "settings access requires a console session" },
+        401,
+      );
+    }
+    if (c.get("session").principalId !== ownerPrincipalId) {
+      return c.json({ code: "forbidden", error: "owner_required", message: "owner principal required" }, 403);
     }
     return next();
   };
@@ -1425,6 +1454,320 @@ export function createConsoleApp(db, {
     return c.json({ code: "queued", verdict: "OBSERVE", sourceEventId: mapped.event.sourceEventId }, 202);
   });
 
+  const buildSettingsSnapshot = () => {
+    const writable = Boolean(configPath) && existsSync(configPath);
+    const loaded = configPath ? loadDaemonConfig({ path: configPath }) : loadDaemonConfig();
+    const envMap = envFilePath ? readDotEnvFile(envFilePath) : {};
+    const secrets = {};
+    for (const key of ALLOWED_SECRET_KEYS) {
+      const inEnvFile = typeof envMap[key] === "string" && envMap[key].trim().length > 0;
+      const inProcess = typeof process.env[key] === "string" && process.env[key].trim().length > 0;
+      secrets[key] = {
+        configured: inEnvFile || inProcess,
+        inEnvFile,
+      };
+    }
+    let credentialSlots = [];
+    try {
+      credentialSlots = createCredentialService(db, { envFile: envFilePath }).describe();
+    } catch {}
+    let briefingTimeOfDay = null;
+    try {
+      const row = db
+        .prepare("SELECT state, recurrence_json FROM timers WHERE id=?")
+        .get(timerIdFor("selfuse-morning-briefing"));
+      if (row && row.state === "SCHEDULED" && row.recurrence_json) {
+        const rec = JSON.parse(row.recurrence_json);
+        if (rec?.type === "daily_wall_clock" && typeof rec.timeOfDay === "string") {
+          briefingTimeOfDay = rec.timeOfDay;
+        }
+      }
+    } catch {}
+    return {
+      ok: true,
+      writable,
+      configPath,
+      envFilePath,
+      config: sanitizeConfigForSettings(loaded),
+      briefingTimeOfDay,
+      secrets,
+      credentialSlots,
+      imageStatus,
+    };
+  };
+
+  app.get("/api/settings", requireOwnerSession, (c) => {
+    try {
+      return c.json(buildSettingsSnapshot(), 200);
+    } catch (err) {
+      return c.json(
+        { code: "settings_unavailable", error: "settings_unavailable", message: String(err?.message ?? err) },
+        500,
+      );
+    }
+  });
+
+  app.post("/api/settings", mutationGuard, requireOwnerSession, async (c) => {
+    if (!configPath || !existsSync(configPath)) {
+      return c.json(
+        { code: "settings_read_only", error: "settings_read_only", message: "daemon started without a writable --config file" },
+        409,
+      );
+    }
+    let body;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ code: "invalid_json", error: "invalid_json", message: "settings body must be JSON" }, 422);
+    }
+    if (!isPlainObject(body)) {
+      return c.json({ code: "invalid_field", error: "invalid_body", message: "settings body must be a JSON object" }, 422);
+    }
+
+    const configPatch = body.configPatch;
+    if (configPatch !== undefined) {
+      if (!isPlainObject(configPatch)) {
+        return c.json({ code: "invalid_field", error: "invalid_config_patch", message: "configPatch must be a plain object" }, 422);
+      }
+      for (const [section, sectionVal] of Object.entries(configPatch)) {
+        if (!ALLOWED_CONFIG_PATCH_SECTIONS.has(section)) {
+          return c.json(
+            { code: "invalid_field", error: "unknown_config_section", section, message: `disallowed configPatch section: ${section}` },
+            422,
+          );
+        }
+        if (!isPlainObject(sectionVal)) {
+          return c.json(
+            { code: "invalid_field", error: "invalid_config_section", section, message: `configPatch.${section} must be a plain object` },
+            422,
+          );
+        }
+      }
+    }
+
+    const secretsInput = body.secrets;
+    const nonEmptySecrets = new Set();
+    if (secretsInput !== undefined) {
+      if (!isPlainObject(secretsInput)) {
+        return c.json({ code: "invalid_field", error: "invalid_secrets", message: "secrets must be a plain object" }, 422);
+      }
+      for (const [key, val] of Object.entries(secretsInput)) {
+        if (!ALLOWED_SECRET_KEYS.has(key)) {
+          return c.json({ code: "invalid_field", error: "invalid_secret_key", key, message: `disallowed secret key: ${key}` }, 422);
+        }
+        if (typeof val !== "string") {
+          return c.json({ code: "invalid_field", error: "invalid_secret_value", key, message: `secret value for ${key} must be a string` }, 422);
+        }
+        if (/[\r\n\0]/.test(val)) {
+          return c.json(
+            { code: "invalid_field", error: "invalid_secret_value", key, message: `secret value for ${key} contains forbidden control characters` },
+            422,
+          );
+        }
+        if (val !== "") {
+          if (key === "MAIL_USER" && !/^[^@\s]+@[^@\s]+$/.test(val.trim().toLowerCase())) {
+            return c.json({ code: "invalid_field", error: "invalid_secret_value", key, message: "MAIL_USER must be a valid email address" }, 422);
+          }
+          nonEmptySecrets.add(key);
+        }
+      }
+    }
+
+    const clearSecretsInput = body.clearSecrets;
+    if (clearSecretsInput !== undefined) {
+      if (!Array.isArray(clearSecretsInput)) {
+        return c.json({ code: "invalid_field", error: "invalid_clear_secrets", message: "clearSecrets must be an array" }, 422);
+      }
+      for (const key of clearSecretsInput) {
+        if (typeof key !== "string" || !ALLOWED_SECRET_KEYS.has(key)) {
+          return c.json(
+            { code: "invalid_field", error: "invalid_secret_key", key, message: `disallowed secret key: ${String(key)}` },
+            422,
+          );
+        }
+        if (nonEmptySecrets.has(key)) {
+          return c.json(
+            { code: "invalid_field", error: "conflicting_secret_key", key, message: `conflicting set and clear for secret key ${key}` },
+            422,
+          );
+        }
+      }
+    }
+
+    let briefingArg = null;
+    if (body.briefingTimeOfDay !== undefined) {
+      if (body.briefingTimeOfDay === null || body.briefingTimeOfDay === "") {
+        briefingArg = "";
+      } else if (typeof body.briefingTimeOfDay === "string" && SETTINGS_HHMM_RE.test(body.briefingTimeOfDay)) {
+        briefingArg = body.briefingTimeOfDay;
+      } else {
+        return c.json(
+          {
+            code: "invalid_field",
+            error: "invalid_briefing_time",
+            message: "briefingTimeOfDay must be HH:MM (24h), empty string, or null",
+          },
+          422,
+        );
+      }
+    }
+
+    let rawConfig;
+    try {
+      rawConfig = JSON.parse(readFileSync(configPath, "utf8"));
+      if (!isPlainObject(rawConfig)) throw new Error("config file must contain a JSON object");
+    } catch (err) {
+      return c.json({ code: "invalid_config", error: "invalid_config", message: err.message }, 422);
+    }
+
+    const mergedRaw = configPatch ? deepMergeConfig(rawConfig, configPatch) : rawConfig;
+    const tmpConfigPath = join(
+      dirname(configPath),
+      `.tmp.settings.${process.pid}.${Date.now()}.${randomBytes(4).toString("hex")}.json`,
+    );
+
+    let validatedConfig;
+    let movedToTarget = false;
+    try {
+      writeFileSync(tmpConfigPath, `${JSON.stringify(mergedRaw, null, 2)}\n`, "utf8");
+      try {
+        validatedConfig = loadDaemonConfig({ path: tmpConfigPath });
+      } catch (err) {
+        const msg = err instanceof ConfigError ? err.message : String(err?.message ?? err);
+        return c.json({ code: "invalid_config", error: "invalid_config", message: msg }, 422);
+      }
+      for (const chatId of validatedConfig.telegram.allowedChatIds) {
+        if (!/^-?\d+$/.test(chatId)) {
+          return c.json(
+            {
+              code: "invalid_config",
+              error: "invalid_config",
+              message: `telegram.allowedChatIds contains non-numeric entry ${JSON.stringify(chatId)}`,
+            },
+            422,
+          );
+        }
+      }
+      if (typeof briefingArg === "string" && briefingArg.length > 0) {
+        if (!stateDir) {
+          return c.json(
+            { code: "settings_unavailable", error: "missing_state_dir", message: "stateDir is required to schedule morning briefing" },
+            409,
+          );
+        }
+        if (!hasOwnerTelegramDmScope(validatedConfig)) {
+          return c.json(
+            {
+              code: "invalid_field",
+              error: "invalid_briefing_time",
+              message: "briefingTimeOfDay requires telegram.ownerDestination or a non-negative chat ID in telegram.allowedChatIds",
+            },
+            422,
+          );
+        }
+      }
+
+      renameSync(tmpConfigPath, configPath);
+      movedToTarget = true;
+    } finally {
+      if (!movedToTarget) {
+        try {
+          if (existsSync(tmpConfigPath)) unlinkSync(tmpConfigPath);
+        } catch {}
+      }
+    }
+
+    const hasEnvMutation =
+      (secretsInput && Object.keys(secretsInput).length > 0) ||
+      (clearSecretsInput && clearSecretsInput.length > 0);
+    let envUpdateResult = { updated: [], cleared: [] };
+    if (envFilePath && hasEnvMutation) {
+      envUpdateResult = upsertDotEnvKeys(envFilePath, {
+        set: secretsInput ?? {},
+        clear: clearSecretsInput ?? [],
+      });
+    } else if (hasEnvMutation && !envFilePath) {
+      for (const [k, v] of Object.entries(secretsInput ?? {})) {
+        if (v !== "") envUpdateResult.updated.push(k);
+      }
+      for (const k of clearSecretsInput ?? []) {
+        envUpdateResult.cleared.push(k);
+      }
+    }
+
+    for (const key of envUpdateResult.updated) {
+      process.env[key] = secretsInput[key];
+    }
+    for (const key of envUpdateResult.cleared) {
+      delete process.env[key];
+    }
+    const mergedEnv = envFilePath ? { ...process.env, ...readDotEnvFile(envFilePath) } : { ...process.env };
+    synthesizeEnvVars(mergedEnv, { target: process.env, refresh: true });
+
+    const now = Date.now();
+    const sessionPrincipal = c.get("session").principalId;
+    withTx(db, () => {
+      writeAudit(db, {
+        code: "host_settings_updated",
+        actorId: sessionPrincipal,
+        details: {
+          sections: configPatch ? Object.keys(configPatch) : [],
+          briefingTimeUpdated: body.briefingTimeOfDay !== undefined,
+        },
+        now,
+      });
+      if (envUpdateResult.updated.length > 0 || envUpdateResult.cleared.length > 0) {
+        writeAudit(db, {
+          code: "host_secrets_updated",
+          actorId: sessionPrincipal,
+          details: {
+            updatedKeys: envUpdateResult.updated,
+            clearedKeys: envUpdateResult.cleared,
+          },
+          now,
+        });
+      }
+    });
+
+    syncSelfUseDatabase(db, {
+      config: validatedConfig,
+      dataDir: stateDir,
+      envMap: process.env,
+      briefingTime: briefingArg,
+      now,
+    });
+
+    if (typeof onConfigReload === "function") {
+      await onConfigReload();
+    }
+
+    return c.json({
+      ...buildSettingsSnapshot(),
+      reloadOk: true,
+    }, 200);
+  });
+
+  app.post("/api/settings/test", mutationGuard, requireOwnerSession, async (c) => {
+    let body;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ code: "invalid_json", error: "invalid_json", message: "test body must be JSON" }, 422);
+    }
+    const target = body?.target;
+    if (target !== "model" && target !== "telegram" && target !== "mail") {
+      return c.json(
+        { code: "invalid_field", error: "invalid_target", message: "target must be one of model, telegram, mail" },
+        422,
+      );
+    }
+    const currentConfig = configPath ? loadDaemonConfig({ path: configPath }) : loadDaemonConfig();
+    const dotEnv = envFilePath ? readDotEnvFile(envFilePath) : {};
+    const resolvedEnv = synthesizeEnvVars({ ...process.env, ...dotEnv }, { refresh: true });
+    const result = await testConnectivity({ target, config: currentConfig, env: resolvedEnv });
+    return c.json(result, 200);
+  });
+
   // Later-phase surfaces answer explicitly-not-implemented, never fake data
   // (04 section 4: "phase中尚未实现的端点返回明确不可用，不用假数据模拟完成").
   app.all("/api/*", (c) => {
@@ -1539,6 +1882,59 @@ function writeAuditSafe(db, entry) {
   try {
     writeAudit(db, entry);
   } catch {}
+}
+
+const ALLOWED_CONFIG_PATCH_SECTIONS = new Set(["model", "telegram", "mail", "policy", "adapters"]);
+const SETTINGS_HHMM_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeConfig(target, patch) {
+  const out = isPlainObject(target) ? { ...target } : {};
+  for (const [key, val] of Object.entries(patch)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    if (isPlainObject(val) && isPlainObject(out[key])) {
+      out[key] = deepMergeConfig(out[key], val);
+    } else if (Array.isArray(val)) {
+      out[key] = [...val];
+    } else if (isPlainObject(val)) {
+      out[key] = deepMergeConfig({}, val);
+    } else {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
+function hasOwnerTelegramDmScope(config) {
+  const ownerDest = config.telegram?.ownerDestination ?? null;
+  if (ownerDest && (ownerDest.startsWith("dm:telegram:") || ownerDest.startsWith("group:telegram:") || parseTelegramTargetResource(ownerDest) !== null)) {
+    return true;
+  }
+  return (config.telegram?.allowedChatIds ?? []).some((id) => /^-?\d+$/.test(id) && !id.startsWith("-"));
+}
+
+function sanitizeConfigForSettings(loaded) {
+  return {
+    timezone: loaded.timezone,
+    model: loaded.model,
+    telegram: loaded.telegram,
+    mail: loaded.mail,
+    calendar: loaded.calendar,
+    policy: loaded.policy,
+    adapters: loaded.adapters,
+    budget: loaded.budget,
+    leases: loaded.leases,
+    router: loaded.router,
+    memory: loaded.memory,
+    upstream: loaded.upstream,
+    backup: loaded.backup,
+    acquisition: loaded.acquisition,
+    triage: loaded.triage,
+    credentials: loaded.credentials,
+  };
 }
 
 export function serveConsole(app, { port = CONSOLE_DEFAULT_PORT }) {

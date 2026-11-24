@@ -8,8 +8,9 @@
 // Holding the lock fails -> exit non-zero immediately.
 
 import { mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadDaemonConfig, ConfigError } from "./config.mjs";
+import { readDotEnvFile, synthesizeEnvVars } from "./selfuse-bootstrap.mjs";
 import { acquireDaemonLock } from "./db/lock.mjs";
 import { openDatabase, checkDatabaseIntegrity } from "./db/connect.mjs";
 import { loadCanonicalSchema, migrate, ensureModelRequestsTable } from "./db/migrate.mjs";
@@ -85,15 +86,47 @@ export async function main(argv = process.argv.slice(2)) {
   // a JSON file the loader reads; every trust decision still lives in the
   // adapter gates, never in this file's contents.
   const configFlag = argv.find((a) => a.startsWith("--config="));
+  const rawConfigPath = configFlag
+    ? configFlag.slice("--config=".length)
+    : (process.env.AEGISPI_CONFIG_PATH || null);
+  const configPath = rawConfigPath ? resolve(process.cwd(), rawConfigPath) : null;
+
+  const envFlag = argv.find((a) => a.startsWith("--env-file=")) ?? argv.find((a) => a.startsWith("--aegis-env-file="));
+  const rawEnvPath = envFlag
+    ? envFlag.slice(envFlag.indexOf("=") + 1)
+    : (process.env.AEGISPI_ENV_FILE || null);
+  const envFilePath = rawEnvPath
+    ? resolve(process.cwd(), rawEnvPath)
+    : (configPath ? resolve(dirname(configPath), ".env") : resolve(process.cwd(), ".env"));
+  const hasExplicitEnvScope = Boolean(envFlag || process.env.AEGISPI_ENV_FILE || configPath);
+  if (hasExplicitEnvScope && existsSync(envFilePath)) {
+    const dotEnv = readDotEnvFile(envFilePath);
+    for (const [k, v] of Object.entries(dotEnv)) {
+      if (process.env[k] === undefined || process.env[k] === "") {
+        process.env[k] = v;
+      }
+    }
+    synthesizeEnvVars(process.env, { target: process.env });
+  }
+
+  const readImageFlag = (prefix) => {
+    const f = argv.find((a) => a.startsWith(prefix));
+    const val = f ? f.slice(prefix.length) : "";
+    return { image: val || null, configured: Boolean(val) };
+  };
+  const imageStatus = {
+    agent: readImageFlag("--agent-image="),
+    execution: readImageFlag("--execution-image="),
+    acquisition: readImageFlag("--acquisition-image="),
+  };
 
   // A config that refuses to load (a loosened drill seam, a broken value)
   // refuses STARTUP with a clean exit rather than running on a guess
   // (re-review F8: the drill invariant is a boot condition).
-  let config;
+  const loadCurrentConfig = () => (configPath ? loadDaemonConfig({ path: configPath }) : loadDaemonConfig());
+  let initialConfig;
   try {
-    config = configFlag
-      ? loadDaemonConfig({ path: configFlag.slice("--config=".length) })
-      : loadDaemonConfig();
+    initialConfig = loadCurrentConfig();
   } catch (e) {
     if (e instanceof ConfigError) {
       console.error(`config: refusing to start — ${e.message}`);
@@ -101,6 +134,30 @@ export async function main(argv = process.argv.slice(2)) {
     }
     throw e;
   }
+
+  const HARD_INPUT_CAP_BYTES = 128 * 1024;
+  const computeMergedInputByteCap = (cfg) =>
+    Math.min(
+      Number.isInteger(cfg.model.maxInputBytes) && cfg.model.maxInputBytes > 0
+        ? cfg.model.maxInputBytes
+        : HARD_INPUT_CAP_BYTES,
+      HARD_INPUT_CAP_BYTES,
+    );
+
+  const runtime = {
+    config: initialConfig,
+    httpTransport: null,
+    baseUpstream: null,
+    telegramUpstream: null,
+    mailUpstream: null,
+    calendarUpstream: null,
+    adapterUpstream: null,
+    telegramPullEnabled: false,
+    mailPullEnabled: false,
+    calendarPullEnabled: false,
+    mergedInputByteCap: computeMergedInputByteCap(initialConfig),
+    backupKey: process.env.AEGISPI_BACKUP_MANIFEST_KEY ?? null,
+  };
   const portFlag = argv.find((a) => a.startsWith("--port="));
   const consolePort = portFlag ? Number(portFlag.slice("--port=".length)) : CONSOLE_DEFAULT_PORT;
 
@@ -143,8 +200,8 @@ export async function main(argv = process.argv.slice(2)) {
   // Disk watermark (06 section 10): a critically full disk is a recovery-level
   // failure — only read-only diagnostics open, containers never auto-start.
   const diskNow = diskWatermark(dataDir, {
-    warnFreeBytes: config.disk.warnFreeBytes,
-    criticalFreeBytes: config.disk.criticalFreeBytes,
+    warnFreeBytes: runtime.config.disk.warnFreeBytes,
+    criticalFreeBytes: runtime.config.disk.criticalFreeBytes,
   });
   const openMode = recovery.mode === "open" && diskNow.level !== "critical";
   if (diskNow.level !== "ok") {
@@ -155,6 +212,69 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (recovery.mode !== "open") {
     console.error(`recovery failed at ${recovery.failedStep}; read-only diagnostics only`);
+  }
+
+  let upstream = null;
+  function reloadRuntimeConfig() {
+    const nextConfig = loadCurrentConfig();
+    const nextHttpTransport =
+      !fakeUpstream && nextConfig.upstream.submitUrl
+        ? createHttpUpstream({ endpoint: nextConfig.upstream.submitUrl, timeoutMs: nextConfig.upstream.timeoutMs })
+        : null;
+    const nextBaseUpstream = upstream ?? nextHttpTransport;
+    const nextTelegramUpstream =
+      !fakeUpstream && nextConfig.telegram?.apiBase
+        ? createTelegramSendTransport({
+            db,
+            stateDir: dataDir,
+            apiBase: nextConfig.telegram.apiBase,
+            allowRealSend: nextConfig.telegram.allowRealSend,
+            proxyUrl: nextConfig.telegram.proxyUrl ?? null,
+            timeoutMs: nextConfig.telegram.timeoutMs,
+            allowedRecipients: nextConfig.adapters.allowedRecipients,
+          })
+        : null;
+    const nextMailUpstream = !fakeUpstream && nextConfig.mail?.smtpHost
+      ? createMailUpstream(db, { mail: nextConfig.mail })
+      : null;
+    const nextCalendarUpstream = !fakeUpstream && nextConfig.calendar?.caldavUrl
+      ? createCalendarUpstream(db, { calendar: nextConfig.calendar })
+      : null;
+    const nextAdapterUpstream = nextBaseUpstream || nextTelegramUpstream || nextMailUpstream || nextCalendarUpstream || nextConfig.model.baseUrl
+      ? createAdapterUpstream(db, {
+          baseUpstream: nextBaseUpstream,
+          telegramUpstream: nextTelegramUpstream,
+          mailUpstream: nextMailUpstream,
+          calendarUpstream: nextCalendarUpstream,
+          transportKind: fakeUpstream ? "fake" : "real",
+          policy: { allowRealExternalWrites: nextConfig.policy.allowRealExternalWrites },
+          credentials: nextConfig.credentials,
+          config: {
+            fixedSendingIdentity: nextConfig.adapters.fixedSendingIdentity,
+            allowedRecipients: nextConfig.adapters.allowedRecipients,
+            allowedRepos: nextConfig.adapters.allowedRepos,
+            allowedBranches: nextConfig.adapters.allowedBranches,
+          },
+          modelConfig: nextConfig.model,
+        })
+      : null;
+
+    runtime.config = nextConfig;
+    runtime.httpTransport = nextHttpTransport;
+    runtime.baseUpstream = nextBaseUpstream;
+    runtime.telegramUpstream = nextTelegramUpstream;
+    runtime.mailUpstream = nextMailUpstream;
+    runtime.calendarUpstream = nextCalendarUpstream;
+    runtime.adapterUpstream = nextAdapterUpstream;
+    runtime.telegramPullEnabled =
+      nextConfig.telegram?.apiBase !== null &&
+      nextConfig.telegram?.apiBase !== undefined &&
+      nextConfig.telegram?.allowRealPull === true;
+    runtime.mailPullEnabled = nextConfig.mail?.imapHost !== null && nextConfig.mail?.imapHost !== undefined;
+    runtime.calendarPullEnabled = nextConfig.calendar?.caldavUrl !== null && nextConfig.calendar?.caldavUrl !== undefined;
+    runtime.mergedInputByteCap = computeMergedInputByteCap(nextConfig);
+    runtime.backupKey = process.env.AEGISPI_BACKUP_MANIFEST_KEY ?? null;
+    return runtime;
   }
 
   // The console (Phase 2 minimal diagnostics + Phase 3 approval/cancel/
@@ -173,6 +293,10 @@ export async function main(argv = process.argv.slice(2)) {
     stateDir: dataDir,
     ownerPrincipalId: "prn:local:owner",
     telegramWebhookSecret,
+    configPath,
+    envFilePath,
+    imageStatus,
+    onConfigReload: reloadRuntimeConfig,
   });
   const served = await serveConsole(consoleApp, { port: consolePort });
   console.log(`console: ${served.bind}:${served.port} (auth: local bearer token; diagnostics${openMode ? "" : " only"})`);
@@ -207,10 +331,10 @@ export async function main(argv = process.argv.slice(2)) {
     ensurePrincipal(db, { platform: "local", subject: "owner" });
   });
   const ledger = createBudgetLedger(db, {
-    taskLimitMicrousd: config.budget.taskLimitMicrousd,
-    dayLimitMicrousd: config.budget.dayLimitMicrousd,
-    warmingEnabled: config.budget.warmingEnabled,
-    timeZone: config.timezone,
+    taskLimitMicrousd: runtime.config.budget.taskLimitMicrousd,
+    dayLimitMicrousd: runtime.config.budget.dayLimitMicrousd,
+    warmingEnabled: runtime.config.budget.warmingEnabled,
+    timeZone: runtime.config.timezone,
   });
   // The transport layer: under --fake-upstream the declared test fixture;
   // in production the REAL HTTP transport whenever the host configured a
@@ -218,58 +342,18 @@ export async function main(argv = process.argv.slice(2)) {
   // no-authorization default still sends zero bytes because the ADAPTER
   // refuses before the transport sees anything). No submitUrl configured =
   // no transport wired: READY effects stay durable with the honest log.
-  const upstream = fakeUpstream ? createFakeRemote(dataDir, { label: "daemon-fake-upstream" }) : null;
-  const httpTransport =
-    !fakeUpstream && config.upstream.submitUrl
-      ? createHttpUpstream({ endpoint: config.upstream.submitUrl, timeoutMs: config.upstream.timeoutMs })
-      : null;
-  const baseUpstream = upstream ?? httpTransport;
+  upstream = fakeUpstream ? createFakeRemote(dataDir, { label: "daemon-fake-upstream" }) : null;
   // The production dispatch path is the ADAPTER upstream, never the raw
   // transport: the trusted registry gates every operation (unknown operations
   // refuse; real external writes stay fail-closed; chargeable submits need a
   // live reservation; adapter-owned templates, never model-assembled URLs).
   // transportKind is declared HERE (fake exactly under --fake-upstream, real
   // otherwise), never sniffed from a label.
-  const telegramUpstream =
-    !fakeUpstream && config.telegram?.apiBase
-      ? createTelegramSendTransport({
-          db,
-          stateDir: dataDir,
-          apiBase: config.telegram.apiBase,
-          allowRealSend: config.telegram.allowRealSend,
-          proxyUrl: config.telegram.proxyUrl ?? null,
-          timeoutMs: config.telegram.timeoutMs,
-          allowedRecipients: config.adapters.allowedRecipients,
-        })
-      : null;
   // Unit 5.3/5.4 dedicated child transports. Wiring one is a config fact —
   // each transport's own fail-closed ladder (allowRealMailSend /
   // allowRealCalendarWrite + credential slots) decides at submit time, so
   // a wired transport with closed gates sends zero bytes.
-  const mailUpstream = !fakeUpstream && config.mail?.smtpHost
-    ? createMailUpstream(db, { mail: config.mail })
-    : null;
-  const calendarUpstream = !fakeUpstream && config.calendar?.caldavUrl
-    ? createCalendarUpstream(db, { calendar: config.calendar })
-    : null;
-  const adapterUpstream = baseUpstream || telegramUpstream || mailUpstream || calendarUpstream || config.model.baseUrl
-    ? createAdapterUpstream(db, {
-        baseUpstream,
-        telegramUpstream,
-        mailUpstream,
-        calendarUpstream,
-        transportKind: fakeUpstream ? "fake" : "real",
-        policy: { allowRealExternalWrites: config.policy.allowRealExternalWrites },
-        credentials: config.credentials,
-        config: {
-          fixedSendingIdentity: config.adapters.fixedSendingIdentity,
-          allowedRecipients: config.adapters.allowedRecipients,
-          allowedRepos: config.adapters.allowedRepos,
-          allowedBranches: config.adapters.allowedBranches,
-        },
-        modelConfig: config.model,
-      })
-    : null;
+  reloadRuntimeConfig();
 
   // Unit 5.2 runtime state (in-memory only; everything durable lives in
   // the DB): the pull interval tracker, and the per-scope consecutive-turn
@@ -278,31 +362,13 @@ export async function main(argv = process.argv.slice(2)) {
   // only ever wired the OUTBOUND transport (Phase 4.3), and the send-only
   // fixtures must never see a getUpdates request. A loopback apiBase with
   // allowRealPull is the local verification seam, mirroring model.baseUrl.
-  const credentials = createCredentialService(db);
-  const telegramPullEnabled =
-    config.telegram?.apiBase !== null &&
-    config.telegram?.apiBase !== undefined &&
-    config.telegram?.allowRealPull === true;
+  const credentials = createCredentialService(db, { envFile: hasExplicitEnvScope ? envFilePath : null });
   let lastPullAt = 0;
   // Unit 5.3/5.4 runtime pull state (in-memory interval trackers; the gates
   // themselves are config-owned and fail closed inside the pull functions).
-  const mailPullEnabled = config.mail?.imapHost !== null && config.mail?.imapHost !== undefined;
-  const calendarPullEnabled = config.calendar?.caldavUrl !== null && config.calendar?.caldavUrl !== undefined;
   let lastMailPullAt = 0;
   let lastCalendarPullAt = 0;
   const scopeTurnCounts = new Map();
-  // The merged model-input byte bound (Unit 5.2 batch semantics): the
-  // ROUTER enforces it per attach, and the merge below re-checks it as
-  // defense in depth. Both take the tighter of config.model.maxInputBytes
-  // and the 128 KiB hard ceiling — a null config value means "no
-  // deployment override", never "unbounded".
-  const HARD_INPUT_CAP_BYTES = 128 * 1024;
-  const mergedInputByteCap = Math.min(
-    Number.isInteger(config.model.maxInputBytes) && config.model.maxInputBytes > 0
-      ? config.model.maxInputBytes
-      : HARD_INPUT_CAP_BYTES,
-    HARD_INPUT_CAP_BYTES,
-  );
 
   function parseImageLauncher(flagPrefix, label, createFn, { reapOnStart = false } = {}) {
     const flag = argv.find((a) => a.startsWith(flagPrefix));
@@ -328,12 +394,12 @@ export async function main(argv = process.argv.slice(2)) {
         stateDir: dataDir,
         imageRef,
         quotas: {
-          cpus: config.containerPlaceholders.execution.cpus,
-          memory: `${config.containerPlaceholders.execution.memoryGiB}g`,
-          pids: config.containerPlaceholders.execution.pids,
-          tmpfsSize: `${config.containerPlaceholders.execution.writableDiskGiB}g`,
+          cpus: runtime.config.containerPlaceholders.execution.cpus,
+          memory: `${runtime.config.containerPlaceholders.execution.memoryGiB}g`,
+          pids: runtime.config.containerPlaceholders.execution.pids,
+          tmpfsSize: `${runtime.config.containerPlaceholders.execution.writableDiskGiB}g`,
         },
-        machineWideMax: config.leases.maxOfflineJobsMachineWide,
+        machineWideMax: runtime.config.leases.maxOfflineJobsMachineWide,
       }),
     { reapOnStart: true },
   );
@@ -348,9 +414,9 @@ export async function main(argv = process.argv.slice(2)) {
         stateDir: dataDir,
         imageRef,
         quotas: {
-          cpus: config.containerPlaceholders.agent.cpus,
-          memory: `${config.containerPlaceholders.agent.memoryGiB}g`,
-          pids: config.containerPlaceholders.agent.pids,
+          cpus: runtime.config.containerPlaceholders.agent.cpus,
+          memory: `${runtime.config.containerPlaceholders.agent.memoryGiB}g`,
+          pids: runtime.config.containerPlaceholders.agent.pids,
         },
       }),
     { reapOnStart: true },
@@ -364,7 +430,7 @@ export async function main(argv = process.argv.slice(2)) {
       createAcquisitionLauncher(db, {
         stateDir: dataDir,
         imageRef,
-        enableHostGateway: config.acquisition.enableHostGateway,
+        enableHostGateway: runtime.config.acquisition.enableHostGateway,
       }),
     { reapOnStart: true },
   );
@@ -391,7 +457,7 @@ export async function main(argv = process.argv.slice(2)) {
             leaseOwner: info.leaseOwner,
             fence: info.fence,
             now: Date.now(),
-            leaseMs: config.leases.leaseMs,
+            leaseMs: runtime.config.leases.leaseMs,
           });
         } catch {}
       }
@@ -454,7 +520,8 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   function enqueuePendingTelegramReplies() {
-    if (config.telegram?.autoReplyOnTask !== true || !config.telegram?.apiBase) return 0;
+    const cfg = runtime.config;
+    if (cfg.telegram?.autoReplyOnTask !== true || !cfg.telegram?.apiBase) return 0;
     const rows = db
       .prepare(
         `SELECT t.id FROM tasks t
@@ -470,7 +537,7 @@ export async function main(argv = process.argv.slice(2)) {
     let enqueued = 0;
     for (const row of rows) {
       try {
-        const res = maybeEnqueueTelegramTaskReply(db, dataDir, { config, taskId: row.id, now: Date.now() });
+        const res = maybeEnqueueTelegramTaskReply(db, dataDir, { config: cfg, taskId: row.id, now: Date.now() });
         if (res.enqueued) enqueued += 1;
       } catch (err) {
         console.error(`telegram-reply failed on ${row.id}: ${err.message}`);
@@ -483,15 +550,21 @@ export async function main(argv = process.argv.slice(2)) {
   // runs once per window-day when the manifest key is configured.
   let lastDiskLevel = diskNow.level;
   let lastBackupDayKey = null;
-  const backupKey = process.env.AEGISPI_BACKUP_MANIFEST_KEY ?? null;
 
   const tick = async () => {
+    const cfg = runtime.config;
+    const activeMergedCap = runtime.mergedInputByteCap;
+    const activeBaseUpstream = runtime.baseUpstream;
+    const activeTelegramUpstream = runtime.telegramUpstream;
+    const activeMailUpstream = runtime.mailUpstream;
+    const activeCalendarUpstream = runtime.calendarUpstream;
+    const activeAdapterUpstream = runtime.adapterUpstream;
     let now = Date.now();
     // 0. Disk watermark: warn blocks NEW job launches; critical never reaches
     //    here (startup already opened read-only).
     const disk = diskWatermark(dataDir, {
-      warnFreeBytes: config.disk.warnFreeBytes,
-      criticalFreeBytes: config.disk.criticalFreeBytes,
+      warnFreeBytes: cfg.disk.warnFreeBytes,
+      criticalFreeBytes: cfg.disk.criticalFreeBytes,
     });
     if (disk.level !== lastDiskLevel) {
       recordWatermark(db, { state: disk, previousLevel: lastDiskLevel, now });
@@ -527,12 +600,12 @@ export async function main(argv = process.argv.slice(2)) {
     //     live 'im' slot) this is a durable no-op. Interval-tracked in
     //     memory only; the durable cursor is system_state.
     let pullResult = null;
-    if (telegramPullEnabled) {
-      if (now - lastPullAt >= (config.telegram.pullIntervalMs ?? 5000)) {
+    if (runtime.telegramPullEnabled) {
+      if (now - lastPullAt >= (cfg.telegram.pullIntervalMs ?? 5000)) {
         lastPullAt = now;
         try {
           pullResult = pullTelegramUpdates(db, dataDir, {
-            telegram: config.telegram,
+            telegram: cfg.telegram,
             credentials,
             now,
           });
@@ -552,11 +625,11 @@ export async function main(argv = process.argv.slice(2)) {
     //      go straight into the triage ingest (F-3): one failed message is
     //      audited and skipped, never wedging the rest of the pass.
     let mailPullResult = null;
-    if (mailPullEnabled) {
-      if (now - lastMailPullAt >= (config.mail.pullIntervalMs ?? 15000)) {
+    if (runtime.mailPullEnabled) {
+      if (now - lastMailPullAt >= (cfg.mail.pullIntervalMs ?? 15000)) {
         lastMailPullAt = now;
         try {
-          mailPullResult = pullMailMessages(db, { mail: config.mail, now });
+          mailPullResult = pullMailMessages(db, { mail: cfg.mail, now });
           if (mailPullResult && typeof mailPullResult === "object" && "fetched" in mailPullResult) {
             console.log(`mail-pull: fetched=${mailPullResult.fetched.length}`);
             const resolved = credentials.resolve("mail");
@@ -573,7 +646,7 @@ export async function main(argv = process.argv.slice(2)) {
                     account: cred.user,
                     message,
                     ownerId: "prn:local:owner",
-                    mailConfig: config.mail,
+                    mailConfig: cfg.mail,
                   });
                   if (ing.admitted && !ing.duplicate) ingested += 1;
                 } catch (e) {
@@ -605,10 +678,10 @@ export async function main(argv = process.argv.slice(2)) {
     //      composition; the write path is approval-only and lives in the
     //      dispatcher, never here.
     let calendarPullResult = null;
-    if (calendarPullEnabled && now - lastCalendarPullAt >= (config.calendar.pullIntervalMs ?? 30000)) {
+    if (runtime.calendarPullEnabled && now - lastCalendarPullAt >= (cfg.calendar.pullIntervalMs ?? 30000)) {
       lastCalendarPullAt = now;
       try {
-        calendarPullResult = pullCalendarEvents(db, dataDir, { now, calendar: config.calendar });
+        calendarPullResult = pullCalendarEvents(db, dataDir, { now, calendar: cfg.calendar });
         if (calendarPullResult && typeof calendarPullResult === "object" && "stored" in calendarPullResult) {
           console.log(`calendar-pull: stored=${calendarPullResult.stored}`);
         }
@@ -621,9 +694,9 @@ export async function main(argv = process.argv.slice(2)) {
     try {
       runDreamingLoop(db, dataDir, {
         now,
-        quietHours: config.calendar?.quietHours ?? null,
+        quietHours: cfg.calendar?.quietHours ?? null,
         ledger,
-        modelProvider: config.model.provider,
+        modelProvider: cfg.model.provider,
       });
     } catch (e) {
       console.error(`dreaming: pass refused: ${String(e.message).slice(0, 160)}`);
@@ -642,17 +715,17 @@ export async function main(argv = process.argv.slice(2)) {
         dispatchEventBatchToTask(db, {
           scopeId: pendingScopeId,
           now,
-          agingStepMs: config.router?.agingStepMs ?? null,
-          maxBatchEvents: config.router?.batchMaxEvents ?? 8,
-          maxSteps: config.budget.taskMaxSteps,
-          deadlineAt: now + config.budget.taskMaxWallClockMs,
+          agingStepMs: cfg.router?.agingStepMs ?? null,
+          maxBatchEvents: cfg.router?.batchMaxEvents ?? 8,
+          maxSteps: cfg.budget.taskMaxSteps,
+          deadlineAt: now + cfg.budget.taskMaxWallClockMs,
           skillSetHash: currentSkillSetHash(db, { scopeId: pendingScopeId }),
           dispatchKeyFor: dispatchKeyForInbox,
           // Byte-bounded, structured-exclusive merging: every attach
           // re-validates grants, closure, thread, task state and the
           // input cap; refusals stay PENDING and form their own task.
           stateDir: dataDir,
-          inputByteCap: mergedInputByteCap,
+          inputByteCap: activeMergedCap,
         });
       } catch (e) {
         // One scope's dispatch failure (e.g. a CP4-blocked cross-scope
@@ -695,8 +768,8 @@ export async function main(argv = process.argv.slice(2)) {
           followupOutbox = processFiredFollowUpTimers(db, dataDir, {
             now,
             firedTimers: wiredTimers,
-            destination: config.telegram?.ownerDestination ?? null,
-            quietHours: config.calendar?.quietHours ?? null,
+            destination: cfg.telegram?.ownerDestination ?? null,
+            quietHours: cfg.calendar?.quietHours ?? null,
           });
         } catch (e) {
           console.error(`followup: pass refused: ${String(e.message).slice(0, 160)}`);
@@ -705,8 +778,8 @@ export async function main(argv = process.argv.slice(2)) {
           briefingOutbox = processFiredBriefingTimers(db, dataDir, {
             now,
             firedTimers: wiredTimers,
-            destination: config.telegram?.ownerDestination ?? null,
-            quietHours: config.calendar?.quietHours ?? null,
+            destination: cfg.telegram?.ownerDestination ?? null,
+            quietHours: cfg.calendar?.quietHours ?? null,
           });
         } catch (e) {
           console.error(`briefing: pass refused: ${String(e.message).slice(0, 160)}`);
@@ -732,10 +805,10 @@ export async function main(argv = process.argv.slice(2)) {
     const claimWithFairness = () =>
       claimNextTask(db, {
         now,
-        leaseMs: config.leases.leaseMs,
-        agingStepMs: config.router?.agingStepMs ?? null,
+        leaseMs: cfg.leases.leaseMs,
+        agingStepMs: cfg.router?.agingStepMs ?? null,
         scopeTurnState: scopeTurnCounts,
-        scopeConsecutiveTurnLimit: config.router?.scopeConsecutiveTurnLimit ?? null,
+        scopeConsecutiveTurnLimit: cfg.router?.scopeConsecutiveTurnLimit ?? null,
       });
     const trackTurn = (claimed) => {
       // Per-scope consecutive-turn counting, never a whole-map wipe: two
@@ -761,14 +834,14 @@ export async function main(argv = process.argv.slice(2)) {
       claim = claimWithFairness();
       trackTurn(claim);
       if (claim) {
-        heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
+        heartbeat(db, { ...claim, now, leaseMs: cfg.leases.leaseMs });
         const taskAcc = ledger.ensureTaskAccount({ taskId: claim.taskId, now }).accountId;
         const dayAcc = ledger.ensureDayAccount({ now }).accountId;
         const res = ledger.reserve({
           requestKey: `worker:${claim.taskId}:${claim.attemptNo}`,
           taskId: claim.taskId,
           purpose: "worker",
-          provider: config.model.provider,
+          provider: cfg.model.provider,
           priceVersion: "catalog-v1",
           upperMicrousd: 1000,
           accounts: [
@@ -828,9 +901,9 @@ export async function main(argv = process.argv.slice(2)) {
           deliveryDone(db, { eventId: delivery.event_id, taskId: claim.taskId, now });
         }
       }
-    } else if (config.model.baseUrl || (executor && acquisitionLauncher && config.triage?.allowModelObserve === false)) {
-      const canRunModel = Boolean(config.model.baseUrl) && (isLoopbackModelEndpoint(config.model.baseUrl) || config.model.allowRealModelCalls);
-      const canRunModelFreeTriage = Boolean(executor && acquisitionLauncher && config.triage?.allowModelObserve === false);
+    } else if (cfg.model.baseUrl || (executor && acquisitionLauncher && cfg.triage?.allowModelObserve === false)) {
+      const canRunModel = Boolean(cfg.model.baseUrl) && (isLoopbackModelEndpoint(cfg.model.baseUrl) || cfg.model.allowRealModelCalls);
+      const canRunModelFreeTriage = Boolean(executor && acquisitionLauncher && cfg.triage?.allowModelObserve === false);
       const peekNextClaimableIsTriage = () => {
         const cand = db
           .prepare(
@@ -871,7 +944,7 @@ export async function main(argv = process.argv.slice(2)) {
           claim = claimWithFairness();
           trackTurn(claim);
           if (claim) {
-            heartbeat(db, { ...claim, now, leaseMs: config.leases.leaseMs });
+            heartbeat(db, { ...claim, now, leaseMs: cfg.leases.leaseMs });
             const taskRow = db
               .prepare("SELECT scope_id, principal_id, skill_set_hash, deadline_at FROM tasks WHERE id=?")
               .get(claim.taskId);
@@ -923,7 +996,7 @@ export async function main(argv = process.argv.slice(2)) {
                 try {
                   const text = readFileSync(payloadPath, "utf8");
                   const bytes = Buffer.byteLength(text, "utf8");
-                  if (payloadTexts.length > 0 && mergedBytes + bytes > mergedInputByteCap) break;
+                  if (payloadTexts.length > 0 && mergedBytes + bytes > activeMergedCap) break;
                   payloadTexts.push(text);
                   mergedBytes += bytes;
                 } catch {}
@@ -940,13 +1013,13 @@ export async function main(argv = process.argv.slice(2)) {
             // the task fails infra_error and its delivery dies visibly
             // (never a silent half-truncation that would mark an unread
             // event DONE).
-            if (callInput !== null && Buffer.byteLength(callInput, "utf8") > mergedInputByteCap) {
+            if (callInput !== null && Buffer.byteLength(callInput, "utf8") > activeMergedCap) {
               writeAudit(db, {
                 code: "event_payload_over_input_cap",
                 taskId: claim.taskId,
                 details: {
                   bytes: Buffer.byteLength(callInput, "utf8"),
-                  cap: mergedInputByteCap,
+                  cap: activeMergedCap,
                   deliveries: pendingDeliveries.length,
                 },
                 now: Date.now(),
@@ -977,7 +1050,7 @@ export async function main(argv = process.argv.slice(2)) {
               try {
                 await executeRepoTriageTask(db, {
                   stateDir: dataDir,
-                  config,
+                  config: cfg,
                   ledger,
                   acquisitionLauncher,
                   agentLauncher,
@@ -1009,13 +1082,13 @@ export async function main(argv = process.argv.slice(2)) {
               skipLaunch = true;
             }
             const parsedMail = skipLaunch ? { isMail: false } : parseInboundMailPayload(launchInput);
-            if (parsedMail.isMail && config.mail?.autoDraftReplies === true && !skipLaunch) {
+            if (parsedMail.isMail && cfg.mail?.autoDraftReplies === true && !skipLaunch) {
               if (canRunModel && agentLauncher) {
                 excludeTriageTaskIds.add(claim.taskId);
                 try {
                   await executeMailTriageTask(db, {
                     stateDir: dataDir,
-                    config,
+                    config: cfg,
                     ledger,
                     agentLauncher,
                     claim,
@@ -1075,7 +1148,7 @@ export async function main(argv = process.argv.slice(2)) {
               } else {
                 const acqOut = await executeRepoObserveAcquisition(db, {
                   stateDir: dataDir,
-                  config,
+                  config: cfg,
                   acquisitionLauncher,
                   taskId: claim.taskId,
                   attemptId: claim.attemptId,
@@ -1085,10 +1158,10 @@ export async function main(argv = process.argv.slice(2)) {
                   targetId: parsedObserve.targetId,
                   question: parsedObserve.question,
                   now,
-                  onProgress: () => heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs }),
+                  onProgress: () => heartbeat(db, { ...claim, now: Date.now(), leaseMs: runtime.config.leases.leaseMs }),
                 });
                 try {
-                  heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
+                  heartbeat(db, { ...claim, now: Date.now(), leaseMs: runtime.config.leases.leaseMs });
                 } catch {}
                 if (!acqOut.ok) {
                   completeTask(db, {
@@ -1142,8 +1215,8 @@ export async function main(argv = process.argv.slice(2)) {
                 }
                 skipLaunch = true;
               } else {
-                const modelKey = config.model.provider && config.model.modelId
-                  ? `${config.model.provider}/${config.model.modelId}`
+                const modelKey = cfg.model.provider && cfg.model.modelId
+                  ? `${cfg.model.provider}/${cfg.model.modelId}`
                   : "deepseek/deepseek-flash";
                 const userPrompt = formatGeneralUserPrompt(launchInput);
                 const firstEventId = pendingDeliveries[0]?.event_id ?? null;
@@ -1156,7 +1229,7 @@ export async function main(argv = process.argv.slice(2)) {
                   threadKey,
                   currentTaskId: claim.taskId,
                   currentUserPrompt: userPrompt ?? `task ${claim.taskId}`,
-                  maxTotalBytes: Math.max(2048, mergedInputByteCap - 1024),
+                  maxTotalBytes: Math.max(2048, activeMergedCap - 1024),
                   now: Date.now(),
                 });
                 const launched = agentLauncher.launchAttempt({
@@ -1173,7 +1246,7 @@ export async function main(argv = process.argv.slice(2)) {
                   now,
                 });
                 try {
-                  heartbeat(db, { ...claim, now: Date.now(), leaseMs: config.leases.leaseMs });
+                  heartbeat(db, { ...claim, now: Date.now(), leaseMs: runtime.config.leases.leaseMs });
                 } catch {}
                 activeAgentContainers.set(`${claim.taskId}:${claim.attemptNo}`, {
                   ...launched,
@@ -1193,10 +1266,10 @@ export async function main(argv = process.argv.slice(2)) {
         if (canRunModel) {
           const batch = await processPendingModelProposalsAsync(db, {
             stateDir: dataDir,
-            config,
+            config: runtime.config,
             ledger,
-            leaseMs: config.leases.leaseMs,
-            heartbeatMs: config.leases.heartbeatMs,
+            leaseMs: runtime.config.leases.leaseMs,
+            heartbeatMs: runtime.config.leases.heartbeatMs,
             completeActiveTask: true,
             excludeTaskIds: excludeTriageTaskIds,
             now,
@@ -1220,20 +1293,20 @@ export async function main(argv = process.argv.slice(2)) {
     const telegramRepliesEnqueued = enqueuePendingTelegramReplies();
     const canDispatchEffectRow = (row) =>
       Boolean(
-        baseUpstream ||
+        activeBaseUpstream ||
           row.operation === "model.inference" ||
-          (telegramUpstream &&
+          (activeTelegramUpstream &&
             (row.operation === "im.notify" || row.operation === "send_message") &&
-            telegramUpstream.canHandle(row.resource)) ||
-          (mailUpstream && row.operation === "mail.send" && mailUpstream.canHandle(row.resource)) ||
-          (calendarUpstream && row.operation === "calendar.write" && calendarUpstream.canHandle(row.resource)),
+            activeTelegramUpstream.canHandle(row.resource)) ||
+          (activeMailUpstream && row.operation === "mail.send" && activeMailUpstream.canHandle(row.resource)) ||
+          (activeCalendarUpstream && row.operation === "calendar.write" && activeCalendarUpstream.canHandle(row.resource)),
       );
     // 5. Effect dispatch & UNKNOWN reconciler (non-model READY/UNKNOWN stay durable when baseUpstream is null).
-    if (adapterUpstream) {
+    if (activeAdapterUpstream) {
       const unknowns = db.prepare("SELECT id, retry_mode, operation, resource FROM effects WHERE state='UNKNOWN'").all().filter(canDispatchEffectRow);
       for (const u of unknowns) {
         try {
-          const action = autoRecoverUnknown(db, adapterUpstream, { effectId: u.id, now, backoffMs: 0 });
+          const action = autoRecoverUnknown(db, activeAdapterUpstream, { effectId: u.id, now, backoffMs: 0 });
           if (action.action !== "none") {
             console.log(`reconcile: ${u.id} (${u.retry_mode}) -> ${action.action}`);
           }
@@ -1247,15 +1320,15 @@ export async function main(argv = process.argv.slice(2)) {
           const row = db.prepare("SELECT * FROM effects WHERE id=?").get(e.id);
           // Head precondition (06 section 6: the CAS transaction re-checks the
           // target resource precondition) — INSIDE the dispatcher transaction.
-          const precondition = adapterUpstream ? headPrecondition(adapterUpstream, row) : () => true;
-          dispatchEffect(db, adapterUpstream, {
+          const precondition = activeAdapterUpstream ? headPrecondition(activeAdapterUpstream, row) : () => true;
+          dispatchEffect(db, activeAdapterUpstream, {
             effectId: e.id, now, precondition,
           });
         } catch (err) {
           if (
             err instanceof AdapterRefused &&
             err.message.startsWith("head_changed:") &&
-            adapterUpstream
+            activeAdapterUpstream
           ) {
             // HEAD drifted between approval and dispatch: the old action is
             // cancelled, a NEW card is minted against the CURRENT head and
@@ -1263,7 +1336,7 @@ export async function main(argv = process.argv.slice(2)) {
             // 需重审"). The human sees fresh facts, never a silent mismatch.
             const row = db.prepare("SELECT action_json FROM effects WHERE id=?").get(e.id);
             const target = JSON.parse(row.action_json).target_resource;
-            const head = adapterUpstream.lookupHead({ targetResource: target });
+            const head = activeAdapterUpstream.lookupHead({ targetResource: target });
             if (head.ok) {
               const out = reproposeHeadChanged(db, dataDir, {
                 now,
@@ -1290,7 +1363,7 @@ export async function main(argv = process.argv.slice(2)) {
         .all();
       for (const f of failedHeadChanged) {
         try {
-          const head = calendarUpstream.lookupHead({ targetResource: f.resource });
+          const head = activeCalendarUpstream.lookupHead({ targetResource: f.resource });
           if (!head.ok) {
             console.error(`calendar 412 repropose refused ${f.id}: ${head.reason}`);
             continue;
@@ -1302,7 +1375,7 @@ export async function main(argv = process.argv.slice(2)) {
         }
       }
     }
-    if (!baseUpstream) {
+    if (!activeBaseUpstream) {
       const unservedReady = db.prepare("SELECT resource, operation FROM effects WHERE state='READY' AND operation!='model.inference'").all().filter((r) => !canDispatchEffectRow(r));
       const unservedUnknown = db.prepare("SELECT resource, operation FROM effects WHERE state='UNKNOWN' AND operation!='model.inference'").all().filter((r) => !canDispatchEffectRow(r));
       if (unservedReady.length > 0) {
@@ -1329,14 +1402,15 @@ export async function main(argv = process.argv.slice(2)) {
     // 8. Scheduled consistency backup: once per maintenance-window day, and
     //    ONLY with the manifest key configured — without it the backup would
     //    be an unsealable promise, so it is skipped with the reason on record.
-    const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: config.backup.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now));
+    const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: cfg.backup.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now));
     const backupWindow = {
-      windowStartHour: config.backup.windowStartHour,
-      windowEndHour: config.backup.windowEndHour,
-      timeZone: config.backup.timeZone,
+      windowStartHour: cfg.backup.windowStartHour,
+      windowEndHour: cfg.backup.windowEndHour,
+      timeZone: cfg.backup.timeZone,
     };
+    const activeBackupKey = runtime.backupKey;
     if (insideMaintenanceWindow(now, backupWindow) && lastBackupDayKey !== dayKey) {
-      if (!backupKey || !/^[0-9a-f]{64}$/.test(backupKey)) {
+      if (!activeBackupKey || !/^[0-9a-f]{64}$/.test(activeBackupKey)) {
         console.error("backup: inside the maintenance window but AEGISPI_BACKUP_MANIFEST_KEY is not configured; the consistency backup is skipped (fail closed, not silently unsealed)");
       } else {
         try {
@@ -1344,7 +1418,7 @@ export async function main(argv = process.argv.slice(2)) {
             stateDir: dataDir,
             backupsDir: join(dataDir, "backups"),
             now,
-            manifestKeyHex: backupKey,
+            manifestKeyHex: activeBackupKey,
             window: backupWindow,
           });
           lastBackupDayKey = dayKey;
@@ -1352,16 +1426,16 @@ export async function main(argv = process.argv.slice(2)) {
           // lands, pairs older than retentionDays are deleted and the prune
           // is audited.
           const pruned = pruneExpiredBackups(join(dataDir, "backups"), {
-            retentionDays: config.backup.retentionDays,
+            retentionDays: cfg.backup.retentionDays,
             now,
           });
           if (pruned.pruned.length > 0) {
             writeAudit(db, {
               code: "backup_retention_pruned",
-              details: { pruned: pruned.pruned, kept: pruned.kept.length, retention_days: config.backup.retentionDays },
+              details: { pruned: pruned.pruned, kept: pruned.kept.length, retention_days: cfg.backup.retentionDays },
               now,
             });
-            console.log(`backup: pruned ${pruned.pruned.length} expired backup(s) beyond ${config.backup.retentionDays} days`);
+            console.log(`backup: pruned ${pruned.pruned.length} expired backup(s) beyond ${cfg.backup.retentionDays} days`);
           }
           console.log(`backup: consistency snapshot ${backup.path} (${backup.bytes} bytes, manifest sealed with dbSha256, ledger entries=${backup.entries})`);
         } catch (e) {
@@ -1386,17 +1460,17 @@ export async function main(argv = process.argv.slice(2)) {
       while (rounds < 20) {
         const work = await tick();
         rounds += 1;
-        const waitDeadline = Date.now() + Math.max(30000, (config.model.callTimeoutMs ?? 60000) + 15000);
+        const waitDeadline = Date.now() + Math.max(30000, (runtime.config.model.callTimeoutMs ?? 60000) + 15000);
         if (agentLauncher && activeAgentContainers.size > 0) {
           while (activeAgentContainers.size > 0 && Date.now() < waitDeadline) {
             reclaimFinishedAgentContainers();
             if (activeAgentContainers.size === 0) break;
             await processPendingModelProposalsAsync(db, {
               stateDir: dataDir,
-              config,
+              config: runtime.config,
               ledger,
-              leaseMs: config.leases.leaseMs,
-              heartbeatMs: config.leases.heartbeatMs,
+              leaseMs: runtime.config.leases.leaseMs,
+              heartbeatMs: runtime.config.leases.heartbeatMs,
               completeActiveTask: true,
               now: Date.now(),
               useWallClockAfterCall: true,
@@ -1442,8 +1516,8 @@ export async function main(argv = process.argv.slice(2)) {
           await new Promise((r) => setTimeout(r, 500));
           waited += 500;
           const diskOnce = diskWatermark(dataDir, {
-            warnFreeBytes: config.disk.warnFreeBytes,
-            criticalFreeBytes: config.disk.criticalFreeBytes,
+            warnFreeBytes: runtime.config.disk.warnFreeBytes,
+            criticalFreeBytes: runtime.config.disk.criticalFreeBytes,
           });
           const events = executor.tick({ now: Date.now(), allowLaunch: diskOnce.level === "ok" });
           for (const ev of events) {
@@ -1470,7 +1544,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   // Continuous mode: drain until idle, then keep a slow heartbeat loop.
-  console.log(`daemon: open (pid ${process.pid}) on ${dbPath}; fake upstream=${fakeUpstream}; loop every ${Math.max(config.leases.heartbeatMs, 1000)}ms`);
+  console.log(`daemon: open (pid ${process.pid}) on ${dbPath}; fake upstream=${fakeUpstream}; loop every ${Math.max(runtime.config.leases.heartbeatMs, 1000)}ms`);
   let running = true;
   let loopTimer = null;
   const shutdownNow = () => {
@@ -1503,7 +1577,7 @@ export async function main(argv = process.argv.slice(2)) {
       shutdownNow();
       return;
     }
-    loopTimer = setTimeout(loop, Math.max(config.leases.heartbeatMs, 1000));
+    loopTimer = setTimeout(loop, Math.max(runtime.config.leases.heartbeatMs, 1000));
   };
   loop();
   return 0;

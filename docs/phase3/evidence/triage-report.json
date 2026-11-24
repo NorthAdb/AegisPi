@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-24T11:41:25.086Z",
+  "generatedAt": "2026-11-24T13:36:48.468Z",
   "nodeVersion": "v22.23.5",
   "suite": "triage",
   "label": "eval:triage: Scenario 4 repository triage and four-class oracle offline acceptance",
@@ -11,7 +11,7 @@
     {
       "name": "triage-e2e-dependency-advisory-unaffected-and-telegram",
       "status": "PASS",
-      "detail": "exit=0 task=SUCCEEDED/unaffected cost=28 jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:6101:9001 manifestValid=true err=(node:29212) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the wa"
+      "detail": "exit=0 task=SUCCEEDED/unaffected cost=28 jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:6101:9001 manifestValid=true err=(node:48272) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the wa"
     },
     {
       "name": "triage-e2e-snapshot-regression-affected-ignores-forged-stdout",
