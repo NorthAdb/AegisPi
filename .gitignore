@@ -11,3 +11,5 @@ evals/contracts/fixtures/**/*.labels.local.json
 .audit/image-build/
 .audit/phase3-rerun/*.log
 .audit/phase3-audit-response-baseline/*.log
+*.local.json
+selfuse.config.json

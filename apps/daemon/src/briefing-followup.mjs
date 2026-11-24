@@ -21,12 +21,12 @@
 
 import { createHash } from "node:crypto";
 import { withTx } from "./db/tx.mjs";
-import { writeAudit, writeStreamEvent } from "./audit.mjs";
-import { insertObjectRow, readObjectContent } from "./objects.mjs";
+import { writeAudit } from "./audit.mjs";
+import { insertObjectRow } from "./objects.mjs";
 import { proposeEffectInTx, draftToReadyInTx } from "./effects.mjs";
 import { enqueueNotificationInTx, supersedeNotificationInTx, finalizeTaskWithNotificationInTx } from "./outbox.mjs";
 import { completeTaskInTx, completePendingDeliveryCheckpointInTx } from "./scheduler.mjs";
-import { markTimerSatisfied, evaluateCondition, timerIdFor } from "./timers.mjs";
+import { markTimerSatisfied, evaluateCondition } from "./timers.mjs";
 import { inQuietHours, nextQuietBoundary } from "./quiet-time.mjs";
 
 export class FollowUpError extends Error {}
@@ -148,13 +148,15 @@ export function processFiredFollowUpTimers(db, stateDir, {
       continue;
     }
     const summaryText = `Follow-up reminder: no reply yet from ${cond.condition.expectedSender ?? "the expected contact"} on thread ${cond.condition.threadKey ?? timerId} (missed beats merged: ${f.missedCount ?? 0}).`;
+    const payloadContent = JSON.stringify({ kind: "followup_reminder", timerId, missedCount: f.missedCount ?? 0, text: summaryText });
+    const payloadContentHash = createHash("sha256").update(payloadContent, "utf8").digest("hex");
     const reminder = withTx(db, () => {
       const payload = insertObjectRow(db, {
         scopeId: taskRow.scope_id,
         kind: "briefing_payload",
         sourceUri: `timer:${timerId}`,
         sourceActor: "host",
-        content: JSON.stringify({ kind: "followup_reminder", timerId, missedCount: f.missedCount ?? 0, text: summaryText }),
+        content: payloadContent,
         observedAt: now,
         requiredScopeIds: [taskRow.scope_id],
       });
@@ -171,7 +173,7 @@ export function processFiredFollowUpTimers(db, stateDir, {
             targetResource: destination,
             operation: "send_message",
             contentHash: createHash("sha256").update(summaryText).digest("hex"),
-            evidenceManifestHash: payload.content_hash,
+            evidenceManifestHash: payloadContentHash,
             parentObjectIds: [payload.id],
             payloadContent: summaryText,
           },
@@ -192,15 +194,14 @@ export function processFiredFollowUpTimers(db, stateDir, {
           )
           .get(claim.taskId, `followup:${timerId}`);
         if (!oldOutbox) {
-          results.push({ timerId, skipped: "reminder already live in a non-supersedeable state" });
-          return { timerId, merged: false };
+          return { timerId, skipped: "reminder already live in a non-supersedeable state" };
         }
         const mergedPayload = insertObjectRow(db, {
           scopeId: taskRow.scope_id,
           kind: "briefing_payload",
           sourceUri: `timer:${timerId}`,
           sourceActor: "host",
-          content: JSON.stringify({ kind: "followup_reminder", timerId, missedCount: f.missedCount ?? 0, text: summaryText }),
+          content: payloadContent,
           observedAt: now,
           requiredScopeIds: [taskRow.scope_id],
         });
@@ -215,7 +216,7 @@ export function processFiredFollowUpTimers(db, stateDir, {
             targetResource: destination,
             operation: "send_message",
             contentHash: createHash("sha256").update(summaryText).digest("hex"),
-            evidenceManifestHash: mergedPayload.content_hash,
+            evidenceManifestHash: payloadContentHash,
             parentObjectIds: [mergedPayload.id],
             payloadContent: summaryText,
           },
@@ -568,10 +569,6 @@ export function mergeQuietBriefingsInTx(db, { now, quietHours, channel, destinat
 
 export function mergeQuietBriefings(db, opts) {
   return withTx(db, () => mergeQuietBriefingsInTx(db, opts));
-}
-
-function enqueuePlain(db, { newEffectId, channel, destination, notifyReason, notBefore, now }) {
-  return withTx(db, () => enqueueNotificationInTx(db, { effectId: newEffectId, channel, destination, notBefore, notifyReason, now })).outboxId;
 }
 
 // The dreaming orchestration needs the same condition evaluation the timers

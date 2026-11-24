@@ -1,0 +1,83 @@
+{
+  "generatedAt": "2026-11-24T03:19:20.384Z",
+  "nodeVersion": "v22.23.5",
+  "suite": "selfuse",
+  "label": "Selfuse behavior end-to-end",
+  "counts": {
+    "pass": 14,
+    "fail": 0
+  },
+  "results": [
+    {
+      "name": "config-recipient-normalization",
+      "status": "PASS",
+      "detail": "{\"mailSenders\":[\"alice@example.test\",\"DM:Telegram:123\"],\"mailRecipients\":[\"bob@example.test\"],\"adapterRecipients\":[\"carol@example.test\",\"dm:telegram:999\",\"group:telegram:-100123\"]}"
+    },
+    {
+      "name": "config-owner-destination-valid",
+      "status": "PASS",
+      "detail": "{\"ownerDestination\":\"dm:telegram:123\",\"mailPull\":1000,\"calPull\":600000}"
+    },
+    {
+      "name": "config-owner-destination-invalid",
+      "status": "PASS",
+      "detail": "expected ConfigError for config-owner-destination-invalid"
+    },
+    {
+      "name": "config-mail-pull-interval-too-low",
+      "status": "PASS",
+      "detail": "expected ConfigError for config-mail-pull-interval-too-low"
+    },
+    {
+      "name": "config-calendar-pull-interval-non-int",
+      "status": "PASS",
+      "detail": "expected ConfigError for config-calendar-pull-interval-non-int"
+    },
+    {
+      "name": "adapter-mixed-case-validate-intent",
+      "status": "PASS",
+      "detail": "{\"vOk\":{\"ok\":true,\"spec\":{\"category\":\"external_write\",\"transport\":\"real\"}},\"vBad\":{\"ok\":false,\"reason\":\"recipient Mallory@Example.Test is not on the authorized recipient list\"}}"
+    },
+    {
+      "name": "mail-mixed-case-loopback-smtp-dispatch",
+      "status": "PASS",
+      "detail": "{\"approved\":true,\"state\":\"SUCCEEDED\",\"beforeCount\":0,\"afterCount\":1}"
+    },
+    {
+      "name": "followup-evidence-hash-and-destination",
+      "status": "PASS",
+      "detail": "{\"len\":1,\"target\":\"dm:telegram:12345\",\"obxDest\":\"dm:telegram:12345\",\"manifest\":\"74a816ec944cbf28b5633fa5485d21dcf224410b362f7a2cefab8a4e49307db6\",\"objHash\":\"74a816ec944cbf28b5633fa5485d21dcf224410b362f7a2cefab8a4e49307db6\"}"
+    },
+    {
+      "name": "followup-non-supersedeable-no-double-push",
+      "status": "PASS",
+      "detail": "[{\"timerId\":\"tmr:followup-case-1\",\"skipped\":\"reminder already live in a non-supersedeable state\"}]"
+    },
+    {
+      "name": "selfuse-translate-telegram-commands",
+      "status": "PASS",
+      "detail": "{\"obsPayload\":{\"kind\":\"repo_observe\",\"targetId\":\"repo1\",\"question\":\"why?\"},\"triagePayload\":{\"kind\":\"repo_triage\",\"presetId\":\"preset1\",\"notifyChannel\":\"dm:telegram:12345\",\"question\":\"check\"},\"plainSame\":true}"
+    },
+    {
+      "name": "selfuse-format-general-user-prompt",
+      "status": "PASS",
+      "detail": "{\"tgPrompt\":\"Summarize status\",\"nonTgPrompt\":\"{\\\"kind\\\":\\\"mail\\\",\\\"text\\\":\\\"keep raw\\\"}\"}"
+    },
+    {
+      "name": "selfuse-telegram-auto-reply",
+      "status": "PASS",
+      "detail": "{\"disabled\":{\"enqueued\":false,\"reason\":\"disabled\"},\"refusedScope\":{\"enqueued\":false,\"reason\":\"scope_not_eligible\"},\"enabled\":{\"enqueued\":true,\"effectId\":\"efx:notify%3Adm%253atelegram%253a12345%3Atg-reply%253atsk%253ainb%25253atelegram%25253atg-upd-100%253atg-reply-test\",\"outboxId\":\"obx:efx:notify%3Adm%253atelegram%253a12345%3Atg-reply%253atsk%253ainb%25253atelegram%25253atg-upd-100%253atg-reply-test\"},\"repeat\":{\"enqueued\":false,\"reason\":\"already_enqueued\"},\"verified\":{\"ok\":true,\"text\":\"Task finished cleanly.\"}}"
+    },
+    {
+      "name": "console-draft-preview-approve-roundtrip",
+      "status": "PASS",
+      "detail": "{\"sessStatus\":200,\"detailStatus\":200,\"extraSubject\":\"Re: Quarterly status\",\"extraBody\":\"Thanks, looks good.\",\"decideStatus\":200,\"effState\":\"READY\",\"hasResultObjCol\":true}"
+    },
+    {
+      "name": "selfuse-cli-init-idempotent-no-secret-leak",
+      "status": "PASS",
+      "detail": "{\"s1\":0,\"s2\":0,\"slots\":[\"im\",\"mail\",\"model\"],\"grantsOk\":true,\"timerState\":\"SCHEDULED\",\"recurrence\":{\"type\":\"daily_wall_clock\",\"timeOfDay\":\"08:30\",\"timezone\":\"Asia/Hong_Kong\"},\"leakedCount\":0,\"run2Out\":\"init: ok db=D:\\\\AegisPi\\\\aegis-pi\\\\workspace-state\\\\phase5\\\\selfuse-cli\\\\data\\\\db\\\\aegis.db slots=model->DEEPSEEK_API_KEY,im->TELEGRAM_BOT_TOKEN,mail->AEGISPI_MAIL_CREDENTIAL scopes=3 grantsAdded=0\\ninit: briefingTimer=tmr:selfuse-morning-briefing created=false dueAt=1795566600000\"}"
+    }
+  ],
+  "dataSources": "Offline loopback SMTP/DB/HTTP fixtures with example.test data only"
+}

@@ -15,7 +15,7 @@ import { assertValidModelBaseUrl, MAX_MODEL_MESSAGES_BYTES, ModelCallError } fro
 import { isHttpUrlWithoutCredentials, isSafeRelativeReadPath } from "./repo-observe.mjs";
 import { parseTriageConfig } from "./repo-triage.mjs";
 import { parseQuietHours, wallClock } from "./quiet-time.mjs";
-import { assertValidTelegramApiBase, parseTelegramProxyUrl, TelegramSendError } from "./telegram-send.mjs";
+import { assertValidTelegramApiBase, parseTelegramProxyUrl, parseTelegramTargetResource, TelegramSendError } from "./telegram-send.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -225,6 +225,13 @@ function parseTelegramConfig(raw) {
     throw new ConfigError(`telegram.pullBatchLimit must be an integer 1..100, got ${JSON.stringify(raw.pullBatchLimit)}`);
   }
   const allowedChatIds = parseStringAllowlist(raw.allowedChatIds, "telegram.allowedChatIds").map((v) => String(v).trim()).filter((v) => v.length > 0);
+  const autoReplyOnTask = raw.autoReplyOnTask === true;
+  const ownerDestination = raw.ownerDestination ?? null;
+  if (ownerDestination !== null) {
+    if (typeof ownerDestination !== "string" || parseTelegramTargetResource(ownerDestination) === null) {
+      throw new ConfigError(`telegram.ownerDestination must be null or a valid telegram target (e.g. dm:telegram:<chatId>), got ${JSON.stringify(raw.ownerDestination)}`);
+    }
+  }
   return {
     apiBase: normalizedApiBase,
     allowRealSend: raw.allowRealSend === true,
@@ -235,6 +242,8 @@ function parseTelegramConfig(raw) {
     pullTimeoutSeconds,
     pullBatchLimit,
     allowedChatIds,
+    autoReplyOnTask,
+    ownerDestination,
   };
 }
 
@@ -288,6 +297,13 @@ function parseMemoryConfig(raw) {
   };
 }
 
+export function normalizeRecipientEntry(raw) {
+  const trimmed = String(raw).trim();
+  if (/^(?:(?:dm|group):)?telegram:/.test(trimmed)) return trimmed;
+  if (/^[^@\s]+@[^@\s]+$/.test(trimmed)) return trimmed.toLowerCase();
+  return trimmed;
+}
+
 function parseStringAllowlist(rawValue, name) {
   if (rawValue === undefined) return [];
   if (!Array.isArray(rawValue) || !rawValue.every((item) => typeof item === "string")) {
@@ -319,6 +335,10 @@ function parseMailConfig(raw) {
     }
     return p;
   };
+  const pullIntervalMs = m.pullIntervalMs ?? 15000;
+  if (!Number.isInteger(pullIntervalMs) || pullIntervalMs < 1000 || pullIntervalMs > 600_000) {
+    throw new ConfigError(`mail.pullIntervalMs must be an integer 1000..600000, got ${JSON.stringify(m.pullIntervalMs)}`);
+  }
   const ttl = m.approvalTtlMs ?? 14400000;
   if (!Number.isInteger(ttl) || ttl < 60_000 || ttl > 7 * 24 * 3600_000) {
     throw new ConfigError(`mail.approvalTtlMs must be an integer 60000..604800000, got ${JSON.stringify(ttl)}`);
@@ -337,8 +357,10 @@ function parseMailConfig(raw) {
     allowRealMailRead: m.allowRealMailRead === true,
     allowRealMailSend: m.allowRealMailSend === true,
     allowedFolders: parseStringAllowlist(m.allowedFolders, "mail.allowedFolders"),
-    allowedSenders: parseStringAllowlist(m.allowedSenders, "mail.allowedSenders"),
-    allowedRecipients: parseStringAllowlist(m.allowedRecipients, "mail.allowedRecipients"),
+    allowedSenders: parseStringAllowlist(m.allowedSenders, "mail.allowedSenders").map(normalizeRecipientEntry).filter((v) => v.length > 0),
+    allowedRecipients: parseStringAllowlist(m.allowedRecipients, "mail.allowedRecipients").map(normalizeRecipientEntry).filter((v) => v.length > 0),
+    pullIntervalMs,
+    autoDraftReplies: m.autoDraftReplies === true,
     approvalTtlMs: ttl,
     maxAttachmentBytes,
   };
@@ -366,6 +388,10 @@ function parseCalendarConfig(raw) {
       throw new ConfigError(`calendar.caldavUrl is not a valid URL: ${e.message}`);
     }
   }
+  const pullIntervalMs = c.pullIntervalMs ?? 30000;
+  if (!Number.isInteger(pullIntervalMs) || pullIntervalMs < 1000 || pullIntervalMs > 600_000) {
+    throw new ConfigError(`calendar.pullIntervalMs must be an integer 1000..600000, got ${JSON.stringify(c.pullIntervalMs)}`);
+  }
   const defaultTimezone = typeof c.defaultTimezone === "string" && c.defaultTimezone.length > 0 ? c.defaultTimezone : "Asia/Hong_Kong";
   let quietHours;
   try {
@@ -383,6 +409,7 @@ function parseCalendarConfig(raw) {
     allowRealCalendarRead: c.allowRealCalendarRead === true,
     allowRealCalendarWrite: c.allowRealCalendarWrite === true,
     allowedCalendars: parseStringAllowlist(c.allowedCalendars, "calendar.allowedCalendars"),
+    pullIntervalMs,
     defaultTimezone,
     quietHours,
   };
@@ -509,7 +536,7 @@ export function loadDaemonConfig({ path = defaultsJsonPath() } = {}) {
     },
     adapters: {
       fixedSendingIdentity: defaults.adapters?.fixedSendingIdentity ?? "aegispi@local",
-      allowedRecipients: parseStringAllowlist(defaults.adapters?.allowedRecipients, "adapters.allowedRecipients"),
+      allowedRecipients: parseStringAllowlist(defaults.adapters?.allowedRecipients, "adapters.allowedRecipients").map(normalizeRecipientEntry).filter((v) => v.length > 0),
       allowedRepos: parseStringAllowlist(defaults.adapters?.allowedRepos, "adapters.allowedRepos"),
       allowedBranches: parseStringAllowlist(defaults.adapters?.allowedBranches, "adapters.allowedBranches"),
     },

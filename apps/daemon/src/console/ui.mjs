@@ -313,6 +313,14 @@ function renderApprovals() {
   var head = el("tr", null, [el("th", { text: "卡" }), el("th", { text: "scope / 任务" }), el("th", { text: "动作" }), el("th", { text: "action_hash" }), el("th", { text: "到期" }), el("th", { text: "操作" })]);
   t.appendChild(head);
   state.approvals.forEach(function (a) {
+    var edit = el("div", { class: "hidden row" });
+    var subj = el("input", { placeholder: "subject", style: "flex:1" });
+    var body = el("textarea", { placeholder: "正文" });
+    edit.appendChild(subj); edit.appendChild(body);
+    function prefillEdit(extra) {
+      if (!subj.value && extra.subject !== undefined && extra.subject !== null) subj.value = String(extra.subject);
+      if (!body.value && extra.bodyText !== undefined && extra.bodyText !== null) body.value = String(extra.bodyText);
+    }
     // F-11 (D-99): the preview card is MOUNTED in the first cell (under the
     // approval id) and fills from GET /api/approvals/:id on first expand —
     // the card fields (target resource, evidence manifest, ETag) were
@@ -323,6 +331,8 @@ function renderApprovals() {
       if (!detail.open || info.dataset.loaded) return;
       var card = await api("GET", "/api/approvals/" + encodeURIComponent(a.id));
       var act = (card.data && card.data.action) || {};
+      var extra = act.extra || {};
+      prefillEdit(extra);
       var rows = [
         ["动作", act.operation || ""],
         ["目标资源", act.targetResource || ""],
@@ -332,6 +342,9 @@ function renderApprovals() {
         ["附件 hash", shortHash(act.attachmentHash || "")],
         ["expected_head (ETag)", act.expectedHead || "—"],
       ];
+      if (extra.subject !== undefined && extra.subject !== null && String(extra.subject).length > 0) {
+        rows.push(["邮件主题", String(extra.subject)]);
+      }
       info.textContent = "";
       rows.forEach(function (r) {
         var line = el("div", { class: "row" });
@@ -339,24 +352,32 @@ function renderApprovals() {
         line.appendChild(el("span", { text: String(r[1]) }));
         info.appendChild(line);
       });
+      if (extra.bodyText !== undefined && extra.bodyText !== null && String(extra.bodyText).length > 0) {
+        info.appendChild(el("div", { class: "dim", text: "草稿正文:" }));
+        info.appendChild(el("pre", { text: String(extra.bodyText) }));
+      }
       info.dataset.loaded = "1";
     });
-    var edit = el("div", { class: "hidden row" });
-    var subj = el("input", { placeholder: "subject", style: "flex:1" });
-    var body = el("textarea", { placeholder: "正文" });
-    edit.appendChild(subj); edit.appendChild(body);
     var doEdit = el("button", { class: "act", text: "提交编辑重签", click: async function () {
       var card = await api("GET", "/api/approvals/" + encodeURIComponent(a.id));
       var action = (card.data && card.data.action) || {};
       var intent = Object.assign({}, action.extra || {}, { subject: subj.value || action.extra.subject, bodyText: body.value || action.extra.bodyText });
       var r = await api("POST", "/api/approvals/" + encodeURIComponent(a.id) + "/revise", { intent: intent, expiresAt: Date.now() + 4 * 3600 * 1000 });
       $("tab-approvals").querySelector(".editmsg") && Array.prototype.forEach.call(document.querySelectorAll(".editmsg"), function (n) { n.textContent = ""; });
-      var msg = el("span", { class: r.status === 200 ? "ok" : "bad", text: r.status === 200 ? "已换新卡 " + (r.data.newApprovalId || "") : ("编辑失败: " + (r.data && r.data.message)) });
+      var msg = el("span", { class: (r.status === 200 ? "ok" : "bad") + " editmsg", text: r.status === 200 ? "已换新卡 " + (r.data.newApprovalId || "") : ("编辑失败: " + (r.data && r.data.message)) });
       edit.appendChild(msg);
       refreshAll();
     } });
     edit.appendChild(doEdit);
-    var showEdit = el("button", { class: "act", text: "编辑草稿并重新生成审批", click: function () { edit.classList.toggle("hidden"); } });
+    var showEdit = el("button", { class: "act", text: "编辑草稿并重新生成审批", click: async function () {
+      edit.classList.toggle("hidden");
+      if (!edit.classList.contains("hidden") && (!subj.value || !body.value) && !edit.dataset.prefilled) {
+        var card = await api("GET", "/api/approvals/" + encodeURIComponent(a.id));
+        var extra = (card.data && card.data.action && card.data.action.extra) || {};
+        prefillEdit(extra);
+        edit.dataset.prefilled = "1";
+      }
+    } });
     var approve = el("button", { class: "act", text: "批准此动作", click: async function () {
       var card = await api("GET", "/api/approvals/" + encodeURIComponent(a.id));
       var dm = card.data && card.data.decisionMaterials;
@@ -430,13 +451,22 @@ function renderTasks() {
         refreshAll();
       } });
       var steer = el("button", { class: "act", text: "Steer", click: function () { edit.classList.toggle("hidden"); } });
+      var actions = [steer, cancel];
+      if (task.result_object_id) {
+        actions.push(el("button", { class: "act", text: "查看结果", click: function () {
+          $("objId").value = task.result_object_id;
+          $("objOffset").value = "0";
+          $("objLoad").click();
+        } }));
+      }
+      actions.push(edit);
       t.appendChild(el("tr", null, [
         el("td", { text: task.id }),
         el("td", { text: task.state }),
         el("td", { text: String(task.result_class || "-") }),
         el("td", { text: "fence " + task.fence }),
         el("td", { text: fmtTime(task.updated_at) }),
-        el("td", null, [steer, cancel, edit]),
+        el("td", null, actions),
       ]));
     });
     panel.appendChild(t);

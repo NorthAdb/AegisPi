@@ -18,7 +18,7 @@ import { startupRecovery } from "./recovery.mjs";
 import { createBudgetLedger } from "./budget.mjs";
 import { dispatchEventBatchToTask } from "./router.mjs";
 import { currentSkillSetHash } from "./skills.mjs";
-import { dispatchKeyForInbox } from "./ingress.mjs";
+import { dispatchKeyForInbox, ensurePrincipal } from "./ingress.mjs";
 import { pullTelegramUpdates } from "./telegram-pull.mjs";
 import { createCredentialService } from "./credentials.mjs";
 import { pullMailMessages, createMailUpstream, splitMailCredential } from "./mail-adapter.mjs";
@@ -58,6 +58,13 @@ import { isLoopbackModelEndpoint } from "./model-call.mjs";
 import { cancelPreCallModelRequest, processPendingModelProposalsAsync } from "./model-requests.mjs";
 import { parseRepoObservePayload, executeRepoObserveAcquisition } from "./repo-observe.mjs";
 import { parseRepoTriagePayload, executeRepoTriageTask } from "./repo-triage.mjs";
+import {
+  translateTelegramCommandToPayload,
+  formatGeneralUserPrompt,
+  parseInboundMailPayload,
+  maybeEnqueueTelegramTaskReply,
+  executeMailTriageTask,
+} from "./selfuse-dispatch.mjs";
 import { diskWatermark, recordWatermark } from "./db/disk-water.mjs";
 import { consistencyBackup, insideMaintenanceWindow, pruneExpiredBackups } from "./db/backup-window.mjs";
 import {
@@ -195,6 +202,9 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   ensureModelRequestsTable(db);
+  withTx(db, () => {
+    ensurePrincipal(db, { platform: "local", subject: "owner" });
+  });
   const ledger = createBudgetLedger(db, {
     taskLimitMicrousd: config.budget.taskLimitMicrousd,
     dayLimitMicrousd: config.budget.dayLimitMicrousd,
@@ -442,6 +452,32 @@ export async function main(argv = process.argv.slice(2)) {
     return open.length;
   }
 
+  function enqueuePendingTelegramReplies() {
+    if (config.telegram?.autoReplyOnTask !== true || !config.telegram?.apiBase) return 0;
+    const rows = db
+      .prepare(
+        `SELECT t.id FROM tasks t
+         JOIN scopes s ON s.id = t.scope_id
+         WHERE t.state='SUCCEEDED' AND t.result_object_id IS NOT NULL
+           AND (s.domain_key LIKE 'dm:telegram:%' OR s.domain_key LIKE 'group:telegram:%')
+           AND NOT EXISTS (
+             SELECT 1 FROM effects e WHERE e.task_id=t.id AND e.operation IN ('send_message', 'im.notify')
+           )
+         ORDER BY t.updated_at DESC LIMIT 20`,
+      )
+      .all();
+    let enqueued = 0;
+    for (const row of rows) {
+      try {
+        const res = maybeEnqueueTelegramTaskReply(db, dataDir, { config, taskId: row.id, now: Date.now() });
+        if (res.enqueued) enqueued += 1;
+      } catch (err) {
+        console.error(`telegram-reply failed on ${row.id}: ${err.message}`);
+      }
+    }
+    return enqueued;
+  }
+
   // Watermark level changes stream an alert once per transition; the backup
   // runs once per window-day when the manifest key is configured.
   let lastDiskLevel = diskNow.level;
@@ -535,6 +571,7 @@ export async function main(argv = process.argv.slice(2)) {
                     now,
                     account: cred.user,
                     message,
+                    ownerId: "prn:local:owner",
                     mailConfig: config.mail,
                   });
                   if (ing.admitted && !ing.duplicate) ingested += 1;
@@ -657,6 +694,7 @@ export async function main(argv = process.argv.slice(2)) {
           followupOutbox = processFiredFollowUpTimers(db, dataDir, {
             now,
             firedTimers: wiredTimers,
+            destination: config.telegram?.ownerDestination ?? null,
             quietHours: config.calendar?.quietHours ?? null,
           });
         } catch (e) {
@@ -666,6 +704,7 @@ export async function main(argv = process.argv.slice(2)) {
           briefingOutbox = processFiredBriefingTimers(db, dataDir, {
             now,
             firedTimers: wiredTimers,
+            destination: config.telegram?.ownerDestination ?? null,
             quietHours: config.calendar?.quietHours ?? null,
           });
         } catch (e) {
@@ -927,7 +966,11 @@ export async function main(argv = process.argv.slice(2)) {
               });
               skipLaunch = true;
             }
-            const parsedTriage = parseRepoTriagePayload(callInput);
+            const translatedInput = !skipLaunch && callInput !== null
+              ? translateTelegramCommandToPayload(callInput, { scopeDomainKey: scopeRow.domain_key })
+              : callInput;
+            launchInput = translatedInput;
+            const parsedTriage = skipLaunch ? { isTriage: false } : parseRepoTriagePayload(translatedInput);
             if (parsedTriage.isTriage) {
               excludeTriageTaskIds.add(claim.taskId);
               try {
@@ -964,7 +1007,52 @@ export async function main(argv = process.argv.slice(2)) {
               }
               skipLaunch = true;
             }
-            const parsedObserve = skipLaunch ? { isObserve: false } : parseRepoObservePayload(callInput);
+            const parsedMail = skipLaunch ? { isMail: false } : parseInboundMailPayload(launchInput);
+            if (parsedMail.isMail && config.mail?.autoDraftReplies === true && !skipLaunch) {
+              if (canRunModel && agentLauncher) {
+                excludeTriageTaskIds.add(claim.taskId);
+                try {
+                  await executeMailTriageTask(db, {
+                    stateDir: dataDir,
+                    config,
+                    ledger,
+                    agentLauncher,
+                    claim,
+                    taskRow,
+                    scopeRow,
+                    mailPayload: parsedMail.mail,
+                    now,
+                  });
+                } catch (err) {
+                  console.error(`mail-triage failed unexpectedly on ${claim.taskId}: ${err.message}`);
+                  try {
+                    withTx(db, () => {
+                      completeTaskInTx(db, {
+                        ...claim,
+                        now: Date.now(),
+                        resultClass: "infra_error",
+                        errorCode: "mail_triage_unexpected_error",
+                      });
+                      returnOpenDeliveries(db, { taskId: claim.taskId, now: Date.now(), reason: "mail_triage_unexpected_error" });
+                    });
+                  } catch {}
+                }
+              } else {
+                try {
+                  withTx(db, () => {
+                    completeTaskInTx(db, {
+                      ...claim,
+                      now: Date.now(),
+                      resultClass: "infra_error",
+                      errorCode: "mail_triage_unavailable",
+                    });
+                    returnOpenDeliveries(db, { taskId: claim.taskId, now: Date.now(), reason: "mail_triage_unavailable" });
+                  });
+                } catch {}
+              }
+              skipLaunch = true;
+            }
+            const parsedObserve = skipLaunch ? { isObserve: false } : parseRepoObservePayload(translatedInput);
             if (!skipLaunch && !canRunModel) {
               skipLaunch = true;
             }
@@ -1056,6 +1144,7 @@ export async function main(argv = process.argv.slice(2)) {
                 const modelKey = config.model.provider && config.model.modelId
                   ? `${config.model.provider}/${config.model.modelId}`
                   : "deepseek/deepseek-flash";
+                const userPrompt = formatGeneralUserPrompt(launchInput);
                 const launched = agentLauncher.launchAttempt({
                   taskId: claim.taskId,
                   attemptId: claim.attemptId,
@@ -1065,7 +1154,7 @@ export async function main(argv = process.argv.slice(2)) {
                   modelRequest: {
                     purpose: "worker",
                     modelId: modelKey,
-                    messages: [{ role: "user", content: launchInput ?? `task ${claim.taskId}` }],
+                    messages: [{ role: "user", content: userPrompt ?? `task ${claim.taskId}` }],
                   },
                   now,
                 });
@@ -1114,6 +1203,7 @@ export async function main(argv = process.argv.slice(2)) {
         console.error(`worker: ${awaiting} task(s) await an execution path; no model baseUrl is configured (model.baseUrl is null) — nothing is claimed or settled (fixture settlements require --fake-upstream)`);
       }
     }
+    const telegramRepliesEnqueued = enqueuePendingTelegramReplies();
     const canDispatchEffectRow = (row) =>
       Boolean(
         baseUpstream ||
@@ -1267,12 +1357,12 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const pendingScopeCount = pendingScopes.length;
     const scheduledNotifications = followupOutbox.filter((r) => r.outboxId).length + briefingOutbox.filter((r) => r.outboxId).length;
-    if (timers.fired.length > 0 || pendingScopeCount > 0 || claim || proposalProcessed > 0 || due.length > 0 || scheduledNotifications > 0) {
+    if (timers.fired.length > 0 || pendingScopeCount > 0 || claim || proposalProcessed > 0 || due.length > 0 || scheduledNotifications > 0 || telegramRepliesEnqueued > 0) {
       console.log(
-        `tick: timers=${timers.fired.length} dispatched_scopes=${pendingScopeCount} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} reminders=${followupOutbox.filter((r) => r.outboxId).length} briefings=${briefingOutbox.filter((r) => r.outboxId).length} due_notifications=${due.length}`,
+        `tick: timers=${timers.fired.length} dispatched_scopes=${pendingScopeCount} claimed=${claim ? claim.taskId : "none"} proposals=${proposalProcessed} reminders=${followupOutbox.filter((r) => r.outboxId).length} briefings=${briefingOutbox.filter((r) => r.outboxId).length} due_notifications=${due.length} tg_replies=${telegramRepliesEnqueued}`,
       );
     }
-    return timers.fired.length + pendingScopeCount + (claim ? 1 : 0) + proposalProcessed + due.length + scheduledNotifications;
+    return timers.fired.length + pendingScopeCount + (claim ? 1 : 0) + proposalProcessed + due.length + scheduledNotifications + telegramRepliesEnqueued;
   };
 
   if (args.has("--once")) {
@@ -1303,9 +1393,15 @@ export async function main(argv = process.argv.slice(2)) {
             }
           }
           stopAllActiveAgentContainers();
+          if (enqueuePendingTelegramReplies() > 0) {
+            continue;
+          }
           if (db.prepare("SELECT count(*) c FROM tasks WHERE state='QUEUED'").get().c > 0) {
             continue;
           }
+        }
+        if (enqueuePendingTelegramReplies() > 0) {
+          continue;
         }
         if (work === 0) break;
       }

@@ -186,8 +186,14 @@ export function createAdapterUpstream(db, {
         if (intent.extra.sendingIdentity !== config.fixedSendingIdentity) {
           return { ok: false, reason: `sending identity ${intent.extra.sendingIdentity} is not the configured fixed identity` };
         }
+        const allowedMailRecipients = new Set(
+          (Array.isArray(config.allowedRecipients) ? config.allowedRecipients : [])
+            .map((entry) => String(entry).trim().toLowerCase())
+            .filter(Boolean),
+        );
         for (const r of intent.extra.recipients) {
-          if (!config.allowedRecipients.includes(r)) {
+          const normalized = String(r).trim().toLowerCase();
+          if (!normalized || !allowedMailRecipients.has(normalized)) {
             return { ok: false, reason: `recipient ${r} is not on the authorized recipient list` };
           }
         }

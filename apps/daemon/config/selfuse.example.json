@@ -1,0 +1,142 @@
+{
+  "$comment": "Personal-use daemon config template. Copy to a gitignored file such as apps/daemon/config/selfuse.local.json or selfuse.config.json, fill real values, and leave defaults.json untouched. Every allowReal* flag starts false (fail closed).",
+  "schemaVersion": 1,
+  "budget": {
+    "taskMicroUsd": 800000,
+    "taskMaxSteps": 25,
+    "taskMaxWallClockSeconds": 900,
+    "dayMicroUsd": 5000000,
+    "cacheWarming": "off",
+    "purposes": ["router", "worker", "summary", "classify", "rsi", "replay", "warming", "watchdog"]
+  },
+  "leases": {
+    "heartbeatSeconds": 10,
+    "leaseSeconds": 45,
+    "offlineJobDeadlineSeconds": 90,
+    "maxConcurrentAgentsPerScope": 1,
+    "maxOfflineJobsMachineWide": 2
+  },
+  "containerPlaceholders": {
+    "agent": { "cpus": 1, "memoryGiB": 1, "pids": 256, "writableDiskGiB": 2 },
+    "execution": { "cpus": 1, "memoryGiB": 2, "pids": 256, "writableDiskGiB": 4 }
+  },
+  "model": {
+    "display": "DeepSeek Flash High",
+    "provider": "deepseek",
+    "modelId": "deepseek-flash",
+    "thinkingLevel": "high",
+    "baseUrl": "https://api.deepseek.com",
+    "allowedPurposes": ["worker"],
+    "allowedModelIds": ["deepseek/deepseek-flash"],
+    "allowRealModelCalls": false,
+    "callUpperMicrousd": 10000,
+    "callTimeoutMs": 60000,
+    "maxInputBytes": 65536,
+    "maxOutputTokens": 2048,
+    "priceCatalog": {
+      "$comment": "Before setting allowRealModelCalls=true, fill verified integer microUSD per 1M token prices for your chosen model. Null rates hold settlement instead of guessing.",
+      "inputPerMTokMicrousd": null,
+      "outputPerMTokMicrousd": null,
+      "cacheReadPerMTokMicrousd": null,
+      "cacheWritePerMTokMicrousd": null
+    }
+  },
+  "time": { "timezoneIANA": "Asia/Hong_Kong", "epochUnit": "unixMilliseconds" },
+  "sqlite": { "driver": "node:sqlite", "bundledSqlite": "3.54.1", "journalMode": "WAL", "synchronous": "FULL" },
+  "policy": {
+    "allowRealExternalWrites": false
+  },
+  "upstream": {
+    "submitUrl": null,
+    "timeoutMs": 30000
+  },
+  "telegram": {
+    "apiBase": "https://api.telegram.org",
+    "allowRealSend": false,
+    "proxyUrl": null,
+    "timeoutMs": 15000,
+    "allowRealPull": false,
+    "pullIntervalMs": 5000,
+    "pullTimeoutSeconds": 20,
+    "pullBatchLimit": 20,
+    "allowedChatIds": ["<TELEGRAM_OWNER_USER_ID>"],
+    "autoReplyOnTask": true,
+    "ownerDestination": null
+  },
+  "router": {
+    "agingStepMs": 60000,
+    "batchMaxEvents": 8,
+    "scopeConsecutiveTurnLimit": 3
+  },
+  "memory": {
+    "l0MemoryMaxChars": 2200,
+    "l0UserMaxChars": 1375,
+    "l1MaxHops": 2,
+    "l1MaxObjects": 16,
+    "summaryMaxOutputTokens": 500,
+    "autoActivateCandidateFacts": false,
+    "spillMaxBytes": 51200,
+    "spillMaxLines": 2000
+  },
+  "mail": {
+    "imapHost": "<MAIL_IMAP_HOST>",
+    "imapPort": 993,
+    "imapTls": true,
+    "smtpHost": "<MAIL_SMTP_HOST>",
+    "smtpPort": 465,
+    "smtpTls": true,
+    "allowRealMailRead": false,
+    "allowRealMailSend": false,
+    "allowedFolders": ["INBOX"],
+    "allowedSenders": ["<TRUSTED_SENDER_EMAIL>"],
+    "allowedRecipients": ["<ALLOWED_RECIPIENT_EMAIL>"],
+    "pullIntervalMs": 15000,
+    "autoDraftReplies": true,
+    "approvalTtlMs": 14400000,
+    "maxAttachmentBytes": 4194304
+  },
+  "calendar": {
+    "caldavUrl": null,
+    "allowRealCalendarRead": false,
+    "allowRealCalendarWrite": false,
+    "allowedCalendars": [],
+    "pullIntervalMs": 30000,
+    "defaultTimezone": "Asia/Hong_Kong",
+    "quietHours": { "start": "23:00", "end": "07:00", "timezone": "Asia/Hong_Kong" }
+  },
+  "credentials": {
+    "mail": "env:AEGISPI_MAIL_CREDENTIAL",
+    "repo": null,
+    "im": "env:TELEGRAM_BOT_TOKEN"
+  },
+  "adapters": {
+    "fixedSendingIdentity": "<YOUR_EMAIL_ADDRESS>",
+    "allowedRecipients": ["dm:telegram:<TELEGRAM_OWNER_USER_ID>", "<ALLOWED_RECIPIENT_EMAIL>"],
+    "allowedRepos": [],
+    "allowedBranches": []
+  },
+  "disk": {
+    "warnFreeGiB": 20,
+    "criticalFreeGiB": 10
+  },
+  "backup": {
+    "windowStartHour": 4,
+    "windowEndHour": 5,
+    "retentionDays": 14
+  },
+  "acquisition": {
+    "allowRealRepoFetch": false,
+    "enableHostGateway": false,
+    "allowedHosts": [],
+    "targets": {},
+    "maxDownloadBytes": 8388608,
+    "maxExcerptBytes": 32768,
+    "maxFiles": 32,
+    "timeoutMs": 30000
+  },
+  "triage": {
+    "allowRealTriage": false,
+    "allowModelObserve": true,
+    "presets": {}
+  }
+}

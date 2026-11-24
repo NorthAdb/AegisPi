@@ -1,10 +1,10 @@
 # eval:triage: Scenario 4 repository triage and four-class oracle offline acceptance
 
-生成：2026-11-23T13:18:36.277Z；Node v22.23.5；suite `triage`。
+生成：2026-11-24T03:33:17.962Z；Node v22.23.5；suite `triage`。
 
 | 状态 | 检查 | 证据 |
 | --- | --- | --- |
-| PASS | triage-e2e-dependency-advisory-unaffected-and-telegram | exit=0 task=SUCCEEDED/unaffected cost=28 jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:6101:9001 manifestValid=true err=(node:48872) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+| PASS | triage-e2e-dependency-advisory-unaffected-and-telegram | exit=0 task=SUCCEEDED/unaffected cost=28 jobs=SUCCEEDED:0,FAILED:1 effect=SUCCEEDED/tg:6101:9001 manifestValid=true err=(node:23588) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 (Use `node --trace-warnings ...` to show where the wa |
 | PASS | triage-e2e-snapshot-regression-affected-ignores-forged-stdout | exit=0 task=SUCCEEDED/affected jobs=SUCCEEDED:0,FAILED:1 |
 | PASS | triage-baseline-failure-forces-infra-error-never-affected | exit=0 task=FAILED/infra_error err=triage_baseline_failed |

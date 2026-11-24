@@ -24,7 +24,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { decideApproval, hasApproveGrant, readConsoleNonce } from "../approvals.mjs";
-import { reviseEffect, cancelTask, reconcileUnknown } from "../effects.mjs";
+import { extraFieldsOfAction, reviseEffect, cancelTask, reconcileUnknown } from "../effects.mjs";
 import { grantPermission, revokePermission } from "../acl.mjs";
 import { createTelegramWebhookGuard, mapTelegramUpdate } from "../ingress-telegram.mjs";
 import { receiveEvent } from "../ingress.mjs";
@@ -227,7 +227,7 @@ export function createConsoleApp(db, {
   app.get("/api/tasks", (c) => {
     const tasks = db
       .prepare(
-        `SELECT id, scope_id, state, priority, result_class, attempt_no, fence, available_at, deadline_at,
+        `SELECT id, scope_id, state, priority, result_class, result_object_id, attempt_no, fence, available_at, deadline_at,
            step_count, max_steps, created_at, updated_at
          FROM tasks ORDER BY created_at DESC LIMIT 100`,
       )
@@ -373,7 +373,7 @@ export function createConsoleApp(db, {
         attachmentHash: action.attachment_hash ?? null,
         expectedHead: action.expected_head ?? null,
         sendingIdentity: action.sending_identity ?? null,
-        extra: action.extra ?? {},
+        extra: extraFieldsOfAction(action),
         evidenceManifestHash: action.evidence_manifest_hash ?? null,
         expiresAt: effect.expires_at,
       },

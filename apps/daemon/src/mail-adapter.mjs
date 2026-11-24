@@ -148,9 +148,14 @@ export function createMailUpstream(db, {
       // The transport reachability whitelist (adapters.allowedRecipients) is
       // enforced here too — but it is NOT a disclosure authorization; the CP4
       // closure gate already decided whether this payload may leave at all.
-      const transportWhitelist = Array.isArray(mailConfig.allowedRecipients) ? mailConfig.allowedRecipients : [];
+      const transportWhitelist = new Set(
+        (Array.isArray(mailConfig.allowedRecipients) ? mailConfig.allowedRecipients : [])
+          .map((entry) => String(entry).trim().toLowerCase())
+          .filter(Boolean),
+      );
       for (const r of recipients) {
-        if (!transportWhitelist.includes(r)) {
+        const normalized = String(r).trim().toLowerCase();
+        if (!normalized || !transportWhitelist.has(normalized)) {
           auditRefusal(`recipient ${r} is not on mail.allowedRecipients (transport reachability)`);
           return { status: "failed_local", error: `local_error: mail adapter refused: recipient ${r} not on the transport whitelist` };
         }

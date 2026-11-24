@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-23T13:14:36.914Z",
+  "generatedAt": "2026-11-24T03:28:05.567Z",
   "nodeVersion": "v22.23.5",
   "suite": "repo-observe",
   "label": "test:repo-observe — Phase 4.2 Permission 1 离线仓库 Observe 全链、fail-closed 门禁与 D-80 加固回归",
@@ -11,7 +11,7 @@
     {
       "name": "repo-observe-e2e-acquisition-to-settled-28",
       "status": "PASS",
-      "detail": "exit=0 task=SUCCEEDED req=SETTLED res=SETTLED(28) maxTok=128 prefixBeforeQ=true redacted=true edge=derived_from leftDirs=0 err=(node:7904) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+      "detail": "exit=0 task=SUCCEEDED req=SETTLED res=SETTLED(28) maxTok=128 prefixBeforeQ=true redacted=true edge=derived_from leftDirs=0 err=(node:22304) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
     },
     {
       "name": "fail-closed-targets-hosts-and-nonloopback-token-caps",
@@ -36,7 +36,7 @@
     {
       "name": "async-heartbeat-extends-lease-and-model-real-optin-exit-4",
       "status": "PASS",
-      "detail": "status=settled req=SETTLED orphan=false task=RUNNING leaseDelta=3073 realGuardExit=4"
+      "detail": "status=settled req=SETTLED orphan=false task=RUNNING leaseDelta=2716 realGuardExit=4"
     },
     {
       "name": "repo-observe-kv-prefix-stable-and-question-survives-cap",
