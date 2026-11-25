@@ -732,6 +732,79 @@ export function correctChargedBoundReservation(
   });
 }
 
+export interface BudgetTaskBindingRow {
+  runtime_epoch: string;
+  binding_kind: "PI_TASK" | "CONVERSATION";
+  binding_key: string;
+  conversation_id: string;
+  owner_task_id: string;
+  purpose: BudgetPurpose;
+  created_at: number;
+}
+
+export function persistBudgetTaskBinding(
+  db: DatabaseSync,
+  params: {
+    runtimeEpoch: string;
+    bindingKind: "PI_TASK" | "CONVERSATION";
+    bindingKey: string;
+    conversationId: string;
+    ownerTaskId: string;
+    purpose: BudgetPurpose;
+    now: number;
+    overwrite?: boolean;
+  },
+): void {
+  withImmediateTx(db, () => {
+    const sql = params.overwrite
+      ? `INSERT INTO budget_task_bindings(
+           runtime_epoch, binding_kind, binding_key, conversation_id, owner_task_id, purpose, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(runtime_epoch, binding_kind, binding_key) DO UPDATE SET
+           conversation_id = excluded.conversation_id,
+           owner_task_id = excluded.owner_task_id,
+           purpose = excluded.purpose`
+      : `INSERT OR IGNORE INTO budget_task_bindings(
+           runtime_epoch, binding_kind, binding_key, conversation_id, owner_task_id, purpose, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+    db.prepare(sql).run(
+      params.runtimeEpoch,
+      params.bindingKind,
+      params.bindingKey,
+      params.conversationId,
+      params.ownerTaskId,
+      params.purpose,
+      params.now,
+    );
+  });
+}
+
+export function getPersistedBudgetBinding(
+  db: DatabaseSync,
+  params: {
+    runtimeEpoch: string;
+    bindingKind: "PI_TASK" | "CONVERSATION";
+    bindingKey: string;
+  },
+): BudgetTaskBindingRow | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM budget_task_bindings
+        WHERE runtime_epoch = ? AND binding_kind = ? AND binding_key = ?`,
+    )
+    .get(params.runtimeEpoch, params.bindingKind, params.bindingKey) as BudgetTaskBindingRow | undefined;
+  return row ?? null;
+}
+
+export function listPersistedBudgetBindings(
+  db: DatabaseSync,
+  runtimeEpoch: string,
+): BudgetTaskBindingRow[] {
+  return db
+    .prepare("SELECT * FROM budget_task_bindings WHERE runtime_epoch = ? ORDER BY created_at ASC")
+    .all(runtimeEpoch) as unknown as BudgetTaskBindingRow[];
+}
+
 export function listBudgetDenialsForConversation(
   db: DatabaseSync,
   conversationId: string,

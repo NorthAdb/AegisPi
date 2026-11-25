@@ -261,13 +261,14 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
     });
     assert.equal(chatRes.status, 200);
 
-    // Wait until View 1 snapshot shows the PENDING approval card
+    // Wait until View 1 snapshot shows the PENDING approval card (G3: snapshot must NOT expose plaintext nonce!)
     let pendingCard: {
       proposalId: string;
       approvalId: string;
       revision: number;
       actionHash: string;
-      nonce: string;
+      hasChallenge: boolean;
+      nonce?: string | null;
       uiStatusLabel: string;
     } | null = null;
     for (let i = 0; i < 80; i++) {
@@ -280,18 +281,20 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
           approvalId: string;
           revision: number;
           actionHash: string;
-          nonce: string | null;
+          hasChallenge: boolean;
+          nonce?: string | null;
           approvalState: string;
           uiStatusLabel: string;
         }>;
       };
-      const found = snap.proposals.find((p) => p.approvalState === "PENDING" && p.nonce);
-      if (found && found.nonce) {
+      const found = snap.proposals.find((p) => p.approvalState === "PENDING" && p.hasChallenge);
+      if (found) {
         pendingCard = {
           proposalId: found.proposalId,
           approvalId: found.approvalId,
           revision: found.revision,
           actionHash: found.actionHash,
+          hasChallenge: found.hasChallenge,
           nonce: found.nonce,
           uiStatusLabel: found.uiStatusLabel,
         };
@@ -300,12 +303,27 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.ok(pendingCard, "W1-B: pending approval card must appear in View 1 snapshot");
+    assert.equal(pendingCard.nonce, undefined, "W1-B/G3: snapshot must NOT contain plaintext nonce");
+
+    // G3: Fetch single-use approval challenge via dedicated authorized endpoint
+    const chRes = await fetch(`${host1.baseUrl}/api/approvals/${pendingCard.approvalId}/challenge`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookie1, origin: host1.baseUrl },
+      body: JSON.stringify({ conversationId }),
+    });
+    assert.equal(chRes.status, 200, "W1-B/G3: authorized challenge route must return 200");
+    const chBody = (await chRes.json()) as { ok: boolean; nonce: string; revision: number; actionHash: string };
+    assert.equal(chBody.ok, true);
+    assert.ok(chBody.nonce && chBody.nonce.length > 8);
+    const approvalNonce = chBody.nonce;
+
     logStep("proposal_pending_in_view1", {
       proposalId: pendingCard.proposalId,
       approvalId: pendingCard.approvalId,
       revision: pendingCard.revision,
       actionHash: pendingCard.actionHash,
-      noncePresent: Boolean(pendingCard.nonce),
+      nonceExposedInSnapshot: false,
+      challengeFetchedViaDedicatedRoute: true,
       uiStatusLabel: pendingCard.uiStatusLabel,
     });
 
@@ -320,7 +338,7 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
         decision: "APPROVE",
         expectedRevision: pendingCard.revision,
         expectedActionHash: pendingCard.actionHash,
-        nonce: pendingCard.nonce,
+        nonce: approvalNonce,
         decisionKey,
       }),
     });
@@ -398,7 +416,7 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
     // Wait briefly to confirm recovery scheduling settles with ZERO resends
     await new Promise((r) => setTimeout(r, 400));
 
-    // 8. Repeated wakeup / duplicate decide attempts & View 1 refresh on Host #2
+    // 8. Repeated wakeup (BOTH HTTP decide replay AND real SDK signal re-delivery!) & View 1 refresh on Host #2
     const cookie2 = await login(host2.baseUrl, consoleToken);
     const replayDecide = await fetch(`${host2.baseUrl}/api/approvals/decide`, {
       method: "POST",
@@ -409,7 +427,7 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
         decision: "APPROVE",
         expectedRevision: pendingCard.revision,
         expectedActionHash: pendingCard.actionHash,
-        nonce: pendingCard.nonce,
+        nonce: approvalNonce,
         decisionKey,
       }),
     });
@@ -427,11 +445,33 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
         decision: "APPROVE",
         expectedRevision: pendingCard.revision,
         expectedActionHash: pendingCard.actionHash,
-        nonce: pendingCard.nonce,
+        nonce: approvalNonce,
         decisionKey: `dk_${runId}_second_attempt`,
       }),
     });
     assert.equal(newKeyDecide.status, 409, "W1-B: new decisionKey against consumed approval must return 409");
+
+    // R4: Explicit duplicate SDK signal wakeup against the recovered tool task on Host #2!
+    const sdkWakeRes = await fetch(`${host2.baseUrl}/api/approvals/${pendingCard.approvalId}/redeliver`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookie2, origin: host2.baseUrl },
+      body: JSON.stringify({}),
+    });
+    assert.equal(sdkWakeRes.status, 200, "W1-B/R4: explicit SDK redeliver route must succeed");
+    const sdkWakeBody = (await sdkWakeRes.json()) as {
+      ok: boolean;
+      sdkResult: string;
+      deliveryKey: string;
+      duplicateCheck: string | null;
+      outbox: { approval_id: string; state: string; sdk_result: string | null; reason: string | null } | null;
+      effect: { effect_id: string; state: string; receipt_ref: string | null } | null;
+    };
+    assert.ok(
+      sdkWakeBody.sdkResult === "duplicate" || sdkWakeBody.sdkResult === "closed",
+      `W1-B/R4: expected SDK duplicate or closed on post-recovery wakeup, got ${sdkWakeBody.sdkResult}`,
+    );
+    assert.equal(sdkWakeBody.effect?.state, "UNKNOWN");
+    await new Promise((r) => setTimeout(r, 250));
 
     const snap2Res = await fetch(`${host2.baseUrl}/api/conversations/${conversationId}/snapshot`, {
       headers: { cookie: cookie2 },
@@ -456,6 +496,14 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
       smtpTotalReceived: smtpStatsAfterHost2.totalReceived,
       view1Label: card2.uiStatusLabel,
       effectState: card2.effect.state,
+      duplicateSdkWakeup: {
+        sdkResult: sdkWakeBody.sdkResult,
+        deliveryKey: sdkWakeBody.deliveryKey,
+        duplicateCheck: sdkWakeBody.duplicateCheck,
+        outboxState: sdkWakeBody.outbox?.state ?? null,
+        outboxSdkResult: sdkWakeBody.outbox?.sdk_result ?? null,
+        effectState: sdkWakeBody.effect?.state ?? null,
+      },
     });
 
     // 9. Graceful stop Host #2 and restart AGAIN (Host #3) to confirm persistence across repeated restarts
@@ -555,6 +603,13 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
         effectId: card3.effect.effectId,
         effectState: card3.effect.state,
         uiStatusLabel: card3.uiStatusLabel,
+      },
+      duplicateSdkWakeup: {
+        sdkResult: sdkWakeBody.sdkResult,
+        deliveryKey: sdkWakeBody.deliveryKey,
+        duplicateCheck: sdkWakeBody.duplicateCheck,
+        outbox: sdkWakeBody.outbox,
+        effect: sdkWakeBody.effect,
       },
       secretScan: { clean: true, leaks: secretLeaks },
       timeline,

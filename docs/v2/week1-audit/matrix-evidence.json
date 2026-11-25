@@ -3,8 +3,8 @@
   "status": "PASS",
   "nodeVersion": "v22.23.5",
   "sqliteVersion": "3.54.1",
-  "passed": 19,
-  "total": 19,
+  "passed": 23,
+  "total": 23,
   "results": [
     {
       "id": "GUARD-BOUNDARY",
@@ -16,12 +16,67 @@
       }
     },
     {
+      "id": "G1-AUTH",
+      "group": "GUARD",
+      "status": "PASS",
+      "summary": "Formal entry refused startup without token; login ignored client principalId; unauthorized cross-principal challenge/decide/reconcile/revoke all returned 403 with 0 governance row mutations.",
+      "evidence": {
+        "noTokenExitCode": 1,
+        "aliceSpoofedLoginBoundPrincipal": "alice",
+        "bobChallengeStatus": 403,
+        "bobDecideStatus": 403,
+        "bobReconcileStatus": 403,
+        "bobRevokeStatus": 403,
+        "aliceReconcileStatus": 200,
+        "aliceRowsUnchangedAfterBobAttempts": true
+      }
+    },
+    {
+      "id": "G2-EGRESS",
+      "group": "GUARD",
+      "status": "PASS",
+      "summary": "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; controlled observers recorded 0 SMTP connects and 0 model dispatches.",
+      "evidence": {
+        "badModelStartupExitCode": 1,
+        "badSmtpStartupExitCode": 1,
+        "smtpConnectCallsObserved": 0,
+        "modelDispatchCallsObserved": 0
+      }
+    },
+    {
+      "id": "G3-NONCE-SSE",
+      "group": "GUARD",
+      "status": "PASS",
+      "summary": "Verified 0 plaintext nonce hits across SSE frames, conversation snapshots, and audit_events; dedicated POST /api/approvals/:id/challenge returns challenge strictly to authorized principal (403 for unauthorized).",
+      "evidence": {
+        "sseFrameCapturedBytes": 1102,
+        "sseNonceHits": 0,
+        "snapshotNonceHits": 0,
+        "auditNonceHits": 0,
+        "authorizedChallengeStatus": 200,
+        "unauthorizedChallengeStatus": 403
+      }
+    },
+    {
+      "id": "R1-ATTRIBUTION",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Verified real run_worker delegation inherits parent host task (ignoring smuggled model budgetTaskId, 0 worker sends when exhausted, charges parent when funded), persisted bindings survive restart (0 sends when exhausted), and missing binding fails closed (unknown_budget_owner, 0 sends, 0 default accounts).",
+      "evidence": {
+        "delegationDenyPhysicalDelta": 1,
+        "delegationFundedWorkerRequestId": "mreq_84468f9948eb47acaa8c778e8ce75fb5",
+        "delegationTaskFinalChargedMu": 240,
+        "restartContinuationPhysicalDelta": 0,
+        "unboundFailClosedPhysicalDelta": 0
+      }
+    },
+    {
       "id": "F01",
       "group": "F",
       "status": "PASS",
       "summary": "Second host instance rejected with InstanceLockBusyError and 0 DB/service mutations; first instance stayed healthy.",
       "evidence": {
-        "host1Pid": 29140,
+        "host1Pid": 9344,
         "host2ExitCode": 1,
         "modelDelta": 0,
         "smtpDelta": 0
@@ -47,19 +102,20 @@
       "id": "F03",
       "group": "F",
       "status": "PASS",
-      "summary": "Detected same-epoch trace rollback and trace replacement before scheduling, quarantined old READY effects, preserved old HELD reservations, rotated epoch, and blocked forked conversation from claiming parent effect.",
+      "summary": "Detected same-epoch trace rollback (including >200-entry multi-page rollback with identical conversation/task IDs) and trace replacement before scheduling; rotated epoch updated Models and policy extension live to newEpoch, quarantined old READY effects, preserved old HELD reservations, and blocked forked conversation from claiming parent effect.",
       "evidence": {
-        "initialEpoch": "ep_c42da493e1624c99a1fb754a2e127ee6",
-        "newEpoch": "ep_343a30f01ccc48ada608e4066f6a58c0",
+        "initialEpoch": "ep_6c1a898b1df74259bd6d8aa62e2ebe11",
+        "newEpoch": "ep_77692d80fe60494ea1fd659c22c1a70d",
         "rollbackCode": "trace_rollback_missing_conversations",
         "replaceCode": "trace_replaced_or_anchor_mismatch",
+        "multiPageRollbackCode": "trace_rollback_watermark_regressed",
+        "postRotationProposalEpoch": "ep_77692d80fe60494ea1fd659c22c1a70d",
+        "postRotationReservationEpoch": "ep_77692d80fe60494ea1fd659c22c1a70d",
         "forkClaimCode": "call_identity_mismatch",
         "quarantinedReadyEffectIds": [
-          "efx_8c1dbbfd095c47c0bc9e6d65d2180a35"
+          "efx_2a25990dd59f426eae6a175794873450"
         ],
-        "preservedHeldCount": 1,
-        "modelDeltaDuringRecovery": 0,
-        "smtpDeltaDuringRecovery": 0
+        "preservedHeldCount": 1
       }
     },
     {
@@ -86,7 +142,7 @@
       "status": "PASS",
       "summary": "Explicit compaction triggered real completeSimple (+1 physical request) with independent request_id attributed to b03-compact-task.",
       "evidence": {
-        "compactionRequestId": "mreq_25f53bdc6e454f298362857fe31c2d35",
+        "compactionRequestId": "mreq_4f8d1da1a2384583b59702ab02f085cc",
         "compactionModelDelta": 1,
         "generationReservationsCount": 2
       }
@@ -100,18 +156,18 @@
         "fundedPhysicalRequests": 2,
         "fundedReservationIds": [
           {
-            "id": "mreq_6cfc844ef1ba4682bd321a42288bbcb3",
+            "id": "mreq_2a1942490dae449a931cbbd5890f3d78",
             "state": "HELD"
           },
           {
-            "id": "mreq_5cb3673715bf46a2a0801acc2fdb6920",
+            "id": "mreq_14fa2729f6e54f93a6c93a7600265308",
             "state": "SETTLED"
           }
         ],
         "unfundedPhysicalRequests": 1,
         "unfundedReservationIds": [
           {
-            "id": "mreq_485d5f4ea2fa48e187a304b6aa14b5cd",
+            "id": "mreq_bac1a409679441038b9a0259bc80c3e4",
             "state": "HELD"
           }
         ]
@@ -121,9 +177,10 @@
       "id": "B05",
       "group": "B",
       "status": "PASS",
-      "summary": "Missing usage stayed HELD across restart, timed out to CHARGED_BOUND (100) on original day across midnight, corrected to 60 on late bill, duplicate bill delta=0, new day delta=0, total sends=1.",
+      "summary": "Missing usage stayed HELD across early restart, then timed out to CHARGED_BOUND on original day across midnight via BOTH host runtime loop (res1) and host startup recovery (res2); trusted late bill via host API corrected res1 to 60 with duplicate delta=0 and new day untouched.",
       "evidence": {
-        "requestId": "mreq_37b28ca427ca462b98ad7df2117c6693",
+        "runtimeLoopSettledRequestId": "mreq_86905fa323f84b5e9f069613d2ab5b28",
+        "startupRecoverySettledRequestId": "mreq_19f8535b2f434216b624f099b3075280",
         "originalDay": "2026-11-25",
         "newDay": "2026-11-26",
         "day1Final": {
@@ -131,29 +188,38 @@
           "kind": "DAY",
           "limit_mu": 5000000,
           "held_mu": 0,
-          "charged_mu": 60,
+          "charged_mu": 160,
           "frozen": 0
         },
-        "taskFinal": {
-          "account_id": "acct:task:b05-task",
+        "task1Final": {
+          "account_id": "acct:task:b05-task-runtime",
           "kind": "TASK",
           "limit_mu": 800000,
           "held_mu": 0,
           "charged_mu": 60,
           "frozen": 0
         },
+        "task2Final": {
+          "account_id": "acct:task:b05-task-startup",
+          "kind": "TASK",
+          "limit_mu": 800000,
+          "held_mu": 0,
+          "charged_mu": 100,
+          "frozen": 0
+        },
         "day2Final": null,
         "duplicateBillDeltaMu": 0,
-        "totalPhysicalRequests": 1
+        "totalPhysicalRequests": 2
       }
     },
     {
       "id": "B06",
       "group": "B",
       "status": "PASS",
-      "summary": "Unknown upper bound and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 3.",
+      "summary": "Unknown upper bound, unprovable non-fixed heuristic schedule, and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 4.",
       "evidence": {
         "unknownUpperReservations": 0,
+        "unprovableHeuristicReservations": 0,
         "badBindingReservations": 0,
         "preTransportState": "RELEASED",
         "preTransportTaskHeld": 0,
@@ -179,7 +245,7 @@
       "status": "PASS",
       "summary": "Approval committed before Pi tool parked was observed immediately on re-entry; outbox reconciled to ACKED, claim=1, SMTP=1.",
       "evidence": {
-        "effectId": "efx_17b3b07285934d0ab2092ca782cb8f34",
+        "effectId": "efx_45234899a4da43419ea4cb052a378700",
         "effectState": "SUCCEEDED",
         "claims": 1,
         "smtpReceived": 1,
@@ -190,10 +256,15 @@
       "id": "E02",
       "group": "E",
       "status": "PASS",
-      "summary": "Crash before T2 commit rolled back approval/effect/outbox cleanly (0 SMTP); restart after T2 commit delivered outbox and sent exactly 1 email.",
+      "summary": "Real Windows Stop-Process -Force inside uncommitted T2 rolled back approval/effect/outbox cleanly (0 SMTP); Stop-Process -Force after T2 commit and before signal delivery recovered on restart and sent exactly 1 email.",
       "evidence": {
-        "rollbackState": "PENDING",
-        "effectId": "efx_9b1cec310e3b4478a3d3eec8019b9467",
+        "preT2KilledPid": 20224,
+        "preT2KillExitCode": 4294967295,
+        "rollbackApprovalState": "PENDING",
+        "postT2KilledPid": 43608,
+        "postT2KillExitCode": 4294967295,
+        "recoveredHostPid": 14892,
+        "effectId": "efx_67bc22b638014d23b25aee1a2c862026",
         "finalEffectState": "SUCCEEDED",
         "claims": 1,
         "smtpTotalReceived": 1
@@ -203,17 +274,41 @@
       "id": "E03",
       "group": "E",
       "status": "PASS",
-      "summary": "Signal delivered without ACK reconciled cleanly on restart (claim=1, SMTP=1); decisionKey replay=200 and payload conflict=409.",
+      "summary": "Real Windows Stop-Process -Force after SDK signal and before outbox ACK reconciled cleanly on restart (ACKED, claim=1, SMTP=1); decisionKey replay=200 and conflict=409; duplicate signal memo verification ACKed matching duplicate and isolated conflicting/unverifiable duplicates with READY quarantined (0 SMTP).",
       "evidence": {
-        "effectId": "efx_8c1f4c33fef143d4be723c25ab334405",
+        "killedPidBeforeAck": 23148,
+        "killExitCode": 4294967295,
+        "recoveredHostPid": 37852,
+        "effectId": "efx_e8cb9677be7643029758496b22d68ad1",
+        "outboxPreKillState": "PENDING",
         "outboxFinal": {
+          "approval_id": "apr_b45f7337a9c34928a8ae4b865131cc62",
+          "signal_key": "sig:ep_99358b1be2864e9fb876acc5345851c1:prp_4426b3bfea454d359fc769a048495af1:r1",
           "state": "ACKED",
-          "sdk_result": "reentry_observed"
+          "sdk_result": "duplicate",
+          "reason": "sdk_duplicate_same_value"
         },
         "replayStatus": 200,
         "conflictStatus": 409,
         "claims": 1,
-        "smtpTotalReceived": 1
+        "smtpAfterPartA": 1,
+        "duplicateMatchedOutcome": {
+          "sdkResult": "duplicate",
+          "duplicateCheck": "matched",
+          "outboxState": "ACKED",
+          "outboxReason": "sdk_duplicate_same_value"
+        },
+        "duplicateConflictOutcome": {
+          "sdkResult": "duplicate",
+          "duplicateCheck": "conflict",
+          "outboxState": "ISOLATED",
+          "effectState": "QUARANTINED",
+          "smtpDeltaOnConflict": 0
+        },
+        "duplicateUnverifiableOutcome": {
+          "outboxState": "ISOLATED",
+          "effectQuarantined": true
+        }
       }
     },
     {
@@ -222,7 +317,7 @@
       "status": "PASS",
       "summary": "Tool terminated before claim caused recovery to quarantine READY -> QUARANTINED (未提交，待核对) with 0 claims and 0 SMTP.",
       "evidence": {
-        "effectId": "efx_b0b8f12fe0f6461e9f6ca8d87b5690d3",
+        "effectId": "efx_6d037867cad24b4390c34e27be23f347",
         "effectState": "QUARANTINED",
         "uiLabel": "未提交，待核对",
         "claims": 0,
@@ -233,10 +328,14 @@
       "id": "E05",
       "group": "E",
       "status": "PASS",
-      "summary": "Crash after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0.",
+      "summary": "Real Windows Stop-Process -Force after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0 (distinct from W1-B's remote-received SMTP=1).",
       "evidence": {
-        "effectId": "efx_7b8b28f0367940afaae11a6c6c48a750",
-        "effectState": "UNKNOWN",
+        "killedPid": 45784,
+        "killExitCode": 4294967295,
+        "recoveredHostPid": 39968,
+        "effectId": "efx_de837545cd2b4eb28d340ad7afb9ac84",
+        "preKillEffectState": "SUBMITTING",
+        "finalEffectState": "UNKNOWN",
         "claims": 1,
         "smtpReceived": 0
       }
@@ -262,7 +361,7 @@
       "evidence": {
         "revokeFirstSmtp": 0,
         "claimFirstRetainedEffects": [
-          "efx_14f328abc62b407688422bd12d03bef2"
+          "efx_d79df2e5c303480ab31335c1accfda75"
         ],
         "totalSmtpAcrossBoth": 1
       }

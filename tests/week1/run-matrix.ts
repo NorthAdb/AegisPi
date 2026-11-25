@@ -11,8 +11,6 @@ import {
   saveDraftRevision,
 } from "../../src/governance/approvals.ts";
 import {
-  chargeBoundExpiredReservations,
-  correctChargedBoundReservation,
   dayAccountIdFor,
   DEFAULT_TIME_ZONE,
   formatChargeDay,
@@ -28,10 +26,23 @@ import {
   revokeOrCancelScope,
   type EffectRow,
 } from "../../src/governance/effects.ts";
+import { recordOutboxDeliveryOutcome } from "../../src/governance/signal-outbox.ts";
+import { AegisApprovalSignal } from "../../src/runtime/extensions/aegis-policy.ts";
 import { AegisHostRuntime } from "../../src/runtime/harness.ts";
 import type { ModelSlotConfig } from "../../src/runtime/models.ts";
 import { uiStatusLabelFor } from "../../src/web/server.ts";
 import { LOCKED_NODE_EXE, startFakeModelServer, startFakeSmtpServer } from "../fakes/client.ts";
+import {
+  httpLogin,
+  killPidForce,
+  readGovDbQuick,
+  spawnMatrixHost,
+  testG1Auth,
+  testG2Egress,
+  testG3NonceSse,
+  testR1Attribution,
+  waitForFile,
+} from "./audit-regressions.ts";
 
 export interface MatrixCaseResult {
   id: string;
@@ -161,6 +172,8 @@ async function testF01(rootDir: string): Promise<MatrixCaseResult> {
       fakeSmtp.host,
       "--smtp-port",
       String(fakeSmtp.smtpPort),
+      "--console-token",
+      "SYNTHETIC_F01_TOKEN",
     ],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
@@ -193,6 +206,8 @@ async function testF01(rootDir: string): Promise<MatrixCaseResult> {
         fakeSmtp.host,
         "--smtp-port",
         String(fakeSmtp.smtpPort),
+        "--console-token",
+        "SYNTHETIC_F01_TOKEN",
       ],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
@@ -462,29 +477,146 @@ async function testF03(rootDir: string): Promise<MatrixCaseResult> {
       state: string;
     };
     assert.equal(effRow.state, "QUARANTINED");
+
+    // R3: Verify Models and policy extension IMMEDIATELY observe rotated.newEpoch (without restarting!)
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: "call_f03_new_epoch",
+            name: "send_email",
+            arguments: { to: ["f03-new@local.test"], subject: "F03 New Epoch", body: "After rotation" },
+          },
+        },
+        { kind: "text", text: "New epoch email completed" },
+      ],
+    });
+    const convNewEpoch = await hReplaced.createManagedConversation({ budgetTaskId: "task-f03-new-epoch" });
+    await convNewEpoch.submit({ type: "input", content: "trigger new epoch approval" }, BACKGROUND_CONTEXT);
+    const pNew = await waitForPendingProposal(hReplaced, String(convNewEpoch.id));
+    await waitForToolSleeping(hReplaced, Number(pNew.tool_task_id));
+
+    const newEpochProposalRow = hReplaced.govDb
+      .prepare("SELECT runtime_epoch FROM proposals WHERE proposal_id = ?")
+      .get(pNew.proposal_id) as { runtime_epoch: string };
+    const newEpochReservationRow = hReplaced.govDb
+      .prepare("SELECT runtime_epoch FROM budget_reservations WHERE owner_task_id = 'task-f03-new-epoch' ORDER BY reserved_at DESC LIMIT 1")
+      .get() as { runtime_epoch: string };
+    assert.equal(newEpochProposalRow.runtime_epoch, rotated.newEpoch, "R3: new proposal after rotation must carry newEpoch");
+    assert.equal(newEpochReservationRow.runtime_epoch, rotated.newEpoch, "R3: new reservation after rotation must carry newEpoch");
+
+    // Verify old-epoch effect/outbox still never executed (SMTP delta before approving new epoch is still 0!)
+    assert.equal((await fakeSmtp.stats()).totalReceived - sBefore, 0);
+
+    // Approve new-epoch proposal to prove rotated host works end-to-end under newEpoch
+    const decNew = decideApproval(hReplaced.govDb, {
+      approvalId: pNew.approval_id,
+      conversationId: String(convNewEpoch.id),
+      principalId: "owner",
+      decision: "APPROVE",
+      expectedRevision: 1,
+      expectedActionHash: pNew.action_hash,
+      nonce: pNew.nonce_value!,
+      decisionKey: "dk-f03-new-epoch",
+      now: Date.now(),
+    });
+    assert.equal(decNew.httpStatus, 200);
+    await hReplaced.deliverPendingOutbox();
+    const arrNew = await fakeSmtp.waitArrival(sBefore + 1, 10_000);
+    assert.equal(arrNew.arrived, true);
+    await hReplaced.harness.waitForIdle(BACKGROUND_CONTEXT);
+
+    // R3 Case C: Multi-page (>200 entries) rollback preserving the EXACT SAME conversationId and taskIds!
+    const multiPageDir = path.join(dir, "multipage-rollback");
+    const hMp1 = await AegisHostRuntime.start({
+      dataDir: multiPageDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      pauseOutboxDelivery: true,
+    });
+    const convMp = await hMp1.createManagedConversation({ budgetTaskId: "task-f03-mp" });
+    // Append 215 entries in ONE conversation (crossing the 200-entry page boundary!)
+    await convMp.commit(async (tx) => {
+      for (let i = 0; i < 215; i++) {
+        await tx.appendEntry(convMp.id, { kind: "aegis.test_note", data: { seq: i } });
+      }
+    }, BACKGROUND_CONTEXT);
+    await hMp1.close();
+
+    // Backup the 215-entry snapshot (same conversationId & taskIds!)
+    const mpSnapshot215 = path.join(dir, "pi-durable.mp215.sqlite");
+    copyFileSync(path.join(multiPageDir, "pi-durable.sqlite"), mpSnapshot215);
+
+    // Reopen and append 15 more entries (215 -> 230 entries, all past page 1, NO new conversation or task IDs!)
+    const hMp2 = await AegisHostRuntime.start({
+      dataDir: multiPageDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      pauseOutboxDelivery: true,
+    });
+    const convMp2 = await hMp2.harness.conversation(convMp.id, BACKGROUND_CONTEXT);
+    assert.ok(convMp2);
+    await convMp2.commit(async (tx) => {
+      for (let i = 215; i < 230; i++) {
+        await tx.appendEntry(convMp2.id, { kind: "aegis.test_note", data: { seq: i } });
+      }
+    }, BACKGROUND_CONTEXT);
+    await hMp2.close();
+
+    // Restore earlier 215-entry snapshot (exact same conversationId & taskIds, only page-2 entry count regressed!)
+    copyFileSync(mpSnapshot215, path.join(multiPageDir, "pi-durable.sqlite"));
+    rmSync(path.join(multiPageDir, "pi-durable.sqlite-wal"), { force: true });
+    rmSync(path.join(multiPageDir, "pi-durable.sqlite-shm"), { force: true });
+
+    const hMpRollback = await AegisHostRuntime.start({
+      dataDir: multiPageDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+    });
+    assert.equal(
+      hMpRollback.health,
+      "NEEDS_ATTENTION",
+      "R3: multi-page (>200 entries) rollback with identical conversation/task IDs must halt startup",
+    );
+    assert.equal(hMpRollback.startupReport.pairedCheck.ok, false);
+    const multiPageRollbackCode = hMpRollback.startupReport.pairedCheck.ok
+      ? ""
+      : hMpRollback.startupReport.pairedCheck.code;
+    assert.equal(
+      multiPageRollbackCode,
+      "trace_rollback_watermark_regressed",
+      `R3: expected watermark regression across page >200, got ${multiPageRollbackCode}`,
+    );
+    await hMpRollback.close();
     await hReplaced.close();
 
     const mAfter = (await fakeModel.stats()).totalPhysicalRequests;
     const sAfter = (await fakeSmtp.stats()).totalReceived;
-    assert.equal(mAfter - mBefore, 0);
-    assert.equal(sAfter - sBefore, 0);
+    assert.equal(mAfter - mBefore, 2); // Only the 2 turns of the authorized new-epoch conversation
+    assert.equal(sAfter - sBefore, 1); // Only the 1 authorized new-epoch email
 
     return {
       id: "F03",
       group: "F",
       status: "PASS",
       summary:
-        "Detected same-epoch trace rollback and trace replacement before scheduling, quarantined old READY effects, preserved old HELD reservations, rotated epoch, and blocked forked conversation from claiming parent effect.",
+        "Detected same-epoch trace rollback (including >200-entry multi-page rollback with identical conversation/task IDs) and trace replacement before scheduling; rotated epoch updated Models and policy extension live to newEpoch, quarantined old READY effects, preserved old HELD reservations, and blocked forked conversation from claiming parent effect.",
       evidence: {
         initialEpoch,
         newEpoch: rotated.newEpoch,
         rollbackCode,
         replaceCode,
+        multiPageRollbackCode,
+        postRotationProposalEpoch: newEpochProposalRow.runtime_epoch,
+        postRotationReservationEpoch: newEpochReservationRow.runtime_epoch,
         forkClaimCode: forkClaim.code,
         quarantinedReadyEffectIds: rotated.quarantinedReadyEffectIds,
         preservedHeldCount: rotated.preservedHeldReservationIds.length,
-        modelDeltaDuringRecovery: mAfter - mBefore,
-        smtpDeltaDuringRecovery: sAfter - sBefore,
       },
     };
   } finally {
@@ -742,6 +874,7 @@ async function testB05(rootDir: string): Promise<MatrixCaseResult> {
 
   // Day 1 at 23:55 Hong Kong time -> Day 2 after midnight!
   const day1Ms = Date.parse("2026-11-25T23:55:00+08:00");
+  const day1StillBeforeDueMs = Date.parse("2026-11-25T23:55:30+08:00");
   const day2Ms = Date.parse("2026-11-26T00:10:00+08:00");
   const day1Key = formatChargeDay(day1Ms, DEFAULT_TIME_ZONE);
   const day2Key = formatChargeDay(day2Ms, DEFAULT_TIME_ZONE);
@@ -751,91 +884,150 @@ async function testB05(rootDir: string): Promise<MatrixCaseResult> {
     const { vault, slots } = makeStandardSlots(fakeModel.baseUrl, { upperMu: 100, actualMu: 60 });
     await fakeModel.queue({
       clear: true,
-      scripts: [{ kind: "missing_usage", text: "Response with omitted usage block" }],
+      scripts: [
+        { kind: "missing_usage", text: "Response 1 with omitted usage block (runtime loop timeout)" },
+        { kind: "missing_usage", text: "Response 2 with omitted usage block (startup recovery timeout)" },
+      ],
     });
 
+    // Host #1 at day1Ms: create TWO missing-usage reservations with settleTimeoutMs=60_000 (due at 23:56:00)
+    // and settleTimeoutMs=120_000 for second (tested via startup recovery after restart!)
+    let currentNow = day1Ms;
     const host1 = await AegisHostRuntime.start({
       dataDir,
       vault,
       modelSlots: slots,
       smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "u@local.test" },
-      now: () => day1Ms,
+      now: () => currentNow,
       settleTimeoutMs: 60_000,
     });
-    const conv = await host1.createManagedConversation({ budgetTaskId: "b05-task" });
-    await (await conv.submit({ type: "input", content: "missing usage test" }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
+    const conv1 = await host1.createManagedConversation({ budgetTaskId: "b05-task-runtime" });
+    await (await conv1.submit({ type: "input", content: "missing usage 1" }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
     await new Promise((r) => setTimeout(r, 40));
 
-    const resBeforeRestart = host1.govDb
-      .prepare("SELECT * FROM budget_reservations WHERE owner_task_id = 'b05-task'")
+    const res1BeforeRestart = host1.govDb
+      .prepare("SELECT * FROM budget_reservations WHERE owner_task_id = 'b05-task-runtime'")
       .get() as unknown as BudgetReservationRow;
-    assert.equal(resBeforeRestart.state, "HELD", "B05: missing usage must keep reservation HELD");
-    assert.equal(resBeforeRestart.charge_day, day1Key);
+    assert.equal(res1BeforeRestart.state, "HELD", "B05: missing usage must keep reservation HELD");
+    assert.equal(res1BeforeRestart.charge_day, day1Key);
     await host1.close();
 
-    // Restart after midnight (day2Ms > settle_due_at)
+    // Host #2 restarts BEFORE settle_due_at (23:55:30) -> reservation #1 MUST stay HELD across restart!
+    currentNow = day1StillBeforeDueMs;
     const host2 = await AegisHostRuntime.start({
       dataDir,
       vault,
       modelSlots: slots,
       smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "u@local.test" },
-      now: () => day2Ms,
+      now: () => currentNow,
+      settleTimeoutMs: 600_000, // 10 min for reservation #2 (due at 00:05:30 on day 2)
     });
+    assert.equal(host2.startupReport.chargedBoundReservations.length, 0);
+    const res1AfterEarlyRestart = host2.govDb
+      .prepare("SELECT state FROM budget_reservations WHERE request_id = ?")
+      .get(res1BeforeRestart.request_id) as { state: string };
+    assert.equal(res1AfterEarlyRestart.state, "HELD", "B05: must remain HELD across restart before settle_due_at");
 
-    const chargedIds = chargeBoundExpiredReservations(host2.govDb, { now: day2Ms });
-    assert.deepEqual(chargedIds, [resBeforeRestart.request_id]);
-    const day1AfterBound = getBudgetAccount(host2.govDb, dayAccountIdFor(day1Key, DEFAULT_TIME_ZONE))!;
-    const day2AfterBound = getBudgetAccount(host2.govDb, dayAccountIdFor(day2Key, DEFAULT_TIME_ZONE));
+    // Now advance clock while Host #2 is RUNNING across midnight (00:02:00 > res1 settle_due_at 23:56:00, < res2 due 00:05:30)!
+    // First create reservation #2 before advancing clock past midnight (still on day1 at 23:55:30)
+    const conv2 = await host2.createManagedConversation({ budgetTaskId: "b05-task-startup" });
+    await (await conv2.submit({ type: "input", content: "missing usage 2" }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
+    await new Promise((r) => setTimeout(r, 40));
+    const res2Row = host2.govDb
+      .prepare("SELECT * FROM budget_reservations WHERE owner_task_id = 'b05-task-startup'")
+      .get() as unknown as BudgetReservationRow;
+    assert.equal(res2Row.state, "HELD");
+    assert.equal(res2Row.charge_day, day1Key);
+
+    // Advance running Host #2 clock to 2026-11-26T00:02:00+08:00 -> Host #2's normal runtime loop MUST settle res1 automatically!
+    currentNow = Date.parse("2026-11-26T00:02:00+08:00");
+    let res1State = "HELD";
+    for (let i = 0; i < 40; i++) {
+      const r = host2.govDb
+        .prepare("SELECT state FROM budget_reservations WHERE request_id = ?")
+        .get(res1BeforeRestart.request_id) as { state: string };
+      if (r.state === "CHARGED_BOUND") {
+        res1State = r.state;
+        break;
+      }
+      await new Promise((r2) => setTimeout(r2, 40));
+    }
+    assert.equal(res1State, "CHARGED_BOUND", "R2/B05: host runtime loop must automatically transition HELD -> CHARGED_BOUND");
+    const res2StillHeld = host2.govDb
+      .prepare("SELECT state FROM budget_reservations WHERE request_id = ?")
+      .get(res2Row.request_id) as { state: string };
+    assert.equal(res2StillHeld.state, "HELD");
+    await host2.close();
+
+    // Host #3 starts at day2Ms (00:10:00 > res2 settle_due_at 00:05:30) -> startup Step 2 MUST automatically settle res2!
+    currentNow = day2Ms;
+    const host3 = await AegisHostRuntime.start({
+      dataDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "u@local.test" },
+      now: () => currentNow,
+    });
+    assert.ok(
+      host3.startupReport.chargedBoundReservations.includes(res2Row.request_id),
+      "R2/B05: host startup Step 2 must automatically transition expired HELD -> CHARGED_BOUND",
+    );
+
+    const day1AfterBound = getBudgetAccount(host3.govDb, dayAccountIdFor(day1Key, DEFAULT_TIME_ZONE))!;
+    const day2AfterBound = getBudgetAccount(host3.govDb, dayAccountIdFor(day2Key, DEFAULT_TIME_ZONE));
     assert.equal(day1AfterBound.held_mu, 0);
-    assert.equal(day1AfterBound.charged_mu, 100);
+    assert.equal(day1AfterBound.charged_mu, 200); // 100 + 100 on original day1!
     assert.equal(day2AfterBound, null, "B05: cross-midnight CHARGED_BOUND must NOT touch new day account");
 
-    // Late trusted bill arrives (actual = 60) -> delta -40 applied to ORIGINAL day1 & task accounts
-    const bill1 = correctChargedBoundReservation(host2.govDb, {
-      requestId: resBeforeRestart.request_id,
+    // Late trusted bill arrives via host.applyTrustedLateBill (actual = 60 for res1) -> delta -40 on original day1 & task1!
+    const bill1 = host3.applyTrustedLateBill({
+      requestId: res1BeforeRestart.request_id,
       actualMu: 60,
       billEventKey: "bill:b05:inv001",
       evidenceRef: "invoice:synthetic-001",
       actorId: "owner",
-      now: day2Ms + 1000,
     });
     assert.equal(bill1.duplicate, false);
     assert.equal(bill1.deltaMu, -40);
 
     // Duplicate late bill -> delta MUST be 0!
-    const bill2 = correctChargedBoundReservation(host2.govDb, {
-      requestId: resBeforeRestart.request_id,
+    const bill2 = host3.applyTrustedLateBill({
+      requestId: res1BeforeRestart.request_id,
       actualMu: 60,
       billEventKey: "bill:b05:inv001",
       evidenceRef: "invoice:synthetic-001",
       actorId: "owner",
-      now: day2Ms + 2000,
     });
     assert.equal(bill2.duplicate, true);
     assert.equal(bill2.deltaMu, 0);
 
-    const day1Final = getBudgetAccount(host2.govDb, dayAccountIdFor(day1Key, DEFAULT_TIME_ZONE))!;
-    const taskFinal = getBudgetAccount(host2.govDb, taskAccountIdFor("b05-task"))!;
-    const day2Final = getBudgetAccount(host2.govDb, dayAccountIdFor(day2Key, DEFAULT_TIME_ZONE));
-    assert.equal(day1Final.charged_mu, 60);
-    assert.equal(taskFinal.charged_mu, 60);
+    const day1Final = getBudgetAccount(host3.govDb, dayAccountIdFor(day1Key, DEFAULT_TIME_ZONE))!;
+    const task1Final = getBudgetAccount(host3.govDb, taskAccountIdFor("b05-task-runtime"))!;
+    const task2Final = getBudgetAccount(host3.govDb, taskAccountIdFor("b05-task-startup"))!;
+    const day2Final = getBudgetAccount(host3.govDb, dayAccountIdFor(day2Key, DEFAULT_TIME_ZONE));
+    assert.equal(day1Final.charged_mu, 160); // 60 (corrected) + 100 (bound)
+    assert.equal(task1Final.charged_mu, 60);
+    assert.equal(task2Final.charged_mu, 100);
     assert.equal(day2Final, null);
 
     const mStats = await fakeModel.stats();
-    assert.equal(mStats.totalPhysicalRequests, 1);
+    assert.equal(mStats.totalPhysicalRequests, 2);
 
-    await host2.close();
+    await host3.close();
     return {
       id: "B05",
       group: "B",
       status: "PASS",
-      summary: "Missing usage stayed HELD across restart, timed out to CHARGED_BOUND (100) on original day across midnight, corrected to 60 on late bill, duplicate bill delta=0, new day delta=0, total sends=1.",
+      summary:
+        "Missing usage stayed HELD across early restart, then timed out to CHARGED_BOUND on original day across midnight via BOTH host runtime loop (res1) and host startup recovery (res2); trusted late bill via host API corrected res1 to 60 with duplicate delta=0 and new day untouched.",
       evidence: {
-        requestId: resBeforeRestart.request_id,
+        runtimeLoopSettledRequestId: res1BeforeRestart.request_id,
+        startupRecoverySettledRequestId: res2Row.request_id,
         originalDay: day1Key,
         newDay: day2Key,
         day1Final,
-        taskFinal,
+        task1Final,
+        task2Final,
         day2Final,
         duplicateBillDeltaMu: bill2.deltaMu,
         totalPhysicalRequests: mStats.totalPhysicalRequests,
@@ -865,6 +1057,22 @@ async function testB06(rootDir: string): Promise<MatrixCaseResult> {
     const res1Count = (h1.govDb.prepare("SELECT count(*) AS n FROM budget_reservations").get() as { n: number }).n;
     assert.equal(res1Count, 0);
     await h1.close();
+
+    // 1b. Unprovable non-fixed heuristic price schedule (syntheticFixedUpperMu = null) MUST fail closed!
+    const s1b = makeStandardSlots(fakeModel.baseUrl, { upperMu: null, actualMu: null });
+    const h1b = await AegisHostRuntime.start({
+      dataDir: path.join(dir, "h1b"),
+      vault: s1b.vault,
+      modelSlots: s1b.slots,
+      smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "u@local.test" },
+    });
+    const c1b = await h1b.createManagedConversation({ budgetTaskId: "b06-unprovable-heuristic" });
+    await (await c1b.submit({ type: "input", content: "heuristic schedule rejected" }, BACKGROUND_CONTEXT)).wait(
+      BACKGROUND_CONTEXT,
+    );
+    const res1bCount = (h1b.govDb.prepare("SELECT count(*) AS n FROM budget_reservations").get() as { n: number }).n;
+    assert.equal(res1bCount, 0, "B06: unprovable non-fixed price schedule must fail closed with 0 reservations");
+    await h1b.close();
 
     // 2. Endpoint / credential slot mismatch
     const badVault = new HostCredentialVault();
@@ -919,9 +1127,11 @@ async function testB06(rootDir: string): Promise<MatrixCaseResult> {
       id: "B06",
       group: "B",
       status: "PASS",
-      summary: "Unknown upper bound and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 3.",
+      summary:
+        "Unknown upper bound, unprovable non-fixed heuristic schedule, and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 4.",
       evidence: {
         unknownUpperReservations: res1Count,
+        unprovableHeuristicReservations: res1bCount,
         badBindingReservations: res2Count,
         preTransportState: res3.state,
         preTransportTaskHeld: t3.held_mu,
@@ -1090,107 +1300,186 @@ async function testE02(rootDir: string): Promise<MatrixCaseResult> {
   const fakeModel = await startFakeModelServer(path.join(dir, "fake-model"));
   const fakeSmtp = await startFakeSmtpServer(path.join(dir, "fake-smtp"), { mode: "normal" });
   const dataDir = path.join(dir, "host-data");
+  const govDbPath = path.join(dataDir, "aegis-gov.sqlite");
+  const token = "SYNTHETIC_E02_TOKEN";
+  const barrierPreT2 = path.join(dir, "barrier-pre-t2.json");
+
+  let proc1: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
+  let proc2: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
+  let proc3: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
 
   try {
-    const { vault, slots } = makeStandardSlots(fakeModel.baseUrl);
     await fakeModel.queue({
       clear: true,
       scripts: [
         {
           kind: "tool_call",
-          toolCall: { id: "call_e02", name: "send_email", arguments: { to: ["e02@local.test"], subject: "E02", body: "E02 body" } },
+          toolCall: {
+            id: "call_e02",
+            name: "send_email",
+            arguments: { to: ["e02@local.test"], subject: "E02", body: "E02 body" },
+          },
         },
         { kind: "text", text: "E02 done" },
       ],
     });
 
-    const host1 = await AegisHostRuntime.start({
+    // Part A (R5): Real child process #1 killed via Stop-Process -Force INSIDE uncommitted T2 transaction!
+    proc1 = await spawnMatrixHost({
       dataDir,
-      vault,
-      modelSlots: slots,
-      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
-      pauseOutboxDelivery: true,
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
+      pauseOutbox: true,
+      faultBeforeT2CommitFile: barrierPreT2,
     });
-    const conv = await host1.createManagedConversation({ budgetTaskId: "e02-task" });
-    await conv.submit({ type: "input", content: "trigger e02" }, BACKGROUND_CONTEXT);
-    const p = await waitForPendingProposal(host1, String(conv.id));
-    await waitForToolSleeping(host1, Number(p.tool_task_id));
+    const login1 = await httpLogin(proc1.baseUrl, token);
+    const convRes = await fetch(`${proc1.baseUrl}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({ slotName: "router", budgetTaskId: "e02-task" }),
+    });
+    const { conversationId } = (await convRes.json()) as { conversationId: string };
+    await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({ content: "trigger e02" }),
+    });
 
-    // Part A: Crash INSIDE T2 before COMMIT -> full rollback!
-    assert.throws(() => {
-      decideApproval(host1.govDb, {
-        approvalId: p.approval_id,
-        conversationId: String(conv.id),
-        principalId: "owner",
+    // Wait for pending proposal
+    let card: { approvalId: string; revision: number; actionHash: string } | null = null;
+    for (let i = 0; i < 80; i++) {
+      const snap = (await (
+        await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/snapshot`, {
+          headers: { cookie: login1.cookie },
+        })
+      ).json()) as { proposals: Array<{ approvalId: string; revision: number; actionHash: string; approvalState: string }> };
+      if (snap.proposals[0]?.approvalState === "PENDING") {
+        card = snap.proposals[0];
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    assert.ok(card);
+    const ch1 = (await (
+      await fetch(`${proc1.baseUrl}/api/approvals/${card.approvalId}/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+        body: JSON.stringify({ conversationId }),
+      })
+    ).json()) as { nonce: string };
+
+    // Fire decide request (child stalls inside BEGIN IMMEDIATE before COMMIT), wait for barrier, then Stop-Process -Force!
+    const hangingDecide = fetch(`${proc1.baseUrl}/api/approvals/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({
+        approvalId: card.approvalId,
+        conversationId,
         decision: "APPROVE",
-        expectedRevision: p.revision,
-        expectedActionHash: p.action_hash,
-        nonce: p.nonce_value!,
-        decisionKey: "dk-e02-abort",
-        now: Date.now(),
-        injectCrashBeforeCommit: () => {
-          throw new Error("e02_crash_before_commit");
-        },
-      });
-    }, /e02_crash_before_commit/);
+        expectedRevision: card.revision,
+        expectedActionHash: card.actionHash,
+        nonce: ch1.nonce,
+        decisionKey: "dk-e02-pre-commit-kill",
+      }),
+    }).catch(() => null);
 
-    const aprAfterRollback = host1.govDb.prepare("SELECT state FROM approvals WHERE approval_id = ?").get(p.approval_id) as { state: string };
-    const effCountRollback = (host1.govDb.prepare("SELECT count(*) AS n FROM effects").get() as { n: number }).n;
-    const outboxCountRollback = (host1.govDb.prepare("SELECT count(*) AS n FROM signal_outbox").get() as { n: number }).n;
-    assert.equal(aprAfterRollback.state, "PENDING");
-    assert.equal(effCountRollback, 0);
-    assert.equal(outboxCountRollback, 0);
+    await waitForFile(barrierPreT2, 10_000);
+    const kill1 = await killPidForce(proc1.pid, proc1.child);
+    await hangingDecide;
+
+    // Verify SQLite WAL cleanly rolled back uncommitted T2 writes (0 effect, 0 outbox, PENDING approval, 0 SMTP)
+    const govAfterKill1 = readGovDbQuick(govDbPath);
+    assert.equal((govAfterKill1.approvals[0] as { state: string }).state, "PENDING");
+    assert.equal(govAfterKill1.effects.length, 0);
+    assert.equal(govAfterKill1.outbox.length, 0);
     assert.equal((await fakeSmtp.stats()).totalReceived, 0);
 
-    // Part B: Commit T2 cleanly with outbox paused (simulating crash after commit & before signal delivery), then restart!
-    const dec = decideApproval(host1.govDb, {
-      approvalId: p.approval_id,
-      conversationId: String(conv.id),
-      principalId: "owner",
-      decision: "APPROVE",
-      expectedRevision: p.revision,
-      expectedActionHash: p.action_hash,
-      nonce: p.nonce_value!,
-      decisionKey: "dk-e02-commit",
-      now: Date.now(),
-    });
-    assert.equal(dec.httpStatus, 200);
-    const effectId = dec.effectId!;
-    assert.equal((await fakeSmtp.stats()).totalReceived, 0);
-    await host1.close();
-
-    // Restart with outbox delivery enabled -> recovers & delivers pending outbox -> claims once -> SMTP=1
-    const host2 = await AegisHostRuntime.start({
+    // Part B (R5): Child process #2 commits T2 with outbox paused, verify APPROVED+READY+PENDING outbox, then Stop-Process -Force!
+    proc2 = await spawnMatrixHost({
       dataDir,
-      vault,
-      modelSlots: slots,
-      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
+      pauseOutbox: true,
+    });
+    const login2 = await httpLogin(proc2.baseUrl, token);
+    const ch2 = (await (
+      await fetch(`${proc2.baseUrl}/api/approvals/${card.approvalId}/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: login2.cookie, origin: proc2.baseUrl },
+        body: JSON.stringify({ conversationId }),
+      })
+    ).json()) as { nonce: string };
+    const decRes = await fetch(`${proc2.baseUrl}/api/approvals/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login2.cookie, origin: proc2.baseUrl },
+      body: JSON.stringify({
+        approvalId: card.approvalId,
+        conversationId,
+        decision: "APPROVE",
+        expectedRevision: card.revision,
+        expectedActionHash: card.actionHash,
+        nonce: ch2.nonce,
+        decisionKey: "dk-e02-committed",
+      }),
+    });
+    assert.equal(decRes.status, 200);
+    const { effectId } = (await decRes.json()) as { effectId: string };
+
+    const govBeforeKill2 = readGovDbQuick(govDbPath);
+    assert.equal((govBeforeKill2.effects[0] as { state: string }).state, "READY");
+    assert.equal((govBeforeKill2.outbox[0] as { state: string }).state, "PENDING");
+    assert.equal((await fakeSmtp.stats()).totalReceived, 0);
+
+    const kill2 = await killPidForce(proc2.pid, proc2.child);
+
+    // Child process #3 restarts normally -> recovers & delivers outbox -> claims once -> SMTP=1!
+    proc3 = await spawnMatrixHost({
+      dataDir,
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
     });
     const arrival = await fakeSmtp.waitArrival(1, 10_000);
     assert.equal(arrival.arrived, true);
-    await host2.harness.waitForIdle(BACKGROUND_CONTEXT);
+    await new Promise((r) => setTimeout(r, 250));
 
-    const eff = host2.govDb.prepare("SELECT * FROM effects WHERE effect_id = ?").get(effectId) as unknown as EffectRow;
-    const claims = countSuccessfulClaimsForEffect(host2.govDb, effectId);
-    assert.equal(eff.state, "SUCCEEDED");
-    assert.equal(claims, 1);
+    const govFinal = readGovDbQuick(govDbPath);
+    const finalEff = govFinal.effects.find((e) => (e as { effect_id: string }).effect_id === effectId) as {
+      state: string;
+    };
+    assert.equal(finalEff.state, "SUCCEEDED");
+    assert.equal(govFinal.claims, 1);
     assert.equal((await fakeSmtp.stats()).totalReceived, 1);
 
-    await host2.close();
+    await proc3.stopGracefully();
     return {
       id: "E02",
       group: "E",
       status: "PASS",
-      summary: "Crash before T2 commit rolled back approval/effect/outbox cleanly (0 SMTP); restart after T2 commit delivered outbox and sent exactly 1 email.",
+      summary:
+        "Real Windows Stop-Process -Force inside uncommitted T2 rolled back approval/effect/outbox cleanly (0 SMTP); Stop-Process -Force after T2 commit and before signal delivery recovered on restart and sent exactly 1 email.",
       evidence: {
-        rollbackState: aprAfterRollback.state,
+        preT2KilledPid: proc1.pid,
+        preT2KillExitCode: kill1.exitCode,
+        rollbackApprovalState: (govAfterKill1.approvals[0] as { state: string }).state,
+        postT2KilledPid: proc2.pid,
+        postT2KillExitCode: kill2.exitCode,
+        recoveredHostPid: proc3.pid,
         effectId,
-        finalEffectState: eff.state,
-        claims,
+        finalEffectState: finalEff.state,
+        claims: govFinal.claims,
         smtpTotalReceived: (await fakeSmtp.stats()).totalReceived,
       },
     };
   } finally {
+    await proc3?.stopGracefully().catch(() => {});
+    await proc2?.stopGracefully().catch(() => {});
+    await proc1?.stopGracefully().catch(() => {});
     await fakeSmtp.stop();
     await fakeModel.stop();
   }
@@ -1202,124 +1491,379 @@ async function testE03(rootDir: string): Promise<MatrixCaseResult> {
   const fakeModel = await startFakeModelServer(path.join(dir, "fake-model"));
   const fakeSmtp = await startFakeSmtpServer(path.join(dir, "fake-smtp"), { mode: "normal" });
   const dataDir = path.join(dir, "host-data");
+  const govDbPath = path.join(dataDir, "aegis-gov.sqlite");
+  const token = "SYNTHETIC_E03_TOKEN";
+  const barrierAfterSignal = path.join(dir, "barrier-after-signal.json");
+
+  let proc1: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
+  let proc2: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
 
   try {
-    const { vault, slots } = makeStandardSlots(fakeModel.baseUrl);
+    // Part A (R5): Real Windows Stop-Process -Force AFTER harness.signal() returned and BEFORE outbox ACK commit!
     await fakeModel.queue({
       clear: true,
       scripts: [
         {
           kind: "tool_call",
-          toolCall: { id: "call_e03", name: "send_email", arguments: { to: ["e03@local.test"], subject: "E03", body: "E03 body" } },
+          toolCall: {
+            id: "call_e03",
+            name: "send_email",
+            arguments: { to: ["e03@local.test"], subject: "E03", body: "E03 body" },
+          },
         },
         { kind: "text", text: "E03 complete" },
       ],
     });
 
-    let threwAfterSignal = false;
-    const host1 = await AegisHostRuntime.start({
+    proc1 = await spawnMatrixHost({
       dataDir,
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
+      faultAfterSignalBeforeAckFile: barrierAfterSignal,
+    });
+    const login1 = await httpLogin(proc1.baseUrl, token);
+    const { conversationId } = (await (
+      await fetch(`${proc1.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+        body: JSON.stringify({ slotName: "router", budgetTaskId: "e03-task" }),
+      })
+    ).json()) as { conversationId: string };
+    await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({ content: "trigger e03" }),
+    });
+
+    let card: { approvalId: string; revision: number; actionHash: string } | null = null;
+    for (let i = 0; i < 80; i++) {
+      const snap = (await (
+        await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/snapshot`, {
+          headers: { cookie: login1.cookie },
+        })
+      ).json()) as { proposals: Array<{ approvalId: string; revision: number; actionHash: string; approvalState: string }> };
+      if (snap.proposals[0]?.approvalState === "PENDING") {
+        card = snap.proposals[0];
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    assert.ok(card);
+    const ch1 = (await (
+      await fetch(`${proc1.baseUrl}/api/approvals/${card.approvalId}/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+        body: JSON.stringify({ conversationId }),
+      })
+    ).json()) as { nonce: string };
+
+    // Decide APPROVE -> triggers outbox delivery -> child stalls synchronously right after SDK signal returns 'delivered' and BEFORE ACK!
+    const decRes = await fetch(`${proc1.baseUrl}/api/approvals/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({
+        approvalId: card.approvalId,
+        conversationId,
+        decision: "APPROVE",
+        expectedRevision: card.revision,
+        expectedActionHash: card.actionHash,
+        nonce: ch1.nonce,
+        decisionKey: "dk-e03",
+      }),
+    });
+    assert.equal(decRes.status, 200);
+    const { effectId } = (await decRes.json()) as { effectId: string };
+
+    // Wait for barrier proving SDK signal was accepted and outbox ACK has NOT committed yet!
+    const barrierInfo = JSON.parse(await waitForFile(barrierAfterSignal, 10_000)) as { sdkResult: string };
+    assert.equal(barrierInfo.sdkResult, "delivered");
+    const govPreKill = readGovDbQuick(govDbPath);
+    const outboxPreKill = govPreKill.outbox.find((o) => (o as { approval_id: string }).approval_id === card!.approvalId) as {
+      state: string;
+    };
+    assert.equal(outboxPreKill.state, "PENDING", "E03/R5: outbox must still be PENDING before kill");
+    assert.equal((await fakeSmtp.stats()).totalReceived, 0, "E03/R5: SMTP must still be 0 before kill");
+
+    // Real Windows Stop-Process -Force in the post-signal / pre-ACK window!
+    const kill1 = await killPidForce(proc1.pid, proc1.child);
+
+    // Restart child #2 -> reconciles still-PENDING outbox without double-sending (claims=1, SMTP=1)!
+    proc2 = await spawnMatrixHost({
+      dataDir,
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
+    });
+    const arr = await fakeSmtp.waitArrival(1, 10_000);
+    assert.equal(arr.arrived, true);
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Verify durable decisionKey idempotency (200 replay) & payload conflict (409) across restart on proc2!
+    const login2 = await httpLogin(proc2.baseUrl, token);
+    const decReplay = await fetch(`${proc2.baseUrl}/api/approvals/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login2.cookie, origin: proc2.baseUrl },
+      body: JSON.stringify({
+        approvalId: card.approvalId,
+        conversationId,
+        decision: "APPROVE",
+        expectedRevision: card.revision,
+        expectedActionHash: card.actionHash,
+        nonce: ch1.nonce,
+        decisionKey: "dk-e03",
+      }),
+    });
+    assert.equal(decReplay.status, 200);
+
+    const decConflict = await fetch(`${proc2.baseUrl}/api/approvals/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login2.cookie, origin: proc2.baseUrl },
+      body: JSON.stringify({
+        approvalId: card.approvalId,
+        conversationId,
+        decision: "REJECT",
+        expectedRevision: card.revision,
+        expectedActionHash: card.actionHash,
+        nonce: ch1.nonce,
+        decisionKey: "dk-e03",
+      }),
+    });
+    assert.equal(decConflict.status, 409);
+
+    const govPostRecover = readGovDbQuick(govDbPath);
+    const outboxFinal = govPostRecover.outbox.find((o) => (o as { approval_id: string }).approval_id === card!.approvalId) as {
+      state: string;
+      sdk_result: string;
+    };
+    assert.equal(outboxFinal.state, "ACKED");
+    assert.equal(govPostRecover.claims, 1);
+    assert.equal((await fakeSmtp.stats()).totalReceived, 1);
+    await proc2.stopGracefully();
+
+    // Part B (R4): Prove duplicate signal value verification (matched -> ACKED, conflict -> ISOLATED+QUARANTINED, unverifiable -> ISOLATED+QUARANTINED)
+    const { vault, slots } = makeStandardSlots(fakeModel.baseUrl);
+    const dupMatchDir = path.join(dir, "r4-live-match");
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: { id: "call_r4_live_match", name: "send_email", arguments: { to: ["r4m@local.test"], subject: "R4M", body: "M" } },
+        },
+        { kind: "text", text: "R4M done" },
+      ],
+    });
+    let releaseMatchClaim!: () => void;
+    const matchClaimGate = new Promise<void>((r) => (releaseMatchClaim = r));
+    let reachedMatchClaim!: () => void;
+    const matchClaimReached = new Promise<void>((r) => (reachedMatchClaim = r));
+    const hDupMatch = await AegisHostRuntime.start({
+      dataDir: dupMatchDir,
       vault,
       modelSlots: slots,
       smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
       pauseOutboxDelivery: true,
-      onAfterSignalBeforeAck: () => {
-        if (!threwAfterSignal) {
-          threwAfterSignal = true;
-          throw new Error("e03_crash_after_signal_before_ack");
-        }
+      onBeforeClaim: async () => {
+        reachedMatchClaim();
+        await matchClaimGate;
       },
     });
-    const conv = await host1.createManagedConversation({ budgetTaskId: "e03-task" });
-    await conv.submit({ type: "input", content: "trigger e03" }, BACKGROUND_CONTEXT);
-    const p = await waitForPendingProposal(host1, String(conv.id));
-    await waitForToolSleeping(host1, Number(p.tool_task_id));
-
-    const dec1 = decideApproval(host1.govDb, {
-      approvalId: p.approval_id,
-      conversationId: String(conv.id),
+    const convLM = await hDupMatch.createManagedConversation({ budgetTaskId: "e03-r4-lm" });
+    await convLM.submit({ type: "input", content: "trigger live match" }, BACKGROUND_CONTEXT);
+    const pLM = await waitForPendingProposal(hDupMatch, String(convLM.id));
+    await waitForToolSleeping(hDupMatch, Number(pLM.tool_task_id));
+    decideApproval(hDupMatch.govDb, {
+      approvalId: pLM.approval_id,
+      conversationId: String(convLM.id),
       principalId: "owner",
       decision: "APPROVE",
-      expectedRevision: p.revision,
-      expectedActionHash: p.action_hash,
-      nonce: p.nonce_value!,
-      decisionKey: "dk-e03",
+      expectedRevision: 1,
+      expectedActionHash: pLM.action_hash,
+      nonce: pLM.nonce_value!,
+      decisionKey: "dk-r4-lm",
       now: Date.now(),
     });
-    assert.equal(dec1.httpStatus, 200);
-    const effectId = dec1.effectId!;
+    const lmKey = `sig:${hDupMatch.runtimeEpoch}:${pLM.proposal_id}:r1`;
+    const firstMatchSig = await hDupMatch.harness.signal(
+      Number(pLM.tool_task_id) as TaskId,
+      AegisApprovalSignal,
+      lmKey,
+      { approvalId: pLM.approval_id, decision: "APPROVED", revision: 1 },
+      BACKGROUND_CONTEXT,
+    );
+    assert.equal(firstMatchSig, "delivered");
+    await matchClaimReached;
+    // Task is live (running) with identical stored memo -> simulate crash-before-ACK (PENDING) and prove deliverPendingOutbox gets 'duplicate' + duplicateCheck='matched' -> ACKED!
+    hDupMatch.govDb
+      .prepare("UPDATE signal_outbox SET state = 'PENDING', sdk_result = NULL, reason = NULL WHERE approval_id = ?")
+      .run(pLM.approval_id);
+    const matchOutboxRes = await hDupMatch.deliverPendingOutbox();
+    assert.equal(matchOutboxRes.length, 1);
+    assert.equal(matchOutboxRes[0]!.sdkResult, "duplicate");
+    assert.equal(matchOutboxRes[0]!.duplicateCheck, "matched");
+    assert.equal(matchOutboxRes[0]!.action, "acked");
+    const lmOutboxRow = hDupMatch.govDb
+      .prepare("SELECT state, reason FROM signal_outbox WHERE approval_id = ?")
+      .get(pLM.approval_id) as { state: string; reason: string };
+    assert.equal(lmOutboxRow.state, "ACKED");
+    assert.equal(lmOutboxRow.reason, "sdk_duplicate_same_value");
+    releaseMatchClaim();
+    await hDupMatch.harness.waitForIdle(BACKGROUND_CONTEXT);
+    await hDupMatch.close();
 
-    // Idempotent same decisionKey + same payload -> 200 replay
-    const decReplay = decideApproval(host1.govDb, {
-      approvalId: p.approval_id,
-      conversationId: String(conv.id),
-      principalId: "owner",
-      decision: "APPROVE",
-      expectedRevision: p.revision,
-      expectedActionHash: p.action_hash,
-      nonce: p.nonce_value!,
-      decisionKey: "dk-e03",
-      now: Date.now(),
+    // B2: Deterministic live task duplicate-CONFLICT via Host deliverPendingOutbox!
+    const dupSubDir = path.join(dir, "r4-live-dup");
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: { id: "call_r4_live_conflict", name: "send_email", arguments: { to: ["r4lc@local.test"], subject: "R4LC", body: "LC" } },
+        },
+        { kind: "text", text: "R4LC after quarantine" },
+      ],
     });
-    assert.equal(decReplay.httpStatus, 200);
-    assert.equal(decReplay.idempotentReplay, true);
-
-    // Same decisionKey + DIFFERENT payload (REJECT instead of APPROVE) -> 409 conflict
-    const decConflict = decideApproval(host1.govDb, {
-      approvalId: p.approval_id,
-      conversationId: String(conv.id),
-      principalId: "owner",
-      decision: "REJECT",
-      expectedRevision: p.revision,
-      expectedActionHash: p.action_hash,
-      nonce: p.nonce_value!,
-      decisionKey: "dk-e03",
-      now: Date.now(),
-    });
-    assert.equal(decConflict.httpStatus, 409);
-    assert.equal(decConflict.code, "decision_key_conflict");
-
-    // Deliver signal -> throws right BEFORE writing outbox ACK (leaves outbox PENDING even though Pi received signal!)
-    await assert.rejects(() => host1.deliverPendingOutbox(), /e03_crash_after_signal_before_ack/);
-    await fakeSmtp.waitArrival(1, 10_000);
-    await host1.harness.waitForIdle(BACKGROUND_CONTEXT);
-    await host1.close();
-
-    // Restart -> reconciles still-PENDING outbox against already-completed task/effect -> ACKED, ZERO duplicate sends!
-    const host2 = await AegisHostRuntime.start({
-      dataDir,
+    let releaseConflictClaim!: () => void;
+    const conflictClaimGate = new Promise<void>((r) => (releaseConflictClaim = r));
+    let reachedConflictClaim!: () => void;
+    const conflictClaimReached = new Promise<void>((r) => (reachedConflictClaim = r));
+    const hDup2 = await AegisHostRuntime.start({
+      dataDir: dupSubDir,
       vault,
       modelSlots: slots,
       smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      pauseOutboxDelivery: true,
+      onBeforeClaim: async () => {
+        reachedConflictClaim();
+        await conflictClaimGate;
+      },
     });
-    await new Promise((r) => setTimeout(r, 200));
+    const convLC = await hDup2.createManagedConversation({ budgetTaskId: "e03-r4-lc" });
+    await convLC.submit({ type: "input", content: "trigger live conflict" }, BACKGROUND_CONTEXT);
+    const pLC = await waitForPendingProposal(hDup2, String(convLC.id));
+    await waitForToolSleeping(hDup2, Number(pLC.tool_task_id));
+    const dLC = decideApproval(hDup2.govDb, {
+      approvalId: pLC.approval_id,
+      conversationId: String(convLC.id),
+      principalId: "owner",
+      decision: "APPROVE",
+      expectedRevision: 1,
+      expectedActionHash: pLC.action_hash,
+      nonce: pLC.nonce_value!,
+      decisionKey: "dk-r4-lc",
+      now: Date.now(),
+    });
+    const lcKey = `sig:${hDup2.runtimeEpoch}:${pLC.proposal_id}:r1`;
+    // Deliver CONFLICTING value (REJECT instead of APPROVED) under awaited key; hold before claim via onBeforeClaim!
+    const firstConflictSignal = await hDup2.harness.signal(
+      Number(pLC.tool_task_id) as TaskId,
+      AegisApprovalSignal,
+      lcKey,
+      { approvalId: pLC.approval_id, decision: "REJECT", revision: 1 },
+      BACKGROUND_CONTEXT,
+    );
+    assert.equal(firstConflictSignal, "delivered");
+    await conflictClaimReached;
+    // Now run production deliverPendingOutbox() -> harness.signal returns 'duplicate' -> reads memos -> detects CONFLICT -> ISOLATED + QUARANTINED!
+    // Re-set outbox back to PENDING only if beforeTool re-entry acked it; wait: beforeTool re-entry marks outbox observed!
+    // Let's verify: to test outbox conflict before re-entry observed, restore PENDING so deliverPendingOutbox exercises the duplicate-conflict branch cleanly:
+    hDup2.govDb
+      .prepare("UPDATE signal_outbox SET state = 'PENDING', sdk_result = NULL, reason = NULL WHERE approval_id = ?")
+      .run(pLC.approval_id);
+    const smtpBeforeConflict = (await fakeSmtp.stats()).totalReceived;
+    const conflictOutboxRes = await hDup2.deliverPendingOutbox();
+    assert.equal(conflictOutboxRes.length, 1);
+    assert.equal(conflictOutboxRes[0]!.sdkResult, "duplicate");
+    assert.equal(conflictOutboxRes[0]!.duplicateCheck, "conflict");
+    assert.equal(conflictOutboxRes[0]!.action, "isolated");
+    const lcOutboxRow = hDup2.govDb
+      .prepare("SELECT state, reason FROM signal_outbox WHERE approval_id = ?")
+      .get(pLC.approval_id) as { state: string; reason: string };
+    const lcEffRow = hDup2.govDb
+      .prepare("SELECT state, reason FROM effects WHERE effect_id = ?")
+      .get(dLC.effectId!) as { state: string; reason: string };
+    assert.equal(lcOutboxRow.state, "ISOLATED");
+    assert.equal(lcOutboxRow.reason, "sdk_duplicate_value_conflict");
+    assert.equal(lcEffRow.state, "QUARANTINED");
+    // Release claim gate: because effect is now QUARANTINED, submitter refuses claim -> 0 SMTP sent!
+    releaseConflictClaim();
+    await hDup2.harness.waitForIdle(BACKGROUND_CONTEXT);
+    assert.equal((await fakeSmtp.stats()).totalReceived - smtpBeforeConflict, 0);
 
-    const outboxFinal = host2.govDb
-      .prepare("SELECT state, sdk_result FROM signal_outbox WHERE approval_id = ?")
-      .get(p.approval_id) as { state: string; sdk_result: string };
-    const claims = countSuccessfulClaimsForEffect(host2.govDb, effectId);
-    const smtpFinal = await fakeSmtp.stats();
+    // B3: Unverifiable duplicate (cannot prove stored value matches) -> MUST isolate for review and quarantine READY!
+    const pUnv = proposeOrGetApproval(hDup2.govDb, {
+      runtimeEpoch: hDup2.runtimeEpoch,
+      conversationId: String(convLC.id),
+      toolTaskId: "99999",
+      callId: "call_r4_unverifiable",
+      scopeId: "scope:default",
+      toolName: "send_email",
+      target: "smtp:unv@local.test",
+      payload: { to: ["unv@local.test"], subject: "U", body: "U" },
+      expiresAt: Date.now() + 600_000,
+      now: Date.now(),
+    });
+    decideApproval(hDup2.govDb, {
+      approvalId: pUnv.approval.approval_id,
+      conversationId: String(convLC.id),
+      principalId: "owner",
+      decision: "APPROVE",
+      expectedRevision: 1,
+      expectedActionHash: pUnv.revision.action_hash,
+      nonce: pUnv.nonce!,
+      decisionKey: "dk-r4-unv",
+      now: Date.now(),
+    });
+    const unvRes = recordOutboxDeliveryOutcome(hDup2.govDb, {
+      approvalId: pUnv.approval.approval_id,
+      sdkOutcome: "duplicate",
+      duplicateCheck: "unverifiable",
+      now: Date.now(),
+    });
+    assert.equal(unvRes.outboxState, "ISOLATED");
+    assert.equal(unvRes.effectQuarantined, true);
 
-    assert.equal(outboxFinal.state, "ACKED");
-    assert.equal(claims, 1);
-    assert.equal(smtpFinal.totalReceived, 1);
+    await hDup2.close();
 
-    await host2.close();
     return {
       id: "E03",
       group: "E",
       status: "PASS",
-      summary: "Signal delivered without ACK reconciled cleanly on restart (claim=1, SMTP=1); decisionKey replay=200 and payload conflict=409.",
+      summary:
+        "Real Windows Stop-Process -Force after SDK signal and before outbox ACK reconciled cleanly on restart (ACKED, claim=1, SMTP=1); decisionKey replay=200 and conflict=409; duplicate signal memo verification ACKed matching duplicate and isolated conflicting/unverifiable duplicates with READY quarantined (0 SMTP).",
       evidence: {
+        killedPidBeforeAck: proc1.pid,
+        killExitCode: kill1.exitCode,
+        recoveredHostPid: proc2.pid,
         effectId,
+        outboxPreKillState: outboxPreKill.state,
         outboxFinal,
-        replayStatus: decReplay.httpStatus,
-        conflictStatus: decConflict.httpStatus,
-        claims,
-        smtpTotalReceived: smtpFinal.totalReceived,
+        replayStatus: decReplay.status,
+        conflictStatus: decConflict.status,
+        claims: govPostRecover.claims,
+        smtpAfterPartA: 1,
+        duplicateMatchedOutcome: {
+          sdkResult: matchOutboxRes[0]!.sdkResult,
+          duplicateCheck: matchOutboxRes[0]!.duplicateCheck,
+          outboxState: lmOutboxRow.state,
+          outboxReason: lmOutboxRow.reason,
+        },
+        duplicateConflictOutcome: {
+          sdkResult: conflictOutboxRes[0]!.sdkResult,
+          duplicateCheck: conflictOutboxRes[0]!.duplicateCheck,
+          outboxState: lcOutboxRow.state,
+          effectState: lcEffRow.state,
+          smtpDeltaOnConflict: 0,
+        },
+        duplicateUnverifiableOutcome: unvRes,
       },
     };
   } finally {
+    await proc2?.stopGracefully().catch(() => {});
+    await proc1?.stopGracefully().catch(() => {});
     await fakeSmtp.stop();
     await fakeModel.stop();
   }
@@ -1412,86 +1956,151 @@ async function testE05(rootDir: string): Promise<MatrixCaseResult> {
   const fakeModel = await startFakeModelServer(path.join(dir, "fake-model"));
   const fakeSmtp = await startFakeSmtpServer(path.join(dir, "fake-smtp"), { mode: "normal" });
   const dataDir = path.join(dir, "host-data");
+  const govDbPath = path.join(dataDir, "aegis-gov.sqlite");
+  const token = "SYNTHETIC_E05_TOKEN";
+  const barrierAfterClaim = path.join(dir, "barrier-after-claim.json");
+
+  let proc1: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
+  let proc2: Awaited<ReturnType<typeof spawnMatrixHost>> | null = null;
 
   try {
-    const { vault, slots } = makeStandardSlots(fakeModel.baseUrl);
     await fakeModel.queue({
       clear: true,
       scripts: [
         {
           kind: "tool_call",
-          toolCall: { id: "call_e05", name: "send_email", arguments: { to: ["e05@local.test"], subject: "E05", body: "E05" } },
+          toolCall: {
+            id: "call_e05",
+            name: "send_email",
+            arguments: { to: ["e05@local.test"], subject: "E05", body: "E05" },
+          },
         },
         { kind: "text", text: "E05 after" },
       ],
     });
 
-    let claimedEffectId = "";
-    let resolveBarrier!: () => void;
-    const claimBarrier = new Promise<void>((r) => (resolveBarrier = r));
-
-    const host1 = await AegisHostRuntime.start({
+    // R5: Spawn real child host #1 that stalls strictly AFTER READY->SUBMITTING commit and BEFORE SMTP connect!
+    proc1 = await spawnMatrixHost({
       dataDir,
-      vault,
-      modelSlots: slots,
-      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
-      onAfterClaimBeforeTransport: async (effId) => {
-        claimedEffectId = effId;
-        resolveBarrier();
-        // Hold indefinitely without ever opening SMTP socket -> host1 closes/aborts leaving SUBMITTING on disk!
-        await new Promise<void>(() => {});
-      },
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
+      faultAfterClaimBeforeSmtpFile: barrierAfterClaim,
     });
-    const conv = await host1.createManagedConversation({ budgetTaskId: "e05-task" });
-    await conv.submit({ type: "input", content: "trigger e05" }, BACKGROUND_CONTEXT);
-    const p = await waitForPendingProposal(host1, String(conv.id));
-    await waitForToolSleeping(host1, Number(p.tool_task_id));
-
-    const dec = decideApproval(host1.govDb, {
-      approvalId: p.approval_id,
-      conversationId: String(conv.id),
-      principalId: "owner",
-      decision: "APPROVE",
-      expectedRevision: p.revision,
-      expectedActionHash: p.action_hash,
-      nonce: p.nonce_value!,
-      decisionKey: "dk-e05",
-      now: Date.now(),
+    const login1 = await httpLogin(proc1.baseUrl, token);
+    const { conversationId } = (await (
+      await fetch(`${proc1.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+        body: JSON.stringify({ slotName: "router", budgetTaskId: "e05-task" }),
+      })
+    ).json()) as { conversationId: string };
+    await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({ content: "trigger e05" }),
     });
-    const effectId = dec.effectId!;
 
-    await claimBarrier;
-    // Close DB & lock abruptly (simulating kill right after READY->SUBMITTING commit and before SMTP connect)
-    host1.govDb.close();
-    await host1.lock.release();
+    let card: { approvalId: string; revision: number; actionHash: string } | null = null;
+    for (let i = 0; i < 80; i++) {
+      const snap = (await (
+        await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/snapshot`, {
+          headers: { cookie: login1.cookie },
+        })
+      ).json()) as { proposals: Array<{ approvalId: string; revision: number; actionHash: string; approvalState: string }> };
+      if (snap.proposals[0]?.approvalState === "PENDING") {
+        card = snap.proposals[0];
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    assert.ok(card);
+    const ch1 = (await (
+      await fetch(`${proc1.baseUrl}/api/approvals/${card.approvalId}/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+        body: JSON.stringify({ conversationId }),
+      })
+    ).json()) as { nonce: string };
 
-    // Restart Host #2: MUST convert SUBMITTING -> UNKNOWN even though fake SMTP received 0!
-    const host2 = await AegisHostRuntime.start({
+    const decRes = await fetch(`${proc1.baseUrl}/api/approvals/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
+      body: JSON.stringify({
+        approvalId: card.approvalId,
+        conversationId,
+        decision: "APPROVE",
+        expectedRevision: card.revision,
+        expectedActionHash: card.actionHash,
+        nonce: ch1.nonce,
+        decisionKey: "dk-e05",
+      }),
+    });
+    assert.equal(decRes.status, 200);
+    const { effectId } = (await decRes.json()) as { effectId: string };
+
+    // Wait for barrier right AFTER READY->SUBMITTING commit and BEFORE SMTP socket open!
+    const barrierData = JSON.parse(await waitForFile(barrierAfterClaim, 10_000)) as { effectId: string };
+    assert.equal(barrierData.effectId, effectId);
+
+    const govPreKill = readGovDbQuick(govDbPath);
+    const preKillEff = govPreKill.effects.find((e) => (e as { effect_id: string }).effect_id === effectId) as {
+      state: string;
+      receipt_ref: string | null;
+    };
+    assert.equal(preKillEff.state, "SUBMITTING");
+    assert.equal(preKillEff.receipt_ref, null);
+    assert.equal(govPreKill.claims, 1);
+    assert.equal((await fakeSmtp.stats()).totalReceived, 0, "E05: SMTP must have 0 received before kill");
+
+    // Real Windows Stop-Process -Force!
+    const kill1 = await killPidForce(proc1.pid, proc1.child);
+
+    // Restart real child host #2 -> MUST transition SUBMITTING -> UNKNOWN with 0 SMTP sent (distinct from W1-B's 1)!
+    proc2 = await spawnMatrixHost({
       dataDir,
-      vault,
-      modelSlots: slots,
-      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: token,
     });
-    assert.ok(host2.startupReport.recoveredSubmittingToUnknown.includes(effectId));
-    const eff = host2.govDb.prepare("SELECT * FROM effects WHERE effect_id = ?").get(effectId) as unknown as EffectRow;
-    const claims = countSuccessfulClaimsForEffect(host2.govDb, effectId);
-    const smtpStats = await fakeSmtp.stats();
+    assert.ok(proc2.recoveredSubmittingToUnknown.includes(effectId));
+    await new Promise((r) => setTimeout(r, 250));
 
-    assert.equal(claimedEffectId, effectId);
-    assert.equal(eff.state, "UNKNOWN");
-    assert.equal(claims, 1);
-    assert.equal(smtpStats.totalReceived, 0);
-    assert.equal(uiStatusLabelFor("APPROVED", eff.state), "结果待核对");
+    const govFinal = readGovDbQuick(govDbPath);
+    const finalEff = govFinal.effects.find((e) => (e as { effect_id: string }).effect_id === effectId) as {
+      state: string;
+      receipt_ref: string | null;
+    };
+    const smtpFinal = await fakeSmtp.stats();
+    assert.equal(finalEff.state, "UNKNOWN");
+    assert.equal(finalEff.receipt_ref, null);
+    assert.equal(govFinal.claims, 1);
+    assert.equal(smtpFinal.totalReceived, 0);
+    assert.equal(uiStatusLabelFor("APPROVED", finalEff.state), "结果待核对");
 
-    await host2.close();
+    await proc2.stopGracefully();
     return {
       id: "E05",
       group: "E",
       status: "PASS",
-      summary: "Crash after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0.",
-      evidence: { effectId, effectState: eff.state, claims, smtpReceived: smtpStats.totalReceived },
+      summary:
+        "Real Windows Stop-Process -Force after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0 (distinct from W1-B's remote-received SMTP=1).",
+      evidence: {
+        killedPid: proc1.pid,
+        killExitCode: kill1.exitCode,
+        recoveredHostPid: proc2.pid,
+        effectId,
+        preKillEffectState: preKillEff.state,
+        finalEffectState: finalEff.state,
+        claims: govFinal.claims,
+        smtpReceived: smtpFinal.totalReceived,
+      },
     };
   } finally {
+    await proc2?.stopGracefully().catch(() => {});
+    await proc1?.stopGracefully().catch(() => {});
     await fakeSmtp.stop();
     await fakeModel.stop();
   }
@@ -2133,6 +2742,10 @@ export async function runMatrix(opts?: { dataDir?: string; evidenceDir?: string 
 
   const tests: Array<() => Promise<MatrixCaseResult> | MatrixCaseResult> = [
     testArchitectureBoundary,
+    () => testG1Auth(rootDir),
+    () => testG2Egress(rootDir),
+    () => testG3NonceSse(rootDir),
+    () => testR1Attribution(rootDir),
     () => testF01(rootDir),
     () => testF02(rootDir),
     () => testF03(rootDir),

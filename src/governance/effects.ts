@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { buildCanonicalDraft } from "./canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "./db.ts";
-import type { ApprovalRow, DraftRevisionRow, ProposalRow, ScopeRow } from "./approvals.ts";
+import { isPrincipalAuthorizedForScope, type ApprovalRow, type DraftRevisionRow, type ProposalRow, type ScopeRow } from "./approvals.ts";
 
 export type EffectState =
   | "READY"
@@ -332,6 +332,7 @@ export function quarantineReadyEffect(
 
 /**
  * Manual human reconciliation of an UNKNOWN effect.
+ * Enforces principal authorization against the effect's scope and conversation owner.
  */
 export function reconcileUnknownEffect(
   db: DatabaseSync,
@@ -343,7 +344,7 @@ export function reconcileUnknownEffect(
     receiptRef?: string | null;
     now: number;
   },
-): { ok: boolean; state: EffectState; message: string } {
+): { ok: boolean; httpStatus: 200 | 403 | 404 | 409; code: string; state?: EffectState; message: string } {
   if (!params.actorId || !params.evidenceRef) {
     throw new Error("Manual reconciliation requires actorId and evidenceRef");
   }
@@ -352,10 +353,61 @@ export function reconcileUnknownEffect(
       | EffectRow
       | undefined;
     if (!existing) {
-      throw new Error(`Effect not found: ${params.effectId}`);
+      return {
+        ok: false,
+        httpStatus: 404,
+        code: "effect_not_found",
+        message: `Effect not found: ${params.effectId}`,
+      };
     }
+
+    const lineage = db
+      .prepare(
+        `SELECT p.scope_id, p.conversation_id
+           FROM approvals a
+           JOIN proposals p ON p.proposal_id = a.proposal_id
+          WHERE a.approval_id = ?`,
+      )
+      .get(existing.approval_id) as { scope_id: string; conversation_id: string } | undefined;
+    const scope = lineage
+      ? (db.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(lineage.scope_id) as ScopeRow | undefined)
+      : undefined;
+    const convScope = lineage
+      ? (db
+          .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
+          .get(lineage.conversation_id) as { principal_id: string } | undefined)
+      : undefined;
+
+    if (
+      !scope ||
+      !isPrincipalAuthorizedForScope(scope, params.actorId) ||
+      (convScope && convScope.principal_id !== params.actorId)
+    ) {
+      writeAuditEvent(db, {
+        entityType: "effect",
+        entityId: params.effectId,
+        eventKey: `reconcile_forbidden:${params.actorId}:${params.now}`,
+        eventType: "effect_reconcile_forbidden",
+        occurredAt: params.now,
+        details: { actorId: params.actorId, scopeId: lineage?.scope_id ?? null },
+      });
+      return {
+        ok: false,
+        httpStatus: 403,
+        code: "forbidden",
+        state: existing.state,
+        message: `Principal ${params.actorId} is not authorized to reconcile effect ${params.effectId}`,
+      };
+    }
+
     if (existing.state !== "UNKNOWN") {
-      return { ok: false, state: existing.state, message: `Effect is ${existing.state}, not UNKNOWN` };
+      return {
+        ok: false,
+        httpStatus: 409,
+        code: "effect_not_unknown",
+        state: existing.state,
+        message: `Effect is ${existing.state}, not UNKNOWN`,
+      };
     }
     let nextState: EffectState = "UNKNOWN";
     if (params.conclusion === "CONFIRMED_SUCCEEDED") {
@@ -395,12 +447,13 @@ export function reconcileUnknownEffect(
         receiptRef: params.receiptRef ?? null,
       },
     });
-    return { ok: true, state: nextState, message: `Reconciled to ${nextState}` };
+    return { ok: true, httpStatus: 200, code: "reconciled", state: nextState, message: `Reconciled to ${nextState}` };
   });
 }
 
 /**
  * E08: Cancel / revoke a scope in the same governance write serialization as claim CAS.
+ * Enforces principal authorization on the target scope before mutating any governance row.
  * Increments scope_epoch, quarantines READY effects, isolates pending outbox rows,
  * and honestly retains already-SUBMITTING/UNKNOWN effects for reconciliation.
  */
@@ -414,6 +467,10 @@ export function revokeOrCancelScope(
     now: number;
   },
 ): {
+  ok: boolean;
+  httpStatus: 200 | 403 | 404;
+  code: string;
+  message?: string;
   newScopeEpoch: number;
   quarantinedReadyEffectIds: string[];
   retainedCommittedEffectIds: string[];
@@ -423,7 +480,34 @@ export function revokeOrCancelScope(
       | ScopeRow
       | undefined;
     if (!scope) {
-      throw new Error(`Scope not found: ${params.scopeId}`);
+      return {
+        ok: false,
+        httpStatus: 404,
+        code: "scope_not_found",
+        message: `Scope not found: ${params.scopeId}`,
+        newScopeEpoch: 0,
+        quarantinedReadyEffectIds: [],
+        retainedCommittedEffectIds: [],
+      };
+    }
+    if (!isPrincipalAuthorizedForScope(scope, params.actorId)) {
+      writeAuditEvent(db, {
+        entityType: "scope",
+        entityId: params.scopeId,
+        eventKey: `revoke_forbidden:${params.actorId}:${params.now}`,
+        eventType: "scope_revoke_forbidden",
+        occurredAt: params.now,
+        details: { actorId: params.actorId, scopeId: params.scopeId },
+      });
+      return {
+        ok: false,
+        httpStatus: 403,
+        code: "forbidden",
+        message: `Principal ${params.actorId} is not authorized to revoke scope ${params.scopeId}`,
+        newScopeEpoch: scope.scope_epoch,
+        quarantinedReadyEffectIds: [],
+        retainedCommittedEffectIds: [],
+      };
     }
     const newScopeEpoch = scope.scope_epoch + 1;
     db.prepare("UPDATE scopes SET scope_epoch = ?, cancelled = ? WHERE scope_id = ?").run(
@@ -487,6 +571,9 @@ export function revokeOrCancelScope(
     });
 
     return {
+      ok: true,
+      httpStatus: 200,
+      code: "revoked",
       newScopeEpoch,
       quarantinedReadyEffectIds,
       retainedCommittedEffectIds,

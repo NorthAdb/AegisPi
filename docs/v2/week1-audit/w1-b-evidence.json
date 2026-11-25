@@ -1,6 +1,6 @@
 {
   "suite": "W1-B",
-  "runId": "w1b_820fb06c",
+  "runId": "w1b_d45c64d3",
   "status": "PASS",
   "environment": {
     "nodeVersion": "v22.23.5",
@@ -8,22 +8,22 @@
     "platform": "win32"
   },
   "identifiers": {
-    "runId": "w1b_820fb06c",
-    "runtimeEpoch": "ep_096f4d8732ce47c9a095e0981a56792c",
+    "runId": "w1b_d45c64d3",
+    "runtimeEpoch": "ep_8ab3de11be3943db9be01a02b0ac4512",
     "conversationId": "8",
-    "proposalId": "prp_2b0e91238e9f484c9bb10ea0c3cb87df",
-    "approvalId": "apr_58402b984c174f4e9064f9e0b39a97b8",
-    "effectId": "efx_738115729bd94cb097d01b423c8ef0fe",
-    "killedHostPid": 48488,
-    "restartedHost2Pid": 25896,
-    "restartedHost3Pid": 48412
+    "proposalId": "prp_10059d474d4e46189d70bea48b910c3c",
+    "approvalId": "apr_469ab648c6ed439885ffcfd80a089a0c",
+    "effectId": "efx_395e7683626144249cbfe0e1c0454072",
+    "killedHostPid": 23796,
+    "restartedHost2Pid": 44844,
+    "restartedHost3Pid": 11564
   },
   "finalGovernanceRecord": {
     "effect": {
-      "effect_id": "efx_738115729bd94cb097d01b423c8ef0fe",
-      "approval_id": "apr_58402b984c174f4e9064f9e0b39a97b8",
+      "effect_id": "efx_395e7683626144249cbfe0e1c0454072",
+      "approval_id": "apr_469ab648c6ed439885ffcfd80a089a0c",
       "state": "UNKNOWN",
-      "claimed_at": 1795614960646,
+      "claimed_at": 1795618277713,
       "receipt_ref": null,
       "reason": "recovered_submitting_without_receipt",
       "reconciled_by": null,
@@ -39,11 +39,11 @@
     "records": [
       {
         "seq": 1,
-        "receivedAt": "2026-11-25T13:56:00.655Z",
+        "receivedAt": "2026-11-25T14:51:17.721Z",
         "rcptTo": [
           "<auditor-w1b@local.test>"
         ],
-        "rawSha256": "e39cd6b21f6238e781a8c34eef2eed1d9011ed1ce3caffe4765b6376062792d8",
+        "rawSha256": "5b85b952a03584396e197dd6c7787f97dfead40c8dea96888936d226c59ae9f6",
         "modeAtArrival": "hold_after_receive",
         "replySent": null
       }
@@ -51,10 +51,35 @@
   },
   "finalView1Evidence": {
     "conversationId": "8",
-    "proposalId": "prp_2b0e91238e9f484c9bb10ea0c3cb87df",
-    "effectId": "efx_738115729bd94cb097d01b423c8ef0fe",
+    "proposalId": "prp_10059d474d4e46189d70bea48b910c3c",
+    "effectId": "efx_395e7683626144249cbfe0e1c0454072",
     "effectState": "UNKNOWN",
     "uiStatusLabel": "结果待核对"
+  },
+  "duplicateSdkWakeup": {
+    "sdkResult": "closed",
+    "deliveryKey": "sig:ep_8ab3de11be3943db9be01a02b0ac4512:prp_10059d474d4e46189d70bea48b910c3c:r1",
+    "duplicateCheck": null,
+    "outbox": {
+      "approval_id": "apr_469ab648c6ed439885ffcfd80a089a0c",
+      "signal_key": "sig:ep_8ab3de11be3943db9be01a02b0ac4512:prp_10059d474d4e46189d70bea48b910c3c:r1",
+      "state": "ACKED",
+      "sdk_result": "delivered",
+      "reason": "sdk_delivered",
+      "attempts": 1,
+      "updated_at": 1795618277702
+    },
+    "effect": {
+      "effect_id": "efx_395e7683626144249cbfe0e1c0454072",
+      "approval_id": "apr_469ab648c6ed439885ffcfd80a089a0c",
+      "state": "UNKNOWN",
+      "claimed_at": 1795618277713,
+      "receipt_ref": null,
+      "reason": "recovered_submitting_without_receipt",
+      "reconciled_by": null,
+      "reconciled_at": null,
+      "reconcile_evidence": null
+    }
   },
   "secretScan": {
     "clean": true,
@@ -63,58 +88,59 @@
   "timeline": [
     {
       "step": 1,
-      "at": "2026-11-25T13:56:00.455Z",
+      "at": "2026-11-25T14:51:17.509Z",
       "event": "host1_started",
       "details": {
-        "pid": 48488,
-        "baseUrl": "http://127.0.0.1:59986",
-        "runtimeEpoch": "ep_096f4d8732ce47c9a095e0981a56792c"
+        "pid": 23796,
+        "baseUrl": "http://127.0.0.1:51894",
+        "runtimeEpoch": "ep_8ab3de11be3943db9be01a02b0ac4512"
       }
     },
     {
       "step": 2,
-      "at": "2026-11-25T13:56:00.629Z",
+      "at": "2026-11-25T14:51:17.693Z",
       "event": "proposal_pending_in_view1",
       "details": {
-        "proposalId": "prp_2b0e91238e9f484c9bb10ea0c3cb87df",
-        "approvalId": "apr_58402b984c174f4e9064f9e0b39a97b8",
+        "proposalId": "prp_10059d474d4e46189d70bea48b910c3c",
+        "approvalId": "apr_469ab648c6ed439885ffcfd80a089a0c",
         "revision": 1,
-        "actionHash": "cb8e9e75f866f46043192159794889f0a336daee66fc8b082a51e1022767daf4",
-        "noncePresent": true,
+        "actionHash": "8b10c6a4f8fb00be7b0f0eaa09db58e42c84370faa126c8f516194e5dc07ee3e",
+        "nonceExposedInSnapshot": false,
+        "challengeFetchedViaDedicatedRoute": true,
         "uiStatusLabel": "待审批"
       }
     },
     {
       "step": 3,
-      "at": "2026-11-25T13:56:00.634Z",
+      "at": "2026-11-25T14:51:17.700Z",
       "event": "approval_decided",
       "details": {
-        "approvalId": "apr_58402b984c174f4e9064f9e0b39a97b8",
-        "effectId": "efx_738115729bd94cb097d01b423c8ef0fe",
-        "decisionKey": "dk_w1b_820fb06c_approve",
+        "approvalId": "apr_469ab648c6ed439885ffcfd80a089a0c",
+        "effectId": "efx_395e7683626144249cbfe0e1c0454072",
+        "decisionKey": "dk_w1b_d45c64d3_approve",
         "initialEffectState": "READY"
       }
     },
     {
       "step": 4,
-      "at": "2026-11-25T13:56:00.662Z",
+      "at": "2026-11-25T14:51:17.729Z",
       "event": "fake_smtp_received_and_held",
       "details": {
         "totalReceived": 1,
-        "rawSha256": "e39cd6b21f6238e781a8c34eef2eed1d9011ed1ce3caffe4765b6376062792d8",
+        "rawSha256": "5b85b952a03584396e197dd6c7787f97dfead40c8dea96888936d226c59ae9f6",
         "replySent": null
       }
     },
     {
       "step": 5,
-      "at": "2026-11-25T13:56:00.680Z",
+      "at": "2026-11-25T14:51:17.752Z",
       "event": "gov_db_verified_submitting_before_kill",
       "details": {
         "effect": {
-          "effect_id": "efx_738115729bd94cb097d01b423c8ef0fe",
-          "approval_id": "apr_58402b984c174f4e9064f9e0b39a97b8",
+          "effect_id": "efx_395e7683626144249cbfe0e1c0454072",
+          "approval_id": "apr_469ab648c6ed439885ffcfd80a089a0c",
           "state": "SUBMITTING",
-          "claimed_at": 1795614960646,
+          "claimed_at": 1795618277713,
           "receipt_ref": null,
           "reason": null,
           "reconciled_by": null,
@@ -127,43 +153,51 @@
     },
     {
       "step": 6,
-      "at": "2026-11-25T13:56:01.183Z",
+      "at": "2026-11-25T14:51:18.422Z",
       "event": "host1_force_killed",
       "details": {
-        "killedPid": 48488,
-        "killCommand": "Stop-Process -Id 48488 -Force",
+        "killedPid": 23796,
+        "killCommand": "Stop-Process -Id 23796 -Force",
         "exitCode": 4294967295,
         "signalCode": null
       }
     },
     {
       "step": 7,
-      "at": "2026-11-25T13:56:02.314Z",
+      "at": "2026-11-25T14:51:19.635Z",
       "event": "host2_restarted_and_recovered",
       "details": {
-        "pid": 25896,
-        "runtimeEpoch": "ep_096f4d8732ce47c9a095e0981a56792c",
+        "pid": 44844,
+        "runtimeEpoch": "ep_8ab3de11be3943db9be01a02b0ac4512",
         "recoveredSubmittingToUnknown": [
-          "efx_738115729bd94cb097d01b423c8ef0fe"
+          "efx_395e7683626144249cbfe0e1c0454072"
         ]
       }
     },
     {
       "step": 8,
-      "at": "2026-11-25T13:56:02.756Z",
+      "at": "2026-11-25T14:51:20.342Z",
       "event": "host2_refreshed_and_verified",
       "details": {
         "smtpTotalReceived": 1,
         "view1Label": "结果待核对",
-        "effectState": "UNKNOWN"
+        "effectState": "UNKNOWN",
+        "duplicateSdkWakeup": {
+          "sdkResult": "closed",
+          "deliveryKey": "sig:ep_8ab3de11be3943db9be01a02b0ac4512:prp_10059d474d4e46189d70bea48b910c3c:r1",
+          "duplicateCheck": null,
+          "outboxState": "ACKED",
+          "outboxSdkResult": "delivered",
+          "effectState": "UNKNOWN"
+        }
       }
     },
     {
       "step": 9,
-      "at": "2026-11-25T13:56:04.148Z",
+      "at": "2026-11-25T14:51:22.170Z",
       "event": "host3_final_verification_passed",
       "details": {
-        "host3Pid": 48412,
+        "host3Pid": 11564,
         "finalEffectState": "UNKNOWN",
         "claimCount": 1,
         "approvalCount": 1,

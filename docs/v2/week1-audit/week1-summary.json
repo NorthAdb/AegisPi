@@ -1,6 +1,6 @@
 {
-  "runId": "week1_6e841c79",
-  "executedAt": "2026-11-25T13:56:22.413Z",
+  "runId": "week1_02e38684",
+  "executedAt": "2026-11-25T14:52:20.884Z",
   "environment": {
     "nodeExe": "node.exe",
     "nodeVersion": "v22.23.5",
@@ -8,7 +8,7 @@
     "platform": "win32",
     "arch": "x64"
   },
-  "dataDirLabel": "aegispi-v2-week1-clean-20261125-215545",
+  "dataDirLabel": "aegispi-v2-week1-r4-20261125-225053",
   "evidenceDirRelative": "docs/v2/week1-audit",
   "results": {
     "typecheck": {
@@ -25,20 +25,40 @@
     },
     "w1_b_and_e06": {
       "status": "PASS",
-      "effectId": "efx_738115729bd94cb097d01b423c8ef0fe",
+      "effectId": "efx_395e7683626144249cbfe0e1c0454072",
       "smtpTotalReceived": 1,
       "finalEffectState": "UNKNOWN",
       "view1Label": "结果待核对"
     },
     "matrix": {
       "status": "PASS",
-      "passed": 19,
-      "total": 19,
+      "passed": 23,
+      "total": 23,
       "cases": [
         {
           "id": "GUARD-BOUNDARY",
           "status": "PASS",
           "summary": "Verified only src/runtime/ imports @earendil-works/* and governance/ has zero upward dependencies."
+        },
+        {
+          "id": "G1-AUTH",
+          "status": "PASS",
+          "summary": "Formal entry refused startup without token; login ignored client principalId; unauthorized cross-principal challenge/decide/reconcile/revoke all returned 403 with 0 governance row mutations."
+        },
+        {
+          "id": "G2-EGRESS",
+          "status": "PASS",
+          "summary": "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; controlled observers recorded 0 SMTP connects and 0 model dispatches."
+        },
+        {
+          "id": "G3-NONCE-SSE",
+          "status": "PASS",
+          "summary": "Verified 0 plaintext nonce hits across SSE frames, conversation snapshots, and audit_events; dedicated POST /api/approvals/:id/challenge returns challenge strictly to authorized principal (403 for unauthorized)."
+        },
+        {
+          "id": "R1-ATTRIBUTION",
+          "status": "PASS",
+          "summary": "Verified real run_worker delegation inherits parent host task (ignoring smuggled model budgetTaskId, 0 worker sends when exhausted, charges parent when funded), persisted bindings survive restart (0 sends when exhausted), and missing binding fails closed (unknown_budget_owner, 0 sends, 0 default accounts)."
         },
         {
           "id": "F01",
@@ -53,7 +73,7 @@
         {
           "id": "F03",
           "status": "PASS",
-          "summary": "Detected same-epoch trace rollback and trace replacement before scheduling, quarantined old READY effects, preserved old HELD reservations, rotated epoch, and blocked forked conversation from claiming parent effect."
+          "summary": "Detected same-epoch trace rollback (including >200-entry multi-page rollback with identical conversation/task IDs) and trace replacement before scheduling; rotated epoch updated Models and policy extension live to newEpoch, quarantined old READY effects, preserved old HELD reservations, and blocked forked conversation from claiming parent effect."
         },
         {
           "id": "B02",
@@ -73,12 +93,12 @@
         {
           "id": "B05",
           "status": "PASS",
-          "summary": "Missing usage stayed HELD across restart, timed out to CHARGED_BOUND (100) on original day across midnight, corrected to 60 on late bill, duplicate bill delta=0, new day delta=0, total sends=1."
+          "summary": "Missing usage stayed HELD across early restart, then timed out to CHARGED_BOUND on original day across midnight via BOTH host runtime loop (res1) and host startup recovery (res2); trusted late bill via host API corrected res1 to 60 with duplicate delta=0 and new day untouched."
         },
         {
           "id": "B06",
           "status": "PASS",
-          "summary": "Unknown upper bound and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 3."
+          "summary": "Unknown upper bound, unprovable non-fixed heuristic schedule, and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 4."
         },
         {
           "id": "B07",
@@ -93,12 +113,12 @@
         {
           "id": "E02",
           "status": "PASS",
-          "summary": "Crash before T2 commit rolled back approval/effect/outbox cleanly (0 SMTP); restart after T2 commit delivered outbox and sent exactly 1 email."
+          "summary": "Real Windows Stop-Process -Force inside uncommitted T2 rolled back approval/effect/outbox cleanly (0 SMTP); Stop-Process -Force after T2 commit and before signal delivery recovered on restart and sent exactly 1 email."
         },
         {
           "id": "E03",
           "status": "PASS",
-          "summary": "Signal delivered without ACK reconciled cleanly on restart (claim=1, SMTP=1); decisionKey replay=200 and payload conflict=409."
+          "summary": "Real Windows Stop-Process -Force after SDK signal and before outbox ACK reconciled cleanly on restart (ACKED, claim=1, SMTP=1); decisionKey replay=200 and conflict=409; duplicate signal memo verification ACKed matching duplicate and isolated conflicting/unverifiable duplicates with READY quarantined (0 SMTP)."
         },
         {
           "id": "E04",
@@ -108,7 +128,7 @@
         {
           "id": "E05",
           "status": "PASS",
-          "summary": "Crash after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0."
+          "summary": "Real Windows Stop-Process -Force after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0 (distinct from W1-B's remote-received SMTP=1)."
         },
         {
           "id": "E07",

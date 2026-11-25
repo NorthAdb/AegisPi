@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { sendSmtpMessage } from "../capabilities/mail/smtp-client.ts";
+import { assertStage1LoopbackSmtpHost } from "../governance/credentials.ts";
 import {
   claimEffectForSubmission,
   recordEffectResult,
@@ -60,6 +61,20 @@ export interface SubmitEmailEffectResult {
 export async function submitApprovedEmailEffect(
   params: SubmitEmailEffectParams,
 ): Promise<SubmitEmailEffectResult> {
+  // Stage 1 hard egress guard BEFORE claiming or connecting
+  try {
+    assertStage1LoopbackSmtpHost(params.smtpConfig.host, params.smtpConfig.port);
+  } catch (err) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: "stage1_egress_blocked",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
   if (params.onBeforeClaim) {
     await params.onBeforeClaim(params.effectId);
   }

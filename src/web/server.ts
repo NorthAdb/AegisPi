@@ -3,10 +3,13 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import {
   decideApproval,
+  fetchAuthorizedApprovalChallenge,
+  isPrincipalAuthorizedForScope,
   saveDraftRevision,
   type ApprovalRow,
   type DraftRevisionRow,
   type ProposalRow,
+  type ScopeRow,
 } from "../governance/approvals.ts";
 import {
   listBudgetDenialsForConversation,
@@ -40,9 +43,14 @@ export interface WebServerConfig {
   host: AegisHostRuntime;
   bindHost?: string;
   port?: number;
-  consoleToken: string;
+  /** Single principal console token (bound server-side to defaultPrincipalId). */
+  consoleToken?: string;
+  /** Host-bound map of principalId -> console secret token (G1: client cannot choose principalId). */
+  consoleTokens?: Record<string, string>;
   defaultPrincipalId?: string;
   now?: () => number;
+  /** Explicit test-only seam for E02 real process kill before T2 commit. */
+  injectBeforeT2Commit?: () => void;
 }
 
 export interface RunningWebServer {
@@ -73,8 +81,26 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     throw new Error(`Stage 1 refuses non-loopback Web bind address: ${bindHost}`);
   }
 
-  const nowFn = config.now ?? (() => Date.now());
+  // G1: Build host-bound principal credentials map; refuse startup if no token configured!
   const defaultPrincipalId = config.defaultPrincipalId ?? "owner";
+  const principalCredentials: Array<{ principalId: string; token: string }> = [];
+  if (config.consoleTokens) {
+    for (const [principalId, token] of Object.entries(config.consoleTokens)) {
+      if (principalId.trim().length > 0 && typeof token === "string" && token.length > 0) {
+        principalCredentials.push({ principalId: principalId.trim(), token });
+      }
+    }
+  }
+  if (typeof config.consoleToken === "string" && config.consoleToken.length > 0) {
+    if (!principalCredentials.some((c) => c.principalId === defaultPrincipalId)) {
+      principalCredentials.push({ principalId: defaultPrincipalId, token: config.consoleToken });
+    }
+  }
+  if (principalCredentials.length === 0) {
+    throw new Error("Refusing to start Web server: console token is required (no default fallback allowed)");
+  }
+
+  const nowFn = config.now ?? (() => Date.now());
   const rateLimiter = new LoginRateLimiter(20, 60_000);
   let boundPort = config.port ?? 4310;
   let snapshotVersion = 1;
@@ -99,7 +125,10 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   });
 
   app.get("/", (c) => {
-    c.header("content-security-policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'self'");
+    c.header(
+      "content-security-policy",
+      "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'self'",
+    );
     return c.html(renderMinimalView1Html());
   });
 
@@ -110,6 +139,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       runtimeEpoch: config.host.runtimeEpoch,
       recoveredSubmittingToUnknown: config.host.startupReport.recoveredSubmittingToUnknown,
       reconciledQuarantinedEffects: config.host.startupReport.reconciledQuarantinedEffects,
+      chargedBoundReservations: config.host.startupReport.chargedBoundReservations,
       selfCheckErrors: config.host.startupReport.selfCheckErrors,
       pairedCheckOk: config.host.startupReport.pairedCheck.ok,
     });
@@ -120,21 +150,27 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     if (!rateLimiter.checkAndRecord("loopback", now)) {
       return c.json({ error: "rate_limited" }, 429);
     }
-    const body = (await c.req.json().catch(() => ({}))) as { token?: string; principalId?: string };
-    if (typeof body.token !== "string" || !constantTimeTokenMatch(config.consoleToken, body.token)) {
+    const body = (await c.req.json().catch(() => ({}))) as { token?: string };
+    if (typeof body.token !== "string" || body.token.length === 0) {
       return c.json({ error: "invalid_credentials" }, 401);
     }
-    const principalId =
-      typeof body.principalId === "string" && body.principalId.trim().length > 0
-        ? body.principalId.trim()
-        : defaultPrincipalId;
+    // G1: Always derive principalId strictly from host-bound credential match (never trust request body principalId!)
+    let matchedPrincipal: string | null = null;
+    for (const cred of principalCredentials) {
+      if (constantTimeTokenMatch(cred.token, body.token)) {
+        matchedPrincipal = cred.principalId;
+      }
+    }
+    if (!matchedPrincipal) {
+      return c.json({ error: "invalid_credentials" }, 401);
+    }
     const session = createWebSession(config.host.govDb, {
-      principalId,
+      principalId: matchedPrincipal,
       now,
       ttlMs: MAX_SESSION_TTL_MS,
     });
     c.header("set-cookie", buildSessionCookie(session.rawToken, Math.floor(MAX_SESSION_TTL_MS / 1000)));
-    return c.json({ ok: true, principalId, expiresAt: session.expiresAt });
+    return c.json({ ok: true, principalId: matchedPrincipal, expiresAt: session.expiresAt });
   });
 
   // Auth middleware for all protected /api/* routes
@@ -197,6 +233,14 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       budgetTaskId?: string;
       scopeId?: string;
     };
+    if (body.scopeId) {
+      const scopeRow = config.host.govDb
+        .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+        .get(body.scopeId) as ScopeRow | undefined;
+      if (!scopeRow || !isPrincipalAuthorizedForScope(scopeRow, session.principalId)) {
+        return c.json({ error: "forbidden_scope" }, 403);
+      }
+    }
     const conv = await config.host.createManagedConversation({
       principalId: session.principalId,
       slotName: body.slotName,
@@ -260,6 +304,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     return c.json({ ok: true, compactionTaskId: res.compactionTaskId, conversationId: convIdStr });
   });
 
+  /**
+   * Builds the authoritative conversation snapshot.
+   * G3: Plaintext approval nonce is NEVER included here (zero exposure in SSE frames or general snapshots).
+   * Authorized approvers obtain challenges exclusively via POST /api/approvals/:id/challenge.
+   */
   async function buildAuthoritativeSnapshot(convIdStr: string, principalId: string) {
     const convScope = config.host.govDb
       .prepare("SELECT * FROM conversation_scopes WHERE conversation_id = ?")
@@ -283,12 +332,13 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       const apr = config.host.govDb
         .prepare("SELECT * FROM approvals WHERE proposal_id = ? AND revision = ?")
         .get(p.proposal_id, p.head_rev) as unknown as ApprovalRow;
-      const challenge =
-        apr.state === "PENDING"
-          ? (config.host.govDb
-              .prepare("SELECT nonce_value FROM approval_challenges WHERE approval_id = ?")
-              .get(apr.approval_id) as { nonce_value: string } | undefined)
-          : undefined;
+      const hasChallenge =
+        apr.state === "PENDING" &&
+        Boolean(
+          config.host.govDb
+            .prepare("SELECT 1 AS ok FROM approval_challenges WHERE approval_id = ?")
+            .get(apr.approval_id),
+        );
       const effect = config.host.govDb
         .prepare("SELECT * FROM effects WHERE approval_id = ?")
         .get(apr.approval_id) as EffectRow | undefined;
@@ -306,7 +356,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         snapshot: JSON.parse(draft.canonical_snapshot) as Record<string, unknown>,
         approvalId: apr.approval_id,
         approvalState: apr.state,
-        nonce: challenge?.nonce_value ?? null,
+        hasChallenge,
         effect: effect
           ? {
               effectId: effect.effect_id,
@@ -362,6 +412,24 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     return c.json(snap);
   });
 
+  // G3: Dedicated authorized endpoint to fetch single-use approval challenge nonce (never in SSE/URL/logs)
+  app.post("/api/approvals/:id/challenge", async (c) => {
+    const session = c.get("authSession");
+    const approvalId = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { conversationId?: string };
+    if (!body.conversationId || typeof body.conversationId !== "string") {
+      return c.json({ error: "missing_conversation_id" }, 400);
+    }
+    const res = fetchAuthorizedApprovalChallenge(config.host.govDb, {
+      approvalId,
+      conversationId: body.conversationId,
+      principalId: session.principalId,
+      now: nowFn(),
+    });
+    c.header("cache-control", "no-store");
+    return c.json(res, res.httpStatus);
+  });
+
   app.post("/api/proposals/:id/draft", async (c) => {
     if (!config.host.isAcceptingCommands) {
       return c.json({ error: "host_not_ready", health: config.host.health }, 503);
@@ -388,7 +456,10 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       now: nowFn(),
     });
     if (res.ok) snapshotVersion++;
-    return c.json(res, res.httpStatus);
+    // Do not return plaintext nonce in generic edit response; decision UI fetches via /api/approvals/:id/challenge
+    const { nonce: _omitted, ...safeRes } = res;
+    void _omitted;
+    return c.json(safeRes, res.httpStatus);
   });
 
   // Unified decision route: POST /api/approvals/decide
@@ -428,15 +499,51 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       nonce: body.nonce,
       decisionKey: body.decisionKey,
       now: nowFn(),
+      injectCrashBeforeCommit: config.injectBeforeT2Commit,
     });
 
     if (res.ok) {
       snapshotVersion++;
-      // Trigger asynchronous outbox delivery without blocking HTTP response
-      void config.host.deliverPendingOutbox().catch(() => {});
+      void config.host.deliverPendingOutbox({ respectPause: true }).catch(() => {});
     }
 
     return c.json(res, res.httpStatus);
+  });
+
+  // Authorized signal re-delivery route for duplicate wakeup verification (R4 / W1-B)
+  app.post("/api/approvals/:id/redeliver", async (c) => {
+    if (!config.host.isAcceptingCommands) {
+      return c.json({ error: "host_not_ready", health: config.host.health }, 503);
+    }
+    const session = c.get("authSession");
+    const approvalId = c.req.param("id");
+    const lineage = config.host.govDb
+      .prepare(
+        `SELECT p.scope_id, p.conversation_id
+           FROM approvals a
+           JOIN proposals p ON p.proposal_id = a.proposal_id
+          WHERE a.approval_id = ?`,
+      )
+      .get(approvalId) as { scope_id: string; conversation_id: string } | undefined;
+    if (!lineage) {
+      return c.json({ error: "approval_not_found" }, 404);
+    }
+    const scope = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(lineage.scope_id) as ScopeRow | undefined;
+    const convScope = config.host.govDb
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
+      .get(lineage.conversation_id) as { principal_id: string } | undefined;
+    if (
+      !scope ||
+      !isPrincipalAuthorizedForScope(scope, session.principalId) ||
+      (convScope && convScope.principal_id !== session.principalId)
+    ) {
+      return c.json({ error: "forbidden" }, 403);
+    }
+    const result = await config.host.replayApprovalSignal(approvalId);
+    snapshotVersion++;
+    return c.json({ ok: true, ...result });
   });
 
   app.post("/api/effects/:id/reconcile", async (c) => {
@@ -458,8 +565,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       receiptRef: body.receiptRef,
       now: nowFn(),
     });
-    snapshotVersion++;
-    return c.json(res, res.ok ? 200 : 409);
+    if (res.ok) snapshotVersion++;
+    return c.json(res, res.httpStatus);
   });
 
   app.post("/api/scopes/:id/revoke", async (c) => {
@@ -473,8 +580,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       markCancelled: body.markCancelled,
       now: nowFn(),
     });
-    snapshotVersion++;
-    return c.json({ ok: true, ...res });
+    if (res.ok) snapshotVersion++;
+    return c.json(res, res.httpStatus);
   });
 
   app.get("/api/conversations/:id/events", async (c) => {
@@ -493,7 +600,6 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       try {
         let lastSentVersion = -1;
         while (open) {
-          // Verify session still valid on every tick (logout closes existing streams)
           const stillValid = config.host.govDb
             .prepare("SELECT revoked_at, expires_at FROM sessions WHERE token_digest = ?")
             .get(session.tokenDigest) as { revoked_at: number | null; expires_at: number } | undefined;

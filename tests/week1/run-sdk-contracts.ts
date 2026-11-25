@@ -32,8 +32,11 @@ import {
   type TaskId,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { getBudgetAccount, taskAccountIdFor, type BudgetReservationRow } from "../../src/governance/budget.ts";
+import { HostCredentialVault } from "../../src/governance/credentials.ts";
 import { openGovernanceDb } from "../../src/governance/db.ts";
 import { acquireDataDirLock, InstanceLockBusyError } from "../../src/governance/lock.ts";
+import { AegisHostRuntime } from "../../src/runtime/harness.ts";
 import { HostPhaseTelemetry } from "../../src/runtime/telemetry.ts";
 import { LOCKED_NODE_EXE, startFakeModelServer } from "../fakes/client.ts";
 
@@ -735,17 +738,16 @@ async function runS4(workDir: string): Promise<ContractResult> {
   const dir = path.join(workDir, "s4");
   mkdirSync(dir, { recursive: true });
   const fakeModel = await startFakeModelServer(path.join(dir, "fake-model"));
-  const tracePath = path.join(dir, "pi-durable.sqlite");
+  const hostDataDir = path.join(dir, "host-data");
 
   try {
-    // Seed a conversation with enough messages so manual compaction actually finds a cut and calls completeSimple!
+    // Seed 2 turns so manual compaction finds a cut and calls completeSimple,
+    // then run compaction AND generation CONCURRENTLY in the SAME conversation through product AegisHostRuntime!
     await fakeModel.queue({
       clear: true,
       scripts: [
         { kind: "text", text: "Turn 1 reply " + "alpha ".repeat(120) },
         { kind: "text", text: "Turn 2 reply " + "beta ".repeat(120) },
-        // Next two run CONCURRENTLY in the SAME conversation:
-        // One is CompactionTask.summarize (completeSimple) and one is GenerationTask.request (streamSimple)!
         {
           kind: "hold_then_text",
           holdBarrierKey: "s4-concurrent-a",
@@ -759,53 +761,58 @@ async function runS4(workDir: string): Promise<ContractResult> {
       ],
     });
 
-    const telemetry = new HostPhaseTelemetry();
-    const observedCalls: Array<{
-      method: "streamSimple" | "completeSimple";
-      taskId: number | undefined;
-      taskName: string | undefined;
-      phase: string | undefined;
-      maxRetries: number | undefined;
-      budgetOwnerTask: string;
-    }> = [];
-
-    // Explicit per-task budget owner map (demonstrating task-level attribution inside the SAME conversationId!)
-    const budgetOwnerByPiTaskId = new Map<number, string>();
-    const observedModels = wrapModelsObserver(buildFakeProviderModels(fakeModel.baseUrl), telemetry, (info) => {
-      const attr = info.attribution;
-      const budgetOwner =
-        attr?.taskId !== undefined
-          ? (budgetOwnerByPiTaskId.get(attr.taskId) ?? `pi-task:${attr.taskName}:${attr.taskId}`)
-          : "UNATTRIBUTED";
-      observedCalls.push({
-        method: info.method,
-        taskId: attr?.taskId,
-        taskName: attr?.taskName,
-        phase: attr?.phase,
-        maxRetries: info.maxRetries,
-        budgetOwnerTask: budgetOwner,
-      });
-    });
-
-    const reg = createRegistry();
-    const storage = await openNodeSqliteStorage(tracePath);
-    const harness = await Harness.open(
-      storage,
+    const vault = new HostCredentialVault();
+    vault.registerSlot(
       {
-        models: observedModels,
-        registry: reg,
-        telemetry,
-        settings: {
-          stream: { maxRetries: 0 },
-          retry: { enabled: false, maxRetries: 0, baseDelayMs: 10 },
-          compaction: { enabled: true, keepRecentTokens: 20, reserveTokens: 256, backgroundTokens: 0 },
-        },
+        slotId: "slot:s4",
+        provider: "fake-local",
+        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedModelIds: ["fake-router-1"],
+        priceVersion: "synthetic-100-60",
       },
-      BACKGROUND_CONTEXT,
+      "SYNTHETIC_S4_KEY",
     );
 
-    const conv = await harness.root(BACKGROUND_CONTEXT, {
-      agent: { model: { provider: "fake-local", modelId: "fake-router-1" } },
+    const recordedReservations: Array<{
+      requestId: string;
+      ownerTaskId: string;
+      conversationId: string;
+      purpose: string;
+      upperMu: number;
+      method: "streamSimple" | "completeSimple";
+    }> = [];
+
+    const host = await AegisHostRuntime.start({
+      dataDir: hostDataDir,
+      vault,
+      modelSlots: [
+        {
+          slotName: "router",
+          provider: "fake-local",
+          modelId: "fake-router-1",
+          baseUrl: fakeModel.baseUrl,
+          credentialSlotId: "slot:s4",
+          contextWindow: 128_000,
+          maxTokens: 1024,
+          priceSchedule: {
+            priceVersion: "synthetic-100-60",
+            inputPerMTokMu: 300_000,
+            outputPerMTokMu: 1_200_000,
+            syntheticFixedUpperMu: 100,
+            syntheticFixedActualMu: 60,
+          },
+          outboundAuthorized: true,
+        },
+      ],
+      smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "s4@local.test" },
+      compactionKeepRecentTokens: 20,
+      compactionReserveTokens: 256,
+      onReservationRecorded: (info) => recordedReservations.push(info),
+    });
+
+    const conv = await host.createManagedConversation({
+      slotName: "router",
+      budgetTaskId: "budget-task-gen-B",
     });
 
     // Seed two turns so compaction has history to compact
@@ -814,21 +821,33 @@ async function runS4(workDir: string): Promise<ContractResult> {
     const s2 = await conv.submit({ type: "input", content: "Second message " + "ipsum ".repeat(80) }, BACKGROUND_CONTEXT);
     await s2.wait(BACKGROUND_CONTEXT);
 
-    observedCalls.length = 0;
+    recordedReservations.length = 0;
 
-    // Now launch BOTH a manual compaction task AND a generation task concurrently inside the SAME conversation!
-    const compactTaskId = await conv.compact("Summarize earlier history", BACKGROUND_CONTEXT);
-    budgetOwnerByPiTaskId.set(compactTaskId, "budget-task-compaction-A");
+    // Launch BOTH compaction (bound to budget-task-compaction-A) AND generation (bound to budget-task-gen-B)
+    // concurrently inside the EXACT SAME conversationId through product AegisHostRuntime!
+    const compactRes = await host.triggerCompaction({
+      conversationId: String(conv.id),
+      instructions: "Summarize earlier history",
+      budgetTaskId: "budget-task-compaction-A",
+    });
+    assert.equal(compactRes.ok, true);
+    const compactTaskId = compactRes.compactionTaskId as TaskId;
 
     const genSub = await conv.submit({ type: "input", content: "Concurrent generation turn 3" }, BACKGROUND_CONTEXT);
 
-    // Wait for BOTH physical requests to arrive at the fake model server simultaneously!
+    // Wait for BOTH physical requests to arrive at fake model server simultaneously!
     const bA = await fakeModel.waitBarrier("s4-concurrent-a", 10_000);
     const bB = await fakeModel.waitBarrier("s4-concurrent-b", 10_000);
     assert.ok(bA.arrived && bB.arrived, "S4: both compaction and generation must be in-flight concurrently in same conversation");
 
-    // Inspect live tasks to map the concurrent generation taskId
-    const inspDuringConcurrency = await harness.inspect(BACKGROUND_CONTEXT);
+    // Verify PRODUCT GOVERNANCE LEDGER holds BOTH distinct task accounts simultaneously while in-flight!
+    const compactAcctInFlight = getBudgetAccount(host.govDb, taskAccountIdFor("budget-task-compaction-A"));
+    const genAcctInFlight = getBudgetAccount(host.govDb, taskAccountIdFor("budget-task-gen-B"));
+    assert.ok(compactAcctInFlight && genAcctInFlight, "S4: both product task accounts must exist while in-flight");
+    assert.equal(compactAcctInFlight.held_mu, 100, "S4: compaction task account must hold 100 mu while in-flight");
+    assert.equal(genAcctInFlight.held_mu, 100, "S4: generation task account must hold 100 mu while in-flight");
+
+    const inspDuringConcurrency = await host.harness.inspect(BACKGROUND_CONTEXT);
     const genTask = inspDuringConcurrency.tasks.find((t) => t.record.kind === "pi.generation");
     assert.ok(genTask, "S4: concurrent pi.generation task must exist");
     assert.notEqual(compactTaskId, genTask.record.id, "S4: compaction and generation have distinct Pi taskIds");
@@ -836,8 +855,37 @@ async function runS4(workDir: string): Promise<ContractResult> {
     await fakeModel.releaseBarrier("s4-concurrent-a");
     await fakeModel.releaseBarrier("s4-concurrent-b");
 
-    await harness.waitForTask(compactTaskId, BACKGROUND_CONTEXT);
+    await host.harness.waitForTask(compactTaskId, BACKGROUND_CONTEXT);
     await genSub.wait(BACKGROUND_CONTEXT);
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Verify both product ledger reservations settled on their distinct budget tasks!
+    const compactRec = recordedReservations.find((r) => r.method === "completeSimple");
+    const genRec = recordedReservations.find((r) => r.method === "streamSimple");
+    assert.ok(compactRec && genRec, "S4: both completeSimple and streamSimple reservations must be recorded");
+    assert.equal(compactRec.ownerTaskId, "budget-task-compaction-A");
+    assert.equal(compactRec.purpose, "compaction");
+    assert.equal(genRec.ownerTaskId, "budget-task-gen-B");
+    assert.equal(genRec.purpose, "router");
+    assert.equal(compactRec.conversationId, genRec.conversationId);
+
+    const compactRow = host.govDb
+      .prepare("SELECT * FROM budget_reservations WHERE request_id = ?")
+      .get(compactRec.requestId) as unknown as BudgetReservationRow;
+    const genRow = host.govDb
+      .prepare("SELECT * FROM budget_reservations WHERE request_id = ?")
+      .get(genRec.requestId) as unknown as BudgetReservationRow;
+    assert.equal(compactRow.state, "SETTLED");
+    assert.equal(compactRow.task_account, "acct:task:budget-task-compaction-A");
+    assert.equal(genRow.state, "SETTLED");
+    assert.equal(genRow.task_account, "acct:task:budget-task-gen-B");
+
+    const compactAcctAfter = getBudgetAccount(host.govDb, taskAccountIdFor("budget-task-compaction-A"))!;
+    const genAcctAfter = getBudgetAccount(host.govDb, taskAccountIdFor("budget-task-gen-B"))!;
+    assert.equal(compactAcctAfter.held_mu, 0);
+    assert.equal(compactAcctAfter.charged_mu, 60);
+    assert.equal(genAcctAfter.held_mu, 0);
+    assert.equal(genAcctAfter.charged_mu, 180);
 
     // Also prove maxRetries: 0 produces exactly 1 physical request on HTTP 503 when durable retry is disabled
     const statsBefore503 = await fakeModel.stats();
@@ -851,30 +899,33 @@ async function runS4(workDir: string): Promise<ContractResult> {
     const physicalDeltaOn503 = statsAfter503.totalPhysicalRequests - statsBefore503.totalPhysicalRequests;
     assert.equal(physicalDeltaOn503, 1, "S4: stream.maxRetries=0 must produce exactly 1 physical HTTP request on 503");
 
-    await harness.close(BACKGROUND_CONTEXT);
-
-    const compactionCall = observedCalls.find((c) => c.taskName === "pi.compaction");
-    const generationCall = observedCalls.find((c) => c.taskName === "pi.generation" && c.taskId === genTask.record.id);
-
-    assert.ok(compactionCall, "S4: compaction call must be attributed via HostPhaseTelemetry");
-    assert.ok(generationCall, "S4: generation call must be attributed via HostPhaseTelemetry");
-    assert.equal(compactionCall.method, "completeSimple");
-    assert.equal(compactionCall.taskId, compactTaskId);
-    assert.equal(compactionCall.budgetOwnerTask, "budget-task-compaction-A");
-    assert.equal(generationCall.method, "streamSimple");
-    assert.equal(generationCall.taskId, genTask.record.id);
-    assert.notEqual(compactionCall.budgetOwnerTask, generationCall.budgetOwnerTask);
+    await host.close();
 
     return {
       id: "S4",
       status: "PASS",
       summary:
-        "HostPhaseTelemetry WeakMap unforgeably attributes concurrent completeSimple (pi.compaction) and streamSimple (pi.generation) in the SAME conversationId to distinct Pi taskIds and distinct budget tasks; maxRetries=0 verified (503 -> 1 physical request).",
+        "Product AegisHostRuntime + HostPhaseTelemetry WeakMap unforgeably attributed concurrent completeSimple (pi.compaction) and streamSimple (pi.generation) in the SAME conversationId to distinct budget_accounts (in-flight held_mu=100 each, settled=60 each); maxRetries=0 verified (503 -> 1 physical request).",
       evidence: {
         sharedConversationId: conv.id,
         compactionTaskId: compactTaskId,
         generationTaskId: genTask.record.id,
-        observedConcurrentCalls: [compactionCall, generationCall],
+        compactionReservation: {
+          requestId: compactRow.request_id,
+          taskAccount: compactRow.task_account,
+          purpose: compactRow.purpose,
+          state: compactRow.state,
+          inFlightHeldMu: compactAcctInFlight.held_mu,
+          finalChargedMu: compactAcctAfter.charged_mu,
+        },
+        generationReservation: {
+          requestId: genRow.request_id,
+          taskAccount: genRow.task_account,
+          purpose: genRow.purpose,
+          state: genRow.state,
+          inFlightHeldMu: genAcctInFlight.held_mu,
+          finalChargedMu: genAcctAfter.charged_mu,
+        },
         physicalRequestsOn503WithMaxRetries0: physicalDeltaOn503,
       },
     };

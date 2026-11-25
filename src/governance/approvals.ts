@@ -332,13 +332,27 @@ export function saveDraftRevision(
     const scope = db.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(proposal.scope_id) as
       | ScopeRow
       | undefined;
-    if (!scope || !isPrincipalAuthorizedForScope(scope, params.principalId) || proposal.conversation_id !== params.conversationId) {
+    const convScope = db
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
+      .get(proposal.conversation_id) as { principal_id: string } | undefined;
+    if (
+      !scope ||
+      !isPrincipalAuthorizedForScope(scope, params.principalId) ||
+      proposal.conversation_id !== params.conversationId ||
+      (convScope && convScope.principal_id !== params.principalId)
+    ) {
       return {
         httpStatus: 403,
         ok: false,
         code: "forbidden",
         message: "Principal or conversation is not authorized for this proposal",
       };
+    }
+    const epochRow = db
+      .prepare("SELECT status FROM runtime_epochs WHERE runtime_epoch = ?")
+      .get(proposal.runtime_epoch) as { status: string } | undefined;
+    if (!epochRow || epochRow.status !== "ACTIVE") {
+      return { httpStatus: 409, ok: false, code: "runtime_epoch_retired", message: "Proposal belongs to a retired runtime epoch" };
     }
     if (proposal.cancelled === 1 || scope.cancelled === 1) {
       return { httpStatus: 409, ok: false, code: "cancelled", message: "Proposal or scope is cancelled" };
@@ -592,12 +606,16 @@ export function decideApproval(
     const scope = db.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(proposal.scope_id) as
       | ScopeRow
       | undefined;
+    const convScope = db
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
+      .get(proposal.conversation_id) as { principal_id: string } | undefined;
 
     // 1. Authorization & conversation binding FIRST (before idempotency lookup!)
     if (
       !scope ||
       !isPrincipalAuthorizedForScope(scope, params.principalId) ||
-      proposal.conversation_id !== params.conversationId
+      proposal.conversation_id !== params.conversationId ||
+      (convScope && convScope.principal_id !== params.principalId)
     ) {
       writeAuditEvent(db, {
         entityType: "approval",
@@ -737,6 +755,17 @@ export function decideApproval(
         ok: false,
         code: "nonce_mismatch",
         message: "Invalid or stale approval nonce",
+      };
+    }
+    const epochRow = db
+      .prepare("SELECT status FROM runtime_epochs WHERE runtime_epoch = ?")
+      .get(proposal.runtime_epoch) as { status: string } | undefined;
+    if (!epochRow || epochRow.status !== "ACTIVE") {
+      return {
+        httpStatus: 409,
+        ok: false,
+        code: "runtime_epoch_retired",
+        message: "Approval belongs to a retired runtime epoch",
       };
     }
     if (
@@ -951,5 +980,100 @@ export function readProposalGovernanceState(
     effectId: effect?.effect_id ?? null,
     effectState: effect?.state ?? null,
     signalKey: signalKeyFor(proposal.runtime_epoch, proposal.proposal_id, approval.revision),
+  };
+}
+
+export interface ApprovalChallengeResult {
+  httpStatus: 200 | 403 | 404 | 409 | 410;
+  ok: boolean;
+  code: string;
+  message?: string;
+  approvalId?: string;
+  proposalId?: string;
+  revision?: number;
+  actionHash?: string;
+  nonce?: string;
+}
+
+/**
+ * Dedicated authorized challenge lookup for the decision UI/API (G3).
+ * Never exposed on SSE streams, URLs, or general snapshots.
+ */
+export function fetchAuthorizedApprovalChallenge(
+  db: DatabaseSync,
+  params: {
+    approvalId: string;
+    conversationId: string;
+    principalId: string;
+    now: number;
+  },
+): ApprovalChallengeResult {
+  const approval = db
+    .prepare("SELECT * FROM approvals WHERE approval_id = ?")
+    .get(params.approvalId) as ApprovalRow | undefined;
+  if (!approval) {
+    return { httpStatus: 404, ok: false, code: "approval_not_found", message: "Approval not found" };
+  }
+  const proposal = db
+    .prepare("SELECT * FROM proposals WHERE proposal_id = ?")
+    .get(approval.proposal_id) as ProposalRow | undefined;
+  if (!proposal) {
+    return { httpStatus: 404, ok: false, code: "proposal_not_found", message: "Proposal not found" };
+  }
+  const scope = db.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(proposal.scope_id) as
+    | ScopeRow
+    | undefined;
+  const convScope = db
+    .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
+    .get(proposal.conversation_id) as { principal_id: string } | undefined;
+
+  if (
+    !scope ||
+    !isPrincipalAuthorizedForScope(scope, params.principalId) ||
+    proposal.conversation_id !== params.conversationId ||
+    (convScope && convScope.principal_id !== params.principalId)
+  ) {
+    return {
+      httpStatus: 403,
+      ok: false,
+      code: "forbidden",
+      message: "Principal or conversation is not authorized to retrieve this approval challenge",
+    };
+  }
+  const epochRow = db
+    .prepare("SELECT status FROM runtime_epochs WHERE runtime_epoch = ?")
+    .get(proposal.runtime_epoch) as { status: string } | undefined;
+  if (!epochRow || epochRow.status !== "ACTIVE") {
+    return { httpStatus: 409, ok: false, code: "runtime_epoch_retired", message: "Runtime epoch is retired" };
+  }
+  if (approval.state === "EXPIRED" || (approval.state === "PENDING" && params.now >= approval.expires_at)) {
+    return { httpStatus: 410, ok: false, code: "approval_expired", message: "Approval has expired" };
+  }
+  if (approval.state !== "PENDING") {
+    return {
+      httpStatus: 409,
+      ok: false,
+      code: "approval_not_pending",
+      message: `Approval is ${approval.state}, not PENDING`,
+    };
+  }
+  const draft = db
+    .prepare("SELECT action_hash FROM draft_revisions WHERE proposal_id = ? AND revision = ?")
+    .get(approval.proposal_id, approval.revision) as { action_hash: string } | undefined;
+  const challenge = db
+    .prepare("SELECT nonce_value FROM approval_challenges WHERE approval_id = ?")
+    .get(approval.approval_id) as { nonce_value: string } | undefined;
+  if (!draft || !challenge) {
+    return { httpStatus: 409, ok: false, code: "challenge_unavailable", message: "Approval challenge unavailable" };
+  }
+  return {
+    httpStatus: 200,
+    ok: true,
+    code: "ok",
+    approvalId: approval.approval_id,
+    proposalId: proposal.proposal_id,
+    revision: approval.revision,
+    actionHash: draft.action_hash,
+    nonce: challenge.nonce_value,
   };
 }

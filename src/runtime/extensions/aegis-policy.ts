@@ -48,7 +48,6 @@ export interface AegisPolicyExtensionOptions {
     parentConversationId: string;
     parentTaskId: string;
     prompt: string;
-    budgetTaskId?: string;
   }) => Promise<{ ok: boolean; text: string; error?: string; workerConversationId?: number }>;
   /** Test seam for E01: allows pausing/hook after proposal creation and before returning sleep park. */
   onBeforeToolAfterProposal?: (info: {
@@ -207,13 +206,12 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
 
   const runWorkerTool = defineTool({
     name: "run_worker",
-    description: "Delegate a task to the isolated Worker model slot with its own budget attribution.",
+    description: "Delegate a task to the isolated Worker model slot under the host's owning budget task.",
     replay: "unsafe",
     parameters: {
       type: "object",
       properties: {
         prompt: { type: "string" },
-        budgetTaskId: { type: "string" },
       },
       required: ["prompt"],
     },
@@ -224,12 +222,12 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
           output: [{ type: "text", text: "Worker delegation is not configured on this host" }],
         };
       }
-      const typed = args as { prompt: string; budgetTaskId?: string };
+      const typed = args as { prompt: string };
+      // Never accept budgetTaskId from untrusted model arguments; host binds worker budget authoritatively.
       const res = await options.runWorkerDelegation({
         parentConversationId: String(api.conversationId),
         parentTaskId: String(api.taskId),
         prompt: typed.prompt,
-        budgetTaskId: typed.budgetTaskId,
       });
       if (!res.ok) {
         return {

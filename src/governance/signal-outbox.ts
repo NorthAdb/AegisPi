@@ -44,10 +44,13 @@ export function listPendingOutboxItems(db: DatabaseSync, activeRuntimeEpoch?: st
     : db.prepare(sql).all()) as unknown as SignalOutboxItem[];
 }
 
+export type DuplicateCheckOutcome = "matched" | "conflict" | "unverifiable";
+
 export interface ReconcileSignalOutcomeParams {
   approvalId: string;
   sdkOutcome: SdkSignalOutcome;
   duplicateValueMatches?: boolean;
+  duplicateCheck?: DuplicateCheckOutcome;
   taskObservedDecisionOrFinished?: boolean;
   reason?: string;
   now: number;
@@ -88,16 +91,29 @@ export function recordOutboxDeliveryOutcome(
       nextState = "ACKED";
       reason = "sdk_delivered";
       break;
-    case "duplicate":
-      if (params.duplicateValueMatches === false) {
+    case "duplicate": {
+      const check: DuplicateCheckOutcome =
+        params.duplicateCheck ??
+        (params.duplicateValueMatches === true
+          ? "matched"
+          : params.duplicateValueMatches === false
+            ? "conflict"
+            : "unverifiable");
+      if (check === "matched") {
+        nextState = "ACKED";
+        reason = "sdk_duplicate_same_value";
+      } else if (check === "conflict") {
         nextState = "ISOLATED";
         shouldQuarantineReady = true;
         reason = "sdk_duplicate_value_conflict";
       } else {
-        nextState = "ACKED";
-        reason = "sdk_duplicate_same_value";
+        // Cannot prove stored value matches: fail closed and keep isolated for manual review.
+        nextState = "ISOLATED";
+        shouldQuarantineReady = true;
+        reason = "sdk_duplicate_unverifiable_pending_review";
       }
       break;
+    }
     case "invalid":
       nextState = "ISOLATED";
       shouldQuarantineReady = true;

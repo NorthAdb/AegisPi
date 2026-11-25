@@ -8,6 +8,7 @@ import {
   Harness,
   type Conversation,
   type ConversationId,
+  type Cursor,
   type Harness as HarnessInstance,
   type HarnessInspection,
   type TaskId,
@@ -18,8 +19,20 @@ import {
   expireOverdueApprovals,
   registerConversationScope,
 } from "../governance/approvals.ts";
-import type { BudgetPurpose } from "../governance/budget.ts";
-import type { HostCredentialVault } from "../governance/credentials.ts";
+import {
+  chargeBoundExpiredReservations,
+  correctChargedBoundReservation,
+  getPersistedBudgetBinding,
+  listPersistedBudgetBindings,
+  persistBudgetTaskBinding,
+  type BudgetPurpose,
+} from "../governance/budget.ts";
+import { canonicalJson } from "../governance/canonical.ts";
+import {
+  assertStage1LoopbackModelUrl,
+  assertStage1LoopbackSmtpHost,
+  type HostCredentialVault,
+} from "../governance/credentials.ts";
 import { openGovernanceDb, type GovDbPragmas } from "../governance/db.ts";
 import {
   quarantineReadyEffect,
@@ -37,6 +50,7 @@ import {
 import {
   listPendingOutboxItems,
   recordOutboxDeliveryOutcome,
+  type DuplicateCheckOutcome,
   type SdkSignalOutcome,
 } from "../governance/signal-outbox.ts";
 import {
@@ -102,6 +116,8 @@ export interface AegisHostConfig {
   shouldFailBeforeTransport?: (requestId: string, owner: ResolvedBudgetOwner) => string | null;
   /** Test seam for B07 */
   injectFaultAfterFirstAccount?: () => void;
+  /** Optional observer for G2 transport proof */
+  onTransportDispatch?: (info: { requestId: string; baseUrl: string; provider: string; modelId: string }) => void;
   onReservationRecorded?: (info: {
     requestId: string;
     ownerTaskId: string;
@@ -119,10 +135,64 @@ export interface StartupReport {
   govPragmas: GovDbPragmas;
   recoveredSubmittingToUnknown: string[];
   expiredApprovals: string[];
+  chargedBoundReservations: string[];
   pairedCheck: PairedCheckResult;
   reconciledQuarantinedEffects: string[];
   selfCheckErrors: string[];
   schedulingBeforeRelease: "paused" | "running" | "closing" | null;
+}
+
+/**
+ * Paginates through ALL committed entries of a conversation using cursor pagination
+ * (never truncated at page 1 / 200 items), returning total entry count and any
+ * aegis.lineage_anchor traceIdentity found.
+ */
+async function scanAllConversationEntries(conv: Conversation): Promise<{
+  totalCount: number;
+  anchorTraceIdentity: string | null;
+}> {
+  let cursor: Cursor | undefined = undefined;
+  let totalCount = 0;
+  let anchorTraceIdentity: string | null = null;
+  for (;;) {
+    const page = await conv.entries({ order: "ascending" }, 200, cursor, BACKGROUND_CONTEXT);
+    totalCount += page.items.length;
+    for (const e of page.items) {
+      if (e.kind === "aegis.lineage_anchor" && e.data && typeof e.data === "object") {
+        const d = e.data as Record<string, unknown>;
+        if (typeof d["traceIdentity"] === "string") {
+          anchorTraceIdentity = d["traceIdentity"];
+        }
+      }
+    }
+    if (!page.next || page.items.length === 0) break;
+    cursor = page.next;
+  }
+  return { totalCount, anchorTraceIdentity };
+}
+
+/**
+ * Inspects Pi's persisted task memos to verify whether a previously delivered signal
+ * under (signalName, key) matches the expected canonical JSON payload.
+ */
+function verifyDuplicateSignalValue(
+  memos: Readonly<Record<string, unknown>> | undefined,
+  signalName: string,
+  deliveryKey: string,
+  expectedPayload: Record<string, unknown>,
+): DuplicateCheckOutcome {
+  if (!memos) return "unverifiable";
+  const memoKey = `pi.signal.${signalName}/${deliveryKey}`;
+  const stored = memos[memoKey];
+  if (!stored || typeof stored !== "object" || !("value" in stored)) {
+    return "unverifiable";
+  }
+  const storedVal = (stored as { value: unknown }).value;
+  try {
+    return canonicalJson(storedVal) === canonicalJson(expectedPayload) ? "matched" : "conflict";
+  } catch {
+    return "unverifiable";
+  }
 }
 
 export class AegisHostRuntime {
@@ -137,13 +207,13 @@ export class AegisHostRuntime {
   readonly govPath: string;
 
   #health: HostHealthState;
-  #runtimeEpoch: string;
+  readonly #epochBox: { current: string };
   #outboxDeliveryEnabled: boolean;
-  #outboxTimer: ReturnType<typeof setInterval> | null = null;
+  #maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   #drainingOutbox = false;
   #closed = false;
 
-  // Task/conversation -> budget owner bindings
+  // Authoritative host task/conversation -> budget owner bindings (backed by budget_task_bindings in govDb)
   readonly #taskBudgetOwner = new Map<number, { ownerTaskId: string; purpose: BudgetPurpose; conversationId: string }>();
   readonly #conversationBudgetOwner = new Map<number, { ownerTaskId: string; purpose: BudgetPurpose }>();
   readonly #knownTaskConversation = new Map<number, number>();
@@ -161,7 +231,7 @@ export class AegisHostRuntime {
     startupReport: StartupReport;
     tracePath: string;
     govPath: string;
-    runtimeEpoch: string;
+    epochBox: { current: string };
     taskBudgetOwner: Map<number, { ownerTaskId: string; purpose: BudgetPurpose; conversationId: string }>;
     conversationBudgetOwner: Map<number, { ownerTaskId: string; purpose: BudgetPurpose }>;
     knownTaskConversation: Map<number, number>;
@@ -177,7 +247,7 @@ export class AegisHostRuntime {
     this.tracePath = params.tracePath;
     this.govPath = params.govPath;
     this.#health = params.startupReport.health;
-    this.#runtimeEpoch = params.runtimeEpoch;
+    this.#epochBox = params.epochBox;
     this.#outboxDeliveryEnabled = params.startupReport.health === "READY" && !params.config.pauseOutboxDelivery;
     this.#taskBudgetOwner = params.taskBudgetOwner;
     this.#conversationBudgetOwner = params.conversationBudgetOwner;
@@ -186,8 +256,8 @@ export class AegisHostRuntime {
     this.#defaultScopeId = params.config.defaultScopeId ?? "scope:default";
     this.#now = params.now;
 
-    if (this.#outboxDeliveryEnabled) {
-      this.#startOutboxLoop();
+    if (this.#health === "READY") {
+      this.#startMaintenanceLoop();
     }
   }
 
@@ -196,7 +266,7 @@ export class AegisHostRuntime {
   }
 
   get runtimeEpoch(): string {
-    return this.#runtimeEpoch;
+    return this.#epochBox.current;
   }
 
   get isAcceptingCommands(): boolean {
@@ -205,13 +275,32 @@ export class AegisHostRuntime {
 
   setOutboxDeliveryPaused(paused: boolean): void {
     this.#outboxDeliveryEnabled = !paused && this.#health === "READY";
-    if (this.#outboxDeliveryEnabled && !this.#outboxTimer) {
-      this.#startOutboxLoop();
+    if (this.#health === "READY" && !this.#maintenanceTimer) {
+      this.#startMaintenanceLoop();
     }
   }
 
-  bindConversationBudgetOwner(conversationId: number, ownerTaskId: string, purpose: BudgetPurpose): void {
+  bindConversationBudgetOwner(
+    conversationId: number,
+    ownerTaskId: string,
+    purpose: BudgetPurpose,
+    opts?: { overwrite?: boolean },
+  ): void {
+    const overwrite = opts?.overwrite ?? false;
+    if (!overwrite && this.#conversationBudgetOwner.has(conversationId)) {
+      return;
+    }
     this.#conversationBudgetOwner.set(conversationId, { ownerTaskId, purpose });
+    persistBudgetTaskBinding(this.govDb, {
+      runtimeEpoch: this.#epochBox.current,
+      bindingKind: "CONVERSATION",
+      bindingKey: String(conversationId),
+      conversationId: String(conversationId),
+      ownerTaskId,
+      purpose,
+      now: this.#now(),
+      overwrite,
+    });
   }
 
   bindPiTaskBudgetOwner(
@@ -219,19 +308,66 @@ export class AegisHostRuntime {
     conversationId: number,
     ownerTaskId: string,
     purpose: BudgetPurpose,
+    opts?: { overwrite?: boolean },
   ): void {
+    const overwrite = opts?.overwrite ?? true;
     this.#taskBudgetOwner.set(piTaskId, {
       ownerTaskId,
       purpose,
       conversationId: String(conversationId),
     });
     this.#knownTaskConversation.set(piTaskId, conversationId);
+    persistBudgetTaskBinding(this.govDb, {
+      runtimeEpoch: this.#epochBox.current,
+      bindingKind: "PI_TASK",
+      bindingKey: String(piTaskId),
+      conversationId: String(conversationId),
+      ownerTaskId,
+      purpose,
+      now: this.#now(),
+      overwrite,
+    });
+  }
+
+  /**
+   * Runs periodic timeout settlement (HELD -> CHARGED_BOUND) on the host clock.
+   * Invoked both during startup Step 2 and continuously during runtime maintenance ticks.
+   */
+  runBudgetSettlementSweep(): string[] {
+    if (this.#closed) return [];
+    return chargeBoundExpiredReservations(this.govDb, { now: this.#now() });
+  }
+
+  /**
+   * Host-level entry point to apply a trusted late provider bill to a CHARGED_BOUND reservation.
+   */
+  applyTrustedLateBill(params: {
+    requestId: string;
+    actualMu: number;
+    billEventKey: string;
+    evidenceRef: string;
+    actorId: string;
+  }) {
+    return correctChargedBoundReservation(this.govDb, {
+      requestId: params.requestId,
+      actualMu: params.actualMu,
+      billEventKey: params.billEventKey,
+      evidenceRef: params.evidenceRef,
+      actorId: params.actorId,
+      now: this.#now(),
+    });
   }
 
   /**
    * 6-Step Startup & Recovery Sequence (Taskbook 1 Section 2).
    */
   static async start(config: AegisHostConfig): Promise<AegisHostRuntime> {
+    // Stage 1 hard egress boundary check BEFORE opening any writable DB or lock
+    assertStage1LoopbackSmtpHost(config.smtpConfig.host, config.smtpConfig.port);
+    for (const s of config.modelSlots) {
+      assertStage1LoopbackModelUrl(s.baseUrl);
+    }
+
     const nowFn = config.now ?? (() => Date.now());
     const absDataDir = path.resolve(config.dataDir);
     mkdirSync(absDataDir, { recursive: true });
@@ -258,9 +394,11 @@ export class AegisHostRuntime {
       });
 
       const { epoch, manifest } = ensureActiveEpochAndManifest(govDb, nowFn());
-      let activeEpochId = epoch.runtime_epoch;
+      // Shared mutable epoch box so Models, policy extension, and runtime always observe epoch rotation immediately!
+      const epochBox = { current: epoch.runtime_epoch };
       const recoveredSubmittingToUnknown = recoverSubmittingEffectsToUnknown(govDb, nowFn());
       const expiredApprovals = expireOverdueApprovals(govDb, nowFn());
+      const chargedBoundReservations = chargeBoundExpiredReservations(govDb, { now: nowFn() });
 
       // STEP 3: Configure hooks, Models egress, sole submitter, and startup self-checks (delivery paused)
       const selfCheckErrors: string[] = [];
@@ -279,9 +417,36 @@ export class AegisHostRuntime {
       const knownTaskConversation = new Map<number, number>();
       let harnessRef: HarnessInstance | null = null;
 
+      // Hydrate persisted budget task bindings for the active epoch from aegis-gov.sqlite (survives restarts!)
+      for (const b of listPersistedBudgetBindings(govDb, epochBox.current)) {
+        if (b.binding_kind === "PI_TASK") {
+          const tid = Number(b.binding_key);
+          const cid = Number(b.conversation_id);
+          if (Number.isFinite(tid)) {
+            taskBudgetOwner.set(tid, {
+              ownerTaskId: b.owner_task_id,
+              purpose: b.purpose,
+              conversationId: b.conversation_id,
+            });
+            if (Number.isFinite(cid)) {
+              knownTaskConversation.set(tid, cid);
+            }
+          }
+        } else if (b.binding_kind === "CONVERSATION") {
+          const cid = Number(b.binding_key);
+          if (Number.isFinite(cid)) {
+            conversationBudgetOwner.set(cid, {
+              ownerTaskId: b.owner_task_id,
+              purpose: b.purpose,
+            });
+          }
+        }
+      }
+
       const telemetry = new HostPhaseTelemetry();
       const resolveBudgetOwner = (attr: PhaseAttribution, _model: Model<Api>): ResolvedBudgetOwner | null => {
-        // 1. Explicit per-Pi-task binding wins (handles concurrent compaction & generation in same conversation!)
+        const activeEpoch = epochBox.current;
+        // 1. Authoritative per-Pi-task binding wins (handles concurrent compaction & generation in same conversation!)
         const direct = taskBudgetOwner.get(attr.taskId);
         if (direct) {
           return {
@@ -290,7 +455,25 @@ export class AegisHostRuntime {
             purpose: attr.taskName === "pi.compaction" ? "compaction" : direct.purpose,
           };
         }
-        // 2. Fallback to conversation binding recorded when task was observed
+        const persistedTask = getPersistedBudgetBinding(govDb!, {
+          runtimeEpoch: activeEpoch,
+          bindingKind: "PI_TASK",
+          bindingKey: String(attr.taskId),
+        });
+        if (persistedTask) {
+          taskBudgetOwner.set(attr.taskId, {
+            ownerTaskId: persistedTask.owner_task_id,
+            purpose: persistedTask.purpose,
+            conversationId: persistedTask.conversation_id,
+          });
+          return {
+            conversationId: persistedTask.conversation_id,
+            ownerTaskId: persistedTask.owner_task_id,
+            purpose: attr.taskName === "pi.compaction" ? "compaction" : persistedTask.purpose,
+          };
+        }
+
+        // 2. Authoritative persisted conversation binding (e.g. after restart or normal router/worker turns)
         const convId = knownTaskConversation.get(attr.taskId);
         if (convId !== undefined) {
           const convBinding = conversationBudgetOwner.get(convId);
@@ -301,18 +484,31 @@ export class AegisHostRuntime {
               purpose: attr.taskName === "pi.compaction" ? "compaction" : convBinding.purpose,
             };
           }
-          return {
-            conversationId: String(convId),
-            ownerTaskId: `conv:${convId}:task:${attr.taskId}`,
-            purpose: attr.taskName === "pi.compaction" ? "compaction" : "router",
-          };
+          const persistedConv = getPersistedBudgetBinding(govDb!, {
+            runtimeEpoch: activeEpoch,
+            bindingKind: "CONVERSATION",
+            bindingKey: String(convId),
+          });
+          if (persistedConv) {
+            conversationBudgetOwner.set(convId, {
+              ownerTaskId: persistedConv.owner_task_id,
+              purpose: persistedConv.purpose,
+            });
+            return {
+              conversationId: String(convId),
+              ownerTaskId: persistedConv.owner_task_id,
+              purpose: attr.taskName === "pi.compaction" ? "compaction" : persistedConv.purpose,
+            };
+          }
         }
+
+        // 3. Fail closed: never synthesize a fresh default-quota task account for an unattributed task!
         return null;
       };
 
       const modelsController = createHostModelsEgress({
         govDb,
-        getRuntimeEpoch: () => activeEpochId,
+        getRuntimeEpoch: () => epochBox.current,
         vault: config.vault,
         telemetry,
         slots: config.modelSlots,
@@ -324,22 +520,27 @@ export class AegisHostRuntime {
         settleTimeoutMs: config.settleTimeoutMs,
         shouldFailBeforeTransport: config.shouldFailBeforeTransport,
         injectFaultAfterFirstAccount: config.injectFaultAfterFirstAccount,
+        onTransportDispatch: config.onTransportDispatch,
         onReservationRecorded: config.onReservationRecorded,
       });
 
-      const resolveScopeId = (conversationId: string): string => {
+      const resolveScopeRow = (conversationId: string): { scopeId: string; principalId: string } => {
         const row = govDb!
-          .prepare("SELECT scope_id FROM conversation_scopes WHERE conversation_id = ?")
-          .get(conversationId) as { scope_id: string } | undefined;
-        return row?.scope_id ?? defaultScopeId;
+          .prepare("SELECT scope_id, principal_id FROM conversation_scopes WHERE conversation_id = ?")
+          .get(conversationId) as { scope_id: string; principal_id: string } | undefined;
+        return {
+          scopeId: row?.scope_id ?? defaultScopeId,
+          principalId: row?.principal_id ?? defaultPrincipalId,
+        };
       };
+      const resolveScopeId = (conversationId: string): string => resolveScopeRow(conversationId).scopeId;
 
       const workerSlot = config.modelSlots.find((s) => s.slotName === "worker") ?? config.modelSlots[0];
       const registry = createRegistry();
       if (!config.faultInjectMissingPolicyHook) {
         const policyExt = createAegisPolicyExtension({
           govDb,
-          getRuntimeEpoch: () => activeEpochId,
+          getRuntimeEpoch: () => epochBox.current,
           resolveScopeId,
           smtpConfig: config.smtpConfig,
           now: nowFn,
@@ -347,10 +548,37 @@ export class AegisHostRuntime {
           onAfterClaimBeforeTransport: config.onAfterClaimBeforeTransport,
           onBeforeClaim: config.onBeforeClaim,
           tamperFinalPayloadForTest: config.tamperFinalPayloadForTest,
-          runWorkerDelegation: async ({ parentConversationId, parentTaskId, prompt, budgetTaskId }) => {
+          runWorkerDelegation: async ({ parentConversationId, parentTaskId, prompt }) => {
             if (!harnessRef || !workerSlot) {
               return { ok: false, text: "", error: "Harness or worker slot unavailable" };
             }
+            const activeEpoch = epochBox.current;
+            // Authoritatively inherit parent's host budget task; NEVER trust model args or mint a fresh default task!
+            const parentTidNum = Number(parentTaskId);
+            const parentCidNum = Number(parentConversationId);
+            const parentOwnerTaskId =
+              (Number.isFinite(parentTidNum) ? taskBudgetOwner.get(parentTidNum)?.ownerTaskId : undefined) ??
+              getPersistedBudgetBinding(govDb!, {
+                runtimeEpoch: activeEpoch,
+                bindingKind: "PI_TASK",
+                bindingKey: parentTaskId,
+              })?.owner_task_id ??
+              (Number.isFinite(parentCidNum) ? conversationBudgetOwner.get(parentCidNum)?.ownerTaskId : undefined) ??
+              getPersistedBudgetBinding(govDb!, {
+                runtimeEpoch: activeEpoch,
+                bindingKind: "CONVERSATION",
+                bindingKey: parentConversationId,
+              })?.owner_task_id;
+
+            if (!parentOwnerTaskId) {
+              return {
+                ok: false,
+                text: "",
+                error: `unknown_budget_owner: parent conversation ${parentConversationId} / task ${parentTaskId} has no bound host budget task`,
+              };
+            }
+
+            const parentScope = resolveScopeRow(parentConversationId);
             const workerConv = await harnessRef.createConversation(
               {
                 ownership: { kind: "ownerless" },
@@ -361,16 +589,25 @@ export class AegisHostRuntime {
               },
               BACKGROUND_CONTEXT,
             );
-            const effectiveBudgetTask = budgetTaskId ?? `worker:${parentConversationId}:${parentTaskId}:${workerConv.id}`;
             conversationBudgetOwner.set(workerConv.id, {
-              ownerTaskId: effectiveBudgetTask,
+              ownerTaskId: parentOwnerTaskId,
               purpose: "worker",
+            });
+            persistBudgetTaskBinding(govDb!, {
+              runtimeEpoch: activeEpoch,
+              bindingKind: "CONVERSATION",
+              bindingKey: String(workerConv.id),
+              conversationId: String(workerConv.id),
+              ownerTaskId: parentOwnerTaskId,
+              purpose: "worker",
+              now: nowFn(),
+              overwrite: true,
             });
             registerConversationScope(govDb!, {
               conversationId: String(workerConv.id),
-              scopeId: resolveScopeId(parentConversationId),
-              principalId: defaultPrincipalId,
-              runtimeEpoch: activeEpochId,
+              scopeId: parentScope.scopeId,
+              principalId: parentScope.principalId,
+              runtimeEpoch: activeEpoch,
               now: nowFn(),
             });
             const sub = await workerConv.submit({ type: "input", content: prompt }, BACKGROUND_CONTEXT);
@@ -445,11 +682,27 @@ export class AegisHostRuntime {
               if (node.owner !== undefined && !taskBudgetOwner.has(node.id)) {
                 const ownerBinding = taskBudgetOwner.get(node.owner);
                 if (ownerBinding) {
+                  const childPurpose: BudgetPurpose =
+                    node.kind === "pi.compaction" ? "compaction" : ownerBinding.purpose;
                   taskBudgetOwner.set(node.id, {
                     ownerTaskId: ownerBinding.ownerTaskId,
-                    purpose: node.kind === "pi.compaction" ? "compaction" : ownerBinding.purpose,
+                    purpose: childPurpose,
                     conversationId: String(node.conversationId),
                   });
+                  try {
+                    persistBudgetTaskBinding(govDb!, {
+                      runtimeEpoch: epochBox.current,
+                      bindingKind: "PI_TASK",
+                      bindingKey: String(node.id),
+                      conversationId: String(node.conversationId),
+                      ownerTaskId: ownerBinding.ownerTaskId,
+                      purpose: childPurpose,
+                      now: nowFn(),
+                      overwrite: false,
+                    });
+                  } catch {
+                    // ignore if DB closing during shutdown
+                  }
                 }
               }
             }
@@ -471,11 +724,12 @@ export class AegisHostRuntime {
       if (selfCheckErrors.length > 0) {
         const report: StartupReport = {
           health: "NEEDS_ATTENTION",
-          runtimeEpoch: activeEpochId,
+          runtimeEpoch: epochBox.current,
           traceIdentity: epoch.trace_identity,
           govPragmas: opened.pragmas,
           recoveredSubmittingToUnknown,
           expiredApprovals,
+          chargedBoundReservations,
           pairedCheck: { ok: true, observedChangeCounter: 0 },
           reconciledQuarantinedEffects: [],
           selfCheckErrors,
@@ -491,7 +745,7 @@ export class AegisHostRuntime {
           startupReport: report,
           tracePath,
           govPath,
-          runtimeEpoch: activeEpochId,
+          epochBox,
           taskBudgetOwner,
           conversationBudgetOwner,
           knownTaskConversation,
@@ -499,27 +753,20 @@ export class AegisHostRuntime {
         });
       }
 
-      // Observe trace lineage anchor & known conversations/tasks strictly read-only!
+      // Observe trace lineage anchor & known conversations/tasks strictly read-only with FULL cursor pagination!
       const anchorConv = await harness.conversation(1 as ConversationId, BACKGROUND_CONTEXT);
       let anchorFoundIdentity: string | null = null;
       let currentWatermark = 0;
       if (anchorConv) {
-        const rootEntries = await anchorConv.entries({ order: "ascending" }, 200, undefined, BACKGROUND_CONTEXT);
-        currentWatermark += rootEntries.items.length;
-        for (const e of rootEntries.items) {
-          if (e.kind === "aegis.lineage_anchor" && e.data && typeof e.data === "object") {
-            const d = e.data as Record<string, unknown>;
-            if (typeof d["traceIdentity"] === "string") {
-              anchorFoundIdentity = d["traceIdentity"];
-            }
-          }
-        }
+        const rootScan = await scanAllConversationEntries(anchorConv);
+        currentWatermark += rootScan.totalCount;
+        anchorFoundIdentity = rootScan.anchorTraceIdentity;
       }
 
-      // Also check all known conversations & known Pi tasks from governance DB
+      // Also scan all known conversations & known Pi tasks from governance DB with full pagination
       const knownConvRows = govDb
         .prepare("SELECT conversation_id FROM conversation_scopes WHERE runtime_epoch = ?")
-        .all(activeEpochId) as Array<{ conversation_id: string }>;
+        .all(epochBox.current) as Array<{ conversation_id: string }>;
       const missingKnownConversationIds: number[] = [];
       for (const r of knownConvRows) {
         const cid = Number(r.conversation_id);
@@ -528,8 +775,8 @@ export class AegisHostRuntime {
         if (!c) {
           missingKnownConversationIds.push(cid);
         } else {
-          const ents = await c.entries({ order: "ascending" }, 200, undefined, BACKGROUND_CONTEXT);
-          currentWatermark += ents.items.length;
+          const scan = await scanAllConversationEntries(c);
+          currentWatermark += scan.totalCount;
         }
       }
 
@@ -558,11 +805,12 @@ export class AegisHostRuntime {
         // Trace DB was replaced or rolled back! Do NOT call resume/signal/wait!
         const report: StartupReport = {
           health: "NEEDS_ATTENTION",
-          runtimeEpoch: activeEpochId,
+          runtimeEpoch: epochBox.current,
           traceIdentity: epoch.trace_identity,
           govPragmas: opened.pragmas,
           recoveredSubmittingToUnknown,
           expiredApprovals,
+          chargedBoundReservations,
           pairedCheck,
           reconciledQuarantinedEffects: [],
           selfCheckErrors: [`paired_trace_mismatch:${pairedCheck.code}`],
@@ -578,7 +826,7 @@ export class AegisHostRuntime {
           startupReport: report,
           tracePath,
           govPath,
-          runtimeEpoch: activeEpochId,
+          epochBox,
           taskBudgetOwner,
           conversationBudgetOwner,
           knownTaskConversation,
@@ -593,7 +841,7 @@ export class AegisHostRuntime {
           await tx.appendEntry(root.id, {
             kind: "aegis.lineage_anchor",
             data: {
-              runtimeEpoch: activeEpochId,
+              runtimeEpoch: epochBox.current,
               traceIdentity: epoch.trace_identity,
               createdAt: nowFn(),
             },
@@ -618,7 +866,7 @@ export class AegisHostRuntime {
              JOIN proposals p ON p.proposal_id = a.proposal_id
             WHERE p.runtime_epoch = ? AND e.state = 'READY'`,
         )
-        .all(activeEpochId) as Array<{ effect_id: string; tool_task_id: string; approval_id: string }>;
+        .all(epochBox.current) as Array<{ effect_id: string; tool_task_id: string; approval_id: string }>;
 
       for (const r of readyRows) {
         const tid = Number(r.tool_task_id) as TaskId;
@@ -631,7 +879,6 @@ export class AegisHostRuntime {
             now: nowFn(),
           });
           if (q) reconciledQuarantinedEffects.push(r.effect_id);
-          // Also reconcile any pending outbox row for this approval
           const outboxRow = govDb
             .prepare("SELECT state FROM signal_outbox WHERE approval_id = ?")
             .get(r.approval_id) as { state: string } | undefined;
@@ -650,11 +897,12 @@ export class AegisHostRuntime {
       // STEP 6: Release recovery scheduling and open intake
       const report: StartupReport = {
         health: "READY",
-        runtimeEpoch: activeEpochId,
+        runtimeEpoch: epochBox.current,
         traceIdentity: epoch.trace_identity,
         govPragmas: opened.pragmas,
         recoveredSubmittingToUnknown,
         expiredApprovals,
+        chargedBoundReservations,
         pairedCheck,
         reconciledQuarantinedEffects,
         selfCheckErrors: [],
@@ -671,7 +919,7 @@ export class AegisHostRuntime {
         startupReport: report,
         tracePath,
         govPath,
-        runtimeEpoch: activeEpochId,
+        epochBox,
         taskBudgetOwner,
         conversationBudgetOwner,
         knownTaskConversation,
@@ -704,6 +952,7 @@ export class AegisHostRuntime {
   /**
    * Explicitly isolates the old epoch & rotates to a brand new epoch after
    * a trace replacement/rollback mismatch was detected on startup (F03).
+   * Updates the shared epochBox so Models, aegis-policy, and runtime all use newEpoch immediately.
    */
   async rotateEpochAfterMismatch(reason: string): Promise<{
     retiredEpoch: string;
@@ -713,7 +962,10 @@ export class AegisHostRuntime {
     preservedHeldReservationIds: string[];
   }> {
     const res = isolateAndRotateEpoch(this.govDb, { reason, now: this.#now() });
-    this.#runtimeEpoch = res.newEpoch.runtime_epoch;
+    this.#epochBox.current = res.newEpoch.runtime_epoch;
+    this.#taskBudgetOwner.clear();
+    this.#conversationBudgetOwner.clear();
+
     const root = await this.harness.root(BACKGROUND_CONTEXT);
     await root.commit(async (tx) => {
       await tx.appendEntry(root.id, {
@@ -726,16 +978,12 @@ export class AegisHostRuntime {
         },
       });
     }, BACKGROUND_CONTEXT);
-    advancePairedManifest(this.govDb, {
-      tracePath: this.tracePath,
-      watermark: 1,
-      now: this.#now(),
-    });
+    await this.syncPairedManifestWatermark();
     this.#health = "READY";
     if (!this.config.pauseOutboxDelivery) {
       this.#outboxDeliveryEnabled = true;
-      this.#startOutboxLoop();
     }
+    this.#startMaintenanceLoop();
     this.harness.resume();
     return {
       retiredEpoch: res.retiredEpoch,
@@ -758,8 +1006,6 @@ export class AegisHostRuntime {
     if (!slot) {
       throw new Error("No model slots configured");
     }
-    const policyExt = this.harness ? undefined : undefined;
-    void policyExt;
     const conv = await this.harness.createConversation(
       {
         ownership: { kind: "ownerless" },
@@ -775,12 +1021,11 @@ export class AegisHostRuntime {
       conversationId: String(conv.id),
       scopeId,
       principalId,
-      runtimeEpoch: this.#runtimeEpoch,
+      runtimeEpoch: this.#epochBox.current,
       now: this.#now(),
     });
-    if (opts?.budgetTaskId) {
-      this.bindConversationBudgetOwner(conv.id, opts.budgetTaskId, opts.slotName ?? "router");
-    }
+    const effectiveBudgetTaskId = opts?.budgetTaskId ?? `host-task:${this.#epochBox.current}:conv:${conv.id}`;
+    this.bindConversationBudgetOwner(conv.id, effectiveBudgetTaskId, opts?.slotName ?? "router", { overwrite: true });
     await this.syncPairedManifestWatermark();
     return conv;
   }
@@ -793,8 +1038,17 @@ export class AegisHostRuntime {
     const cid = Number(params.conversationId) as ConversationId;
     if (!Number.isFinite(cid)) return { ok: false, code: "invalid_conversation_id" };
     if (params.budgetTaskId) {
-      const existing = this.#conversationBudgetOwner.get(cid);
-      this.bindConversationBudgetOwner(cid, params.budgetTaskId, existing?.purpose ?? "router");
+      // Only bind if conversation has no persisted host budget owner yet (never allow overwriting an existing binding!)
+      const existing =
+        this.#conversationBudgetOwner.get(cid) ??
+        getPersistedBudgetBinding(this.govDb, {
+          runtimeEpoch: this.#epochBox.current,
+          bindingKind: "CONVERSATION",
+          bindingKey: String(cid),
+        });
+      if (!existing) {
+        this.bindConversationBudgetOwner(cid, params.budgetTaskId, "router", { overwrite: false });
+      }
     }
     const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
     if (!conv) return { ok: false, code: "conversation_not_found" };
@@ -815,8 +1069,16 @@ export class AegisHostRuntime {
       params.instructions ?? "Summarize conversation",
       BACKGROUND_CONTEXT,
     );
-    if (params.budgetTaskId) {
-      this.bindPiTaskBudgetOwner(compactTaskId, cid, params.budgetTaskId, "compaction");
+    const effectiveOwner =
+      params.budgetTaskId ??
+      this.#conversationBudgetOwner.get(cid)?.ownerTaskId ??
+      getPersistedBudgetBinding(this.govDb, {
+        runtimeEpoch: this.#epochBox.current,
+        bindingKind: "CONVERSATION",
+        bindingKey: String(cid),
+      })?.owner_task_id;
+    if (effectiveOwner) {
+      this.bindPiTaskBudgetOwner(compactTaskId, cid, effectiveOwner, "compaction", { overwrite: true });
     }
     return { ok: true, compactionTaskId: Number(compactTaskId) };
   }
@@ -842,15 +1104,21 @@ export class AegisHostRuntime {
     const taskIds = insp.tasks.map((t) => t.record.id);
     const convRows = this.govDb
       .prepare("SELECT conversation_id FROM conversation_scopes WHERE runtime_epoch = ?")
-      .all(this.#runtimeEpoch) as Array<{ conversation_id: string }>;
-    let watermark = 1; // root anchor
+      .all(this.#epochBox.current) as Array<{ conversation_id: string }>;
+
+    let watermark = 0;
+    const rootConv = await this.harness.conversation(1 as ConversationId, BACKGROUND_CONTEXT);
+    if (rootConv) {
+      const rootScan = await scanAllConversationEntries(rootConv);
+      watermark += rootScan.totalCount;
+    }
     for (const r of convRows) {
       const cid = Number(r.conversation_id);
       if (!Number.isFinite(cid)) continue;
       const c = await this.harness.conversation(cid as ConversationId, BACKGROUND_CONTEXT);
       if (c) {
-        const ents = await c.entries({ order: "ascending" }, 200, undefined, BACKGROUND_CONTEXT);
-        watermark += ents.items.length;
+        const scan = await scanAllConversationEntries(c);
+        watermark += scan.totalCount;
       }
     }
     watermark += taskIds.length;
@@ -863,17 +1131,109 @@ export class AegisHostRuntime {
   }
 
   /**
+   * Explicitly invokes SDK harness.signal for an approval's tool task to test/record
+   * duplicate wakeup behavior (R4 / W1-B) without mutating already-consumed effects.
+   */
+  async replayApprovalSignal(approvalId: string): Promise<{
+    sdkResult: SdkSignalOutcome;
+    deliveryKey: string;
+    duplicateCheck: DuplicateCheckOutcome | null;
+    outbox: Record<string, unknown> | null;
+    effect: Record<string, unknown> | null;
+  }> {
+    const row = this.govDb
+      .prepare(
+        `SELECT o.approval_id, o.signal_key, o.state AS outbox_state, o.sdk_result, o.reason AS outbox_reason,
+                a.proposal_id, a.revision, a.state AS approval_state,
+                p.runtime_epoch, p.tool_task_id
+           FROM signal_outbox o
+           JOIN approvals a ON a.approval_id = o.approval_id
+           JOIN proposals p ON p.proposal_id = a.proposal_id
+          WHERE o.approval_id = ?`,
+      )
+      .get(approvalId) as
+      | {
+          approval_id: string;
+          signal_key: string;
+          outbox_state: string;
+          sdk_result: string | null;
+          outbox_reason: string | null;
+          proposal_id: string;
+          revision: number;
+          approval_state: string;
+          runtime_epoch: string;
+          tool_task_id: string;
+        }
+      | undefined;
+    if (!row) {
+      throw new Error(`No signal_outbox row found for approval ${approvalId}`);
+    }
+    const tid = Number(row.tool_task_id) as TaskId;
+    const taskBefore = await this.harness.getTask(tid, BACKGROUND_CONTEXT);
+    const proposalKeyPrefix = `sig:${row.runtime_epoch}:${row.proposal_id}:r`;
+    const awaitedSignal =
+      taskBefore?.state.status === "sleeping"
+        ? taskBefore.state.signals?.find(
+            (s) => s.signal === AegisApprovalSignal.name && s.key.startsWith(proposalKeyPrefix),
+          )
+        : undefined;
+    const deliveryKey = awaitedSignal?.key ?? row.signal_key;
+    const payload = {
+      approvalId: row.approval_id,
+      decision: row.approval_state,
+      revision: row.revision,
+    };
+    const sdkResult = await this.harness.signal(
+      tid,
+      AegisApprovalSignal,
+      deliveryKey,
+      payload,
+      BACKGROUND_CONTEXT,
+    );
+    let duplicateCheck: DuplicateCheckOutcome | null = null;
+    if (sdkResult === "duplicate") {
+      const latest = await this.harness.getTask(tid, BACKGROUND_CONTEXT);
+      const memos = latest && "memos" in latest ? latest.memos : undefined;
+      duplicateCheck = verifyDuplicateSignalValue(memos, AegisApprovalSignal.name, deliveryKey, payload);
+    }
+    const outbox =
+      (this.govDb.prepare("SELECT * FROM signal_outbox WHERE approval_id = ?").get(approvalId) as
+        | Record<string, unknown>
+        | undefined) ?? null;
+    const effect =
+      (this.govDb.prepare("SELECT * FROM effects WHERE approval_id = ?").get(approvalId) as
+        | Record<string, unknown>
+        | undefined) ?? null;
+    return { sdkResult, deliveryKey, duplicateCheck, outbox, effect };
+  }
+
+  /**
    * T3: Deliver pending signal_outbox entries to matching parked Pi tool tasks
    * and reconcile all 5 SDK outcomes (delivered, duplicate, invalid, closed, not_found).
+   * On 'duplicate', verifies stored signal value in Pi task memos before ACKing;
+   * mismatch or unverifiable value fails closed to ISOLATED + QUARANTINED.
    */
-  async deliverPendingOutbox(): Promise<
-    Array<{ approvalId: string; signalKey: string; sdkResult: string; action: string }>
+  async deliverPendingOutbox(opts?: { respectPause?: boolean }): Promise<
+    Array<{
+      approvalId: string;
+      signalKey: string;
+      sdkResult: string;
+      duplicateCheck?: DuplicateCheckOutcome;
+      action: string;
+    }>
   > {
     if (this.#closed || this.#health !== "READY" || this.#drainingOutbox) return [];
+    if (opts?.respectPause && !this.#outboxDeliveryEnabled) return [];
     this.#drainingOutbox = true;
-    const results: Array<{ approvalId: string; signalKey: string; sdkResult: string; action: string }> = [];
+    const results: Array<{
+      approvalId: string;
+      signalKey: string;
+      sdkResult: string;
+      duplicateCheck?: DuplicateCheckOutcome;
+      action: string;
+    }> = [];
     try {
-      const items = listPendingOutboxItems(this.govDb, this.#runtimeEpoch);
+      const items = listPendingOutboxItems(this.govDb, this.#epochBox.current);
       for (const item of items) {
         if (this.#closed) break;
         const tid = Number(item.tool_task_id) as TaskId;
@@ -897,9 +1257,7 @@ export class AegisHostRuntime {
         }
 
         if (taskRec.state.status === "terminal" || taskRec.abortRequested) {
-          // Check if the effect was already claimed/succeeded (tool already observed decision!)
-          const alreadyConsumed =
-            item.effect_state !== null && item.effect_state !== "READY";
+          const alreadyConsumed = item.effect_state !== null && item.effect_state !== "READY";
           recordOutboxDeliveryOutcome(this.govDb, {
             approvalId: item.approval_id,
             sdkOutcome: "closed",
@@ -916,21 +1274,22 @@ export class AegisHostRuntime {
           continue;
         }
 
-        // Only deliver when the target tool task is actually sleeping (parked at gate).
-        // If approval arrived before park (E01), keep PENDING so either beforeTool re-entry
-        // observes it directly or the next poll delivers once sleeping!
-        if (taskRec.state.status !== "sleeping") {
+        const proposalKeyPrefix = `sig:${item.runtime_epoch}:${item.proposal_id}:r`;
+        const awaitedSignal =
+          taskRec.state.status === "sleeping"
+            ? taskRec.state.signals?.find(
+                (s) => s.signal === AegisApprovalSignal.name && s.key.startsWith(proposalKeyPrefix),
+              )
+            : undefined;
+        const deliveryKey = awaitedSignal?.key ?? item.signal_key;
+        const existingMemo =
+          "memos" in taskRec && taskRec.memos
+            ? taskRec.memos[`pi.signal.${AegisApprovalSignal.name}/${deliveryKey}`]
+            : undefined;
+
+        if (taskRec.state.status !== "sleeping" && existingMemo === undefined) {
           continue;
         }
-
-        // Resolve the exact signal key this sleeping task is awaiting for this (runtimeEpoch, proposalId).
-        // When a draft is edited from r1 -> r2 while the tool is still parked on r1's wake key,
-        // waking on the awaited proposal key triggers beforeTool re-entry, which reads r2 from govDb.
-        const proposalKeyPrefix = `sig:${item.runtime_epoch}:${item.proposal_id}:r`;
-        const awaitedSignal = taskRec.state.signals?.find(
-          (s) => s.signal === AegisApprovalSignal.name && s.key.startsWith(proposalKeyPrefix),
-        );
-        const deliveryKey = awaitedSignal?.key ?? item.signal_key;
 
         const payload = {
           approvalId: item.approval_id,
@@ -953,11 +1312,18 @@ export class AegisHostRuntime {
           });
         }
 
+        let duplicateCheck: DuplicateCheckOutcome | undefined = undefined;
+        if (sdkResult === "duplicate") {
+          const latestTask = await this.harness.getTask(tid, BACKGROUND_CONTEXT);
+          const memos = latestTask && "memos" in latestTask ? latestTask.memos : undefined;
+          duplicateCheck = verifyDuplicateSignalValue(memos, AegisApprovalSignal.name, deliveryKey, payload);
+        }
+
         const alreadyConsumed = item.effect_state !== null && item.effect_state !== "READY";
-        recordOutboxDeliveryOutcome(this.govDb, {
+        const outcome = recordOutboxDeliveryOutcome(this.govDb, {
           approvalId: item.approval_id,
           sdkOutcome: sdkResult,
-          duplicateValueMatches: true,
+          duplicateCheck,
           taskObservedDecisionOrFinished: alreadyConsumed,
           now: this.#now(),
         });
@@ -965,7 +1331,8 @@ export class AegisHostRuntime {
           approvalId: item.approval_id,
           signalKey: item.signal_key,
           sdkResult,
-          action: sdkResult === "delivered" || sdkResult === "duplicate" ? "acked" : "reconciled",
+          ...(duplicateCheck ? { duplicateCheck } : {}),
+          action: outcome.outboxState === "ACKED" ? "acked" : "isolated",
         });
       }
     } finally {
@@ -974,14 +1341,20 @@ export class AegisHostRuntime {
     return results;
   }
 
-  #startOutboxLoop(): void {
-    if (this.#outboxTimer) return;
-    this.#outboxTimer = setInterval(() => {
-      if (this.#outboxDeliveryEnabled && !this.#closed) {
+  #startMaintenanceLoop(): void {
+    if (this.#maintenanceTimer) return;
+    this.#maintenanceTimer = setInterval(() => {
+      if (this.#closed || this.#health !== "READY") return;
+      try {
+        chargeBoundExpiredReservations(this.govDb, { now: this.#now() });
+      } catch {
+        // ignore transient contention / shutdown race
+      }
+      if (this.#outboxDeliveryEnabled) {
         void this.deliverPendingOutbox().catch(() => {});
       }
     }, 40);
-    this.#outboxTimer.unref();
+    this.#maintenanceTimer.unref();
   }
 
   /**
@@ -994,9 +1367,9 @@ export class AegisHostRuntime {
     this.#closed = true;
     this.#health = "STOPPED";
     this.#outboxDeliveryEnabled = false;
-    if (this.#outboxTimer) {
-      clearInterval(this.#outboxTimer);
-      this.#outboxTimer = null;
+    if (this.#maintenanceTimer) {
+      clearInterval(this.#maintenanceTimer);
+      this.#maintenanceTimer = null;
     }
     try {
       await this.syncPairedManifestWatermark();

@@ -1,4 +1,5 @@
 import net from "node:net";
+import { assertStage1LoopbackSmtpHost } from "../../governance/credentials.ts";
 
 export interface SmtpSendRequest {
   host: string;
@@ -9,6 +10,8 @@ export interface SmtpSendRequest {
   body: string;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /** Optional transport factory observer for Stage 1 egress tests (defaults to net.createConnection). */
+  createConnection?: typeof net.createConnection;
 }
 
 export interface SmtpSendResult {
@@ -34,7 +37,17 @@ function dotStuff(text: string): string {
  * and post-DATA timeout/disconnect (unknown).
  */
 export function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendResult> {
+  try {
+    assertStage1LoopbackSmtpHost(req.host, req.port);
+  } catch (err) {
+    return Promise.resolve({
+      status: "failed_local",
+      reason: err instanceof Error ? err.message : String(err),
+      bytesSent: 0,
+    });
+  }
   const timeoutMs = req.timeoutMs ?? 15_000;
+  const connectFn = req.createConnection ?? net.createConnection;
   return new Promise<SmtpSendResult>((resolve) => {
     let settled = false;
     let bytesSent = 0;
@@ -47,7 +60,7 @@ export function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendResult> {
       resolve(result);
     };
 
-    const socket = net.createConnection({ host: req.host, port: req.port });
+    const socket = connectFn({ host: req.host, port: req.port });
     socket.setEncoding("utf8");
     socket.setTimeout(timeoutMs);
 

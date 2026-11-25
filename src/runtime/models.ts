@@ -26,7 +26,11 @@ import {
   type BudgetPurpose,
 } from "../governance/budget.ts";
 import { mintId } from "../governance/canonical.ts";
-import type { HostCredentialVault, ModelPriceSchedule } from "../governance/credentials.ts";
+import {
+  assertStage1LoopbackModelUrl,
+  type HostCredentialVault,
+  type ModelPriceSchedule,
+} from "../governance/credentials.ts";
 import { withImmediateTx, writeAuditEvent } from "../governance/db.ts";
 import type { HostPhaseTelemetry, PhaseAttribution } from "./telemetry.ts";
 
@@ -64,6 +68,8 @@ export interface HostModelsConfig {
   shouldFailBeforeTransport?: (requestId: string, owner: ResolvedBudgetOwner) => string | null;
   /** Test seam for B07: injected into reserveBudget after first account update. */
   injectFaultAfterFirstAccount?: () => void;
+  /** Optional observer invoked strictly before underlying HTTP transport dispatch (G2 verification). */
+  onTransportDispatch?: (info: { requestId: string; baseUrl: string; provider: string; modelId: string }) => void;
   onReservationRecorded?: (info: {
     requestId: string;
     ownerTaskId: string;
@@ -105,34 +111,26 @@ function createImmediateErrorStream(model: Model<Api>, errorMessage: string, now
   return stream;
 }
 
+/**
+ * Computes a provable conservative integer microUSD upper bound for T6 budget reservation.
+ * Stage 1 fails closed (returns null -> unknown_upper_bound, 0 physical sends) for any
+ * price schedule without an explicitly verified per-request integer upper bound;
+ * approximate character-length heuristics are explicitly rejected.
+ */
 function estimateUpperBoundMu(
-  context: AiContext,
-  model: Model<Api>,
+  _context: AiContext,
+  _model: Model<Api>,
   schedule: ModelPriceSchedule | null,
 ): number | null {
   if (!schedule) return null;
-  if (schedule.syntheticFixedUpperMu !== undefined && schedule.syntheticFixedUpperMu !== null) {
-    if (!Number.isSafeInteger(schedule.syntheticFixedUpperMu) || schedule.syntheticFixedUpperMu < 0) {
-      return null;
-    }
+  if (
+    typeof schedule.syntheticFixedUpperMu === "number" &&
+    Number.isSafeInteger(schedule.syntheticFixedUpperMu) &&
+    schedule.syntheticFixedUpperMu >= 0
+  ) {
     return schedule.syntheticFixedUpperMu;
   }
-  if (
-    !Number.isSafeInteger(schedule.inputPerMTokMu) ||
-    schedule.inputPerMTokMu < 0 ||
-    !Number.isSafeInteger(schedule.outputPerMTokMu) ||
-    schedule.outputPerMTokMu < 0
-  ) {
-    return null;
-  }
-  if (!Number.isFinite(model.maxTokens) || model.maxTokens <= 0) {
-    return null;
-  }
-  const serializedLen = JSON.stringify(context.messages ?? []).length;
-  const estInputTokens = Math.max(1, Math.ceil(serializedLen / 3));
-  const inputMu = Math.ceil((estInputTokens * schedule.inputPerMTokMu) / 1_000_000);
-  const outputMu = Math.ceil((model.maxTokens * schedule.outputPerMTokMu) / 1_000_000);
-  return Math.max(1, inputMu + outputMu);
+  return null;
 }
 
 function computeActualMu(msg: AssistantMessage, schedule: ModelPriceSchedule): number | null {
@@ -167,6 +165,9 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
   let slotList: ModelSlotConfig[] = [];
 
   const applySlots = (slots: ModelSlotConfig[]): void => {
+    for (const s of slots) {
+      assertStage1LoopbackModelUrl(s.baseUrl);
+    }
     slotList = [...slots];
     inner.clearProviders();
     const byProvider = new Map<string, ModelSlotConfig[]>();
@@ -385,6 +386,26 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     }
 
     // 6. Enforce maxRetries: 0 (no hidden provider retries; durable retries must re-reserve!)
+    // Also re-verify Stage 1 loopback URL strictly before transport dispatch.
+    const effectiveBaseUrl = model.baseUrl ?? slot.baseUrl;
+    try {
+      assertStage1LoopbackModelUrl(effectiveBaseUrl);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      releaseBudgetReservation(config.govDb, {
+        requestId,
+        reason,
+        evidenceRef: `stage1_egress_blocked:${requestId}`,
+        now: nowFn(),
+      });
+      return createImmediateErrorStream(model, `Blocked model send (${requestId}): ${reason}`, now);
+    }
+    config.onTransportDispatch?.({
+      requestId,
+      baseUrl: effectiveBaseUrl,
+      provider: model.provider,
+      modelId: model.id,
+    });
     const enforcedOptions: ModelsSimpleStreamOptions = {
       ...options,
       maxRetries: 0,

@@ -172,6 +172,17 @@ CREATE TABLE IF NOT EXISTS conversation_scopes (
   runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS budget_task_bindings (
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  binding_kind TEXT NOT NULL CHECK(binding_kind IN ('PI_TASK','CONVERSATION')),
+  binding_key TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  owner_task_id TEXT NOT NULL,
+  purpose TEXT NOT NULL CHECK(purpose IN ('router','worker','compaction','summary','classify')),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(runtime_epoch, binding_kind, binding_key)
+);
 `;
 
 export function openGovernanceDb(dbPath: string): { db: DatabaseSync; pragmas: GovDbPragmas } {

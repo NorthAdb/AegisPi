@@ -249,15 +249,23 @@ export function renderMinimalView1Html(): string {
 
           approveBtn.addEventListener('click', async () => {
             if (state.dirtyByProposal[p.proposalId]) return;
+            const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
+              method: 'POST',
+              body: JSON.stringify({ conversationId: snap.conversationId })
+            });
+            if (!ch.ok || !ch.body || !ch.body.nonce) {
+              await loadSnapshot(snap.conversationId);
+              return;
+            }
             await api('/api/approvals/decide', {
               method: 'POST',
               body: JSON.stringify({
                 approvalId: p.approvalId,
                 conversationId: snap.conversationId,
                 decision: 'APPROVE',
-                expectedRevision: p.revision,
-                expectedActionHash: p.actionHash,
-                nonce: p.nonce,
+                expectedRevision: ch.body.revision,
+                expectedActionHash: ch.body.actionHash,
+                nonce: ch.body.nonce,
                 decisionKey: 'ui-' + p.approvalId + '-r' + p.revision
               })
             });
@@ -265,15 +273,23 @@ export function renderMinimalView1Html(): string {
           });
 
           rejectBtn.addEventListener('click', async () => {
+            const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
+              method: 'POST',
+              body: JSON.stringify({ conversationId: snap.conversationId })
+            });
+            if (!ch.ok || !ch.body || !ch.body.nonce) {
+              await loadSnapshot(snap.conversationId);
+              return;
+            }
             await api('/api/approvals/decide', {
               method: 'POST',
               body: JSON.stringify({
                 approvalId: p.approvalId,
                 conversationId: snap.conversationId,
                 decision: 'REJECT',
-                expectedRevision: p.revision,
-                expectedActionHash: p.actionHash,
-                nonce: p.nonce,
+                expectedRevision: ch.body.revision,
+                expectedActionHash: ch.body.actionHash,
+                nonce: ch.body.nonce,
                 decisionKey: 'ui-rej-' + p.approvalId + '-r' + p.revision
               })
             });

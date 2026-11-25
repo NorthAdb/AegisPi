@@ -127,29 +127,27 @@
     {
       "id": "S4",
       "status": "PASS",
-      "summary": "HostPhaseTelemetry WeakMap unforgeably attributes concurrent completeSimple (pi.compaction) and streamSimple (pi.generation) in the SAME conversationId to distinct Pi taskIds and distinct budget tasks; maxRetries=0 verified (503 -> 1 physical request).",
+      "summary": "Product AegisHostRuntime + HostPhaseTelemetry WeakMap unforgeably attributed concurrent completeSimple (pi.compaction) and streamSimple (pi.generation) in the SAME conversationId to distinct budget_accounts (in-flight held_mu=100 each, settled=60 each); maxRetries=0 verified (503 -> 1 physical request).",
       "evidence": {
-        "sharedConversationId": 1,
-        "compactionTaskId": 15,
-        "generationTaskId": 18,
-        "observedConcurrentCalls": [
-          {
-            "method": "completeSimple",
-            "taskId": 15,
-            "taskName": "pi.compaction",
-            "phase": "summarize",
-            "maxRetries": 0,
-            "budgetOwnerTask": "budget-task-compaction-A"
-          },
-          {
-            "method": "streamSimple",
-            "taskId": 18,
-            "taskName": "pi.generation",
-            "phase": "request",
-            "maxRetries": 0,
-            "budgetOwnerTask": "pi-task:pi.generation:18"
-          }
-        ],
+        "sharedConversationId": 8,
+        "compactionTaskId": 23,
+        "generationTaskId": 26,
+        "compactionReservation": {
+          "requestId": "mreq_f1bb7772b1034f7daf1645decba17847",
+          "taskAccount": "acct:task:budget-task-compaction-A",
+          "purpose": "compaction",
+          "state": "SETTLED",
+          "inFlightHeldMu": 100,
+          "finalChargedMu": 60
+        },
+        "generationReservation": {
+          "requestId": "mreq_08333b23492a42bfa883dc71f771426f",
+          "taskAccount": "acct:task:budget-task-gen-B",
+          "purpose": "router",
+          "state": "SETTLED",
+          "inFlightHeldMu": 100,
+          "finalChargedMu": 180
+        },
         "physicalRequestsOn503WithMaxRetries0": 1
       }
     },
@@ -166,7 +164,7 @@
           "sqliteVersion": "3.54.1"
         },
         "traceJournalMode": "wal",
-        "holderPidKilled": 50968,
+        "holderPidKilled": 32932,
         "secondInstanceRejected": true,
         "reacquiredAfterForceKill": true,
         "rollbackMissingConversationId": 7
