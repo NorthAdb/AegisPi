@@ -1,5 +1,7 @@
 # AegisPi
 
+> **状态归档（`v1-zero-trust-baseline`）**：当前分支为 **AegisPi v1**（Phase 1–5 + 个人自用控制台与热重载配置，`327/327 PASS`）已完成并正式封存的零信任基线版本。后续架构演进为基于 `@earendil-works/pi-durable@1.6.0` + `@earendil-works/pi-mcp@1.6.0` 的纯 TypeScript v2 主线，v1 剩余缺口处置与核心资产复用清单见 [docs/V1-CLOSURE-AND-V2-MIGRATION.md](docs/V1-CLOSURE-AND-V2-MIGRATION.md)。
+
 自托管、事件驱动的个人常驻 Agent 系统（实现仓库）。边界原则：宿主 daemon 单点持有 ACL、预算、审批、凭据与外部提交器；模型文本与工具结果从不授予权限（`AGENTS.md` §5）。本仓库公开，密钥与人工判断标注一律不入库。
 
 ## 本地启动控制台

@@ -42,6 +42,8 @@
 
 | 资料 | 用途 |
 | --- | --- |
+| [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md) | **v1 正式收官封存与 v2 迁移说明（2026-11-25，`v1-zero-trust-baseline`）**：记录 `327/327` / `selfuse 31/31` 封存基线、14 项遗留缺口与旧 Phase 6 项的最终处置表，以及后续 v2 拟抽离复用的 5 块 v1 核心安全资产 |
+| [GAP-INVENTORY-AND-PHASE6.md](GAP-INVENTORY-AND-PHASE6.md) | **v1 全量缺口与 Phase 6 待实施盘点台账（已归档）**：集中梳理 `G-A1..G-A6`、`G-B1..G-B2`、`C1..C6`，最终处置结论以 [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md) 为准 |
 | [phase5/HANDOFF-BATCH1-AUDIT.md](phase5/HANDOFF-BATCH1-AUDIT.md) | **Phase 5 第 1 批交接与验收结论（2026-11-22，`D-95`/`D-96`）**：记录 `45b7c03..52e223a` 初版对抗审计（`HOLD`）、`D-94` 主人豁免归档、L3 Dreaming 转入第 2 批，以及 **`D-96` 返工修复后全量验收 `PASS`（放行第 2 批）** |
 | [phase5/reports/phase5-batch1-closure.md](phase5/reports/phase5-batch1-closure.md) | **Phase 5 第 1 批收口报告（单元 5.1 + 5.2，2026-11-22）**：含初版自测、`D-94` 声明、§七初版审计（`HOLD`）与 **§八返工修复与最终验收收口（`D-96 PASS`，纪元 13，`47/47` + `23/23`）** |
 | [phase5/reports/phase5-batch2-closure.md](phase5/reports/phase5-batch2-closure.md) | **Phase 5 第 2 批收口报告（单元 5.3 邮件 + 5.4 日历/L3 Dreaming + 5.5 Web 控制台，2026-11-22，`D-97`）**：`eval:scenarios` `78/78`（环回 TLS SMTP/IMAP/CalDAV 夹具全矩阵）、security-unit `63/63`（+15 个 5.5 用例）、cancel-approval `20/20`（+4）、纪元 14、17 套全量回归 + real×5 exit 4 + `report:user-value` `149/149`，浏览器 E2E 四页签实测截图归档 `phase5/evidence/browser-e2e/` |
