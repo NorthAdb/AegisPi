@@ -1,15 +1,14 @@
 # 文档索引（统一入口）
 
-维护规则：本索引只指路并标明每份资料的用途与身份，不复制正文（避免多副本口径漂移）。审计原稿、冻结报告、原始日志与证据文件字节不变；历史文档不按现行口径改写，其历史结论与现行结论并列时以本索引的标注为准；更正一律走 [phase3/reports/errata-2026-11-20.md](phase3/reports/errata-2026-11-20.md) 与各文档的日期追记节。
+维护规则：本索引只指路并标明每份资料的用途与身份，不复制正文（避免多副本口径漂移）。`docs/` 根目录只保留 **3 个主入口**（[README.md](README.md)、[SELF-USE-GUIDE.md](SELF-USE-GUIDE.md)、[V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md)），过渡交接与缺口盘点档案集中归档于 [v1/](v1/)，Phase 1–5 收口报告与证据路径按评测脚本契约保持在 `phase1/`–`phase5/` 与 `adr/`。审计原稿、冻结报告、原始日志与证据文件字节不变。
 
-## 推荐阅读顺序（新人）
+## 推荐阅读顺序
 
-1. 根 [README](../README.md)：项目定位、已实现/未实现边界、运行前置条件。
-2. 本文：按类别找对资料，认清「现行」与「历史」身份。
-3. [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md)：现行权威状态清单（四项真实验收现状、审计归档、镜像、缺口、待办）。
-4. [adr/0001-model-path-pi-host-execution.md](adr/0001-model-path-pi-host-execution.md) + [phase4/phase4-restricted-kickoff-draft.md](phase4/phase4-restricted-kickoff-draft.md)：Phase 4 设计、实施与收口报告（**单元 4.1–4.5 及终局对抗审计均已完成**）：单元 4.1 见 [phase4-1-closure.md](phase4/reports/phase4-1-closure.md) 与 [AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)；单元 4.2 见 [phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)；单元 4.3 见 [phase4-3-closure.md](phase4/reports/phase4-3-closure.md)；单元 4.4 见 [phase4-4-closure.md](phase4/reports/phase4-4-closure.md)；**单元 4.5 与 Phase 4 最终收口见 [phase4-5-closure.md](phase4/reports/phase4-5-closure.md) 与 [user-value-report.md](phase4/reports/user-value-report.md)**。
-5. [phase5/phase5-kickoff-plan.md](phase5/phase5-kickoff-plan.md)：**Phase 5 详细实施与验收规划**（单元 5.1–5.6：分层记忆 L0–L3 与墓碑遗忘清单、Telegram 路线 1 `getUpdates` 轮询入站与跨通道 Canary 隔离、场景一邮件草稿审批、场景二晨报/条件 Timer 与日历 ETag 审批、`127.0.0.1:4310` 最小可用 Web 控制台前端，以及三大真实通道受控实盘验收）。
-6. 按需查各阶段历史：phase1/2/3 收口报告与审计原稿（只作史实，不作操作依据）。
+1. 根 [README](../README.md)：项目定位、v1 封存基线总览与运行前置条件。
+2. [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md)：**v1 正式封存裁决、全部剩余项处置结论及 v2 拟复用资产清单**（首读收官结论）。
+3. [SELF-USE-GUIDE.md](SELF-USE-GUIDE.md)：v1 本地单命令冷启动与 Web Console `⑤ 设置与接入` 操作指南。
+4. 本文：按类别找对历史资料（[v1/](v1/)、[phase1/](phase1/)–[phase5/](phase5/)、[adr/](adr/)）。
+5. 历史审计与阶段收口：phase1–5 下各收口报告、证据及 [v1/](v1/) 历史交接档（仅作史实追溯，不作为后续开发任务单）。
 
 ## 现行规范（操作依据）
 
@@ -42,8 +41,10 @@
 
 | 资料 | 用途 |
 | --- | --- |
-| [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md) | **v1 正式收官封存与 v2 迁移说明（2026-11-25，`v1-zero-trust-baseline`）**：记录 `327/327` / `selfuse 31/31` 封存基线、14 项遗留缺口与旧 Phase 6 项的最终处置表，以及后续 v2 拟抽离复用的 5 块 v1 核心安全资产 |
-| [GAP-INVENTORY-AND-PHASE6.md](GAP-INVENTORY-AND-PHASE6.md) | **v1 全量缺口与 Phase 6 待实施盘点台账（已归档）**：集中梳理 `G-A1..G-A6`、`G-B1..G-B2`、`C1..C6`，最终处置结论以 [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md) 为准 |
+| [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md) | **v1 正式收官封存与 v2 迁移说明（2026-11-25，`v1-zero-trust-baseline`）**：记录 `327/327` / `selfuse 31/31` 封存基线、14 项历史缺口与旧 Phase 6 项的最终处置表，以及后续 v2 拟抽离复用的 5 块 v1 核心安全资产 |
+| [SELF-USE-GUIDE.md](SELF-USE-GUIDE.md) | **v1 个人自用指南**：单命令冷启动（`scripts/selfuse.mjs start`）、Web Console `⑤ 设置与接入` 填写配置与热重载说明 |
+| [v1/GAP-INVENTORY-AND-PHASE6.md](v1/GAP-INVENTORY-AND-PHASE6.md) | **v1 历史缺口盘点与最终处置台账（已归档）**：集中核查 `G-A1..G-A6`、`G-B1..G-B2`、`C1..C6` 并标注最终处置结论 |
+| [v1/HANDOFF-PHASE5-TO-SELFUSE.md](v1/HANDOFF-PHASE5-TO-SELFUSE.md) | **Phase 5 至自用过渡历史交接档（已归档）**：记录当时自用差距评估及后续已完成/已封存映射 |
 | [phase5/HANDOFF-BATCH1-AUDIT.md](phase5/HANDOFF-BATCH1-AUDIT.md) | **Phase 5 第 1 批交接与验收结论（2026-11-22，`D-95`/`D-96`）**：记录 `45b7c03..52e223a` 初版对抗审计（`HOLD`）、`D-94` 主人豁免归档、L3 Dreaming 转入第 2 批，以及 **`D-96` 返工修复后全量验收 `PASS`（放行第 2 批）** |
 | [phase5/reports/phase5-batch1-closure.md](phase5/reports/phase5-batch1-closure.md) | **Phase 5 第 1 批收口报告（单元 5.1 + 5.2，2026-11-22）**：含初版自测、`D-94` 声明、§七初版审计（`HOLD`）与 **§八返工修复与最终验收收口（`D-96 PASS`，纪元 13，`47/47` + `23/23`）** |
 | [phase5/reports/phase5-batch2-closure.md](phase5/reports/phase5-batch2-closure.md) | **Phase 5 第 2 批收口报告（单元 5.3 邮件 + 5.4 日历/L3 Dreaming + 5.5 Web 控制台，2026-11-22，`D-97`）**：`eval:scenarios` `78/78`（环回 TLS SMTP/IMAP/CalDAV 夹具全矩阵）、security-unit `63/63`（+15 个 5.5 用例）、cancel-approval `20/20`（+4）、纪元 14、17 套全量回归 + real×5 exit 4 + `report:user-value` `149/149`，浏览器 E2E 四页签实测截图归档 `phase5/evidence/browser-e2e/` |
@@ -58,7 +59,7 @@
 | [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md) | **单元 4.1 收口验收报告**（2026-11-21 纪元 5 终版）：§2a–§2c 实施产物、T1–T10 矩阵与锚点 E2E 观测对照、纪元 5 镜像证据与自审计 19 项加固整改汇总 |
 | [phase3/reports/phase3-status-and-remaining.md](phase3/reports/phase3-status-and-remaining.md) | **Phase 3–4 状态与待办清单**：A/B/C/D 现状、审计归档与判定、原镜像口径、模型路径（4.1 审计冻结、4.2 许可 1 离线就绪）与 4.2 首跑待办汇总 |
 | [phase3/reports/round-closure-2026-11-20-limited-fixes.md](phase3/reports/round-closure-2026-11-20-limited-fixes.md) | 限定修复收口：daemon 用例崩溃根因（测试层修复、生产零改动）与纪元 2 选择性重建；终树三 docker 套件 14/14、29/29、5/5 |
-| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像纪元表**（**纪元 16**：Phase 5 第 3 批重建 `agent`（`phase3-cbdc86d5fe60`，`sha256:99938a36…`），携带 `acquisition` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
+| [phase3/reports/image-digest.md](phase3/reports/image-digest.md) | **现行镜像摘要表**（`agent:phase3-357d3a70e2ea`，manifest `sha256:a3d84892…`，携带 `acquisition` 与 `execution`；v2 机器块，image-gate 解析，勿手改）；前序纪元保留为历史节 |
 | [phase3/reports/quota-calibration.md](phase3/reports/quota-calibration.md) | 容器配额占位值的实测依据（CPU/内存/pids/可写盘） |
 
 ## 历史收口与审计（史实身份，不作现行操作依据）

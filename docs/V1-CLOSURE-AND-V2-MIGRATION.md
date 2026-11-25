@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 聚合门禁 `report:user-value` | **327/327 PASS** | `defaultsFailClosed=true`、`secretScan=clean` |
 | 自用引导与网页设置 `evals/phase5/selfuse/run.mjs` | **31/31 PASS** | `.env` 白名单写盘、422 校验、热重载、回环探针脱敏通过 |
-| 离线与容器回归矩阵（19 套） | **全部 exit 0** | `contracts` 15、`durability` 164、`acl` 15、`budget` 20、`cancel-approval` 20、`offline-jobs` 14、`security-unit` 68、`restore` 11、`security-integration` 29、`model-proposal` 15、`repo-observe` 7、`ingress-telegram` 7、`memory-lifecycle` 47、`cross-channel` 25、`scenarios` 89、`quota-calibration` 5、`triage` 7 |
+| 其余 17 套核心离线与容器套件 | **全部 exit 0** | `contracts` 15、`durability` 164、`acl` 15、`budget` 20、`cancel-approval` 20、`offline-jobs` 14、`security-unit` 68、`restore` 11、`security-integration` 29、`model-proposal` 15、`repo-observe` 7、`ingress-telegram` 7、`memory-lifecycle` 47、`cross-channel` 25、`scenarios` 89、`quota-calibration` 5、`triage` 7 |
 | 核心不变项与隔离守卫 | **全部保持** | `apps/daemon/config/defaults.json` 全失败关闭零改动；6 个 `*-real` 入口缺省 `exit 4`；浏览器 Chrome DevTools 实测 `⑤ 设置与接入` 0 报错 |
 
 ---
@@ -29,7 +29,7 @@
 
 ## 三、v1 遗留缺口与旧 Phase 6 项最终处置结论
 
-全部 14 项源记录见 [GAP-INVENTORY-AND-PHASE6.md](GAP-INVENTORY-AND-PHASE6.md)。本次收官**不修改 v1 生产逻辑代码**，各项统一按以下四类口闭合处置：
+全部 14 项源记录见 [v1/GAP-INVENTORY-AND-PHASE6.md](v1/GAP-INVENTORY-AND-PHASE6.md)。本次收官**不修改 v1 生产逻辑代码**，各项统一按以下四类口径闭合处置：
 
 | 编号 | 原事项 | 最终处置 | 归档说明 / v2 落点 |
 | --- | --- | --- | --- |
@@ -67,7 +67,7 @@
 
 ## 五、归档资料索引
 
-- [GAP-INVENTORY-AND-PHASE6.md](GAP-INVENTORY-AND-PHASE6.md)：v1 全量缺口原始盘点台账（已由本文完成处置归档）
-- [HANDOFF-PHASE5-TO-SELFUSE.md](HANDOFF-PHASE5-TO-SELFUSE.md)：Phase 5 收官基线与自用过渡交接记录
+- [v1/GAP-INVENTORY-AND-PHASE6.md](v1/GAP-INVENTORY-AND-PHASE6.md)：v1 历史缺口盘点与最终处置台账
+- [v1/HANDOFF-PHASE5-TO-SELFUSE.md](v1/HANDOFF-PHASE5-TO-SELFUSE.md)：Phase 5 收官基线与自用过渡历史交接记录
 - [SELF-USE-GUIDE.md](SELF-USE-GUIDE.md)：v1 个人本地单命令启动与 Web Console 设置指南
 - [phase5/reports/phase5-final-closure.md](phase5/reports/phase5-final-closure.md)：Phase 5 终局收口报告（`D-102` / `D-103`）

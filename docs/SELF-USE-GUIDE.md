@@ -1,6 +1,6 @@
-# AegisPi 个人自用指南
+# AegisPi 个人自用指南（v1 封存基线）
 
-本指南说明如何在本机启动并配置 AegisPi 个人实例. 所有命令都在仓库根目录执行, 并固定使用锁定的 Node 运行时 `D:\AegisPi\tools\node-v22.23.5\node.exe`.
+本指南说明如何在本机启动并配置 AegisPi **v1（`v1-zero-trust-baseline`）** 个人实例. 所有命令都在仓库根目录执行, 并固定使用锁定的 Node 运行时 `D:\AegisPi\tools\node-v22.23.5\node.exe`.
 
 `apps/daemon/config/defaults.json` 必须保持全失败关闭, 不要修改它.
 
@@ -35,7 +35,7 @@ Bot 只接收 `telegram.allowedChatIds` 白名单中的数字会话 ID.
 - `/resume`: 恢复当前作用域路由.
 - `/observe <targetId> [question]`: 对已配置的只读仓库目标拉取源码并问答.
 - `/triage <presetId> [question]`: 触发预配置的只读复现与四分类影响判定.
-- 自由文本消息: 进入单轮模型问答, 开启 `telegram.autoReplyOnTask: true` 且目标在 `adapters.allowedRecipients` 中时自动回发结果.
+- 自由文本消息: 携带同域近期多轮对话历史（scoped history）调用模型问答, 开启 `telegram.autoReplyOnTask: true` 且目标在 `adapters.allowedRecipients` 中时自动回发结果.
 
 ## 邮件草稿与本地审批流程
 
@@ -99,8 +99,8 @@ D:\AegisPi\tools\node-v22.23.5\node.exe scripts/selfuse.mjs start --dry-run
 
 守护进程在 `backup.windowStartHour` 到 `backup.windowEndHour` (默认香港时间 `04:00` 到 `05:00`) 每日执行一次一致性备份并按 `backup.retentionDays` (默认 `14` 天) 清理过期快照, 前提是 `AEGISPI_BACKUP_MANIFEST_KEY` 已配置为有效的 64 位十六进制密钥.
 
-## 当前明确边界
+## v1 基线边界说明（已封存，不在 v1 继续扩充）
 
-- CalDAV 真实日历通道延后, 默认配置保持 `calendar.caldavUrl: null`.
-- Telegram 公网 Webhook 延后, 当前只启用路线 1 主动 `getUpdates` 长轮询.
-- 通用 Telegram 或邮件对话为单轮问答, 不会自动执行多轮工具循环或从自由回复直接生成外部写审批卡.
+- **CalDAV 真实日历**：按需长期后置，默认配置保持 `calendar.caldavUrl: null`（网页端 `calendar.quietHours` 为只读展示）。
+- **Telegram 公网 Webhook**：随 v1 封存不再启用，v1 仅保留路线 1 主动 `getUpdates` 长轮询。
+- **会话执行边界**：通用 Web / Telegram 文本对话支持同域近期多轮上下文（scoped history），但容器内不运行多步工具自动循环，也不会从自由回复隐式生成外部写审批卡；相关演进由后续 v2（`pi-durable`）承载，详见 [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md)。
