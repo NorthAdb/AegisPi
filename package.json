@@ -1,36 +1,29 @@
 {
   "name": "aegis-pi",
+  "version": "2.0.0-week1",
   "private": true,
-  "workspaces": [
-    "apps/*"
-  ],
+  "type": "module",
   "engines": {
-    "node": "22.23.5"
+    "node": "22.23.5",
+    "npm": "10.9.9"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-durable": "1.6.0",
+    "@earendil-works/pi-mcp": "1.6.0",
+    "@hono/node-server": "2.1.11",
+    "hono": "4.13.22"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.7",
+    "typescript": "5.9.3",
+    "vitest": "5.1.2"
   },
   "scripts": {
-    "test:contracts": "node evals/contracts/run-contracts.mjs",
-    "test:durability": "node evals/phase2/durability/run.mjs",
-    "test:acl": "node evals/phase2/acl/run.mjs",
-    "test:budget": "node evals/phase2/budget/run.mjs",
-    "test:cancel-approval": "node evals/phase3/cancel-approval/run.mjs",
-    "test:offline-jobs": "node evals/phase3/offline-jobs/run.mjs",
-    "test:security:unit": "node evals/phase3/security-unit/run.mjs",
-    "test:restore": "node evals/phase3/restore/run.mjs",
-    "test:security:integration": "node evals/phase3/security-integration/run.mjs",
-    "test:model-proposal": "node evals/phase3/model-proposal/run.mjs",
-    "test:repo-observe": "node evals/phase3/repo-observe/run.mjs",
-    "test:ingress-telegram": "node evals/phase3/ingress-telegram/run.mjs",
-    "test:ingress-telegram:real": "node evals/phase3/ingress-telegram/real.mjs",
-    "test:memory-lifecycle": "node evals/phase5/memory-lifecycle/run.mjs",
-    "test:cross-channel": "node evals/phase5/cross-channel/run.mjs",
-    "test:selfuse": "node evals/phase5/selfuse/run.mjs",
-    "eval:scenarios": "node evals/phase5/scenarios/run.mjs",
-    "eval:scenarios:real": "node evals/phase5/scenarios-real/run.mjs",
-    "test:model:real": "node evals/phase3/model-real/run.mjs",
-    "test:external-write:real": "node evals/phase3/external-write-real/run.mjs",
-    "test:quota-calibration": "node evals/phase3/quota-calibration/run.mjs",
-    "eval:triage": "node evals/phase4/triage/run.mjs",
-    "eval:triage:real": "node evals/phase4/triage-real/run.mjs",
-    "report:user-value": "node evals/phase4/report-user-value/run.mjs"
+    "typecheck": "tsc --noEmit",
+    "test:s1-s5": "node tests/week1/run-sdk-contracts.ts",
+    "test:w1-a": "node tests/week1/run-w1-a.ts",
+    "test:w1-b": "node tests/week1/run-w1-b.ts",
+    "test:week1": "node tests/week1/run-all.ts"
   }
 }

@@ -1,9 +1,9 @@
-# AGENTS · AegisPi 实现仓库工程约束
+# AGENTS · AegisPi v2 分支实现仓库工程约束
 
-本文件约束在本仓库内实施的 agent。规范正文不在本库，唯一来源是本机 `D:\AegisPi\aegis-pi-design-pack-v1.4.1`（先读其 README、PRE-READ、00、06、02，再动代码；05 是契约核验清单）。本文件只列仓库级硬约束，不复制规范正文。
+本文件约束在 `v2` 分支内实施的 agent。规范权威来源为本机 `D:\AegisPi\aegis-pi-v2-planning\baseline-v2.3\aegispi_v2_overview.md`（v2.3 定稿）、`D:\AegisPi\aegis-pi-v2-planning\taskbook-1-review.md` 及历史 v1 零信任基线设计包 `D:\AegisPi\aegis-pi-design-pack-v1.4.1`（历史基线封存于 tag `v1-zero-trust-baseline` / `3a88b6895991d328e8e27fd1072a29846e7a9adf`）。迁移决议见 `docs/adr/0002-v2-pi-durable-migration.md`。
 
-1. **版本锁定**。Pi `@earendil-works/pi-coding-agent` exact 1.5.2，Node 22.23.5 显式路径调用（`D:\AegisPi\tools\node-v22.23.5\node.exe`，npm 10.9.9）。分帧、SQLite、镜像测试必须在锁定 Node 上复测。新增依赖先审来源与必要性，提交真实 lockfile 与 digest，`PIN_REQUIRED`/示例 SHA 不是有效锁定。
-2. **Phase 边界**。Phase 1 只做契约核验与夹具，不实现四场景，不接真实外部写（本仓库 git 推送除外），不做逃逸测试。契约不成立走 ADR，不编造 SDK 方法名或模型 ID。
-3. **敏感内容**。本仓库公开。人工判断标注、Bad Case、基线样本只留本地（`.gitignore` 已排除 labels），入库只放指针或脱敏副本。密钥不进代码、日志、prompt 和 URL。
-4. **证据格式**。每项完成附实际命令、输出与环境版本；外部研究数字、项目目标、资料包验证与产品实测分别标注，不混写。
-5. **不越界**。宿主持有 ACL、预算、审批、epoch、凭据与外部提交器；模型文本与工具结果从不授予权限。此边界在后续阶段的代码里落地，Phase 1 的探针脚本同样不得越过。
+1. **版本锁定与纯 TypeScript 约束**。显式使用锁定工具链：`D:\AegisPi\tools\node-v22.23.5\node.exe`（Node 22.23.5，内置 SQLite 3.54.1）与 npm 10.9.9。锁定 exact `1.6.0` 的 `@earendil-works/pi-durable`、`@earendil-works/pi-mcp`、`@earendil-works/pi-ai`；所有直接依赖禁止 `^` / `~`，提交真实 `package-lock.json` 与依赖完整性记录。后端采用 Node 22 原生可擦除 TypeScript：相对导入必须带 `.ts` 扩展名，启用 `allowImportingTsExtensions`、`verbatimModuleSyntax`、`erasableSyntaxOnly`，通过 `tsc --noEmit` 校验。
+2. **单向依赖与单点导入铁律**。分层顺序为 `src/web/` (L4) -> `src/runtime/` (L3) -> `src/capabilities/` (L2) -> `src/governance/` (L1)。全仓除 `src/runtime/` 外严禁任何业务模块直接 `import @earendil-works/pi-*`（测试目录仅限针对 `src/runtime/` 或 S1–S5 契约探针的显式测试）。
+3. **阶段一（第 1–2 周）边界**。第 1 周交付宿主持久治理、预算预留/结算、不可变审批与唯一提交器、双库崩溃恢复及最小视图①，全部模型与邮件外发使用独立进程的本地替身与合成凭据。本阶段不启用真实模型计费、真实邮件发送、真实 GitHub 写入、公网监听或容器逃逸测试。若 SDK 或 Windows 实测推翻前提，保存最小复现与原始输出并走 ADR，严禁编造 API 或放宽断言。
+4. **双库与权限不越界**。Pi 独占 `pi-durable.sqlite`（`WAL + NORMAL`）；宿主独占 `aegis-gov.sqlite`（`WAL + FULL + foreign_keys=ON`）。宿主持有 ACL、预算、审批、epoch、凭据与唯一外发提交器；模型文本、工具结果、Signal 载荷与会话检查点均不授予权限，密钥只驻留宿主内存注入，严禁进入双库、WAL、日志、prompt、SSE、URL 或检查点配置。
+5. **敏感内容与证据格式**。本仓库公开。人工标注、Bad Case、真实账号样本与 `.env` 只留本地，入库仅放合成或脱敏夹具。每项验收附实际命令、退出码、环境版本、假服务独立持久计数与脱敏证据；v1 历史成绩（327/327、selfuse 31/31）与 v2 本次实测分别列示，禁止混写。

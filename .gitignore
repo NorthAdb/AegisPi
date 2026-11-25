@@ -13,3 +13,12 @@ evals/contracts/fixtures/**/*.labels.local.json
 .audit/phase3-audit-response-baseline/*.log
 *.local.json
 selfuse.config.json
+
+# v2 local runtime data and test scratch
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+web/dist/
+.tmp-week1-*/
+
