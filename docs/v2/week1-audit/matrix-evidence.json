@@ -1,0 +1,303 @@
+{
+  "suite": "WEEK1-MATRIX",
+  "status": "PASS",
+  "nodeVersion": "v22.23.5",
+  "sqliteVersion": "3.54.1",
+  "passed": 19,
+  "total": 19,
+  "results": [
+    {
+      "id": "GUARD-BOUNDARY",
+      "group": "GUARD",
+      "status": "PASS",
+      "summary": "Verified only src/runtime/ imports @earendil-works/* and governance/ has zero upward dependencies.",
+      "evidence": {
+        "violations": []
+      }
+    },
+    {
+      "id": "F01",
+      "group": "F",
+      "status": "PASS",
+      "summary": "Second host instance rejected with InstanceLockBusyError and 0 DB/service mutations; first instance stayed healthy.",
+      "evidence": {
+        "host1Pid": 29140,
+        "host2ExitCode": 1,
+        "modelDelta": 0,
+        "smtpDelta": 0
+      }
+    },
+    {
+      "id": "F02",
+      "group": "F",
+      "status": "PASS",
+      "summary": "Missing policy hook and missing Models wrapper both fail closed before scheduling release with 0 model/SMTP calls.",
+      "evidence": {
+        "missingHookErrors": [
+          "missing_required_extension:aegis-policy"
+        ],
+        "missingModelsErrors": [
+          "missing_required_models_egress_wrapper"
+        ],
+        "modelDelta": 0,
+        "smtpDelta": 0
+      }
+    },
+    {
+      "id": "F03",
+      "group": "F",
+      "status": "PASS",
+      "summary": "Detected same-epoch trace rollback and trace replacement before scheduling, quarantined old READY effects, preserved old HELD reservations, rotated epoch, and blocked forked conversation from claiming parent effect.",
+      "evidence": {
+        "initialEpoch": "ep_c42da493e1624c99a1fb754a2e127ee6",
+        "newEpoch": "ep_343a30f01ccc48ada608e4066f6a58c0",
+        "rollbackCode": "trace_rollback_missing_conversations",
+        "replaceCode": "trace_replaced_or_anchor_mismatch",
+        "forkClaimCode": "call_identity_mismatch",
+        "quarantinedReadyEffectIds": [
+          "efx_8c1dbbfd095c47c0bc9e6d65d2180a35"
+        ],
+        "preservedHeldCount": 1,
+        "modelDeltaDuringRecovery": 0,
+        "smtpDeltaDuringRecovery": 0
+      }
+    },
+    {
+      "id": "B02",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Concurrent DAY race and concurrent TASK race each admitted exactly 1 HELD reservation (+1 model request) with zero partial holds.",
+      "evidence": {
+        "round1ModelDelta": 1,
+        "round1Outcomes": [
+          "done",
+          "unanswered"
+        ],
+        "round2ModelDelta": 1,
+        "round2Outcomes": [
+          "done",
+          "unanswered"
+        ]
+      }
+    },
+    {
+      "id": "B03",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Explicit compaction triggered real completeSimple (+1 physical request) with independent request_id attributed to b03-compact-task.",
+      "evidence": {
+        "compactionRequestId": "mreq_25f53bdc6e454f298362857fe31c2d35",
+        "compactionModelDelta": 1,
+        "generationReservationsCount": 2
+      }
+    },
+    {
+      "id": "B04",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Durable retry reserves a new requestId before retry (funded=2 sends, unfunded=1 send); maxRetries=0 blocks hidden provider retries.",
+      "evidence": {
+        "fundedPhysicalRequests": 2,
+        "fundedReservationIds": [
+          {
+            "id": "mreq_6cfc844ef1ba4682bd321a42288bbcb3",
+            "state": "HELD"
+          },
+          {
+            "id": "mreq_5cb3673715bf46a2a0801acc2fdb6920",
+            "state": "SETTLED"
+          }
+        ],
+        "unfundedPhysicalRequests": 1,
+        "unfundedReservationIds": [
+          {
+            "id": "mreq_485d5f4ea2fa48e187a304b6aa14b5cd",
+            "state": "HELD"
+          }
+        ]
+      }
+    },
+    {
+      "id": "B05",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Missing usage stayed HELD across restart, timed out to CHARGED_BOUND (100) on original day across midnight, corrected to 60 on late bill, duplicate bill delta=0, new day delta=0, total sends=1.",
+      "evidence": {
+        "requestId": "mreq_37b28ca427ca462b98ad7df2117c6693",
+        "originalDay": "2026-11-25",
+        "newDay": "2026-11-26",
+        "day1Final": {
+          "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+          "kind": "DAY",
+          "limit_mu": 5000000,
+          "held_mu": 0,
+          "charged_mu": 60,
+          "frozen": 0
+        },
+        "taskFinal": {
+          "account_id": "acct:task:b05-task",
+          "kind": "TASK",
+          "limit_mu": 800000,
+          "held_mu": 0,
+          "charged_mu": 60,
+          "frozen": 0
+        },
+        "day2Final": null,
+        "duplicateBillDeltaMu": 0,
+        "totalPhysicalRequests": 1
+      }
+    },
+    {
+      "id": "B06",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Unknown upper bound and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 3.",
+      "evidence": {
+        "unknownUpperReservations": 0,
+        "badBindingReservations": 0,
+        "preTransportState": "RELEASED",
+        "preTransportTaskHeld": 0,
+        "preTransportDayHeld": 0,
+        "totalPhysicalRequests": 0
+      }
+    },
+    {
+      "id": "B07",
+      "group": "B",
+      "status": "PASS",
+      "summary": "Mid-transaction failure after first account update rolled back both accounts and reservation cleanly (0 sends); subsequent clean run succeeded (+1).",
+      "evidence": {
+        "requestsAfterFault": 0,
+        "reservationsAfterFault": 0,
+        "requestsAfterRetry": 1,
+        "finalState": "SETTLED"
+      }
+    },
+    {
+      "id": "E01",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Approval committed before Pi tool parked was observed immediately on re-entry; outbox reconciled to ACKED, claim=1, SMTP=1.",
+      "evidence": {
+        "effectId": "efx_17b3b07285934d0ab2092ca782cb8f34",
+        "effectState": "SUCCEEDED",
+        "claims": 1,
+        "smtpReceived": 1,
+        "pendingOutbox": 0
+      }
+    },
+    {
+      "id": "E02",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Crash before T2 commit rolled back approval/effect/outbox cleanly (0 SMTP); restart after T2 commit delivered outbox and sent exactly 1 email.",
+      "evidence": {
+        "rollbackState": "PENDING",
+        "effectId": "efx_9b1cec310e3b4478a3d3eec8019b9467",
+        "finalEffectState": "SUCCEEDED",
+        "claims": 1,
+        "smtpTotalReceived": 1
+      }
+    },
+    {
+      "id": "E03",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Signal delivered without ACK reconciled cleanly on restart (claim=1, SMTP=1); decisionKey replay=200 and payload conflict=409.",
+      "evidence": {
+        "effectId": "efx_8c1f4c33fef143d4be723c25ab334405",
+        "outboxFinal": {
+          "state": "ACKED",
+          "sdk_result": "reentry_observed"
+        },
+        "replayStatus": 200,
+        "conflictStatus": 409,
+        "claims": 1,
+        "smtpTotalReceived": 1
+      }
+    },
+    {
+      "id": "E04",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Tool terminated before claim caused recovery to quarantine READY -> QUARANTINED (未提交，待核对) with 0 claims and 0 SMTP.",
+      "evidence": {
+        "effectId": "efx_b0b8f12fe0f6461e9f6ca8d87b5690d3",
+        "effectState": "QUARANTINED",
+        "uiLabel": "未提交，待核对",
+        "claims": 0,
+        "smtpReceived": 0
+      }
+    },
+    {
+      "id": "E05",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Crash after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0.",
+      "evidence": {
+        "effectId": "efx_7b8b28f0367940afaae11a6c6c48a750",
+        "effectState": "UNKNOWN",
+        "claims": 1,
+        "smtpReceived": 0
+      }
+    },
+    {
+      "id": "E07",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Editing draft after r1 approval quarantined r1 READY effect and rejected stale r1 approval (409); approving r2 delivered exact r2 bytes (SMTP=1).",
+      "evidence": {
+        "r1EffectState": "QUARANTINED",
+        "r2EffectState": "SUCCEEDED",
+        "staleR1HttpStatus": 409,
+        "smtpReceived": 1,
+        "smtpMatchesR2Bytes": true
+      }
+    },
+    {
+      "id": "E08",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Both revoke-vs-claim serialization orders verified: revoke-first quarantined READY (SMTP=0); claim-first retained committed effect and completed honestly (SMTP=1).",
+      "evidence": {
+        "revokeFirstSmtp": 0,
+        "claimFirstRetainedEffects": [
+          "efx_14f328abc62b407688422bd12d03bef2"
+        ],
+        "totalSmtpAcrossBoth": 1
+      }
+    },
+    {
+      "id": "E09",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Verified REJECT (0 SMTP), EXPIRED (410, 0 SMTP), cross-conv/principal (403, 0 SMTP), and dual-tab race ([200, 409], SMTP=1).",
+      "evidence": {
+        "crossConvStatus": 403,
+        "badPrincipalStatus": 403,
+        "rejectStatus": 200,
+        "expiredStatus": 410,
+        "dualTabStatuses": [
+          200,
+          409
+        ],
+        "totalSmtp": 1
+      }
+    },
+    {
+      "id": "E10",
+      "group": "E",
+      "status": "PASS",
+      "summary": "Tampered final args blocked (0 claims, 0 SMTP); concurrent READY claim admitted exactly 1; SUCCEEDED persisted as SUCCEEDED across restart (SMTP=1).",
+      "evidence": {
+        "tamperClaims": 0,
+        "concurrentClaimWinners": 1,
+        "succeededAfterRestart": {
+          "state": "SUCCEEDED",
+          "receipt_ref": "250 2.0.0 OK fake-msg-1"
+        },
+        "totalSmtp": 1
+      }
+    }
+  ]
+}
