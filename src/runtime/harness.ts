@@ -118,6 +118,9 @@ export interface AegisHostConfig {
   injectFaultAfterFirstAccount?: () => void;
   /** Optional observer for G2 transport proof */
   onTransportDispatch?: (info: { requestId: string; baseUrl: string; provider: string; modelId: string }) => void;
+  /** Optional custom underlying fetch & per-hop observer for G2 redirect/egress tests */
+  fetchImpl?: typeof globalThis.fetch;
+  onHttpFetchAttempt?: (url: string) => void;
   onReservationRecorded?: (info: {
     requestId: string;
     ownerTaskId: string;
@@ -521,13 +524,15 @@ export class AegisHostRuntime {
         shouldFailBeforeTransport: config.shouldFailBeforeTransport,
         injectFaultAfterFirstAccount: config.injectFaultAfterFirstAccount,
         onTransportDispatch: config.onTransportDispatch,
+        fetchImpl: config.fetchImpl,
+        onHttpFetchAttempt: config.onHttpFetchAttempt,
         onReservationRecorded: config.onReservationRecorded,
       });
 
       const resolveScopeRow = (conversationId: string): { scopeId: string; principalId: string } => {
         const row = govDb!
-          .prepare("SELECT scope_id, principal_id FROM conversation_scopes WHERE conversation_id = ?")
-          .get(conversationId) as { scope_id: string; principal_id: string } | undefined;
+          .prepare("SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+          .get(epochBox.current, conversationId) as { scope_id: string; principal_id: string } | undefined;
         return {
           scopeId: row?.scope_id ?? defaultScopeId,
           principalId: row?.principal_id ?? defaultPrincipalId,
@@ -1030,26 +1035,31 @@ export class AegisHostRuntime {
     return conv;
   }
 
+  getConversationBudgetTaskId(conversationId: string, runtimeEpoch?: string): string | null {
+    const targetEpoch = runtimeEpoch ?? this.#epochBox.current;
+    if (targetEpoch === this.#epochBox.current) {
+      const cid = Number(conversationId);
+      if (Number.isFinite(cid)) {
+        const cached = this.#conversationBudgetOwner.get(cid);
+        if (cached) return cached.ownerTaskId;
+      }
+    }
+    const row = getPersistedBudgetBinding(this.govDb, {
+      runtimeEpoch: targetEpoch,
+      bindingKind: "CONVERSATION",
+      bindingKey: conversationId,
+    });
+    return row?.owner_task_id ?? null;
+  }
+
   async submitChatInput(params: {
     conversationId: string;
     content: string;
-    budgetTaskId?: string;
   }): Promise<{ ok: true; submissionId: number } | { ok: false; code: string }> {
     const cid = Number(params.conversationId) as ConversationId;
     if (!Number.isFinite(cid)) return { ok: false, code: "invalid_conversation_id" };
-    if (params.budgetTaskId) {
-      // Only bind if conversation has no persisted host budget owner yet (never allow overwriting an existing binding!)
-      const existing =
-        this.#conversationBudgetOwner.get(cid) ??
-        getPersistedBudgetBinding(this.govDb, {
-          runtimeEpoch: this.#epochBox.current,
-          bindingKind: "CONVERSATION",
-          bindingKey: String(cid),
-        });
-      if (!existing) {
-        this.bindConversationBudgetOwner(cid, params.budgetTaskId, "router", { overwrite: false });
-      }
-    }
+    const bound = this.getConversationBudgetTaskId(params.conversationId, this.#epochBox.current);
+    if (!bound) return { ok: false, code: "unknown_budget_owner" };
     const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
     if (!conv) return { ok: false, code: "conversation_not_found" };
     const sub = await conv.submit({ type: "input", content: params.content }, BACKGROUND_CONTEXT);
@@ -1059,27 +1069,23 @@ export class AegisHostRuntime {
   async triggerCompaction(params: {
     conversationId: string;
     instructions?: string;
+    /** Trusted host-internal override ONLY (e.g. S4 dual-task concurrency fixture). Ordinary Web routes MUST omit this. */
     budgetTaskId?: string;
   }): Promise<{ ok: true; compactionTaskId: number } | { ok: false; code: string }> {
     const cid = Number(params.conversationId) as ConversationId;
     if (!Number.isFinite(cid)) return { ok: false, code: "invalid_conversation_id" };
+    const effectiveOwner =
+      params.budgetTaskId ?? this.getConversationBudgetTaskId(params.conversationId, this.#epochBox.current);
+    if (!effectiveOwner) {
+      return { ok: false, code: "unknown_budget_owner" };
+    }
     const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
     if (!conv) return { ok: false, code: "conversation_not_found" };
     const compactTaskId = await conv.compact(
       params.instructions ?? "Summarize conversation",
       BACKGROUND_CONTEXT,
     );
-    const effectiveOwner =
-      params.budgetTaskId ??
-      this.#conversationBudgetOwner.get(cid)?.ownerTaskId ??
-      getPersistedBudgetBinding(this.govDb, {
-        runtimeEpoch: this.#epochBox.current,
-        bindingKind: "CONVERSATION",
-        bindingKey: String(cid),
-      })?.owner_task_id;
-    if (effectiveOwner) {
-      this.bindPiTaskBudgetOwner(compactTaskId, cid, effectiveOwner, "compaction", { overwrite: true });
-    }
+    this.bindPiTaskBudgetOwner(compactTaskId, cid, effectiveOwner, "compaction", { overwrite: true });
     return { ok: true, compactionTaskId: Number(compactTaskId) };
   }
 

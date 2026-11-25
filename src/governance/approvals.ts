@@ -102,9 +102,9 @@ export function registerConversationScope(
   },
 ): void {
   db.prepare(
-    `INSERT OR IGNORE INTO conversation_scopes(conversation_id, scope_id, principal_id, runtime_epoch, created_at)
+    `INSERT OR IGNORE INTO conversation_scopes(runtime_epoch, conversation_id, scope_id, principal_id, created_at)
      VALUES (?, ?, ?, ?, ?)`,
-  ).run(params.conversationId, params.scopeId, params.principalId, params.runtimeEpoch, params.now);
+  ).run(params.runtimeEpoch, params.conversationId, params.scopeId, params.principalId, params.now);
 }
 
 export function isPrincipalAuthorizedForScope(scope: ScopeRow, principalId: string): boolean {
@@ -333,8 +333,8 @@ export function saveDraftRevision(
       | ScopeRow
       | undefined;
     const convScope = db
-      .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
-      .get(proposal.conversation_id) as { principal_id: string } | undefined;
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+      .get(proposal.runtime_epoch, proposal.conversation_id) as { principal_id: string } | undefined;
     if (
       !scope ||
       !isPrincipalAuthorizedForScope(scope, params.principalId) ||
@@ -607,8 +607,8 @@ export function decideApproval(
       | ScopeRow
       | undefined;
     const convScope = db
-      .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
-      .get(proposal.conversation_id) as { principal_id: string } | undefined;
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+      .get(proposal.runtime_epoch, proposal.conversation_id) as { principal_id: string } | undefined;
 
     // 1. Authorization & conversation binding FIRST (before idempotency lookup!)
     if (
@@ -1024,8 +1024,8 @@ export function fetchAuthorizedApprovalChallenge(
     | ScopeRow
     | undefined;
   const convScope = db
-    .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
-    .get(proposal.conversation_id) as { principal_id: string } | undefined;
+    .prepare("SELECT principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+    .get(proposal.runtime_epoch, proposal.conversation_id) as { principal_id: string } | undefined;
 
   if (
     !scope ||

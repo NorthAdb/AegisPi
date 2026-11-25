@@ -28,6 +28,7 @@ import {
 import { mintId } from "../governance/canonical.ts";
 import {
   assertStage1LoopbackModelUrl,
+  Stage1EgressBlockedError,
   type HostCredentialVault,
   type ModelPriceSchedule,
 } from "../governance/credentials.ts";
@@ -70,6 +71,10 @@ export interface HostModelsConfig {
   injectFaultAfterFirstAccount?: () => void;
   /** Optional observer invoked strictly before underlying HTTP transport dispatch (G2 verification). */
   onTransportDispatch?: (info: { requestId: string; baseUrl: string; provider: string; modelId: string }) => void;
+  /** Optional custom underlying fetch implementation (for G2 controlled redirect/egress observation). */
+  fetchImpl?: typeof globalThis.fetch;
+  /** Optional observer invoked on EVERY physical HTTP fetch attempt inside Stage 1 guarded fetch. */
+  onHttpFetchAttempt?: (url: string) => void;
   onReservationRecorded?: (info: {
     requestId: string;
     ownerTaskId: string;
@@ -145,6 +150,37 @@ function computeActualMu(msg: AssistantMessage, schedule: ModelPriceSchedule): n
   const inputCost = ((u.input ?? 0) * schedule.inputPerMTokMu) / 1_000_000;
   const outputCost = ((u.output ?? 0) * schedule.outputPerMTokMu) / 1_000_000;
   return Math.max(1, Math.ceil(inputCost + outputCost));
+}
+
+/**
+ * Stage 1 guarded HTTP fetch transport passed directly into pi-ai's OpenAI client.
+ * 1. Re-enforces Stage 1 loopback-only URL validation on EVERY physical fetch attempt.
+ * 2. Sets redirect: "manual" so Node's fetch NEVER auto-follows 3xx redirects to off-loopback hosts.
+ * 3. Explicitly rejects any 3xx redirect response with Stage1EgressBlockedError (0 secondary hops).
+ */
+export function createStage1GuardedFetch(
+  underlyingFetch: typeof globalThis.fetch = globalThis.fetch,
+  onHttpFetchAttempt?: (url: string) => void,
+): typeof globalThis.fetch {
+  return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const rawUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    assertStage1LoopbackModelUrl(rawUrl);
+    onHttpFetchAttempt?.(rawUrl);
+    const guardedInit: RequestInit = {
+      ...init,
+      redirect: "manual",
+    };
+    const response = await underlyingFetch(input, guardedInit);
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location") ?? "(missing)";
+      throw new Stage1EgressBlockedError(
+        location,
+        `Stage 1 blocks HTTP ${response.status} redirect from ${rawUrl} to ${location}`,
+      );
+    }
+    return response;
+  };
 }
 
 export interface HostModelsController {
@@ -245,7 +281,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
         eventKey: `deny:${requestId}`,
         eventType: "budget_denied",
         occurredAt: nowFn(),
-        details: { code, message, ...extra },
+        details: { code, message, runtimeEpoch: config.getRuntimeEpoch(), ...extra },
       });
     });
   };
@@ -406,9 +442,14 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       provider: model.provider,
       modelId: model.id,
     });
+    const guardedFetch = createStage1GuardedFetch(
+      config.fetchImpl ?? globalThis.fetch,
+      config.onHttpFetchAttempt,
+    );
     const enforcedOptions: ModelsSimpleStreamOptions = {
       ...options,
       maxRetries: 0,
+      fetch: guardedFetch,
     };
     const underlyingStream = inner.streamSimple(model, ctx, enforcedOptions);
 

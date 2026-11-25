@@ -249,7 +249,7 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
     const convRes = await fetch(`${host1.baseUrl}/api/conversations`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie1, origin: host1.baseUrl },
-      body: JSON.stringify({ slotName: "router", budgetTaskId: `task_${runId}` }),
+      body: JSON.stringify({ slotName: "router" }),
     });
     assert.equal(convRes.status, 200);
     const { conversationId } = (await convRes.json()) as { conversationId: string };
@@ -257,7 +257,7 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
     const chatRes = await fetch(`${host1.baseUrl}/api/conversations/${conversationId}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie1, origin: host1.baseUrl },
-      body: JSON.stringify({ content: "Please send the synthetic W1-B email.", budgetTaskId: `task_${runId}` }),
+      body: JSON.stringify({ content: "Please send the synthetic W1-B email." }),
     });
     assert.equal(chatRes.status, 200);
 

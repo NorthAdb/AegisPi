@@ -368,12 +368,15 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
       entry: "router" | "worker" | "compaction";
       shortAccount: "task" | "day";
     }): Promise<void> => {
+      // For compaction negative cases, seed history under the conversation's OWN host-bound task account,
+      // then tighten that EXACT host-bound task (or day) account to UPPER_MU - 1 (99) before calling
+      // POST /api/conversations/:id/compact WITHOUT any client-supplied budgetTaskId!
       const ownerTaskId = `w1a-neg-${cfg.entry}-${cfg.shortAccount}`;
       const taskAcctId = taskAccountIdFor(ownerTaskId);
 
       let convId: ConversationId;
       if (cfg.entry === "compaction") {
-        convId = await seedCompactionReadyConv(`seed-${ownerTaskId}`);
+        convId = await seedCompactionReadyConv(ownerTaskId);
       } else {
         const conv = await host.createManagedConversation({
           slotName: cfg.entry,
@@ -382,12 +385,16 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
         convId = conv.id;
       }
 
-      // Set exact balances: short account gets UPPER_MU - 1 (99), other gets ample (10000)
+      const existingTask = getBudgetAccount(host.govDb, taskAcctId);
+      const taskChargedAlready = existingTask?.charged_mu ?? 0;
+      const reservationsBefore = readReservationsForTask(ownerTaskId);
+
+      // Set exact balances: short account gets UPPER_MU - 1 (99) available, other gets ample (10000) available
       if (cfg.shortAccount === "task") {
         setBudgetAccountLimit(host.govDb, {
           accountId: taskAcctId,
           kind: "TASK",
-          limitMu: UPPER_MU - 1,
+          limitMu: taskChargedAlready + (UPPER_MU - 1),
           now: fixedNow,
           approvedBy: "test-harness",
         });
@@ -396,7 +403,7 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
         setBudgetAccountLimit(host.govDb, {
           accountId: taskAcctId,
           kind: "TASK",
-          limitMu: 10_000,
+          limitMu: taskChargedAlready + 10_000,
           now: fixedNow,
           approvedBy: "test-harness",
         });
@@ -417,12 +424,12 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
       });
       const srvBefore = (await fakeModel.stats()).totalPhysicalRequests;
 
-      // Trigger through NORMAL entry point
+      // Trigger through NORMAL Web entry point WITHOUT client-supplied budgetTaskId (host owns budget binding!)
       if (cfg.entry === "compaction") {
         const resp = await fetch(`${web.baseUrl}/api/conversations/${convId}/compact`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie, origin: web.baseUrl },
-          body: JSON.stringify({ instructions: "Compact under short budget", budgetTaskId: ownerTaskId }),
+          body: JSON.stringify({ instructions: "Compact under short budget" }),
         });
         assert.equal(resp.status, 200);
         const body = (await resp.json()) as { compactionTaskId: number };
@@ -431,7 +438,7 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
         const resp = await fetch(`${web.baseUrl}/api/conversations/${convId}/chat`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie, origin: web.baseUrl },
-          body: JSON.stringify({ content: `Trigger ${cfg.entry} with short ${cfg.shortAccount} budget`, budgetTaskId: ownerTaskId }),
+          body: JSON.stringify({ content: `Trigger ${cfg.entry} with short ${cfg.shortAccount} budget` }),
         });
         assert.equal(resp.status, 200);
         const body = (await resp.json()) as { submissionId: number };
@@ -445,7 +452,8 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
       const srvAfter = (await fakeModel.stats()).totalPhysicalRequests;
       const tAfter = getBudgetAccount(host.govDb, taskAcctId)!;
       const dAfter = getBudgetAccount(host.govDb, dayAcctId)!;
-      const reservations = readReservationsForTask(ownerTaskId);
+      const reservationsAfter = readReservationsForTask(ownerTaskId);
+      const newReservations = reservationsAfter.slice(reservationsBefore.length);
       const snap = await getSnapshot(web.baseUrl, cookie, String(convId));
       const matchingDenials = snap.budgetDenials.filter((d) => d.ownerTaskId === ownerTaskId);
 
@@ -455,7 +463,7 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
       assert.equal(dAfter.held_mu, 0, `${cfg.caseId}: day account must have 0 residual held_mu`);
       assert.deepEqual(tAfter, tBefore, `${cfg.caseId}: task account must be unchanged`);
       assert.deepEqual(dAfter, dBefore, `${cfg.caseId}: day account must be unchanged`);
-      assert.equal(reservations.length, 0, `${cfg.caseId}: zero budget_reservations rows created`);
+      assert.equal(newReservations.length, 0, `${cfg.caseId}: zero new budget_reservations rows created`);
       assert.ok(matchingDenials.length >= 1, `${cfg.caseId}: View 1 snapshot must show specific denial reason`);
       const expectedCode = cfg.shortAccount === "task" ? "task_budget_exceeded" : "day_budget_exceeded";
       assert.equal(matchingDenials[0]?.code, expectedCode, `${cfg.caseId}: denial code must be ${expectedCode}`);
@@ -475,7 +483,7 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
         taskAccountAfter: tAfter,
         dayAccountBefore: dBefore,
         dayAccountAfter: dAfter,
-        reservationsCreated: reservations,
+        reservationsCreated: newReservations,
         view1Denials: matchingDenials,
         status: "PASS",
       });

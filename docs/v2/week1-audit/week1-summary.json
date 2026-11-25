@@ -1,6 +1,6 @@
 {
-  "runId": "week1_02e38684",
-  "executedAt": "2026-11-25T14:52:20.884Z",
+  "runId": "week1_0ab39ee5",
+  "executedAt": "2026-11-25T15:36:00.318Z",
   "environment": {
     "nodeExe": "node.exe",
     "nodeVersion": "v22.23.5",
@@ -8,7 +8,7 @@
     "platform": "win32",
     "arch": "x64"
   },
-  "dataDirLabel": "aegispi-v2-week1-r4-20261125-225053",
+  "dataDirLabel": "aegispi-v2-week1-r5-20261125-233448",
   "evidenceDirRelative": "docs/v2/week1-audit",
   "results": {
     "typecheck": {
@@ -25,15 +25,15 @@
     },
     "w1_b_and_e06": {
       "status": "PASS",
-      "effectId": "efx_395e7683626144249cbfe0e1c0454072",
+      "effectId": "efx_54b45a8945bd492881bcfdaa274f3218",
       "smtpTotalReceived": 1,
       "finalEffectState": "UNKNOWN",
       "view1Label": "结果待核对"
     },
     "matrix": {
       "status": "PASS",
-      "passed": 23,
-      "total": 23,
+      "passed": 24,
+      "total": 24,
       "cases": [
         {
           "id": "GUARD-BOUNDARY",
@@ -48,7 +48,7 @@
         {
           "id": "G2-EGRESS",
           "status": "PASS",
-          "summary": "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; controlled observers recorded 0 SMTP connects and 0 model dispatches."
+          "summary": "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; Stage 1 guarded fetch (redirect=manual) blocked HTTP 307 redirect to off-loopback host with 0 disallowed fetch calls."
         },
         {
           "id": "G3-NONCE-SSE",
@@ -58,7 +58,12 @@
         {
           "id": "R1-ATTRIBUTION",
           "status": "PASS",
-          "summary": "Verified real run_worker delegation inherits parent host task (ignoring smuggled model budgetTaskId, 0 worker sends when exhausted, charges parent when funded), persisted bindings survive restart (0 sends when exhausted), and missing binding fails closed (unknown_budget_owner, 0 sends, 0 default accounts)."
+          "summary": "Verified real run_worker delegation inherits parent host task, persisted bindings survive restart, missing binding fails closed, and ordinary Web create/chat/compact routes ignore client budgetTaskId (0 sends, 0 spoofed accounts)."
+        },
+        {
+          "id": "R3-EPOCH-ACL",
+          "status": "PASS",
+          "summary": "Verified epoch-scoped conversation_scopes across trace replacement with reused numeric conversation ID: old principal blocked (403) on new epoch and restricted to historical ep1 audit (messages=[]), while new principal sees only ep2 data and gets 403 on ep1."
         },
         {
           "id": "F01",

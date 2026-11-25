@@ -24,7 +24,8 @@ Accepted（2026-11-25，香港时间；已按第 1 轮审计意见修订并由�
 - 宿主在 `src/runtime/telemetry.ts` 实现 `HostPhaseTelemetry`，使用进程内私有 `WeakMap<TelemetrySpan, PhaseAttribution>` 记录每个 span 对象到 `(taskId, taskName, phase, attempt)` 的不可伪造映射。
 - 宿主在治理库新增 `budget_task_bindings` 表，持久化每个活跃代际下 `PI_TASK` 与 `CONVERSATION` 到权威宿主预算任务 `(owner_task_id, purpose)` 的绑定，重启后自动回载。
 - `run_worker` 工具参数移除模型可控的 `budgetTaskId`，仅接受 `prompt`；宿主委派入口固定继承父任务/父会话的已持久化宿主 `owner_task_id`（记为 `purpose = "worker"`）。
-- `src/runtime/models.ts` 在物理发送前按 `PI_TASK -> CONVERSATION` 解析持久归属；缺失可信 span 或无法查到宿主绑定时直接失败关闭（`unknown_budget_owner`，新增物理请求为 0，绝不临时合成默认额度账户）。
+- 普通 Web 路由（`POST /api/conversations`、`POST /api/conversations/:id/chat`、`POST /api/conversations/:id/compact`）不接受请求体中的 `budgetTaskId`，由宿主在建会话时签发并持久化 `host-task:<runtimeEpoch>:conv:<id>`，聊天与压缩始终复用该宿主绑定；仅宿主内部受信任接口保留显式多任务绑定参数以支撑 S4 并发分账夹具。
+- `src/runtime/models.ts` 在物理发送前按 `PI_TASK -> CONVERSATION` 解析持久归属；缺失可信 span 或无法查到宿主绑定时直接失败关闭（`unknown_budget_owner`，新增物理请求为 0，绝不临时合成默认额度账户）。同时向 `pi-ai` OpenAI Completions 传输注入阶段一受限 `fetch`（强制每跳回环校验 + `redirect: "manual"` + 拒绝任何 `3xx` 跳转），防止首跳回环后经 HTTP 重定向跳出本地替身边界（G2）。
 - 阶段一 `estimateUpperBoundMu` 仅接受经验证的整数每请求上界（`syntheticFixedUpperMu`）；任何依赖字符长度估算等无法证明硬上界的非固定价表路径一律失败关闭（`unknown_upper_bound`，新增物理请求为 0）。
 
 ### 2. 同代际轨迹回退识别与换代联动（S5 / F03 / R3）
@@ -48,7 +49,7 @@ Accepted（2026-11-25，香港时间；已按第 1 轮审计意见修订并由�
 | 表 / 字段 | 相对附录草案的变化 | 影响口径 |
 |---|---|---|
 | `paired_manifest`（新增表） | 单行表记录 `trace_identity`、全分页单调水位、只读 change counter 与已知 Pi 任务 ID | 恢复：支持含跨页历史的同代际回退检测（F03 / S5 / R3） |
-| `conversation_scopes`（新增表） | 绑定 `(conversation_id, scope_id, principal_id, runtime_epoch)` | 权限：强制会话与主体归属校验，阻断越权决定/核对/撤销（G1 / E09） |
+| `conversation_scopes`（新增表） | 以复合主键 `(runtime_epoch, conversation_id)` 绑定 `(scope_id, principal_id)`；快照、聊天、压缩与轨迹读取均按代际隔离，已退役代际仅返回历史治理审计且不读当前活跃轨迹库 | 权限/恢复：防止换代后复用数字会话 ID 沿用旧 ACL 或跨主体泄露新轨迹（G1 / R3 / E09） |
 | `budget_task_bindings`（新增表） | 持久化 `(runtime_epoch, binding_kind, binding_key) -> (conversation_id, owner_task_id, purpose)` | 账务：确保委派与重启后归属不丢失、不另开默认账户（R1 / S4） |
 | `approval_challenges`（新增表） | 宿主私有表，仅在 `PENDING` 期间保存明文 nonce 供已鉴权审批人经专用 `/api/approvals/:id/challenge` 读取，离开 `PENDING` 即删除 | 审批安全：明文 nonce 零暴露于 SSE / 快照 / URL / 日志（G3） |
 | `scopes` 新增列 | 增加 `allowed_principals_json`、`allowed_tools_json`、`allowed_targets_json` | 权限：T1 / T2 / T4 / 核对 / 撤销实时 ACL 复核（G1 / E08 / E09 / E10） |

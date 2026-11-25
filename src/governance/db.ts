@@ -166,11 +166,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 
 CREATE TABLE IF NOT EXISTS conversation_scopes (
-  conversation_id TEXT PRIMARY KEY NOT NULL,
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  conversation_id TEXT NOT NULL,
   scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
   principal_id TEXT NOT NULL,
-  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(runtime_epoch, conversation_id)
 );
 
 CREATE TABLE IF NOT EXISTS budget_task_bindings (

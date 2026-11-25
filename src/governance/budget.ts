@@ -208,6 +208,7 @@ export function reserveBudget(db: DatabaseSync, params: ReserveBudgetParams): Re
         occurredAt: params.now,
         details: {
           code: "unknown_upper_bound",
+          runtimeEpoch: params.runtimeEpoch,
           conversationId: params.conversationId,
           ownerTaskId: params.ownerTaskId,
           purpose: params.purpose,
@@ -381,6 +382,7 @@ export function reserveBudget(db: DatabaseSync, params: ReserveBudgetParams): Re
           details: {
             code: err.code,
             message: err.message,
+            runtimeEpoch: params.runtimeEpoch,
             ...err.details,
           },
         });
@@ -808,6 +810,7 @@ export function listPersistedBudgetBindings(
 export function listBudgetDenialsForConversation(
   db: DatabaseSync,
   conversationId: string,
+  runtimeEpoch?: string,
 ): Array<{
   seq: number;
   requestId: string;
@@ -840,7 +843,10 @@ export function listBudgetDenialsForConversation(
     if (!r.details_json) continue;
     try {
       const parsed = JSON.parse(r.details_json) as Record<string, unknown>;
-      if (parsed["conversationId"] === conversationId) {
+      if (
+        parsed["conversationId"] === conversationId &&
+        (!runtimeEpoch || parsed["runtimeEpoch"] === undefined || parsed["runtimeEpoch"] === runtimeEpoch)
+      ) {
         out.push({
           seq: r.seq,
           requestId: r.entity_id,

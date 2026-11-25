@@ -198,6 +198,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
 
   app.get("/api/conversations", (c) => {
     const session = c.get("authSession");
+    const activeEpoch = config.host.runtimeEpoch;
     const rows = config.host.govDb
       .prepare(
         `SELECT conversation_id, scope_id, principal_id, runtime_epoch, created_at
@@ -218,6 +219,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         scopeId: r.scope_id,
         principalId: r.principal_id,
         runtimeEpoch: r.runtime_epoch,
+        isActiveEpoch: r.runtime_epoch === activeEpoch,
         createdAt: r.created_at,
       })),
     });
@@ -230,7 +232,6 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     const session = c.get("authSession");
     const body = (await c.req.json().catch(() => ({}))) as {
       slotName?: "router" | "worker";
-      budgetTaskId?: string;
       scopeId?: string;
     };
     if (body.scopeId) {
@@ -241,15 +242,37 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         return c.json({ error: "forbidden_scope" }, 403);
       }
     }
+    // R1: Never accept client-supplied budgetTaskId on ordinary Web routes; host always owns the budget binding!
     const conv = await config.host.createManagedConversation({
       principalId: session.principalId,
       slotName: body.slotName,
-      budgetTaskId: body.budgetTaskId,
       scopeId: body.scopeId,
     });
+    const budgetTaskId = config.host.getConversationBudgetTaskId(String(conv.id), config.host.runtimeEpoch);
     snapshotVersion++;
-    return c.json({ ok: true, conversationId: String(conv.id), runtimeEpoch: config.host.runtimeEpoch });
+    return c.json({
+      ok: true,
+      conversationId: String(conv.id),
+      runtimeEpoch: config.host.runtimeEpoch,
+      budgetTaskId,
+    });
   });
+
+  function verifyActiveEpochConversationAccess(convIdStr: string, principalId: string): boolean {
+    const activeEpoch = config.host.runtimeEpoch;
+    const convScope = config.host.govDb
+      .prepare(
+        "SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+      )
+      .get(activeEpoch, convIdStr) as { scope_id: string; principal_id: string } | undefined;
+    if (!convScope || convScope.principal_id !== principalId) {
+      return false;
+    }
+    const scope = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(convScope.scope_id) as ScopeRow | undefined;
+    return Boolean(scope && isPrincipalAuthorizedForScope(scope, principalId));
+  }
 
   app.post("/api/conversations/:id/chat", async (c) => {
     if (!config.host.isAcceptingCommands) {
@@ -257,20 +280,17 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     }
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
-    const convScope = config.host.govDb
-      .prepare("SELECT * FROM conversation_scopes WHERE conversation_id = ?")
-      .get(convIdStr) as { principal_id: string } | undefined;
-    if (!convScope || convScope.principal_id !== session.principalId) {
+    if (!verifyActiveEpochConversationAccess(convIdStr, session.principalId)) {
       return c.json({ error: "forbidden" }, 403);
     }
-    const body = (await c.req.json().catch(() => ({}))) as { content?: string; budgetTaskId?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { content?: string };
     if (!body.content || typeof body.content !== "string") {
       return c.json({ error: "missing_content" }, 400);
     }
+    // R1: Ordinary Web chat always uses the conversation's host-owned budget binding.
     const res = await config.host.submitChatInput({
       conversationId: convIdStr,
       content: body.content,
-      budgetTaskId: body.budgetTaskId,
     });
     if (!res.ok) {
       return c.json({ error: res.code }, 404);
@@ -285,17 +305,14 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     }
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
-    const convScope = config.host.govDb
-      .prepare("SELECT * FROM conversation_scopes WHERE conversation_id = ?")
-      .get(convIdStr) as { principal_id: string } | undefined;
-    if (!convScope || convScope.principal_id !== session.principalId) {
+    if (!verifyActiveEpochConversationAccess(convIdStr, session.principalId)) {
       return c.json({ error: "forbidden" }, 403);
     }
-    const body = (await c.req.json().catch(() => ({}))) as { instructions?: string; budgetTaskId?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { instructions?: string };
+    // R1: Ordinary Web compaction ALWAYS uses the conversation's host-owned budget binding (ignores any client budgetTaskId!).
     const res = await config.host.triggerCompaction({
       conversationId: convIdStr,
       instructions: body.instructions,
-      budgetTaskId: body.budgetTaskId,
     });
     if (!res.ok) {
       return c.json({ error: res.code }, 404);
@@ -305,25 +322,37 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   });
 
   /**
-   * Builds the authoritative conversation snapshot.
+   * Builds the authoritative conversation snapshot scoped strictly to (targetEpoch, conversationId).
+   * R3/G1: Enforces epoch-scoped conversation ACLs; live Pi transcript is read ONLY for the active epoch
+   * so retired-epoch principals can inspect their own historical governance records without ever reading
+   * a reused numeric conversation ID's new-epoch transcript!
    * G3: Plaintext approval nonce is NEVER included here (zero exposure in SSE frames or general snapshots).
-   * Authorized approvers obtain challenges exclusively via POST /api/approvals/:id/challenge.
    */
-  async function buildAuthoritativeSnapshot(convIdStr: string, principalId: string) {
+  async function buildAuthoritativeSnapshot(convIdStr: string, principalId: string, requestedEpoch?: string) {
+    const activeEpoch = config.host.runtimeEpoch;
+    const targetEpoch = requestedEpoch && requestedEpoch.trim().length > 0 ? requestedEpoch.trim() : activeEpoch;
     const convScope = config.host.govDb
-      .prepare("SELECT * FROM conversation_scopes WHERE conversation_id = ?")
-      .get(convIdStr) as { scope_id: string; principal_id: string; runtime_epoch: string } | undefined;
+      .prepare(
+        "SELECT scope_id, principal_id, runtime_epoch FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+      )
+      .get(targetEpoch, convIdStr) as { scope_id: string; principal_id: string; runtime_epoch: string } | undefined;
     if (!convScope || convScope.principal_id !== principalId) {
+      return null;
+    }
+    const scope = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(convScope.scope_id) as ScopeRow | undefined;
+    if (!scope || !isPrincipalAuthorizedForScope(scope, principalId)) {
       return null;
     }
 
     const proposalRows = config.host.govDb
       .prepare(
         `SELECT * FROM proposals
-          WHERE conversation_id = ?
+          WHERE runtime_epoch = ? AND conversation_id = ?
           ORDER BY created_at ASC`,
       )
-      .all(convIdStr) as unknown as ProposalRow[];
+      .all(targetEpoch, convIdStr) as unknown as ProposalRow[];
 
     const proposals = proposalRows.map((p) => {
       const draft = config.host.govDb
@@ -375,23 +404,35 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     const reservations = config.host.govDb
       .prepare(
         `SELECT * FROM budget_reservations
-          WHERE conversation_id = ?
+          WHERE runtime_epoch = ? AND conversation_id = ?
           ORDER BY reserved_at ASC`,
       )
-      .all(convIdStr) as unknown as BudgetReservationRow[];
+      .all(targetEpoch, convIdStr) as unknown as BudgetReservationRow[];
 
-    const accounts = config.host.govDb
+    const visibleAccountIds = new Set<string>();
+    const boundTask = config.host.getConversationBudgetTaskId(convIdStr, targetEpoch);
+    if (boundTask) visibleAccountIds.add(`acct:task:${boundTask}`);
+    for (const r of reservations) {
+      visibleAccountIds.add(r.task_account);
+      visibleAccountIds.add(r.day_account);
+    }
+    const allAccounts = config.host.govDb
       .prepare("SELECT * FROM budget_accounts ORDER BY account_id ASC")
       .all() as unknown as BudgetAccountRow[];
+    const accounts = allAccounts.filter((a) => visibleAccountIds.has(a.account_id));
 
-    const budgetDenials = listBudgetDenialsForConversation(config.host.govDb, convIdStr);
+    const budgetDenials = listBudgetDenialsForConversation(config.host.govDb, convIdStr, targetEpoch);
 
-    const messages = await config.host.readConversationMessages(convIdStr);
+    // R3/G1: ONLY read live Pi trace DB when inspecting the ACTIVE epoch!
+    const isActiveEpoch = targetEpoch === activeEpoch;
+    const messages = isActiveEpoch ? await config.host.readConversationMessages(convIdStr) : [];
 
     return {
       conversationId: convIdStr,
       scopeId: convScope.scope_id,
-      runtimeEpoch: config.host.runtimeEpoch,
+      runtimeEpoch: targetEpoch,
+      activeRuntimeEpoch: activeEpoch,
+      isActiveEpoch,
       health: config.host.health,
       snapshotVersion,
       proposals,
@@ -405,7 +446,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   app.get("/api/conversations/:id/snapshot", async (c) => {
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
-    const snap = await buildAuthoritativeSnapshot(convIdStr, session.principalId);
+    const requestedEpoch = c.req.query("epoch");
+    const snap = await buildAuthoritativeSnapshot(convIdStr, session.principalId, requestedEpoch);
     if (!snap) {
       return c.json({ error: "forbidden_or_not_found" }, 403);
     }
@@ -519,12 +561,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     const approvalId = c.req.param("id");
     const lineage = config.host.govDb
       .prepare(
-        `SELECT p.scope_id, p.conversation_id
+        `SELECT p.runtime_epoch, p.scope_id, p.conversation_id
            FROM approvals a
            JOIN proposals p ON p.proposal_id = a.proposal_id
           WHERE a.approval_id = ?`,
       )
-      .get(approvalId) as { scope_id: string; conversation_id: string } | undefined;
+      .get(approvalId) as { runtime_epoch: string; scope_id: string; conversation_id: string } | undefined;
     if (!lineage) {
       return c.json({ error: "approval_not_found" }, 404);
     }
@@ -532,14 +574,17 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       .prepare("SELECT * FROM scopes WHERE scope_id = ?")
       .get(lineage.scope_id) as ScopeRow | undefined;
     const convScope = config.host.govDb
-      .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
-      .get(lineage.conversation_id) as { principal_id: string } | undefined;
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+      .get(lineage.runtime_epoch, lineage.conversation_id) as { principal_id: string } | undefined;
     if (
       !scope ||
       !isPrincipalAuthorizedForScope(scope, session.principalId) ||
       (convScope && convScope.principal_id !== session.principalId)
     ) {
       return c.json({ error: "forbidden" }, 403);
+    }
+    if (lineage.runtime_epoch !== config.host.runtimeEpoch) {
+      return c.json({ error: "runtime_epoch_retired" }, 409);
     }
     const result = await config.host.replayApprovalSignal(approvalId);
     snapshotVersion++;
@@ -587,7 +632,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   app.get("/api/conversations/:id/events", async (c) => {
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
-    const initial = await buildAuthoritativeSnapshot(convIdStr, session.principalId);
+    const requestedEpoch = c.req.query("epoch");
+    const initial = await buildAuthoritativeSnapshot(convIdStr, session.principalId, requestedEpoch);
     if (!initial) {
       return c.json({ error: "forbidden_or_not_found" }, 403);
     }
@@ -607,7 +653,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
             break;
           }
           if (snapshotVersion !== lastSentVersion) {
-            const snap = await buildAuthoritativeSnapshot(convIdStr, session.principalId);
+            const snap = await buildAuthoritativeSnapshot(convIdStr, session.principalId, requestedEpoch);
             if (!snap) break;
             lastSentVersion = snap.snapshotVersion;
             await stream.writeSSE({

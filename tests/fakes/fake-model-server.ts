@@ -20,7 +20,7 @@ export interface ModelArrivalRecord {
 }
 
 export interface ScriptedResponse {
-  kind: "text" | "tool_call" | "http_error" | "missing_usage" | "hold_then_text";
+  kind: "text" | "tool_call" | "http_error" | "missing_usage" | "hold_then_text" | "redirect";
   text?: string;
   toolCall?: {
     id: string;
@@ -29,6 +29,7 @@ export interface ScriptedResponse {
   };
   httpStatus?: number;
   errorMessage?: string;
+  redirectLocation?: string;
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -219,14 +220,19 @@ const server = http.createServer(async (req, res) => {
 
       const authHeader = typeof req.headers["authorization"] === "string" ? req.headers["authorization"] : "";
       const usageObj =
-        script.kind === "missing_usage" || script.kind === "http_error"
+        script.kind === "missing_usage" || script.kind === "http_error" || script.kind === "redirect"
           ? null
           : {
               prompt_tokens: script.usage?.prompt_tokens ?? 100,
               completion_tokens: script.usage?.completion_tokens ?? 20,
               total_tokens: (script.usage?.prompt_tokens ?? 100) + (script.usage?.completion_tokens ?? 20),
             };
-      const statusCode = script.kind === "http_error" ? (script.httpStatus ?? 503) : 200;
+      const statusCode =
+        script.kind === "http_error"
+          ? (script.httpStatus ?? 503)
+          : script.kind === "redirect"
+            ? (script.httpStatus ?? 307)
+            : 200;
 
       const seq = records.length + 1;
       const rec: ModelArrivalRecord = {
@@ -261,6 +267,15 @@ const server = http.createServer(async (req, res) => {
         });
       } else if (script.holdBarrierKey) {
         notifyBarrierArrived(script.holdBarrierKey);
+      }
+
+      if (script.kind === "redirect") {
+        res.writeHead(statusCode, {
+          location: script.redirectLocation ?? "https://api.openai.com/v1/chat/completions",
+          "content-type": "text/plain; charset=utf-8",
+        });
+        res.end("Synthetic redirect");
+        return;
       }
 
       if (script.kind === "http_error") {

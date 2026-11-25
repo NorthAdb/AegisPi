@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { TaskId } from "@earendil-works/pi-durable";
 import { sendSmtpMessage } from "../../src/capabilities/mail/smtp-client.ts";
 import {
   decideApproval,
@@ -613,17 +614,97 @@ export async function testG2Egress(rootDir: string): Promise<MatrixCaseResult> {
   );
   assert.equal(modelDispatchCalls, 0, "G2: disallowed model endpoint must produce 0 transport dispatches");
 
+  // 6. Real loopback-to-off-loopback HTTP 307 redirect test via Stage 1 guarded fetch!
+  const fakeRedirectModel = await startFakeModelServer(path.join(dir, "fake-redirect-model"));
+  const fetchUrlsObserved: string[] = [];
+  let disallowedRedirectFetchCalls = 0;
+  try {
+    await fakeRedirectModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "redirect",
+          httpStatus: 307,
+          redirectLocation: "https://api.openai.com/v1/chat/completions",
+        },
+      ],
+    });
+    const redirectVault = new HostCredentialVault();
+    redirectVault.registerSlot(
+      {
+        slotId: "slot:redir",
+        provider: "fake-local",
+        allowedBaseUrls: [fakeRedirectModel.baseUrl],
+        allowedModelIds: ["fake-router-1"],
+        priceVersion: "synthetic-100-60",
+      },
+      "SYNTHETIC_REDIR_KEY",
+    );
+    const redirectHost = await AegisHostRuntime.start({
+      dataDir: path.join(dir, "redirect-host"),
+      vault: redirectVault,
+      modelSlots: [
+        {
+          slotName: "router",
+          provider: "fake-local",
+          modelId: "fake-router-1",
+          baseUrl: fakeRedirectModel.baseUrl,
+          credentialSlotId: "slot:redir",
+          contextWindow: 128_000,
+          maxTokens: 1024,
+          priceSchedule: {
+            priceVersion: "synthetic-100-60",
+            inputPerMTokMu: 300_000,
+            outputPerMTokMu: 1_200_000,
+            syntheticFixedUpperMu: 100,
+            syntheticFixedActualMu: 60,
+          },
+          outboundAuthorized: true,
+        },
+      ],
+      smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "g2@local.test" },
+      fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+        const u = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        fetchUrlsObserved.push(u);
+        if (!u.startsWith("http://127.0.0.1:") && !u.startsWith("http://localhost:")) {
+          disallowedRedirectFetchCalls++;
+          throw new Error(`Unexpected off-loopback fetch: ${u}`);
+        }
+        return await globalThis.fetch(input, init);
+      }) as typeof globalThis.fetch,
+    });
+    try {
+      const c = await redirectHost.createManagedConversation({ budgetTaskId: "g2-redirect-task" });
+      const sub = await c.submit({ type: "input", content: "trigger redirect test" }, BACKGROUND_CONTEXT);
+      const settled = await sub.wait(BACKGROUND_CONTEXT);
+      assert.equal(settled.status, "unanswered", "G2: redirected model request must fail closed");
+      assert.equal(
+        disallowedRedirectFetchCalls,
+        0,
+        "G2: off-loopback HTTP redirect destination MUST receive 0 fetch calls",
+      );
+      assert.equal(fetchUrlsObserved.length, 1, "G2: only the single loopback initial hop may execute");
+      assert.ok(fetchUrlsObserved[0]!.startsWith(fakeRedirectModel.baseUrl));
+    } finally {
+      await redirectHost.close();
+    }
+  } finally {
+    await fakeRedirectModel.stop();
+  }
+
   return {
     id: "G2-EGRESS",
     group: "GUARD",
     status: "PASS",
     summary:
-      "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; controlled observers recorded 0 SMTP connects and 0 model dispatches.",
+      "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; Stage 1 guarded fetch (redirect=manual) blocked HTTP 307 redirect to off-loopback host with 0 disallowed fetch calls.",
     evidence: {
       badModelStartupExitCode: badModelProc.status,
       badSmtpStartupExitCode: badSmtpProc.status,
       smtpConnectCallsObserved: smtpConnectCalls,
       modelDispatchCallsObserved: modelDispatchCalls,
+      redirectLoopbackHops: fetchUrlsObserved.length,
+      disallowedRedirectFetchCalls,
     },
   };
 }
@@ -1026,21 +1107,396 @@ export async function testR1Attribution(rootDir: string): Promise<MatrixCaseResu
     assert.deepEqual(taskAcctsC.map((a) => a.account_id), ["acct:task:r1-restart-task"]);
     await hostB3.close();
 
+    // Part D (Round 2 R1 Blocker): Ordinary Web routes MUST ignore client-supplied budgetTaskId on create, chat, and compact!
+    const dataDirD = path.join(dir, "part-d-web");
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        { kind: "text", text: "Seed web turn 1 " + "omega ".repeat(80) },
+        { kind: "text", text: "Seed web turn 2 " + "sigma ".repeat(80) },
+        { kind: "text", text: "SHOULD_NEVER_SEND_SPOOFED_COMPACT" },
+        { kind: "text", text: "SHOULD_NEVER_SEND_SPOOFED_CHAT" },
+      ],
+    });
+    const hostD = await AegisHostRuntime.start({
+      dataDir: dataDirD,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: "127.0.0.1", port: 9, fromAddress: "r1@local.test" },
+      compactionKeepRecentTokens: 20,
+      compactionReserveTokens: 256,
+    });
+    const webD = await startWebServer({
+      host: hostD,
+      port: 0,
+      consoleToken: "SYNTHETIC_R1_WEB_TOK",
+    });
+    let webSpoofCompactDelta = -1;
+    let webSpoofChatDelta = -1;
+    let webAssignedTaskId = "";
+    try {
+      const loginD = await httpLogin(webD.baseUrl, "SYNTHETIC_R1_WEB_TOK");
+      // Attempt to pass spoofed budgetTaskId on POST /api/conversations -> MUST be ignored; host assigns host-task:...
+      const createRes = await fetch(`${webD.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginD.cookie, origin: webD.baseUrl },
+        body: JSON.stringify({ slotName: "router", budgetTaskId: "spoof-web-create" }),
+      });
+      assert.equal(createRes.status, 200);
+      const created = (await createRes.json()) as { conversationId: string; budgetTaskId: string };
+      webAssignedTaskId = created.budgetTaskId;
+      assert.ok(webAssignedTaskId.startsWith("host-task:"), `R1-D: host must mint its own budgetTaskId, got ${webAssignedTaskId}`);
+      assert.notEqual(webAssignedTaskId, "spoof-web-create");
+
+      // Seed 2 normal turns so compaction has history to compact (consumes 120 mu on webAssignedTaskId)
+      for (let i = 1; i <= 2; i++) {
+        const cr = await fetch(`${webD.baseUrl}/api/conversations/${created.conversationId}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: loginD.cookie, origin: webD.baseUrl },
+          body: JSON.stringify({ content: `Seed message ${i} ` + "delta ".repeat(60) }),
+        });
+        const cb = (await cr.json()) as { submissionId: number };
+        const sub = await hostD.harness.submission(cb.submissionId as never, BACKGROUND_CONTEXT);
+        await sub!.wait(BACKGROUND_CONTEXT);
+      }
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Tighten the host-assigned task account to charged (120) + 99 = 219 (1 mu short of 100!)
+      const hostAcct = getBudgetAccount(hostD.govDb, taskAccountIdFor(webAssignedTaskId))!;
+      assert.equal(hostAcct.charged_mu, 120);
+      setBudgetAccountLimit(hostD.govDb, {
+        accountId: taskAccountIdFor(webAssignedTaskId),
+        kind: "TASK",
+        limitMu: hostAcct.charged_mu + 99,
+        now: Date.now(),
+        approvedBy: "test-harness",
+      });
+
+      // Attempt Web compact smuggling a fresh budgetTaskId="spoof-web-compact" -> MUST ignore and deny on host-assigned task!
+      const mBeforeSpoofCompact = (await fakeModel.stats()).totalPhysicalRequests;
+      const cmpRes = await fetch(`${webD.baseUrl}/api/conversations/${created.conversationId}/compact`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginD.cookie, origin: webD.baseUrl },
+        body: JSON.stringify({ instructions: "Compact with spoofed budgetTaskId", budgetTaskId: "spoof-web-compact" }),
+      });
+      assert.equal(cmpRes.status, 200);
+      const cmpBody = (await cmpRes.json()) as { compactionTaskId: number };
+      await hostD.harness.waitForTask(cmpBody.compactionTaskId as TaskId, BACKGROUND_CONTEXT);
+      await new Promise((r) => setTimeout(r, 40));
+      webSpoofCompactDelta = (await fakeModel.stats()).totalPhysicalRequests - mBeforeSpoofCompact;
+      assert.equal(webSpoofCompactDelta, 0, "R1-D: Web compact with spoofed budgetTaskId must send 0 physical requests");
+
+      // Attempt Web chat smuggling budgetTaskId="spoof-web-chat" -> MUST ignore and deny on host-assigned task!
+      const mBeforeSpoofChat = (await fakeModel.stats()).totalPhysicalRequests;
+      const chatRes = await fetch(`${webD.baseUrl}/api/conversations/${created.conversationId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginD.cookie, origin: webD.baseUrl },
+        body: JSON.stringify({ content: "Chat with spoofed budgetTaskId", budgetTaskId: "spoof-web-chat" }),
+      });
+      assert.equal(chatRes.status, 200);
+      const chatBody = (await chatRes.json()) as { submissionId: number };
+      const subSpoof = await hostD.harness.submission(chatBody.submissionId as never, BACKGROUND_CONTEXT);
+      await subSpoof!.wait(BACKGROUND_CONTEXT);
+      await new Promise((r) => setTimeout(r, 40));
+      webSpoofChatDelta = (await fakeModel.stats()).totalPhysicalRequests - mBeforeSpoofChat;
+      assert.equal(webSpoofChatDelta, 0, "R1-D: Web chat with spoofed budgetTaskId must send 0 physical requests");
+
+      const taskAcctsD = hostD.govDb
+        .prepare("SELECT account_id FROM budget_accounts WHERE kind = 'TASK'")
+        .all() as Array<{ account_id: string }>;
+      assert.deepEqual(
+        taskAcctsD.map((a) => a.account_id),
+        [taskAccountIdFor(webAssignedTaskId)],
+        "R1-D: Web routes must NOT create any spoof-web-* budget accounts",
+      );
+    } finally {
+      await webD.close();
+      await hostD.close();
+    }
+
     return {
       id: "R1-ATTRIBUTION",
       group: "B",
       status: "PASS",
       summary:
-        "Verified real run_worker delegation inherits parent host task (ignoring smuggled model budgetTaskId, 0 worker sends when exhausted, charges parent when funded), persisted bindings survive restart (0 sends when exhausted), and missing binding fails closed (unknown_budget_owner, 0 sends, 0 default accounts).",
+        "Verified real run_worker delegation inherits parent host task, persisted bindings survive restart, missing binding fails closed, and ordinary Web create/chat/compact routes ignore client budgetTaskId (0 sends, 0 spoofed accounts).",
       evidence: {
         delegationDenyPhysicalDelta: mAfterADeny - mBeforeA,
         delegationFundedWorkerRequestId: workerResRow.request_id,
         delegationTaskFinalChargedMu: taskAcctA.charged_mu,
         restartContinuationPhysicalDelta: mAfterBRestart - mBeforeBRestart,
         unboundFailClosedPhysicalDelta: mAfterUnbound - mBeforeUnbound,
+        webHostAssignedTaskId: webAssignedTaskId,
+        webSpoofCompactPhysicalDelta: webSpoofCompactDelta,
+        webSpoofChatPhysicalDelta: webSpoofChatDelta,
       },
     };
   } finally {
+    await fakeModel.stop();
+  }
+}
+
+/**
+ * R3 / G1: Epoch-scoped conversation ACLs across trace DB replacement & numeric conversation ID reuse.
+ * Two principals (alice -> scope:alice, bob -> scope:bob):
+ * - Under ep1: alice owns conversation ID N (with governance proposal & budget reservation).
+ * - Trace DB is replaced & epoch rotates to ep2; Pi reuses the EXACT SAME numeric conversation ID N for bob!
+ * - Verify:
+ *   1. alice gets 403 on active-epoch snapshot/chat/compact for ID N;
+ *   2. alice gets 200 on ?epoch=<ep1> seeing ONLY her historical ep1 governance rows and messages=[] (zero bob transcript leak);
+ *   3. bob gets 200 on active-epoch snapshot seeing ONLY his ep2 governance rows and ep2 transcript (zero alice rows);
+ *   4. bob gets 403 on ?epoch=<ep1>.
+ */
+export async function testR3EpochAcl(rootDir: string): Promise<MatrixCaseResult> {
+  const dir = path.join(rootDir, "r3-epoch-acl");
+  mkdirSync(dir, { recursive: true });
+  const fakeModel = await startFakeModelServer(path.join(dir, "fake-model"));
+  const fakeSmtp = await startFakeSmtpServer(path.join(dir, "fake-smtp"));
+  const dataDir = path.join(dir, "host-data");
+
+  try {
+    const vault = new HostCredentialVault();
+    vault.registerSlot(
+      {
+        slotId: "slot:r3acl",
+        provider: "fake-local",
+        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedModelIds: ["fake-router-1"],
+        priceVersion: "synthetic-100-60",
+      },
+      "SYNTHETIC_R3ACL_KEY",
+    );
+    const slots: ModelSlotConfig[] = [
+      {
+        slotName: "router",
+        provider: "fake-local",
+        modelId: "fake-router-1",
+        baseUrl: fakeModel.baseUrl,
+        credentialSlotId: "slot:r3acl",
+        contextWindow: 128_000,
+        maxTokens: 1024,
+        priceSchedule: {
+          priceVersion: "synthetic-100-60",
+          inputPerMTokMu: 300_000,
+          outputPerMTokMu: 1_200_000,
+          syntheticFixedUpperMu: 100,
+          syntheticFixedActualMu: 60,
+        },
+        outboundAuthorized: true,
+      },
+    ];
+    const tokens = { alice: "TOKEN_ALICE_R3ACL", bob: "TOKEN_BOB_R3ACL" };
+
+    // Phase 1 (ep1): Alice creates conversation (gets first Pi conversation ID) and generates a proposal + reservation
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: "call_alice_ep1",
+            name: "send_email",
+            arguments: { to: ["alice@local.test"], subject: "Alice EP1", body: "ALICE_PRIVATE_EP1" },
+          },
+        },
+      ],
+    });
+    const h1 = await AegisHostRuntime.start({
+      dataDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      pauseOutboxDelivery: true,
+    });
+    ensureScope(h1.govDb, {
+      scopeId: "scope:alice",
+      allowedPrincipals: ["alice"],
+      allowedTools: ["send_email"],
+      allowedTargets: ["*"],
+    });
+    ensureScope(h1.govDb, {
+      scopeId: "scope:bob",
+      allowedPrincipals: ["bob"],
+      allowedTools: ["send_email"],
+      allowedTargets: ["*"],
+    });
+    const ep1 = h1.runtimeEpoch;
+    const w1 = await startWebServer({ host: h1, port: 0, consoleTokens: tokens });
+    let reusedConvId = "";
+    try {
+      const loginAlice1 = await httpLogin(w1.baseUrl, tokens.alice);
+      const c1Res = await fetch(`${w1.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginAlice1.cookie, origin: w1.baseUrl },
+        body: JSON.stringify({ slotName: "router", scopeId: "scope:alice" }),
+      });
+      assert.equal(c1Res.status, 200);
+      reusedConvId = ((await c1Res.json()) as { conversationId: string }).conversationId;
+      await fetch(`${w1.baseUrl}/api/conversations/${reusedConvId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginAlice1.cookie, origin: w1.baseUrl },
+        body: JSON.stringify({ content: "ALICE_PRIVATE_PROMPT_EP1" }),
+      });
+      // Wait for Alice's ep1 proposal to land in govDb
+      for (let i = 0; i < 60; i++) {
+        const n = (
+          h1.govDb
+            .prepare("SELECT count(*) AS n FROM proposals WHERE runtime_epoch = ? AND conversation_id = ?")
+            .get(ep1, reusedConvId) as { n: number }
+        ).n;
+        if (n > 0) break;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+    } finally {
+      await w1.close();
+      await h1.close();
+    }
+
+    // Phase 2: Replace pi-durable.sqlite with fresh empty DB -> detect mismatch & rotate to ep2!
+    rmSync(path.join(dataDir, "pi-durable.sqlite"), { force: true });
+    rmSync(path.join(dataDir, "pi-durable.sqlite-wal"), { force: true });
+    rmSync(path.join(dataDir, "pi-durable.sqlite-shm"), { force: true });
+
+    await fakeModel.queue({
+      clear: true,
+      scripts: [{ kind: "text", text: "BOB_CONFIDENTIAL_REPLY_EP2" }],
+    });
+
+    const h2 = await AegisHostRuntime.start({
+      dataDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+    });
+    assert.equal(h2.health, "NEEDS_ATTENTION");
+    const rot = await h2.rotateEpochAfterMismatch("r3_epoch_acl_trace_replaced");
+    const ep2 = rot.newEpoch;
+    assert.notEqual(ep2, ep1);
+
+    const w2 = await startWebServer({ host: h2, port: 0, consoleTokens: tokens });
+    try {
+      const loginAlice2 = await httpLogin(w2.baseUrl, tokens.alice);
+      const loginBob2 = await httpLogin(w2.baseUrl, tokens.bob);
+
+      // Bob creates the first conversation in the fresh Pi trace DB -> MUST reuse exact same numeric ID as Alice's ep1!
+      const c2Res = await fetch(`${w2.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginBob2.cookie, origin: w2.baseUrl },
+        body: JSON.stringify({ slotName: "router", scopeId: "scope:bob" }),
+      });
+      assert.equal(c2Res.status, 200);
+      const bobConvId = ((await c2Res.json()) as { conversationId: string }).conversationId;
+      assert.equal(
+        bobConvId,
+        reusedConvId,
+        `R3-EPOCH-ACL: expected fresh trace DB to reuse conversation ID ${reusedConvId}, got ${bobConvId}`,
+      );
+
+      // Bob runs a chat turn with confidential ep2 content
+      const bobChat = await fetch(`${w2.baseUrl}/api/conversations/${bobConvId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginBob2.cookie, origin: w2.baseUrl },
+        body: JSON.stringify({ content: "BOB_CONFIDENTIAL_PROMPT_EP2" }),
+      });
+      assert.equal(bobChat.status, 200);
+      const { submissionId } = (await bobChat.json()) as { submissionId: number };
+      const bobSub = await h2.harness.submission(submissionId as never, BACKGROUND_CONTEXT);
+      await bobSub!.wait(BACKGROUND_CONTEXT);
+      await new Promise((r) => setTimeout(r, 40));
+
+      // 1. Alice attempting active-epoch access on reused conversation ID -> 403!
+      const aliceActiveSnap = await fetch(`${w2.baseUrl}/api/conversations/${reusedConvId}/snapshot`, {
+        headers: { cookie: loginAlice2.cookie },
+      });
+      assert.equal(aliceActiveSnap.status, 403, "R3-EPOCH-ACL: old principal must get 403 on active epoch reused ID");
+
+      const aliceActiveChat = await fetch(`${w2.baseUrl}/api/conversations/${reusedConvId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginAlice2.cookie, origin: w2.baseUrl },
+        body: JSON.stringify({ content: "Alice hijacking Bob's reused ID" }),
+      });
+      assert.equal(aliceActiveChat.status, 403);
+
+      const aliceActiveCompact = await fetch(`${w2.baseUrl}/api/conversations/${reusedConvId}/compact`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginAlice2.cookie, origin: w2.baseUrl },
+        body: JSON.stringify({ instructions: "Alice hijacking compact" }),
+      });
+      assert.equal(aliceActiveCompact.status, 403);
+
+      // 2. Alice inspecting her OWN historical ep1 governance audit -> 200, ONLY ep1 rows, messages=[] (ZERO Bob leak!)
+      const aliceHistRes = await fetch(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/snapshot?epoch=${encodeURIComponent(ep1)}`,
+        { headers: { cookie: loginAlice2.cookie } },
+      );
+      assert.equal(aliceHistRes.status, 200);
+      const aliceHistText = await aliceHistRes.text();
+      assert.equal(aliceHistText.includes("BOB_CONFIDENTIAL"), false, "R3-EPOCH-ACL: historical snapshot must NEVER leak ep2 transcript");
+      const aliceHist = JSON.parse(aliceHistText) as {
+        runtimeEpoch: string;
+        isActiveEpoch: boolean;
+        proposals: Array<{ runtimeEpoch: string }>;
+        budgetReservations: Array<{ runtime_epoch: string }>;
+        messages: unknown[];
+      };
+      assert.equal(aliceHist.runtimeEpoch, ep1);
+      assert.equal(aliceHist.isActiveEpoch, false);
+      assert.equal(aliceHist.messages.length, 0);
+      assert.ok(aliceHist.proposals.length >= 1 && aliceHist.proposals.every((p) => p.runtimeEpoch === ep1));
+      assert.ok(aliceHist.budgetReservations.length >= 1 && aliceHist.budgetReservations.every((r) => r.runtime_epoch === ep1));
+
+      // 3. Bob inspecting active-epoch snapshot -> 200, ONLY ep2 rows and Bob's ep2 messages (ZERO Alice ep1 rows!)
+      const bobActiveRes = await fetch(`${w2.baseUrl}/api/conversations/${bobConvId}/snapshot`, {
+        headers: { cookie: loginBob2.cookie },
+      });
+      assert.equal(bobActiveRes.status, 200);
+      const bobActiveText = await bobActiveRes.text();
+      assert.equal(bobActiveText.includes("ALICE_PRIVATE"), false, "R3-EPOCH-ACL: Bob must NEVER see Alice's ep1 proposals");
+      assert.equal(bobActiveText.includes("BOB_CONFIDENTIAL_REPLY_EP2"), true);
+      const bobActive = JSON.parse(bobActiveText) as {
+        runtimeEpoch: string;
+        isActiveEpoch: boolean;
+        proposals: Array<{ runtimeEpoch: string }>;
+        budgetReservations: Array<{ runtime_epoch: string }>;
+      };
+      assert.equal(bobActive.runtimeEpoch, ep2);
+      assert.equal(bobActive.isActiveEpoch, true);
+      assert.equal(bobActive.proposals.length, 0);
+      assert.ok(bobActive.budgetReservations.length >= 1 && bobActive.budgetReservations.every((r) => r.runtime_epoch === ep2));
+
+      // 4. Bob inspecting Alice's historical ep1 -> 403!
+      const bobHistRes = await fetch(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/snapshot?epoch=${encodeURIComponent(ep1)}`,
+        { headers: { cookie: loginBob2.cookie } },
+      );
+      assert.equal(bobHistRes.status, 403, "R3-EPOCH-ACL: new principal must get 403 on old principal's historical epoch");
+
+      return {
+        id: "R3-EPOCH-ACL",
+        group: "F",
+        status: "PASS",
+        summary:
+          "Verified epoch-scoped conversation_scopes across trace replacement with reused numeric conversation ID: old principal blocked (403) on new epoch and restricted to historical ep1 audit (messages=[]), while new principal sees only ep2 data and gets 403 on ep1.",
+        evidence: {
+          ep1,
+          ep2,
+          reusedConversationId: reusedConvId,
+          aliceActiveSnapshotStatus: aliceActiveSnap.status,
+          aliceActiveChatStatus: aliceActiveChat.status,
+          aliceActiveCompactStatus: aliceActiveCompact.status,
+          aliceHistoricalStatus: aliceHistRes.status,
+          aliceHistoricalMessagesCount: aliceHist.messages.length,
+          bobActiveSnapshotStatus: bobActiveRes.status,
+          bobActiveProposalsCount: bobActive.proposals.length,
+          bobHistoricalEp1Status: bobHistRes.status,
+        },
+      };
+    } finally {
+      await w2.close();
+      await h2.close();
+    }
+  } finally {
+    await fakeSmtp.stop();
     await fakeModel.stop();
   }
 }

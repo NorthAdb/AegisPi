@@ -363,19 +363,19 @@ export function reconcileUnknownEffect(
 
     const lineage = db
       .prepare(
-        `SELECT p.scope_id, p.conversation_id
+        `SELECT p.runtime_epoch, p.scope_id, p.conversation_id
            FROM approvals a
            JOIN proposals p ON p.proposal_id = a.proposal_id
           WHERE a.approval_id = ?`,
       )
-      .get(existing.approval_id) as { scope_id: string; conversation_id: string } | undefined;
+      .get(existing.approval_id) as { runtime_epoch: string; scope_id: string; conversation_id: string } | undefined;
     const scope = lineage
       ? (db.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(lineage.scope_id) as ScopeRow | undefined)
       : undefined;
     const convScope = lineage
       ? (db
-          .prepare("SELECT principal_id FROM conversation_scopes WHERE conversation_id = ?")
-          .get(lineage.conversation_id) as { principal_id: string } | undefined)
+          .prepare("SELECT principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+          .get(lineage.runtime_epoch, lineage.conversation_id) as { principal_id: string } | undefined)
       : undefined;
 
     if (
