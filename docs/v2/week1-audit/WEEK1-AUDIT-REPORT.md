@@ -1,10 +1,10 @@
 # AegisPi v2 任务书 1 第 1 周交付审计报告
 
-- **文档版本**：Week 1 审计交接第 2 轮提审（2026-11-25，香港时间；已按第 1 轮审计意见 §10 全量整改闭环）
+- **文档版本**：Week 1 审计交接第 3 轮提审（2026-11-25，香港时间；已按第 2 轮审计意见 §11.2 全部三项阻断完成闭环）
 - **目标仓库与分支**：`aegis-pi` / 分支 `v2`
 - **基线提交（v1 零信任基线）**：`3a88b6895991d328e8e27fd1072a29846e7a9adf`（tag `v1-zero-trust-baseline`）
-- **当前实施与证据候选 SHA（第 2 轮）**：`681113ced86a45fee5c7b67b8c932ea32e6d98cd`（前轮候选为 `66f7ee19f5c25c95c757ced4d85497f36fbf770d`；本报告更新随后续文档提交入库，不改动任何实现或 JSON 证据文件）
-- **最新全量实测运行标识**：`runId = week1_02e38684`（执行时间 `2026-11-25T14:52:20.884Z`，退出码 `0`）
+- **当前实施与证据候选 SHA（第 3 轮）**：`1c6fe81a95f0d61814a241e11d953162cd551221`（前两轮候选分别为 `66f7ee1`、`681113c`；本报告更新随后续文档提交入库，不改动任何实现或 JSON 证据文件）
+- **最新全量实测运行标识**：`runId = week1_0ab39ee5`（执行时间 `2026-11-25T15:36:00.318Z`，退出码 `0`）
 - **审计范围**：阶段一第 1 周（宿主持久治理、预算双账户预留/结算、不可变审批与唯一提交器、双库崩溃恢复、最小视图①、独立假服务与契约 S1–S5 / W1-A / W1-B / F01–F03 / B01–B07 / E01–E10 / G1–G3 / R1–R5）。第 2 周只读连接器（S6）与完整 Web 纵切（V01–V06）不在本次签收范围内。
 
 ---
@@ -20,7 +20,9 @@
 | 2 | `f7b65893d3ffe9b40936e8c24b859e04dcf80af0` | `feat(v2): implement Week 1 governance kernel, Pi runtime layer, and minimal View 1` | 落地 L1–L4 核心实现与 ADR-0003 |
 | 3 | `66f7ee19f5c25c95c757ced4d85497f36fbf770d` | `test(v2): add standalone fakes, S1-S5 probes, W1-A/W1-B, and Week 1 audit pack` | 第 1 轮候选：独立假服务、验证夹具与脱敏 JSON 证据包 |
 | 4 | `67a0d96` | `docs(v2): add standalone Week 1 audit handoff report` | 第 1 轮交接审计报告 |
-| 5 | `681113ced86a45fee5c7b67b8c932ea32e6d98cd` | `fix(v2): remediate Week 1 audit findings G1-G3, R1-R5, and price bound` | **第 2 轮候选**：完成 §10 全部整改、修订 ADR-0003 并重跑全量脱敏证据 |
+| 5 | `681113ced86a45fee5c7b67b8c932ea32e6d98cd` | `fix(v2): remediate Week 1 audit findings G1-G3, R1-R5, and price bound` | 第 2 轮候选：完成 §10 全部整改、修订 ADR-0003 并重跑全量脱敏证据 |
+| 6 | `0a1d82e` | `docs(v2): update Week 1 audit report with Round 1 remediation and Round 2 sign-off` | 第 2 轮审计报告更新 |
+| 7 | `1c6fe81a95f0d61814a241e11d953162cd551221` | `fix(v2): close Round 2 audit blockers (Web budget binding, redirect fetch guard, epoch-scoped ACL)` | **第 3 轮候选**：关闭 §11.2 全部 3 项阻断、更新 ADR-0003 并重跑 24/24 全量证据 |
 
 ### 1.2 迁移与架构决策文档
 
@@ -77,7 +79,7 @@
 
 ### 3.1 一键复跑完整第 1 周验收（推荐）
 
-执行 `tsc --noEmit`、`S1–S5`、`W1-A`（含 `B01`）、`W1-B`（含 `E06` 与重复 SDK 唤醒）与全量矩阵（`GUARD-BOUNDARY`、`G1-AUTH`、`G2-EGRESS`、`G3-NONCE-SSE`、`R1-ATTRIBUTION`、`F01–F03`、`B02–B07`、`E01–E05`、`E07–E10`，共 23 项），并将新的脱敏证据输出至独立临时目录：
+执行 `tsc --noEmit`、`S1–S5`、`W1-A`（含 `B01`）、`W1-B`（含 `E06` 与重复 SDK 唤醒）与全量矩阵（`GUARD-BOUNDARY`、`G1-AUTH`、`G2-EGRESS`、`G3-NONCE-SSE`、`R1-ATTRIBUTION`、`R3-EPOCH-ACL`、`F01–F03`、`B02–B07`、`E01–E05`、`E07–E10`，共 24 项），并将新的脱敏证据输出至独立临时目录：
 
 ```powershell
 $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -114,13 +116,13 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 & $node tests/week1/run-matrix.ts
 ```
 
-### 3.5 第 2 轮实测执行记录（候选 SHA `681113c`）
+### 3.5 第 3 轮实测执行记录（候选 SHA `1c6fe81`）
 
 - **执行命令**：
   ```powershell
-  $node='D:\AegisPi\tools\node-v22.23.5\node.exe'; & $node ./node_modules/typescript/bin/tsc --noEmit; if ($LASTEXITCODE -eq 0) { & $node tests/week1/run-all.ts --data-dir "$env:TEMP\aegispi-v2-week1-r4-$(Get-Date -Format 'yyyyMMdd-HHmmss')" --evidence-dir "docs/v2/week1-audit" }
+  $node='D:\AegisPi\tools\node-v22.23.5\node.exe'; & $node ./node_modules/typescript/bin/tsc --noEmit; if ($LASTEXITCODE -eq 0) { & $node tests/week1/run-all.ts --data-dir "$env:TEMP\aegispi-v2-week1-r5-$(Get-Date -Format 'yyyyMMdd-HHmmss')" --evidence-dir "docs/v2/week1-audit" }
   ```
-- **运行标识与退出码**：`runId = week1_02e38684`，退出码 `0`（`tsc --noEmit` 退出码 `0`；`run-all.ts` 退出码 `0`）
+- **运行标识与退出码**：`runId = week1_0ab39ee5`，退出码 `0`（`tsc --noEmit` 退出码 `0`；`run-all.ts` 退出码 `0`）
 - **脱敏证据目录**：`docs/v2/week1-audit/`
   - [week1-summary.json](./week1-summary.json)
   - [s1-s5-evidence.json](./s1-s5-evidence.json)
@@ -130,7 +132,7 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 
 ---
 
-## 4. 第 1 周全量验收矩阵（第 2 轮候选 `681113c` 逐项结果）
+## 4. 第 1 周全量验收矩阵（第 3 轮候选 `1c6fe81` 逐项结果）
 
 ### 4.1 工程护栏与 SDK 契约（S1–S5 / S6 / G1–G3）
 
@@ -139,8 +141,8 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 | `TSC` | Node 22 原生可擦除 TS 静态类型检查 | **通过** | `tsc --noEmit` 退出码 `0` | [week1-summary.json](./week1-summary.json) |
 | `GUARD-BOUNDARY` | 单点导入与单向分层护栏 | **通过** | `violations = []`；仅 `src/runtime/` 导入 `@earendil-works/*`，`src/governance/` 零上行依赖 | [matrix-evidence.json](./matrix-evidence.json) |
 | `G1-AUTH` | 主体宿主绑定、无口令拒启与跨主体治理越权阻断 | **通过** | 缺口令退出码 `1`；伪造 `principalId="bob"` 仍绑定 `alice`；`bob` 调 challenge/decide/reconcile/revoke 全返 `403`，目标治理行零变更 | [matrix-evidence.json](./matrix-evidence.json) |
-| `G2-EGRESS` | 阶段一本地回环出站硬边界（模型与 SMTP） | **通过** | 非回环模型与 SMTP 配置在启动（exit `1`）、Vault 与传输层全部拒绝；受控观察器录得 `smtpConnectCalls = 0`、`modelDispatchCalls = 0` | [matrix-evidence.json](./matrix-evidence.json) |
-| `G3-NONCE-SSE` | 审批挑战零暴露于 SSE/快照/日志与专用受权获取入口 | **通过** | 捕获 SSE 帧（1102 B）命中 `0`、快照命中 `0`、审计表命中 `0`；`POST /api/approvals/:id/challenge` 仅授权主体返 `200`（`Cache-Control: no-store`），越权返 `403` | [matrix-evidence.json](./matrix-evidence.json) |
+| `G2-EGRESS` | 阶段一本地回环出站硬边界（含防 HTTP 重定向跳出） | **通过** | 非回环模型/SMTP 在启动（exit `1`）、Vault 与传输层全拒；`redirect: "manual"` 受控 `fetch` 阻断假服务 307 跳向 `api.openai.com`，`redirectLoopbackHops = 1`、`disallowedRedirectFetchCalls = 0`、`smtpConnectCalls = 0` | [matrix-evidence.json](./matrix-evidence.json) |
+| `G3-NONCE-SSE` | 审批挑战零暴露于 SSE/快照/日志与专用受权获取入口 | **通过** | 捕获 SSE 帧（1182 B）命中 `0`、快照命中 `0`、审计表命中 `0`；`POST /api/approvals/:id/challenge` 仅授权主体返 `200`（`Cache-Control: no-store`），越权返 `403` | [matrix-evidence.json](./matrix-evidence.json) |
 | `S1` | 启动调度闸门（遗留任务不提前调度） | **通过** | `Harness.open` 后 `scheduling = "paused"`，`phaseCallbacksBeforeFence = 0`，`transportCallsBeforeFence = 0`；`signal()` 与 `waitForIdle()` 均切为 `running` | [s1-s5-evidence.json](./s1-s5-evidence.json) |
 | `S2` | 工具调用身份与草稿重写/分叉隔离 | **通过** | `beforeTool` 与 `execute` 在顶层（`call_s2_model`）与嵌套调用（`call_s2_model/child1`）上三元组 `(conversationId, taskId, callId)` 完全一致；`{ arguments }` 改写生效；fork 分配独立 `conversationId = 18` | [s1-s5-evidence.json](./s1-s5-evidence.json) |
 | `S3` | Signal 全部返回值与观察句柄关闭 | **通过** | 完整命中 `not_found`、`invalid`、`delivered`、`duplicate`、`closed` 5 种 `SignalResult`；`watch` / `watchTaskGraph` 正常关闭，`Harness.close` 优雅退出 | [s1-s5-evidence.json](./s1-s5-evidence.json) |
@@ -152,9 +154,10 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 
 | 用例 ID | 类别 | 验收项摘要 | 结果 | 关键实测指标 | 证据文件 |
 |---|---|---|---|---|---|
-| `W1-A` / `B01` | 预算 | 足额对照 + 三入口 × 双账户少 1 microUSD 零逃逸 | **通过** | `runId = w1a_c964659f`：3 组对照各 `+1` 且 `SETTLED`；6 组负例新增物理请求全为 `0`、冻结残留 `0`、原会话视图①返回准确 `code` 与 `purpose` | [w1-a-evidence.json](./w1-a-evidence.json) |
-| `W1-B` / `E06` | 外部效果 | 视图①批准 + 假 SMTP 扣应答 + `Stop-Process -Force` 强杀 + 重启与重复 SDK 唤醒核对 | **通过** | `runId = w1b_d45c64d3`、`effectId = efx_395e7683...`：批准 `1` 次、领取 `1` 次、SMTP 累计 `1` 封、强杀（PID `23796`）恢复后 `UNKNOWN`、显式重复 SDK 唤醒返 `closed`、重启与刷新后持续显示「结果待核对」、密钥扫描 `0` 泄漏 | [w1-b-evidence.json](./w1-b-evidence.json) |
-| `R1-ATTRIBUTION` | 预算 | 真实 `run_worker` 委派、重启续跑与无绑定失败关闭 | **通过** | 委派忽略模型夹带 `budgetTaskId`、继承父宿主任务（缺 1μ 时 Worker 物理请求 `0` 且无默认账户，足额时记 `purpose="worker"` 并扣原任务 `charged=240`）；重启后读持久绑定续跑拒发（`0` 请求）；无绑定报 `unknown_budget_owner`（`0` 请求、`0` 默认账户） | [matrix-evidence.json](./matrix-evidence.json) |
+| `W1-A` / `B01` | 预算 | 足额对照 + 三入口 × 双账户少 1 microUSD 零逃逸 | **通过** | `runId = w1a_05c5566e`：3 组对照各 `+1` 且 `SETTLED`；6 组负例（含不含 `budgetTaskId` 的普通 Web 压缩）新增物理请求全为 `0`、冻结残留 `0`、原会话视图①返回准确 `code` 与 `purpose` | [w1-a-evidence.json](./w1-a-evidence.json) |
+| `W1-B` / `E06` | 外部效果 | 视图①批准 + 假 SMTP 扣应答 + `Stop-Process -Force` 强杀 + 重启与重复 SDK 唤醒核对 | **通过** | `runId = w1b_089ab025`、`effectId = efx_54b45a89...`：批准 `1` 次、领取 `1` 次、SMTP 累计 `1` 封、强杀（PID `34112`）恢复后 `UNKNOWN`、显式重复 SDK 唤醒返 `closed`、重启与刷新后持续显示「结果待核对」、密钥扫描 `0` 泄漏 | [w1-b-evidence.json](./w1-b-evidence.json) |
+| `R1-ATTRIBUTION` | 预算 | 真实 `run_worker` 委派、重启续跑、无绑定失败关闭与 Web 路由禁止请求选账 | **通过** | 委派继承父任务；重启读持久绑定拒发（`0`）；无绑定报 `unknown_budget_owner`（`0`）；Web create/chat/compact 夹带伪造 `budgetTaskId` 均被忽略，固定绑定 `host-task:...`，压缩与聊天拒发各 `0` 请求、`0` 伪造账户 | [matrix-evidence.json](./matrix-evidence.json) |
+| `R3-EPOCH-ACL` | 基础/权限 | 换代复用数字会话 ID 的跨代际权限与轨迹隔离 | **通过** | `ep1 -> ep2` 复用会话 ID `"8"`：`alice` 访新代际快照/聊天/压缩全 `403`，访 `?epoch=<ep1>` 返 `200` 且仅见 `ep1` 审计、`messages = []`（零泄露 `bob` 轨迹）；`bob` 访新代际返 `200` 且仅见 `ep2` 数据、访 `ep1` 返 `403` | [matrix-evidence.json](./matrix-evidence.json) |
 | `F01` | 基础 | Windows 单实例所有权互斥 | **通过** | 第二进程报 `InstanceLockBusyError`（exit `1`），`modelDelta = 0`、`smtpDelta = 0`，首进程（PID `9344`）健康存活 | [matrix-evidence.json](./matrix-evidence.json) |
 | `F02` | 基础 | 策略钩子或 Models 出口缺失时失败关闭 | **通过** | 缺钩子报 `missing_required_extension:aegis-policy`，缺包装报 `missing_required_models_egress_wrapper`；`modelDelta = 0`、`smtpDelta = 0` | [matrix-evidence.json](./matrix-evidence.json) |
 | `F03` | 基础 | 同代际轨迹回退（含跨页 >200 条同 ID 回退）/替换阻断、换代实时联动与 fork 隔离 | **通过** | 检出 `trace_rollback_missing_conversations`、`trace_replaced_or_anchor_mismatch` 及同 ID 跨页回退 `trace_rollback_watermark_regressed`；换代后首笔新预留与首个新提案均写入 `newEpoch = ep_77692d80...`，旧 `READY` 隔离（1 条）、旧 `HELD` 保留（1 条）、fork 认领被拒（`call_identity_mismatch`） | [matrix-evidence.json](./matrix-evidence.json) |
@@ -179,7 +182,7 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 
 ## 5. W1-A 详细实测数据（预算零逃逸验收）
 
-- **运行标识**：`runId = w1a_c964659f`（完整数据见 [w1-a-evidence.json](./w1-a-evidence.json)）
+- **运行标识**：`runId = w1a_05c5566e`（完整数据见 [w1-a-evidence.json](./w1-a-evidence.json)）
 - **合成定价模型**：单次请求上界 `upperMu = 100 microUSD`，实际账单 `actualMu = 60 microUSD`
 - **假模型服务最终物理总请求数**：`8`（包含 3 组对照组各 1 次 + 为压缩对照组和 2 组压缩负例在独立会话中生成前置对话历史的 5 次前置正常生成；所有 6 组预算不足触发点本身的新增物理请求均为 `0`）
 
@@ -196,10 +199,10 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 | `W1A-NEG-2-ROUTER-DAY` | `router` | 日余额少 1μ | `4 -> 4`（`0`） | `[]`（0 条） | `10000 / 0 / 0` -> `10000 / 0 / 0` | `339 / 0 / 240` -> `339 / 0 / 240` | `day_budget_exceeded` / `router`（`seq=16`） | **PASS** |
 | `W1A-NEG-3-WORKER-TASK` | `worker` | 任务余额少 1μ | `4 -> 4`（`0`） | `[]`（0 条） | `99 / 0 / 0` -> `99 / 0 / 0` | `10240 / 0 / 240` -> `10240 / 0 / 240` | `task_budget_exceeded` / `worker`（`seq=19`） | **PASS** |
 | `W1A-NEG-4-WORKER-DAY` | `worker` | 日余额少 1μ | `4 -> 4`（`0`） | `[]`（0 条） | `10000 / 0 / 0` -> `10000 / 0 / 0` | `339 / 0 / 240` -> `339 / 0 / 240` | `day_budget_exceeded` / `worker`（`seq=21`） | **PASS** |
-| `W1A-NEG-5-COMPACTION-TASK` | `compaction` | 任务余额少 1μ | `6 -> 6`（`0`） | `[]`（0 条） | `99 / 0 / 0` -> `99 / 0 / 0` | `10360 / 0 / 360` -> `10360 / 0 / 360` | `task_budget_exceeded` / `compaction`（`seq=29`） | **PASS** |
-| `W1A-NEG-6-COMPACTION-DAY` | `compaction` | 日余额少 1μ | `8 -> 8`（`0`） | `[]`（0 条） | `10000 / 0 / 0` -> `10000 / 0 / 0` | `579 / 0 / 480` -> `579 / 0 / 480` | `day_budget_exceeded` / `compaction`（`seq=37`） | **PASS** |
+| `W1A-NEG-5-COMPACTION-TASK` | `compaction` | 任务余额少 1μ | `6 -> 6`（`0`） | `[]`（0 条） | `219 / 0 / 120` -> `219 / 0 / 120` | `10360 / 0 / 360` -> `10360 / 0 / 360` | `task_budget_exceeded` / `compaction`（`seq=29`） | **PASS** |
+| `W1A-NEG-6-COMPACTION-DAY` | `compaction` | 日余额少 1μ | `8 -> 8`（`0`） | `[]`（0 条） | `10120 / 0 / 120` -> `10120 / 0 / 120` | `579 / 0 / 480` -> `579 / 0 / 480` | `day_budget_exceeded` / `compaction`（`seq=37`） | **PASS** |
 
-> 计数差值说明：`W1A-CTRL-COMPACTION` 从 `3` 起算，系在触发压缩前先向会话 `8` 写入 1 轮历史消息（第 3 次请求）；`W1A-NEG-5` 从 `6` 起算、`W1A-NEG-6` 从 `8` 起算，系各自在全新会话（`81`、`97`）中先生成 2 轮前置消息使 `pi.compaction` 达到可压缩条件，随后精确收紧目标账户至可用 `99 microUSD` 再触发真实压缩。真实 `run_worker` 委派入口与重启续跑归属由 `R1-ATTRIBUTION` 独立验证。
+> 计数与账户说明：`W1A-NEG-5` 与 `W1A-NEG-6` 在各自全新会话（`81`、`97`）中以会话自身宿主绑定任务（`charged = 120`）生成 2 轮历史消息后收紧对应账户至可用 `99 microUSD`，随后向 `POST /api/conversations/:id/compact` 发送**不含 `budgetTaskId`** 的普通 Web 压缩请求，触发压缩前后假服务端增量严格为 `0`。
 
 ---
 
@@ -209,46 +212,46 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 
 | 字段 | 实测值 |
 |---|---|
-| `runId` | `w1b_d45c64d3` |
-| `runtimeEpoch` | `ep_8ab3de11be3943db9be01a02b0ac4512` |
+| `runId` | `w1b_089ab025` |
+| `runtimeEpoch` | `ep_6d1712c8441947c994d34dd6757a04f4` |
 | `conversationId` | `8` |
-| `proposalId` | `prp_10059d474d4e46189d70bea48b910c3c` |
-| `approvalId` | `apr_469ab648c6ed439885ffcfd80a089a0c` |
-| `effectId` | `efx_395e7683626144249cbfe0e1c0454072` |
-| 宿主进程演进 | Host #1 PID `23796`（强杀） -> Host #2 PID `44844`（首次恢复、HTTP 重放与重复 SDK 唤醒） -> Host #3 PID `11564`（二次重启终验） |
+| `proposalId` | `prp_d87257da4e544e1dbdb4c7ee38734e4a` |
+| `approvalId` | `apr_ca1f534fb60b4c638510b4aaa861e203` |
+| `effectId` | `efx_54b45a8945bd492881bcfdaa274f3218` |
+| 宿主进程演进 | Host #1 PID `34112`（强杀） -> Host #2 PID `28972`（首次恢复、HTTP 重放与重复 SDK 唤醒） -> Host #3 PID `21748`（二次重启终验） |
 
 ### 6.2 端到端时间线（完整 JSON 见 [w1-b-evidence.json](./w1-b-evidence.json)）
 
 | 步骤 | UTC 时间戳 | 事件 | 关键实测状态 |
 |---|---|---|---|
-| 1 | `2026-11-25T14:51:17.509Z` | `host1_started` | Host #1（PID `23796`，`http://127.0.0.1:51894`）启动并建立代际 `ep_8ab3de11...` |
-| 2 | `2026-11-25T14:51:17.693Z` | `proposal_pending_in_view1` | 合成邮件草案在最小视图①呈现：`revision = 1`，`actionHash = 8b10c6a4...`，`nonceExposedInSnapshot = false`，经专用受权路由获取挑战，UI 标签「待审批」 |
-| 3 | `2026-11-25T14:51:17.700Z` | `approval_decided` | 经最小视图①提交批准（`decisionKey = dk_w1b_d45c64d3_approve`），生成 `efx_395e7683...`（初始 `READY`） |
-| 4 | `2026-11-25T14:51:17.729Z` | `fake_smtp_received_and_held` | 独立假 SMTP 持久登记第 `1` 封收件（`rawSha256 = 5b85b952...`），按 `hold_after_receive` 扣住应答（`replySent = null`） |
-| 5 | `2026-11-25T14:51:17.752Z` | `gov_db_verified_submitting_before_kill` | 控制器只读核对 `aegis-gov.sqlite`：`state = SUBMITTING`，`claimed_at = 1795618277713`，`receipt_ref = null`，`claimCount = 1`，`approvalCount = 1` |
-| 6 | `2026-11-25T14:51:18.422Z` | `host1_force_killed` | 执行 `Stop-Process -Id 23796 -Force` 强杀 Host #1（进程退出码 `4294967295`） |
-| 7 | `2026-11-25T14:51:19.635Z` | `host2_restarted_and_recovered` | 保留两库与假服务重启 Host #2（PID `44844`），同代际恢复将 `efx_395e7683...` 转入 `UNKNOWN` |
-| 8 | `2026-11-25T14:51:20.342Z` | `host2_refreshed_and_verified` | 重放 HTTP 批准（同 key `200`、新 key `409`）+ 显式触发重复 SDK 唤醒（`POST /api/approvals/:id/redeliver` -> `sdkResult = "closed"`，`outbox = ACKED / delivered`，`effect = UNKNOWN`）+ 刷新原会话 `8`：视图①显示「结果待核对」，假 SMTP 累计仍为 `1` |
-| 9 | `2026-11-25T14:51:22.170Z` | `host3_final_verification_passed` | 优雅关闭 Host #2 后再启 Host #3（PID `11564`）：最终 `UNKNOWN`、`claimCount = 1`、`approvalCount = 1`、假 SMTP 累计 = `1`、视图①「结果待核对」、密钥扫描泄漏 = `0` |
+| 1 | `2026-11-25T15:35:07.909Z` | `host1_started` | Host #1（PID `34112`，`http://127.0.0.1:56220`）启动并建立代际 `ep_6d1712c8...` |
+| 2 | `2026-11-25T15:35:08.092Z` | `proposal_pending_in_view1` | 合成邮件草案在最小视图①呈现：`revision = 1`，`actionHash = ed5393a9...`，`nonceExposedInSnapshot = false`，经专用受权路由获取挑战，UI 标签「待审批」 |
+| 3 | `2026-11-25T15:35:08.097Z` | `approval_decided` | 经最小视图①提交批准（`decisionKey = dk_w1b_089ab025_approve`），生成 `efx_54b45a89...`（初始 `READY`） |
+| 4 | `2026-11-25T15:35:08.123Z` | `fake_smtp_received_and_held` | 独立假 SMTP 持久登记第 `1` 封收件（`rawSha256 = 6b07cc4f...`），按 `hold_after_receive` 扣住应答（`replySent = null`） |
+| 5 | `2026-11-25T15:35:08.149Z` | `gov_db_verified_submitting_before_kill` | 控制器只读核对 `aegis-gov.sqlite`：`state = SUBMITTING`，`claimed_at = 1795620908110`，`receipt_ref = null`，`claimCount = 1`，`approvalCount = 1` |
+| 6 | `2026-11-25T15:35:08.663Z` | `host1_force_killed` | 执行 `Stop-Process -Id 34112 -Force` 强杀 Host #1（进程退出码 `4294967295`） |
+| 7 | `2026-11-25T15:35:09.627Z` | `host2_restarted_and_recovered` | 保留两库与假服务重启 Host #2（PID `28972`），同代际恢复将 `efx_54b45a89...` 转入 `UNKNOWN` |
+| 8 | `2026-11-25T15:35:10.318Z` | `host2_refreshed_and_verified` | 重放 HTTP 批准（同 key `200`、新 key `409`）+ 显式触发重复 SDK 唤醒（`POST /api/approvals/:id/redeliver` -> `sdkResult = "closed"`，`outbox = ACKED / delivered`，`effect = UNKNOWN`）+ 刷新原会话 `8`：视图①显示「结果待核对」，假 SMTP 累计仍为 `1` |
+| 9 | `2026-11-25T15:35:11.676Z` | `host3_final_verification_passed` | 优雅关闭 Host #2 后再启 Host #3（PID `21748`）：最终 `UNKNOWN`、`claimCount = 1`、`approvalCount = 1`、假 SMTP 累计 = `1`、视图①「结果待核对」、密钥扫描泄漏 = `0` |
 
 ### 6.3 最终治理记录、重复 SDK 唤醒记录与假 SMTP 持久记录
 
 - **治理库最终效果记录**：
-  - `effect_id`: `efx_395e7683626144249cbfe0e1c0454072`
-  - `approval_id`: `apr_469ab648c6ed439885ffcfd80a089a0c`
+  - `effect_id`: `efx_54b45a8945bd492881bcfdaa274f3218`
+  - `approval_id`: `apr_ca1f534fb60b4c638510b4aaa861e203`
   - `state`: `UNKNOWN`
-  - `claimed_at`: `1795618277713`
+  - `claimed_at`: `1795620908110`
   - `receipt_ref`: `null`
   - `reason`: `recovered_submitting_without_receipt`
   - `claimCount`: `1`，`approvalCount`: `1`
 - **重启后重复 SDK 唤醒记录（R4 补证）**：
-  - `deliveryKey`: `sig:ep_8ab3de11be3943db9be01a02b0ac4512:prp_10059d474d4e46189d70bea48b910c3c:r1`
+  - `deliveryKey`: `sig:ep_6d1712c8441947c994d34dd6757a04f4:prp_d87257da4e544e1dbdb4c7ee38734e4a:r1`
   - `sdkResult`: `closed`
   - `outbox`: `state = ACKED`, `sdk_result = delivered`, `reason = sdk_delivered`, `attempts = 1`
   - `effect`: `state = UNKNOWN`, `receipt_ref = null`
 - **独立假 SMTP 持久日志（`smtp-received.jsonl`）**：
   - `totalReceived`: `1`
-  - `seq = 1`, `receivedAt = 2026-11-25T14:51:17.721Z`, `rcptTo = ["<auditor-w1b@local.test>"]`, `rawSha256 = 5b85b952a03584396e197dd6c7787f97dfead40c8dea96888936d226c59ae9f6`, `modeAtArrival = hold_after_receive`, `replySent = null`
+  - `seq = 1`, `receivedAt = 2026-11-25T15:35:08.116Z`, `rcptTo = ["<auditor-w1b@local.test>"]`, `rawSha256 = 6b07cc4f3ad3f2b9e049fbb1edb596859786f23b16e50de152fcde40637b0c0c`, `modeAtArrival = hold_after_receive`, `replySent = null`
 - **最小视图①最终状态**：`conversationId = "8"`, `effectState = "UNKNOWN"`, `uiStatusLabel = "结果待核对"`
 - **脱敏与密钥边界检查**：`secretScan = { clean: true, leaks: [] }`
 
@@ -266,7 +269,7 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 | 调整项 | 相对任务书 1 附录的变化 | 影响口径 |
 |---|---|---|
 | `paired_manifest`（新增表） | 记录 `trace_identity`、全分页单调观测水位、只读 SQLite file change counter 与已知 Pi 任务 ID | 恢复：支持含跨页历史（>200 条）的同代际轨迹回退与替换识别（F03 / S5 / R3） |
-| `conversation_scopes`（新增表） | 绑定 `(conversation_id, scope_id, principal_id, runtime_epoch)` | 权限：强校验会话与主体归属，阻断越权决定/核对/撤销（G1 / E09） |
+| `conversation_scopes`（新增表） | 以复合主键 `(runtime_epoch, conversation_id)` 绑定 `(scope_id, principal_id)`；快照、聊天、压缩与轨迹读取均按代际隔离，历史代际不读活跃轨迹库 | 权限/恢复：换代复用数字会话 ID 不沿用旧 ACL，阻断跨代际越权与轨迹泄露（G1 / R3 / E09） |
 | `budget_task_bindings`（新增表） | 持久化 `(runtime_epoch, binding_kind, binding_key) -> (conversation_id, owner_task_id, purpose)` | 账务：确保委派与重启后归属持久生效、不另开默认额度账户（R1 / S4） |
 | `approval_challenges`（新增表） | 宿主私有表，仅在 `PENDING` 期间保存明文 nonce，仅通过专用受权 `POST /api/approvals/:id/challenge`（`Cache-Control: no-store`）返回，离开 `PENDING` 即删除 | 审批安全：明文 nonce 零暴露于 SSE / 快照 / URL / 日志（G3） |
 | `scopes` 新增列 | 增加 `allowed_principals_json`、`allowed_tools_json`、`allowed_targets_json` | 权限：T1 / T2 / T4 / 核对 / 撤销实时 ACL 复核（G1 / E08 / E09 / E10） |
@@ -294,7 +297,7 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 > - v1 自动化测试套件：`327/327 PASS`
 > - v1 本地自用验收（`selfuse`）：`31/31 PASS`
 >
-> 本次 **v2 第 1 周实测成绩（候选 `681113c`）**独立统计为：`tsc --noEmit` 通过、`S1–S5` 5/5 通过、`W1-A` 9/9 通过、`W1-B` 通过、矩阵 `23/23` 通过（含 `G1–G3` 与 `R1–R5` 全部回归）。
+> 本次 **v2 第 1 周实测成绩（候选 `1c6fe81`）**独立统计为：`tsc --noEmit` 通过、`S1–S5` 5/5 通过、`W1-A` 9/9 通过、`W1-B` 通过、矩阵 `24/24` 通过（含 `G1–G3`、`R1–R5` 与 `R3-EPOCH-ACL` 全部回归）。
 
 ---
 
@@ -372,10 +375,59 @@ $auditDir = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\week1-1795615968076'
 
 | 核对项 | 第 2 轮审计复跑结果 | 备注 / 复跑 runId |
 |---|---|---|
-| 核对第 2 轮候选 SHA `681113c` 与工作区状态 | [ ] 通过 / [ ] 异常 | |
-| 干净目录全量复跑（`run-all.ts` 退出码 0，矩阵 23/23） | [ ] 通过 / [ ] 异常 | |
-| 复验 G1 / G2 / G3（认证授权、回环出站、SSE 无 nonce） | [ ] 通过 / [ ] 异常 | |
-| 复验 R1 / R2 / 补充修正（委派与重启归属、产品账本 S4、宿主超时收口、启发式价表拒发） | [ ] 通过 / [ ] 异常 | |
-| 复验 R3 / R4 / R5（换代联动、>200 条同 ID 回退、重复信号核验与 W1-B 补证、E02/E03/E05 真实强杀） | [ ] 通过 / [ ] 异常 | |
-| 审阅修订版 ADR-0003 与脱敏扫描 | [ ] 通过 / [ ] 异常 | |
-| **第 2 轮签收结论** | [ ] 准予进入第 2 周 / [ ] 继续整改 | 审计人 / 日期： |
+| 核对第 2 轮候选 `681113c` | 通过 | 复跑前工作区干净。HEAD `0a1d82e` 比候选只多本报告更新，lockfile SHA-256 与报告一致。 |
+| 干净目录全量复跑 | 通过 | `week1_76d6db19`，退出码 0。类型检查通过，S1–S5 5/5，矩阵 23/23。 |
+| 独立复跑 W1-A、W1-B | 夹具通过 | `w1a_6aa2abca` 足额对照各发送 1 次，六组负例各发送 0 次且双账户无残留冻结。`w1b_73e7312e` 强杀后收件 1、领取 1、效果 UNKNOWN，重放 SDK 唤醒返回 closed。另用 Edge 对全量运行的 W1-B 恢复数据副本验证原会话刷新前后均显示“结果待核对”。 |
+| G1 / G2 / G3 | 部分关闭 | G1 登录主体绑定及核对、撤销授权的既有回归通过；换代后会话权限仍需修正。G2 直接配置非回环地址的拒绝通过，HTTP 跳转后的目的端仍需约束。G3 在快照、SSE 和日志中的合成 nonce 检查通过。 |
+| R1 / R2 / 硬计费上界 | 部分关闭 | Worker 委派、重启归属、实际账本 S4 已有回归。Web 压缩入口仍可指定预算账户。R2 启动与运行期到期结算、迟到及重复账单已通过。无固定合成上界的拒发通过。 |
+| R3 / R4 / R5 | 部分关闭 | F03 的新代际写入、跨页回退通过；同数字会话 ID 跨代际仍可能沿用旧 ACL。R4 实测匹配与冲突、无法核验时的处置，W1-B 实测重复唤醒。R5 在指定屏障实际强杀。 |
+| 修订版 ADR-0003 与脱敏证据 | 已复核 | 目前可支持夹具中的并发预留、跨页回退与挑战移出 SSE。出站和会话代际仍有下列源码审查发现。 |
+| **第 2 轮签收** | **继续整改，第 2 周暂缓** | Codex 独立复审，2026-11-25。 |
+
+### 剩余签收阻断
+
+| 编号 | 源码发现 | 复验条件 |
+|---|---|---|
+| R1 · P1 Web 压缩的计费归属由请求选择 | 压缩路由直接把请求体的 `budgetTaskId` 交给宿主，宿主优先使用该值绑定压缩任务。账本按任务 ID 找账户，账户缺失时可初始化默认额度。会话创建路由也接受调用者提供的预算任务 ID，缺少对该账务身份的归属核验。当前 W1-A 的压缩夹具主动传入已设限的 ID，无法证明 Web 入口始终使用宿主指定的所属任务。见 [Web 路由](../../../src/web/server.ts#L294)、[宿主归属](../../../src/runtime/harness.ts#L1072)、[账户初始化](../../../src/governance/budget.ts#L232)。 | 普通 Web 命令的计费归属由宿主持有。正常压缩走已授权的任务绑定；遇到任务或日额度不足，假服务新增 0，两个账户不变。S4 的双任务并发夹具仍可由受信宿主内部设置独立绑定。 |
+| G2 · P1 回环检查止于首跳 | Models 校验初始 `baseUrl`，随后把请求交给 pi-ai 的 OpenAI Completions 传输，未提供宿主约束的 fetch。锁定版 pi-ai 把可选 fetch 传给 OpenAI 客户端，未指定时使用全局 fetch。本机 Node 22.23.5 的 `new Request('http://127.0.0.1').redirect` 为 `follow`。因此当前检查约束了首个 URL，后续跳转的目的端不在检查范围内。见 [模型出口](../../../src/runtime/models.ts#L388)、[pi-ai 传输](../../../node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js#L542)。 | 在实际 HTTP 传输关闭自动重定向，或对每次请求的有效目的地重复执行阶段一约束。用合成回环替身和受控传输观察器佐证被拒目的地的调用次数为 0。 |
+| R3 / G1 · P1 会话权限未按代际隔离 | `conversation_scopes` 以裸 Pi 会话 ID 作主键，注册用 `INSERT OR IGNORE`。替换轨迹库并换代后，Pi 可重新分配相同数字 ID，旧行会保留旧主体和作用域。Web 快照按裸 ID 查旧 ACL 和治理记录，再向当前 Pi 读取轨迹；聊天与压缩也只校验旧行主体。F03 检查新提案和预留的 epoch，未检查同 ID 的会话授权。见 [表键](../../../src/governance/db.ts#L168)、[注册](../../../src/governance/approvals.ts#L104)、[快照访问](../../../src/web/server.ts#L312)、[当前轨迹读取](../../../src/web/server.ts#L389)。 | 让会话权限与轨迹读写共同使用代际和会话身份。换代时保留旧治理审计；在两个合成主体和重用会话 ID 的恢复夹具中，旧主体只能访问其授权的历史数据，新主体仅获得其新会话。 |
+
+三个阻断均为源码审查结论。独立复跑使用本地替身。
+
+### 独立复跑记录
+
+原始证据在本机规划目录 `audit-reruns/round2-1795619937294/`。全量结果及 Edge 页面核验在 `evidence/`，两条红线单跑在 `independent-a/evidence/` 和 `independent-b/evidence/`。以下命令在实现仓根目录执行，全部退出码为 0。再次执行请使用新数据目录。
+
+```powershell
+$nodeExe = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+$auditDir = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\round2-1795619937294'
+& $nodeExe tests/week1/run-all.ts --data-dir "$auditDir\data" --evidence-dir "$auditDir\evidence" --keep-data true
+& $nodeExe tests/week1/run-w1-a.ts --data-dir "$auditDir\independent-a\data" --evidence-dir "$auditDir\independent-a\evidence"
+& $nodeExe tests/week1/run-w1-b.ts --data-dir "$auditDir\independent-b\data" --evidence-dir "$auditDir\independent-b\evidence"
+```
+
+---
+
+## 12. 第 2 轮审计阻断整改回执与第 3 轮复审签收栏（候选 `1c6fe81`）
+
+### 12.1 第 2 轮三项剩余阻断逐项闭环
+
+| 阻断编号 | 整改措施与代码落点 | 回归用例与第 3 轮实测证据（`runId = week1_0ab39ee5`） |
+|---|---|---|
+| **R1 · P1 普通 Web 路由计费归属由宿主持有** | 1. [src/web/server.ts](../../../src/web/server.ts) 从 `POST /api/conversations`、`POST /api/conversations/:id/chat` 与 `POST /api/conversations/:id/compact` 彻底剥离请求体 `budgetTaskId`；建会话始终由宿主签发 `host-task:<runtimeEpoch>:conv:<id>` 并持久化，普通聊天与压缩始终复用该宿主绑定。<br>2. [src/runtime/harness.ts](../../../src/runtime/harness.ts) 新增 `getConversationBudgetTaskId`，`submitChatInput` 与未传内部参数的 `triggerCompaction` 缺失绑定直接失败关闭（`unknown_budget_owner`）。<br>3. [tests/week1/run-w1-a.ts](../../../tests/week1/run-w1-a.ts) 改为对会话自身已绑定账户收紧至可用 `99μ` 后发送不含 `budgetTaskId` 的正常 Web 压缩请求。 | `R1-ATTRIBUTION` **PASS**（[matrix-evidence.json](./matrix-evidence.json)）：Web create/chat/compact 夹带 `spoof-web-*` 均被忽略，固定使用 `host-task:ep_d31b4604...:conv:8`，`webSpoofCompactPhysicalDelta = 0`、`webSpoofChatPhysicalDelta = 0`、伪造账户数为 `0`；`W1-A` 9/9 **PASS**（`W1A-NEG-5/6` 不带 `budgetTaskId` 均拒发且增量 `0`）；`S4` 内部受信任双任务并发分账继续 **PASS**。 |
+| **G2 · P1 HTTP 重定向全跳回环限制** | 1. [src/runtime/models.ts](../../../src/runtime/models.ts) 新增 `createStage1GuardedFetch` 并经 `ModelsSimpleStreamOptions.fetch` 传入 `pi-ai` OpenAI Completions 客户端：每次物理 `fetch` 均重跑 `assertStage1LoopbackModelUrl`，强制 `redirect: "manual"`，并对任意 `3xx` 响应立即抛出 `Stage1EgressBlockedError`（零二次跳转）。<br>2. [tests/fakes/fake-model-server.ts](../../../tests/fakes/fake-model-server.ts) 增加 `redirect` 剧本（返回 `307 Location: https://api.openai.com/v1/chat/completions`）供回环替身端到端验证。 | `G2-EGRESS` **PASS**（[matrix-evidence.json](./matrix-evidence.json)）：真实回环假服务返回 `307 -> https://api.openai.com/...` 时，受控 `fetchImpl` 观察器记录 `redirectLoopbackHops = 1`、`disallowedRedirectFetchCalls = 0`，请求失败关闭。 |
+| **R3 / G1 · P1 会话权限与轨迹读写按代际隔离** | 1. [src/governance/db.ts](../../../src/governance/db.ts) 与 [src/governance/approvals.ts](../../../src/governance/approvals.ts) 将 `conversation_scopes` 改为复合主键 `PRIMARY KEY(runtime_epoch, conversation_id)`；所有治理查询（`saveDraftRevision`、`decideApproval`、`fetchAuthorizedApprovalChallenge`、`reconcileUnknownEffect`、`resolveScopeRow`）均按 `(runtime_epoch, conversation_id)` 联合校验。<br>2. [src/web/server.ts](../../../src/web/server.ts) 与 [src/governance/budget.ts](../../../src/governance/budget.ts) 将快照、SSE、聊天、压缩、预留、提案与拒绝记录均按代际过滤；`GET /api/conversations/:id/snapshot?epoch=<ep>` 仅在 `targetEpoch === activeEpoch` 时读取当前活跃 Pi 轨迹，历史代际仅返回该主体已授权的历史治理审计且 `messages = []`。 | `R3-EPOCH-ACL` **PASS**（[matrix-evidence.json](./matrix-evidence.json)）：`alice` (`ep1`) 与 `bob` (`ep2`) 换代后复用同一数字会话 ID `"8"`；`alice` 访活跃代际快照/聊天/压缩全 `403`，访 `?epoch=<ep1>` 返 `200`（`messages = []`、零泄露 `bob` 轨迹）；`bob` 访活跃代际返 `200`（仅见 `ep2` 数据、`proposals = 0`），访 `ep1` 返 `403`。 |
+
+### 12.2 第 3 轮复审签收栏（请审计人在本栏填写第 3 轮结论）
+
+> 建议审计人使用新的 `$auditDir` 在候选 SHA `1c6fe81` 上执行 §3.1–§3.3 命令复跑。
+
+| 核对项 | 第 3 轮审计复跑结果 | 备注 / 复跑 runId |
+|---|---|---|
+| 核对第 3 轮候选 SHA `1c6fe81` 与工作区状态 | [ ] 通过 / [ ] 异常 | |
+| 干净目录全量复跑（`run-all.ts` 退出码 0，矩阵 24/24） | [ ] 通过 / [ ] 异常 | |
+| 独立复跑 W1-A（无客户端 `budgetTaskId` 压缩负例）、W1-B | [ ] 通过 / [ ] 异常 | |
+| 复验 R1 Web 计费归属（普通 Web 路由忽略客户端 `budgetTaskId`） | [ ] 通过 / [ ] 异常 | |
+| 复验 G2 传输层防重定向（307 跳向非回环，被拒目的地调用 = 0） | [ ] 通过 / [ ] 异常 | |
+| 复验 R3/G1 跨代际复用会话 ID 权限与轨迹隔离（`R3-EPOCH-ACL`） | [ ] 通过 / [ ] 异常 | |
+| **第 3 轮签收结论** | [ ] 准予进入第 2 周 / [ ] 继续整改 | 审计人 / 日期： |
