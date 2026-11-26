@@ -1,0 +1,85 @@
+{
+  "runId": "s2_p0_ecef9608",
+  "executedAt": "2026-11-26T12:30:18.184Z",
+  "smtpTls": {
+    "directTlsOk": true,
+    "connectTunnelTlsOk": true,
+    "badHostnameRejectedBeforeSend": true,
+    "fakeTlsSmtpTotalReceived": 2,
+    "plainTextGuardRejectedCcAndAttachments": true
+  },
+  "p0_2_budget_streaming": {
+    "progressiveDeltasObserved": 3,
+    "firstTokenMs": 31,
+    "totalMs": 191,
+    "controlSendDelta": 1,
+    "shortfallSendDelta": 0
+  },
+  "p0_1_two_cas": {
+    "tier0GithubAutoIssued": true,
+    "tier0ClaimCount": 1,
+    "tier0FakeMcpWriteDelta": 1,
+    "protectedBranchWriteDelta": 0,
+    "oldRevisionRejected409": true,
+    "duplicateDecisionKeyReplayed": true,
+    "editedEmailFakeSmtpDelta": 1
+  },
+  "p0_3_mcp_c4": {
+    "driftQuarantined": true,
+    "pendingClaimBlockedOnDrift": "mcp_tool_quarantined",
+    "pendingClaimBlockedOnFingerprintChangeAfterReapprove": "mcp_tool_fingerprint_changed",
+    "revokedCallBlocked": "mcp_tool_revoked",
+    "missingToolQuarantined": true,
+    "binaryTamperRejected": "mcp_binary_sha256_mismatch",
+    "remoteToolCallDeltaDuringC4": 0
+  },
+  "p0_4_credentials_zero_leak": {
+    "slotsChecked": [
+      "slot:model-router",
+      "slot:model-worker",
+      "slot:tls-smtp",
+      "slot:github-mcp-pat",
+      "slot:web-console"
+    ],
+    "scannedFiles": [
+      {
+        "file": "aegis-gov.sqlite",
+        "bytes": 409600,
+        "hits": 0
+      },
+      {
+        "file": "pi-durable.sqlite",
+        "bytes": 188416,
+        "hits": 0
+      },
+      {
+        "file": "model-requests.jsonl",
+        "bytes": 3921,
+        "hits": 0
+      },
+      {
+        "file": "smtp-received.jsonl",
+        "bytes": 569,
+        "hits": 0
+      },
+      {
+        "file": "mcp-calls.jsonl",
+        "bytes": 2733,
+        "hits": 0
+      }
+    ],
+    "totalForbiddenHits": 0
+  },
+  "p0_5_skills_routines_hono_mobile": {
+    "skills3LevelAndLockVerified": true,
+    "routineRuleRevokeReconfirmVerified": true,
+    "routineMissedPeriodsCollapsedTo1": true,
+    "routinePauseStoppedFutureTriggers": true,
+    "honoClosedBackgroundCompleted": true,
+    "mobileHttpsBadConfigRejected": true,
+    "mobileHttpsHostPrefixCookieVerified": true,
+    "mobileHttpsCrossOrigin403Verified": true,
+    "mobileHttpsLogoutRevokedSession": true
+  },
+  "status": "PASS"
+}
