@@ -421,8 +421,58 @@ $node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
 
 日志位于 `$evRoot` 下的 `web-build.log`、`stage2.log`、`week1.log` 和 `week2.log`，各套件 `evidence/` 留存 JSON，`data/` 留存独立假服务原始计数。阶段二浏览器纵切假 SMTP 收件日志 1 条、模型日志 3 条、MCP 日志 4 条。核心套件假 SMTP 收件日志 2 条、独立 TLS SMTP 收件日志 2 条、模型日志 9 条、MCP 日志 11 条。
 
-### 11.4 后续整改与提审（实施方）
+### 11.4 后续整改与提审（实施方 · 2026-11-26）
 
-下一候选以 `4ec3bb5` 为对照，只收敛 §11.3 已确认的实质性 P0。保留两轮已通过的用例及阶段一冻结底座。新增验证优先选能证明红线闭合的一条最小用例，共用路径合并验证。P1/P2 与边角场景留在备忘。
+针对 §11.3 裁定的全部五类实质性 P0 残留项（相对 `4ec3bb5` 增量收敛），实施方已完成全部代码修复、最小红线闭合验证及阶段二 + 阶段一第 1、2 周全量回归。
 
-提交新冻结 SHA、逐项最小修复与证据、实际复跑命令和退出码。对确认证据后仍未关闭的 P0，记录具体阻塞并继续关闭相关能力。真实服务实测按原独立授权与产品签收口径登记。
+- **本轮冻结代码候选提交**：`81ec02acdd5f05c919675bc45bc1e559eef7f798`（`fix(v2-stage2): close all five Round 2 residual P0 findings (S2-P0-1..5)`，共修改 15 个代码与测试文件，不含文档与证据）。
+- **冻结底座与锁文件零改动核验**：`git diff 5748c6c -- src/governance/approvals.ts src/governance/effects.ts src/governance/budget.ts src/capabilities/workspace/importer.ts package.json package-lock.json tests/week1 tests/week2` 输出为空；两份锁文件 SHA-256 与 §2.1 完全一致；`git diff --check` 零空白错误；本报告及 `docs/v2/stage2-audit/evidence/round3/` 独立落于后续文档提交，确保 `git diff 81ec02a HEAD` 仅包含 `docs/v2/stage2-audit/`。
+
+#### 五类 P0 残留项逐项闭合对照表
+
+| 编号 | 本轮根因与最小修复 | 源码核查位置 | 最小红线闭合验证（`s2_p0_959e8b69`） |
+| --- | --- | --- | --- |
+| **S2-P0-1** | 新增 `isStrictPlainTextEmailRequired()`，在阶段二及任意非环回 SMTP 端点无条件强制纯文本白名单字段；`src/index.ts` 与 `AegisHostRuntime.start()` 启动期拒绝阶段二配置 `strictPlainTextEmail: false`；`validateStage2PlainTextEmail()` 除 `cc`/`bcc`/`attachments`/`attachmentDigests` 外拒绝一切额外未知字段；建单、改稿、T4 领取前/内及 SMTP 序列化严格统一为 `{ to, subject, body }`，批准快照与实际发信字段 1:1 一致。 | [rules.ts](../../../src/governance/rules.ts) · [index.ts](../../../src/index.ts) · [harness.ts](../../../src/runtime/harness.ts) · [aegis-policy.ts](../../../src/runtime/extensions/aegis-policy.ts) · [server.ts](../../../src/web/server.ts) · [submitter.ts](../../../src/runtime/submitter.ts) | `validateStage2PlainTextEmail` 拒绝额外 `html` 字段；阶段二 `AegisHostRuntime.start(..., strictPlainTextEmail: false)` 启动拒绝；即便调用方传 `strictPlainTextEmail: false`，提交器在 T4 前拒绝含 `cc` 载荷（`claimed=false`、`unsupported_email_field_cc`、假 SMTP 增量 `0`）。 |
+| **S2-P0-2** | 固定合成价表严格收口至**显式** `provider === "fake-local"` 且环回主机；环回地址上的真实计费代理（如 `127.0.0.1` + `deepseek`）不再自动取得合成价表；新增受验供应商/模型上界契约注册表 `VERIFIED_MODEL_BOUND_CONTRACTS`（当前仅登记已验证的 `deepseek/deepseek-chat` 契约 `deepseek-chat-openai-compat-v1`，绑定 UTF-8 字节 BPE 上界、帧开销与 `maxTokensHardCeiling=8192`）；非显式替身必须提供绑定 `provider`+`modelId` 且命中已验契约的价表，通用未验模型或未验推理模型即使配置 `allowTokenBoundEstimation=true` 亦在启动与发送前默认拒绝（`unproven_model_bound_contract`）；非推理槽强制清除 `reasoning` 选项。 | [credentials.ts](../../../src/governance/credentials.ts) · [index.ts](../../../src/index.ts) · [models.ts](../../../src/runtime/models.ts) | 环回代理 `http://127.0.0.1:7890/v1` + `deepseek/deepseek-chat` 缺价表或合成价表均拒绝；通用模型 `generic-llm/mystery-1` 及未验推理模型 `deepseek/deepseek-reasoner` 开 `allowTokenBoundEstimation=true` 均拒绝；已验契约 `deepseek/deepseek-chat` 通过，且预算不足时物理发送增量 `0`。 |
+| **S2-P0-3** | 前向 Migration 8（兼容阶段一遗留 `definition_sha256` 列）为 `mcp_tool_pins` 增加 `observed_schema_sha256` 与 `present_in_last_list`；`verifyOrQuarantineMcpTool()` 在 `QUARANTINED`、`REVOKED` 与首次漂移分支均原子刷新最新 `canonical_def_json`、`observed_schema_sha256` 与 `present_in_last_list=1`；`quarantineMissingMcpTools()` 对全部缺失工具（含已隔离/已撤权）标记 `present_in_last_list=0`；`#reconcileLiveToolsList()` 原子替换内存 `#loadedTools` 与 `#loadedToolFingerprints`；`approveStoredMcpToolPin()` 拒绝不在场工具（`409 mcp_tool_not_present`）及陈旧指纹（`409`）；`verifyLiveMcpToolPin()`、桥接读写与提交器 T4 前/内同时核对数据库核准指纹、最新观察指纹、在场状态及实时内存指纹。 | [db.ts](../../../src/governance/db.ts) · [mcp-pin.ts](../../../src/governance/mcp-pin.ts) · [mcp-bridge.ts](../../../src/runtime/mcp-bridge.ts) · [submitter.ts](../../../src/runtime/submitter.ts) · [server.ts](../../../src/web/server.ts) | 工具已隔离（`v2`）期间再次变更至 `v3` 并推送第二次 `notifications/tools/list_changed` 后，库内审阅定义与观察指纹更新至 `v3`，提交 `v1` 或 `v2` 指纹均被 `409` 拒绝，仅 `v3` 核准成功；缺失工具 `presentInLastList=false` 且核准返回 `409 mcp_tool_not_present`；C4 期间远端工具调用增量 `0`。 |
+| **S2-P0-4** | `smtp-client.ts` 移除可选远程 `qid=` 文本提取，SMTP 2xx 严格归约为 `smtp:<code>:accepted`（提交器正则同步收口为 `/^smtp:2\d{2}:accepted$/`）；`models.ts` 在 `createGuardedModelFetch` 边界立即取消非 2xx 远程错误响应体并替换为受控 `model_provider_http_<status>`，同时在 `underlyingStream.push`/`end` 归约全部远端错误事件与终态 `errorMessage` 并将受控 `errorCode` 透传至 `onStreamFinished`；`harness.ts` 与 `routines.ts` 仅持久化受控错误码；`mcp-bridge.ts` 对只读与写入的 `isError` 及传输异常均归约为 `mcp_remote_tool_error:<tool>` / `mcp_transport_error:<code>`，`#lastPauseReason` 与 `/api/mcp/pins/recheck` 异常同样收敛为受控码。 | [smtp-client.ts](../../../src/capabilities/mail/smtp-client.ts) · [submitter.ts](../../../src/runtime/submitter.ts) · [models.ts](../../../src/runtime/models.ts) · [harness.ts](../../../src/runtime/harness.ts) · [routines.ts](../../../src/capabilities/timers/routines.ts) · [mcp-bridge.ts](../../../src/runtime/mcp-bridge.ts) · [server.ts](../../../src/web/server.ts) | 假 SMTP 250 回复 `queued as QIDSECRET-...` 归约为 `smtp:250:accepted`；假模型返回 HTTP 401 回显秘文触发例程失败，落库 `routine_triggers.reason === "model_provider_http_401"`；假 MCP 只读 `isError` 回显秘文归约为 `mcp_remote_tool_error:get_file_contents`；全盘双库、WAL、假服务日志与 Web 投影 9 个槽位扫描命中 `0`。 |
+| **S2-P0-5** | 视图①与视图③共用 `projectEffectForAuthorization(effect, redacted)`，来源撤权后视图①同步脱敏 `effect.receiptRef`、`effect.reason`、清空 `effect.reconcileEvidence` 并置 `hasChallenge=false`；视图② `GET /api/routines` 读取时实时核验例程 `scope_id`、每条触发记录关联会话（`chat_commands` + `conversation_scopes`）主体/作用域与 `countRevokedSourcesForConversation()`，撤权或失权后同步脱敏 `lastResultSummary` 与 `triggers[].reason`（附 `resultRedacted=true` / `redacted=true`），仅保留受控状态。 | [server.ts](../../../src/web/server.ts) | 撤销来源读授权后，视图① `/snapshot` 与视图③ `/api/approvals` 均脱敏草稿及效果回执/原因/核对证据（`hasChallenge=false`）；视图② `/api/routines` 同步脱敏 `lastResultSummary` 与 `triggers[0].reason`，三视图均不含原始受限文本。 |
+
+#### 第 3 轮自测实跑结果（冻结候选 `81ec02acdd5f05c919675bc45bc1e559eef7f798`）
+
+环境：Windows x64、锁定 `D:\AegisPi\tools\node-v22.23.5\node.exe`（Node `v22.23.5`、SQLite `3.54.1`）、npm `10.9.9`、Docker `29.9.2`、Edge `157.0.4341.60`。
+
+| 套件 | 实际执行命令 | 退出码 | 结果与脱敏证据摘要 |
+| --- | --- | --- | --- |
+| 前端类型检查与构建 | `npm --prefix web run build` | `0` | PASS（`tsc --noEmit && vite build`，35 modules，`2.65s`） |
+| 阶段二全量验收 | `node tests/stage2/run-all.ts --evidence-dir docs/v2/stage2-audit/evidence/round3` | `0` | PASS（`stage2_a61930b6`，`commitSha=81ec02acdd5f05c919675bc45bc1e559eef7f798`；锁文件/前后端 `tsc`/分层守卫全过；核心 `s2_p0_959e8b69` 9 槽位扫描 `totalForbiddenHits=0`、C4 远端调用增量 `0`、预算不足增量 `0`、假 TLS SMTP=2；浏览器桌面/窄屏 `s2_browser_0fb4f145` 假 SMTP=1）。证据：[stage2-summary.json](evidence/round3/stage2-summary.json) · [stage2-p0-core-evidence.json](evidence/round3/stage2-p0-core-evidence.json) · [stage2-browser-e2e-evidence.json](evidence/round3/stage2-browser-e2e-evidence.json) |
+| 阶段一第 2 周全量回归 | `node tests/week2/run-all.ts` | `0` | PASS（`week2_984d75fd`，`commitSha=81ec02acdd5f05c919675bc45bc1e559eef7f798`；`v04_v05` `v04v05_f32a13f4`、`v02` `v02_d3eebeaf`、`v03` Docker `v03_0e4d0050`、`s6` `s6_aaa4d8d7` `totalForbiddenHits=0`、浏览器 `v01v06_8e218cff` 全通过） |
+| 阶段一第 1 周全量回归 | `node tests/week1/run-all.ts` | `0` | PASS（`week1_ebabc747`；`typecheck`、`S1-S5`、`W1-A` 9/9、`W1-B` 假 SMTP=1/`UNKNOWN`/`结果待核对`、`matrix` 25/25 全通过） |
+
+#### 真实服务实测口径
+
+- 真实 DeepSeek 流式与计费、真实 Gmail 只读与单封测试发信、真实 GitHub MCP 只读与选定测试仓单次写、可选实体手机 HTTPS 仍保持默认关闭并标记**待验证**，待本轮安全红线独立复审签收且取得用户逐项独立授权后按产品签收口径实测登记。
+
+#### 第 3 轮审计人一键复跑命令（PowerShell · 含 Windows 锁文件原始字节保真）
+
+```powershell
+$sha = '81ec02acdd5f05c919675bc45bc1e559eef7f798'
+git diff 5748c6c $sha -- src/governance/approvals.ts src/governance/effects.ts src/governance/budget.ts src/capabilities/workspace/importer.ts package.json package-lock.json tests/week1 tests/week2
+git diff --check 5748c6c..$sha
+
+# 在独立工作树按 Git 对象原始字节保真两份锁文件
+$tmp = Join-Path $env:TEMP "aegispi-stage2-r3-$($sha.Substring(0,7))"
+git worktree add --detach $tmp $sha
+git -C $tmp show "${sha}:package-lock.json" | Set-Content -Path (Join-Path $tmp 'package-lock.json') -AsByteStream -NoNewline
+git -C $tmp show "${sha}:web/package-lock.json" | Set-Content -Path (Join-Path $tmp 'web/package-lock.json') -AsByteStream -NoNewline
+Set-Location $tmp
+$env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
+& 'D:\AegisPi\tools\node-v22.23.5\npm.cmd' --prefix web run build
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/stage2/run-all.ts --evidence-dir "$tmp\evidence-stage2"
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/week1/run-all.ts
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/week2/run-all.ts
+```
+
+### 11.5 第 3 轮独立复审裁定（Codex · 待填写）
+
+> 待独立审计人（Codex）基于冻结候选 `81ec02acdd5f05c919675bc45bc1e559eef7f798` 复跑与源码核查后填写裁定。
