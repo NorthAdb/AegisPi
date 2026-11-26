@@ -310,6 +310,64 @@ $npm = 'D:\AegisPi\tools\node-v22.23.5\npm.cmd'
 
 ---
 
-## 11. 预留：第 1 轮整改回执与第 2 轮最终复审签收栏（封顶 2 轮）
+## 11. 第 1 轮整改回执与第 2 轮最终复审签收栏（封顶 2 轮）
 
-> 如第 1 轮存在 P0 退回项，实施方将在此节逐项给出新冻结候选 SHA、最小修复、复跑命令与版本化脱敏证据，随后由审计人在 §11.3 完成第 2 轮复审与最终签收。
+### 11.1 第 1 轮整改回执（实施方 · 2026-11-26）
+
+- **第 2 轮冻结代码候选提交（`v2`）**：`4ec3bb5b74d7046d26a01950adb6d9ed8076b14d`（相对起点 `5748c6c` 与第 1 轮候选 `5bb326c`，§1.3 所列冻结底座路径与根/前端锁文件保持零改动：`git diff --stat 5748c6c 4ec3bb5 -- src/governance/approvals.ts src/governance/effects.ts src/governance/budget.ts src/capabilities/workspace/importer.ts package.json package-lock.json tests/week1 tests/week2` 输出为空）。
+- **第 2 轮脱敏证据目录**：`docs/v2/stage2-audit/evidence/round2/`（`stage2-summary.json`、`stage2-p0-core-evidence.json`、`stage2-browser-e2e-evidence.json`），所有后续文档提交与 `4ec3bb5` 的代码差异严格为空。
+
+#### 五类 P0 逐项整改对照表
+
+| 编号 | 第 1 轮问题摘要 | 最小修复与落地位置 | 新增自动化验证与结果 |
+| --- | --- | --- | --- |
+| **S2-P0-1** | 正式入口未绑定独立获准 SMTP 收件范围；改稿未共用纯文本与单行头校验；SMTP 主题未限制单行边界 | 1) [rules.ts](../../../src/governance/rules.ts) 新增 `validateEmailEnvelopeSingleLine`、`validateEmailRecipientsAllowlist` 并加固 `validateStage2PlainTextEmail`（拒绝 CR/LF/NUL/控制字符及非数组 `cc`/`bcc`/`attachments`，非环回真实 SMTP 强制非空且无 `*` 收件白名单）。<br>2) [index.ts](../../../src/index.ts) 接入 `smtp.allowedRecipients` / `--allowed-email-targets` 并在启动前 fail-closed；[harness.ts](../../../src/runtime/harness.ts) 绑定 `allowedEmailRecipients`。<br>3) [aegis-policy.ts](../../../src/runtime/extensions/aegis-policy.ts)、[server.ts](../../../src/web/server.ts)（`POST /api/proposals/:id/draft`）、[submitter.ts](../../../src/runtime/submitter.ts)（T4 领取前与 `precondition` 内）及 [smtp-client.ts](../../../src/capabilities/mail/smtp-client.ts)（发包前）共用同一套单行头、纯文本与收件白名单校验。 | `s2_p0_12e6cd1e` 实测：CRLF 主题注入在校验、改稿接口（`400`）、提交器与 `sendSmtpMessage`（`bytesSent=0`）全链路拒绝；非环回 SMTP 通配或越界收件人拒绝；合规改稿独立假 SMTP 增量 `1`。 |
+| **S2-P0-2** | 真实模型缺价表时回退合成固定价格；UTF-8 折半估算与 `contextWindow` 截断无法证明覆盖真实计费 | 1) [credentials.ts](../../../src/governance/credentials.ts) 新增 `validateModelPriceScheduleForEndpoint`：合成固定价表仅允许本机环回假端点，非环回真实端点强制提供非合成版本化价表且 `allowTokenBoundEstimation=true`，支持 `cacheWritePerMTokMu` 与 `maxReasoningTokens`。<br>2) [index.ts](../../../src/index.ts) 非环回端点不再回退 `synthetic-v1`，缺失或非法价表启动前即拒绝。<br>3) [models.ts](../../../src/runtime/models.ts) 移除 `bytes/2` 与 `Math.min(contextWindow, ...)` 截断，改用字节级 BPE 数学最坏上界 `1 UTF-8 byte = 1 token` 加显式消息/工具帧开销，拒绝无法定界的非文本块（如图像），取 `max(input, cacheRead, cacheWrite)` 单价，并将预留所使用的 `effectiveMaxTokens` 显式透传到上游请求选项；结算纳入 `cacheWrite`。 | `s2_p0_12e6cd1e` 实测：非环回 `https://api.deepseek.com` 缺价表或合成价表均 fail-closed（`0` 物理请求）；token 定界预算不足拦截发送增量 `0`；正常流式首 token `89 ms`。 |
+| **S2-P0-3a** | MCP 客户端未订阅 `notifications/tools/list_changed`，连接存续期工具变更无法即时暂停重核 | [mcp-bridge.ts](../../../src/runtime/mcp-bridge.ts) 在 `client.connect` 前订阅锁定 `@earendil-works/pi-mcp@1.6.0` 的 `client.onNotification("notifications/tools/list_changed", ...)` 与 `client.onClose`；收到通知立即同步置 `admissionPaused=true`、记录审计事件并串行触发 `recheckToolPins()`，校验失败保持关闭准入。 | `s2_p0_12e6cd1e` 实测：假 MCP 运行中写漂移标记并主动发送 `notifications/tools/list_changed`，桥接立即暂停并隔离漂移工具，期间远端 `tools/call` 增量 `0`。 |
+| **S2-P0-3b** | 界面未展示完整规范化定义；核准只传工具身份，未绑定用户所见定义与指纹 | 1) [mcp-pin.ts](../../../src/governance/mcp-pin.ts) 新增 `inspectStoredMcpToolPin`，并将 `approveStoredMcpToolPin` 改为强制要求 `expectedSchemaSha256`（及可选 `expectedCanonicalDefJson`），在同一 `BEGIN IMMEDIATE` 事务内核对失败返回 `409`。<br>2) [server.ts](../../../src/web/server.ts) 的 `GET /api/mcp/pins` 返回完整 `canonicalDefJson`、`observedSchemaSha256`、`pinnedSchemaSha256` 与 `drifted`；`POST .../approve` 缺指纹返回 `400`、陈旧返回 `409`。<br>3) [WorkspaceView.tsx](../../../web/src/views/WorkspaceView.tsx) 与 [api.ts](../../../web/src/client/api.ts) 展示可审阅完整规范化定义 JSON 并在点击核准时绑定提交。 | `s2_p0_12e6cd1e` 实测：空指纹请求返回 `400`，陈旧指纹在同一事务返回 `409`，匹配审阅指纹方可通过。 |
+| **S2-P0-3c** | GitHub 策略用 `operation` 而投递用草稿字段；空 `allowedPaths` 可放行文件写；Tier 0 仅按常见保护分支名判断 | 1) [rules.ts](../../../src/governance/rules.ts) 新增 `resolveControlledGithubMcpTool`，以单一受控操作映射同时绑定策略、Pin 与投递；文件写操作强制要求非空 `allowedPaths` 匹配；Tier 0 除排除保护分支/标签/工作流/高危写外，强制要求 `ref` 为显式 `refs/heads/...` 且列入 `confirmedNonProtectedRefs`（未确认 ref 自动升级 Tier 2）。<br>2) [aegis-policy.ts](../../../src/runtime/extensions/aegis-policy.ts)、[submitter.ts](../../../src/runtime/submitter.ts) 与 [server.ts](../../../src/web/server.ts) 改稿接口一致强制 `mcpToolName === controlledTool` 且草稿不可篡改 MCP 绑定。 | `s2_p0_12e6cd1e` 实测：篡改 `mcpToolName` 在 T4 领取前被 `github_write_tool_mismatch` 拒绝；空 `allowedPaths` 返回 `allowed=false`；未确认非保护分支 `refs/heads/develop` 升级为 Tier 2。 |
+| **S2-P0-3d** | Skills 正文读取仅查技能状态；正式入口凭 `workspace` 配置即开启 L3 脚本执行 | 1) [db.ts](../../../src/governance/db.ts) 前向迁移 7 扩展 `source_read_grants.source_type` 支持 `'skill'`；[policy.ts](../../../src/governance/policy.ts) 支持 `scriptId`/`scriptSha256` 约束。<br>2) [store.ts](../../../src/capabilities/skills/store.ts)、[aegis-policy.ts](../../../src/runtime/extensions/aegis-policy.ts) 与 [server.ts](../../../src/web/server.ts) 对 L2 正文披露强制核验现行 `(principalId, scopeId)` 的 `read_body` 授权；L3 `resolveVerifiedSkillScript` 额外强制核验独立 `execute_script` 许可（默认不授予）。<br>3) [index.ts](../../../src/index.ts) 要求显式 `skills.allowScriptExecution === true` 才启用 L3 沙箱 runner，并在容器启动前再次核验 `execute_script` 许可。 | `s2_p0_12e6cd1e` 实测：无授权主体（含 HTTP `guest`）读取正文返回 `403` / `skill_read_denied`；无独立 `execute_script` 许可调用 L3 脚本返回 `skill_script_execution_denied`。 |
+| **S2-P0-4** | SMTP 与 GitHub MCP 远端原始应答与错误文本直接落库 `effects` 并进入工具输出与 Web 投影 | 1) [smtp-client.ts](../../../src/capabilities/mail/smtp-client.ts) 在接收边界将成功回执归约为 `smtp:<code>:accepted`（或严格校验的 `qid=<alnum>`），所有远端/本地错误归约为受控错误码，不再透传原始应答行或 banner。<br>2) [submitter.ts](../../../src/runtime/submitter.ts) 对 SMTP 与 GitHub MCP 二次归约：GitHub 写入仅提取经正则验证的 hex Commit SHA（`github:commit:<sha>` 或 `github:write:committed`），失败归约为受控状态码。 | `s2_p0_12e6cd1e` 实测：让假 SMTP（250 成功与 550 拒绝）和假 GitHub MCP 故意在响应中回显合成凭据标记，扫描双库、`WAL`、日志及 `/api/approvals`、`/snapshot` 投影，新增与既有 7 槽位命中均为 `0`。 |
+| **S2-P0-5** | 视图③ `/api/approvals` 未复用视图①的实时来源读取权核对与撤权脱敏 | [server.ts](../../../src/web/server.ts) 抽取并复用同源 `countRevokedSourcesForConversation` 与作用域校验：`GET /api/approvals` 在来源撤权后与视图①一致脱敏 `target`、`snapshot` 与 `effect` 明细，置 `draftRedacted: true`、`hasChallenge: false`，禁用编辑与批准（同时保持 `POST /api/approvals/:id/challenge` 与阶段一 `V04/V05` 的 `REJECT` 取消路径兼容，而 `APPROVE` 与改稿一律 `403 source_read_revoked`）。 | `s2_p0_12e6cd1e` + `v04v05_d306ca14` 实测：来源撤权后视图①与视图③同步隐藏受限草稿并禁批，改稿与 `APPROVE` 返回 `403`，且阶段一 `V04/V05` 全部通过。 |
+
+#### P1 / P2 备忘项同步闭环情况
+
+- **S2-P1-1（GitHub 官方 `owner/repo` 契约与阶段一库升级）**：[aegis-policy.ts](../../../src/runtime/extensions/aegis-policy.ts) 与 [submitter.ts](../../../src/runtime/submitter.ts) 按已 Pin 工具的 `inputSchema` 动态映射 `{ owner, repo }`（兼容官方 `github-mcp-server` 与既有假服务）；[rules.ts](../../../src/governance/rules.ts) 新增 `upgradeStage2ScopeAllowedTools` 并在 [harness.ts](../../../src/runtime/harness.ts) 阶段二启动时原地补齐既有阶段一 `scope:default` 的 `allowed_tools_json`（不改冻结的 `approvals.ts`），已在 `s2_p0_12e6cd1e` 验证。
+- **S2-P1-2（Skills 同会话新任务生效）**：[store.ts](../../../src/capabilities/skills/store.ts)、[aegis-context.ts](../../../src/runtime/extensions/aegis-context.ts) 与 [harness.ts](../../../src/runtime/harness.ts) 改按会话活跃任务键（`lockKey`）锁定版本，已在 `s2_p0_12e6cd1e` 验证同一会话内任务 1 保持 v1、切版后任务 2 取得 v2。
+- **S2-P1-3（例程最近结果回流）**：[routines.ts](../../../src/capabilities/timers/routines.ts) 新增 `recordRoutineTriggerCompletion`，[harness.ts](../../../src/runtime/harness.ts) 在例程受理后异步回写实际完成状态与摘要，[server.ts](../../../src/web/server.ts) 与 [WorkspaceView.tsx](../../../web/src/views/WorkspaceView.tsx) 暴露 `lastConversationId` 及「打开结果会话」入口。
+- **S2-P1-4（按计费日聚合成本）**：[server.ts](../../../src/web/server.ts) 的 `GET /api/budget/summary` 改为按当日 `day_account` 全量聚合当日 `settledMu` / `chargedBoundMu` / `heldMu` / `byPurpose`，历史明细再单独 `LIMIT 100`；已在 `s2_p0_12e6cd1e` 插入 105 条跨日记录验证当日汇总无截断漂移。
+- **S2-P1-5（Web 分层与阶段一规范对齐）**：新增 L3 门面 [console-facade.ts](../../../src/runtime/console-facade.ts)，[server.ts](../../../src/web/server.ts) 清除全部 `../capabilities/*` 直接导入，并在 [tests/stage2/run-all.ts](../../../tests/stage2/run-all.ts) 收紧 `checkLayerBoundary()` 禁止 `src/web/` 越层导入 `capabilities/`；同步修订 [AGENTS.md](../../../AGENTS.md) 第 3 条对齐 v2.3 阶段一受控只读连接器边界。
+- **S2-P2-1（Windows 检出锁文件行尾）**：下方 §11.2 复跑命令显式纳入 `git show HEAD:<lockfile>` 原始字节校验步骤。
+
+### 11.2 第 2 轮实测结果与一键复跑命令（实施方自测 · 冻结候选 `4ec3bb5b74d7046d26a01950adb6d9ed8076b14d`）
+
+| 套件 | 候选 SHA | 实际命令 | 退出码 | Run ID | 关键指标 / 独立计数 |
+| --- | --- | --- | --- | --- | --- |
+| 前端重建 + 前后端类型检查 | `4ec3bb5` | `tsc --noEmit`（根 + `web/`）& `npm --prefix web run build` | `0` | — | `web/dist` 零报错构建；根/前端锁文件未变更 |
+| **阶段二全套（含全部 R1 P0/P1 新增用例）** | `4ec3bb5` | `node tests/stage2/run-all.ts --evidence-dir docs/v2/stage2-audit/evidence/round2` | **`0`** | `stage2_8ef7176d` | `rootLockIntegrity` PASS、`layerBoundary` PASS（0 违规，含禁止 `web->capabilities`）、`p0Core` `s2_p0_12e6cd1e` PASS（7 槽位含远端回显零命中 `totalForbiddenHits=0`）、`browserDesktopAndNarrow` `s2_browser_137ed8f1` PASS（桌面 `1280x800` + 窄屏 `390x844`、假 SMTP `1`、改稿一致） |
+| **阶段一第 2 周全套回归** | `4ec3bb5` | `node tests/week2/run-all.ts` | **`0`** | `week2_00be19c3` | `typecheck` PASS、`layerBoundary` PASS、`v04_v05` `v04v05_d306ca14` PASS、`v02` `v02_b4537830` PASS、`v03` `v03_60bea256`（Docker）PASS、`s6` `s6_66d8c9aa`（`totalForbiddenHits=0`）PASS、`v01_v05_v06_browser` `v01v06_83fa8173`（Edge）PASS |
+| **阶段一第 1 周全套回归** | 同代码树 | `node tests/week1/run-all.ts` | **`0`** | `week1_b5699147` | `typecheck`、`s1_s5`、`w1_a_and_b01`（9/9）、`w1_b_and_e06`（假 SMTP `1` / `结果待核对`）、`matrix` `25/25` 全通过 |
+| 真实 DeepSeek / Gmail / GitHub / 实体手机 | `4ec3bb5` | — | — | — | **待验证**（无新增授权，未触发真实计费或外部写入，与 §8 保持一致） |
+
+#### 第 2 轮审计人一键复跑命令（含 S2-P2-1 Windows 锁文件原始字节保真）
+
+```powershell
+$env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
+$node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+$npm = 'D:\AegisPi\tools\node-v22.23.5\npm.cmd'
+
+# 1. 在独立 worktree 固定到第 2 轮候选提交 4ec3bb5b74d7046d26a01950adb6d9ed8076b14d，并恢复锁文件 Git 原始字节（规避 Windows core.autocrlf）
+& $node -e 'const fs=require("node:fs"); const cp=require("node:child_process"); for (const p of ["package-lock.json","web/package-lock.json"]) fs.writeFileSync(p, cp.execFileSync("git", ["show", "4ec3bb5b74d7046d26a01950adb6d9ed8076b14d:"+p]));'
+& $npm ci --offline --no-audit --no-fund
+& $npm --prefix web ci --offline --no-audit --no-fund
+& $npm --prefix web run build
+
+# 2. 复跑阶段二全套（含全部 S2-P0-1..5 与 P1 自动化回归）及阶段一第 1、2 周全套回归
+& $node tests/stage2/run-all.ts
+& $node tests/week1/run-all.ts
+& $node tests/week2/run-all.ts
+```
+
+### 11.3 预留：第 2 轮独立复审与最终签收结论（Codex）
+
+> 请审计人基于冻结候选 `4ec3bb5b74d7046d26a01950adb6d9ed8076b14d` 在此填写第 2 轮独立复审与最终安全审计签收结论。
