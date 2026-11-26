@@ -322,6 +322,16 @@ CREATE TABLE IF NOT EXISTS managed_file_imports (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS task_frozen_snapshots (
+  snapshot_key TEXT PRIMARY KEY NOT NULL,
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  snapshot_id TEXT NOT NULL,
+  snapshot_dir TEXT NOT NULL,
+  baselines_json TEXT NOT NULL,
+  authorized_paths_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
 `;
 
 export function openGovernanceDb(dbPath: string): { db: DatabaseSync; pragmas: GovDbPragmas } {
@@ -572,6 +582,19 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
   if (!mcpColNames.has("args_json")) {
     db.exec("ALTER TABLE mcp_server_pins ADD COLUMN args_json TEXT NOT NULL DEFAULT '[]';");
   }
+
+  // Migration 4 (W2-S3): Ensure durable run-level frozen snapshot index exists on all legacy DBs
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_frozen_snapshots (
+      snapshot_key TEXT PRIMARY KEY NOT NULL,
+      runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+      snapshot_id TEXT NOT NULL,
+      snapshot_dir TEXT NOT NULL,
+      baselines_json TEXT NOT NULL,
+      authorized_paths_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL
+    );
+  `);
 }
 
 export function withImmediateTx<T>(db: DatabaseSync, fn: () => T): T {

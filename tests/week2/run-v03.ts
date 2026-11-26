@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   cleanupTaskVolume,
@@ -1363,6 +1363,255 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
       const lastSbox = JSON.parse(sboxAudits[0]!.details_json) as { inputAuthorizedFiles: string[] };
       sequentialAuthorizedInputs = lastSbox.inputAuthorizedFiles;
       assert.equal(sequentialAuthorizedInputs.includes("secrets/formal-ungranted.txt"), false);
+
+      // W2-S3 Round 5: Same-round crash-recovery across 2 tools in ONE logical execution task + post-cache path revocation + missing snapshot fail-closed!
+      const srDir = path.join(rootDir, "formal-host-v03-sameround");
+      const srDataDir = path.join(srDir, "data");
+      const srWorkspace = path.join(srDir, "workspace");
+      mkdirSync(path.join(srWorkspace, "reports"), { recursive: true });
+      mkdirSync(srDataDir, { recursive: true });
+
+      const origSrB = `ORIG_SAME_ROUND_B_V1_${runId}\n`;
+      const origSrBSha = sha256Text(origSrB);
+      const userOfflineSrB = `USER_OFFLINE_EDIT_DURING_DOWNTIME_B_${runId}\n`;
+      const userOfflineSrBSha = sha256Text(userOfflineSrB);
+      const modelOverwriteSrB = `MODEL_OVERWRITE_SAME_ROUND_B_${runId}\n`;
+      const modelOverwriteSrBSha = sha256Text(modelOverwriteSrB);
+      writeFileSync(path.join(srWorkspace, "reports", "same-round-b.md"), origSrB, "utf8");
+      writeFileSync(path.join(srWorkspace, "reports", "revoked-cached.md"), `SENSITIVE_REVOKED_CACHED_${runId}\n`, "utf8");
+
+      let revokedCachedGrantId = "";
+      {
+        const { db: srSeedDb } = openGovernanceDb(path.join(srDataDir, "aegis-gov.sqlite"));
+        ensureActiveEpochAndManifest(srSeedDb, now);
+        ensureScope(srSeedDb, {
+          scopeId: "scope:default",
+          allowedPrincipals: ["owner"],
+          allowedTools: ["workspace_write_managed"],
+          allowedTargets: ["*"],
+        });
+        grantSourceRead(srSeedDb, {
+          principalId: "owner",
+          scopeId: "scope:default",
+          sourceType: "workspace_write",
+          resourceId: "workspace",
+          operations: ["write"],
+          constraints: { allowedRelPaths: ["reports/same-round-a.md", "reports/same-round-b.md"] },
+          now,
+        });
+        const revCachedGrant = grantSourceRead(srSeedDb, {
+          principalId: "owner",
+          scopeId: "scope:default",
+          sourceType: "workspace_write",
+          resourceId: "workspace",
+          operations: ["write"],
+          constraints: { allowedRelPaths: ["reports/revoked-cached.md"] },
+          now,
+        });
+        revokedCachedGrantId = revCachedGrant.grant_id;
+        grantModelDisclosure(srSeedDb, {
+          principalId: "owner",
+          scopeId: "scope:default",
+          sourceType: "*",
+          sourceId: "*",
+          provider: "fake-local",
+          modelId: "*",
+          baseUrl: fakeModel.baseUrl,
+          slotName: "*",
+          now,
+        });
+        srSeedDb.close();
+      }
+
+      const srCfgPath = path.join(srDir, "connectors.json");
+      writeFileSync(
+        srCfgPath,
+        JSON.stringify(
+          {
+            workspace: {
+              workspaceDir: srWorkspace,
+              approvedImageId,
+              imageName: DEFAULT_SANDBOX_IMAGE,
+              trackedBaselineRelPaths: [
+                "reports/same-round-a.md",
+                "reports/same-round-b.md",
+                "reports/revoked-cached.md",
+              ],
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      const srToken = `SYNTH_V03_SAMEROUND_${runId}`;
+      const srBarrierFile = path.join(srDir, "barrier-sr-a.json");
+      const srAContent = `SAME_ROUND_A_${runId}\n`;
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_sr_a_${runId}`,
+              name: "workspace_write_managed",
+              arguments: { relPath: "reports/same-round-a.md", content: srAContent },
+            },
+          },
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_sr_b_${runId}`,
+              name: "workspace_write_managed",
+              arguments: {
+                relPath: "reports/same-round-b.md",
+                content: modelOverwriteSrB,
+                baseSha256: userOfflineSrBSha,
+              },
+            },
+          },
+          { kind: "text", text: "Same-round recovery finished." },
+        ],
+      });
+
+      const hostSr1 = await spawnFormalHost({
+        dataDir: srDataDir,
+        modelBaseUrl: fakeModel.baseUrl,
+        smtpHost: fakeSmtp.host,
+        smtpPort: fakeSmtp.smtpPort,
+        consoleToken: srToken,
+        connectorsConfigPath: srCfgPath,
+        extraArgs: ["--fault-after-import-install-before-receipt", srBarrierFile],
+      });
+      const srCookie1 = await httpLogin(hostSr1.baseUrl, srToken);
+      const srConv = (await (
+        await fetch(`${hostSr1.baseUrl}/api/conversations`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: srCookie1, origin: hostSr1.baseUrl },
+          body: JSON.stringify({ slotName: "router" }),
+        })
+      ).json()) as { conversationId: string; runtimeEpoch: string };
+
+      const srChatRes = await fetch(`${hostSr1.baseUrl}/api/conversations/${srConv.conversationId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: srCookie1, origin: hostSr1.baseUrl },
+        body: JSON.stringify({
+          content: "Write index a then update report b in same execution round",
+          chatKey: `v03-sr-${runId}`,
+          runtimeEpoch: srConv.runtimeEpoch,
+        }),
+      });
+      assert.equal(srChatRes.status, 200);
+      await waitForFile(srBarrierFile, 25_000);
+      forceKillWindowsPid(hostSr1.pid);
+      await new Promise((r) => setTimeout(r, 400));
+
+      // During downtime: user modifies same-round-b.md AND revokes reports/revoked-cached.md BEFORE host restarts!
+      writeFileSync(path.join(srWorkspace, "reports", "same-round-b.md"), userOfflineSrB, "utf8");
+      {
+        const { db: srDownDb } = openGovernanceDb(path.join(srDataDir, "aegis-gov.sqlite"));
+        revokeSourceReadGrant(srDownDb, {
+          grantId: revokedCachedGrantId,
+          reason: "w2_s3_post_cache_revoke",
+          now: Date.now(),
+        });
+        srDownDb.close();
+      }
+
+      const hostSr2 = await spawnFormalHost({
+        dataDir: srDataDir,
+        modelBaseUrl: fakeModel.baseUrl,
+        smtpHost: fakeSmtp.host,
+        smtpPort: fakeSmtp.smtpPort,
+        consoleToken: srToken,
+        connectorsConfigPath: srCfgPath,
+      });
+      try {
+        const srCookie2 = await httpLogin(hostSr2.baseUrl, srToken);
+        const srDeadline = Date.now() + 25_000;
+        let srImpB: { targetRelPath: string; state: string; baseSha256: string | null; conflictRelPath: string | null } | undefined;
+        let srFinished = false;
+        while (Date.now() < srDeadline) {
+          const sp = (await (
+            await fetch(`${hostSr2.baseUrl}/api/conversations/${srConv.conversationId}/snapshot`, {
+              headers: { cookie: srCookie2 },
+            })
+          ).json()) as {
+            fileImports: Array<{ targetRelPath: string; state: string; baseSha256: string | null; conflictRelPath: string | null }>;
+            messages?: Array<{ role: string; content: unknown }>;
+          };
+          srImpB = sp.fileImports.find((f) => f.targetRelPath === "reports/same-round-b.md");
+          srFinished = Boolean(
+            sp.messages?.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("Same-round recovery finished")),
+          );
+          if (srImpB && srFinished) break;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        assert.equal(srFinished, true, "W2-S3: Same-round resumed run must finish tool 2");
+        assert.equal(srImpB?.state, "CONFLICT_SAVED", "W2-S3: Resumed same-round tool 2 MUST keep pre-crash frozen baseline -> CONFLICT_SAVED");
+        assert.equal(srImpB?.baseSha256, origSrBSha, "W2-S3: Resumed same-round baseline must equal pre-crash origSrBSha");
+        assert.ok(srImpB?.conflictRelPath, "W2-S3: Conflict candidate must be saved");
+        assert.equal(
+          sha256FileIfExists(path.join(srWorkspace, "reports", "same-round-b.md")),
+          userOfflineSrBSha,
+          "W2-S3: User's downtime edit MUST NOT be overwritten after restart!",
+        );
+        assert.equal(
+          sha256FileIfExists(path.join(srWorkspace, srImpB.conflictRelPath!)),
+          modelOverwriteSrBSha,
+        );
+      } finally {
+        await hostSr2.stop();
+      }
+
+      const { db: postSrDb } = openGovernanceDb(path.join(srDataDir, "aegis-gov.sqlite"));
+      try {
+        const srSboxRows = postSrDb
+          .prepare("SELECT details_json FROM audit_events WHERE event_type = 'docker_sandbox_observed' ORDER BY occurred_at DESC")
+          .all() as Array<{ details_json: string }>;
+        assert.ok(srSboxRows.length >= 1);
+        const latestSrSbox = JSON.parse(srSboxRows[0]!.details_json) as {
+          inputAuthorizedFiles: string[];
+          excludedInputFiles?: string[];
+        };
+        assert.equal(
+          latestSrSbox.inputAuthorizedFiles.includes("reports/revoked-cached.md"),
+          false,
+          "W2-S3: Post-cache revoked path MUST be excluded before launching resumed container!",
+        );
+        assert.equal(
+          (latestSrSbox.excludedInputFiles ?? []).includes("reports/revoked-cached.md"),
+          true,
+          "W2-S3: Excluded post-cache revoked path must be audited",
+        );
+
+        // Fail-closed test: delete persisted snapshot directory -> getOrCreateTaskFrozenSnapshot MUST fail closed!
+        const snapRow = postSrDb
+          .prepare("SELECT snapshot_key, runtime_epoch, snapshot_dir FROM task_frozen_snapshots LIMIT 1")
+          .get() as {
+            snapshot_key: string;
+            runtime_epoch: string;
+            snapshot_dir: string;
+          } | undefined;
+        assert.ok(snapRow, "W2-S3: Persisted task_frozen_snapshots row must exist in govDb");
+        rmSync(snapRow.snapshot_dir, { recursive: true, force: true });
+        const srImporter = new ManagedWorkspaceImporter(srWorkspace);
+        const missingRes = srImporter.getOrCreateTaskFrozenSnapshot({
+          snapshotKey: snapRow.snapshot_key,
+          snapshotRootDir: path.join(srDataDir, "sandbox-task-snapshots"),
+          govDb: postSrDb,
+          runtimeEpoch: snapRow.runtime_epoch,
+          executionRootTaskId: "resumed",
+          principalId: "owner",
+          scopeId: "scope:default",
+          candidateRelPaths: ["reports/same-round-b.md"],
+        });
+        assert.equal(missingRes.ok, false, "W2-S3: Missing persisted frozen snapshot MUST fail closed");
+        assert.equal(!missingRes.ok ? missingRes.code : null, "frozen_snapshot_missing");
+      } finally {
+        postSrDb.close();
+      }
     } finally {
       await fakeSmtp.stop().catch(() => {});
       await fakeModel.stop().catch(() => {});
@@ -1443,6 +1692,9 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         sequentialV1Sha256: sequentialV1Sha,
         sequentialV2Sha256: sequentialV2Sha,
         formalContainerAuthorizedInputs: sequentialAuthorizedInputs,
+        sameRoundCrashRecoveryConflictPreserved: true,
+        sameRoundPostCacheRevokedExcluded: true,
+        missingFrozenSnapshotFailClosedVerified: true,
       },
     };
     const evidencePath = path.join(evidenceDir, "v03-evidence.json");

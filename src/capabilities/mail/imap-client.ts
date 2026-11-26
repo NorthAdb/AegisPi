@@ -17,6 +17,12 @@ export interface ImapEndpointConfig {
   credentialSlotId: string;
   mailbox: string;
   timeoutMs?: number;
+  onObserveChildEnv?: (info: {
+    entries?: Array<[string, string]>;
+    keys: string[];
+    valueDigests: Record<string, string>;
+    passwordPresentInEnv: boolean;
+  }) => void;
 }
 
 export interface ImapReadResult {
@@ -43,6 +49,7 @@ export interface ImapReadResult {
     contentDigest: string;
   } | null;
   childEnvKeysObserved?: string[];
+  childEnvValueDigests?: Record<string, string>;
 }
 
 function buildMinimalChildEnv(): Record<string, string> {
@@ -191,6 +198,7 @@ export async function readImapMessageReadOnly(params: {
     mailbox: params.endpoint.mailbox,
     ...(params.uid !== undefined ? { uid: params.uid } : {}),
     ...(params.subjectContains ? { subjectContains: params.subjectContains } : {}),
+    ...(params.endpoint.onObserveChildEnv ? { includeEnvValuesForAudit: true } : {}),
     timeoutMs: params.endpoint.timeoutMs ?? 15_000,
   });
 
@@ -221,7 +229,19 @@ export async function readImapMessageReadOnly(params: {
     };
   }
 
-  const parsed = JSON.parse(line) as ImapReadResult & { passwordPresentInEnv?: boolean };
+  const parsed = JSON.parse(line) as ImapReadResult & {
+    passwordPresentInEnv?: boolean;
+    childEnvEntriesObserved?: Array<[string, string]>;
+  };
+  if (params.endpoint.onObserveChildEnv) {
+    params.endpoint.onObserveChildEnv({
+      entries: parsed.childEnvEntriesObserved ?? [],
+      keys: parsed.childEnvKeysObserved ?? [],
+      valueDigests: parsed.childEnvValueDigests ?? {},
+      passwordPresentInEnv: Boolean(parsed.passwordPresentInEnv),
+    });
+  }
+  delete parsed.childEnvEntriesObserved;
   if (parsed.ok && parsed.message) {
     parsed.message.contentDigest = sha256Hex(`${parsed.message.subject}\n${parsed.message.body}`);
   }
@@ -241,6 +261,7 @@ export async function readImapMessageReadOnly(params: {
         readOnlyExamine: parsed.readOnlyExamine ?? false,
         usedBodyPeek: parsed.usedBodyPeek ?? false,
         childEnvKeysObserved: parsed.childEnvKeysObserved ?? [],
+        childEnvValueDigests: parsed.childEnvValueDigests ?? {},
         passwordPresentInEnv: Boolean(parsed.passwordPresentInEnv),
       },
     });

@@ -631,6 +631,7 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
     let v05ReusedConvId = "";
     let claimConvIdForRevCheck = "";
     let claimEpochForRevCheck = "";
+    let workerDelegationRequestOrder: string[] = [];
 
     try {
       const ownerCookie = await httpLogin(web5.baseUrl, tokens.owner);
@@ -737,7 +738,38 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         "Approval committed between snapshot and SSE subscribe MUST NOT be missed!",
       );
 
-      // Also verify background Worker completion arrives over SSE!
+      type ApprovalTurnDoneSnap = {
+        cursor: string;
+        seq: number;
+        proposals: Array<{ approvalState: string; effect?: { state: string } }>;
+        messages: Array<{ role: string; content: unknown }>;
+      };
+      let approvalTurnDoneSnap: ApprovalTurnDoneSnap | null = null;
+      const approvalDeadline = Date.now() + 15_000;
+      while (Date.now() < approvalDeadline) {
+        const s = (await (
+          await fetch(`${web5.baseUrl}/api/conversations/${conv5.conversationId}/snapshot`, {
+            headers: { cookie: ownerCookie },
+          })
+        ).json()) as ApprovalTurnDoneSnap;
+        if (
+          s &&
+          s.proposals[0]?.approvalState === "APPROVED" &&
+          s.proposals[0]?.effect?.state === "SUCCEEDED" &&
+          s.messages.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("V05 approval done."))
+        ) {
+          approvalTurnDoneSnap = s;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      assert.ok(
+        approvalTurnDoneSnap,
+        "W2-R4-E1: Approval turn must reach terminal state (effect=SUCCEEDED + assistant text) before worker delegation",
+      );
+
+      // Verify independent FakeModel request ordering & Worker completion arrives over SSE cleanly!
+      const reqCountBeforeWorker = (await fakeModel.stats()).totalPhysicalRequests;
       await fakeModel.queue({
         clear: true,
         scripts: [
@@ -756,13 +788,39 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         headers: { "content-type": "application/json", cookie: ownerCookie, origin: web5.baseUrl },
         body: JSON.stringify({ content: "Delegate worker", chatKey: `ck-v05-wrk-${runId}`, runtimeEpoch: conv5.runtimeEpoch }),
       });
-      await new Promise((r) => setTimeout(r, 450));
-      const snapPostWrk = (await (
-        await fetch(`${web5.baseUrl}/api/conversations/${conv5.conversationId}/snapshot`, {
-          headers: { cookie: ownerCookie },
-        })
-      ).json()) as { seq: number; workerTasks: Array<{ status: string }> };
+
+      type SnapPostWrk = {
+        seq: number;
+        workerTasks: Array<{ status: string }>;
+        messages: Array<{ role: string; content: unknown }>;
+      };
+      let snapPostWrk: SnapPostWrk | null = null;
+      const wrkDeadline = Date.now() + 15_000;
+      while (Date.now() < wrkDeadline) {
+        const s = (await (
+          await fetch(`${web5.baseUrl}/api/conversations/${conv5.conversationId}/snapshot`, {
+            headers: { cookie: ownerCookie },
+          })
+        ).json()) as SnapPostWrk;
+        if (
+          s &&
+          s.workerTasks.some((w) => w.status === "done") &&
+          s.messages.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("ROUTER_AFTER_WORKER_V05"))
+        ) {
+          snapPostWrk = s;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      assert.ok(snapPostWrk, "V05: background worker completion and post-worker Router reply must project deterministically");
       assert.ok(snapPostWrk.workerTasks.some((w) => w.status === "done"), "V05: background worker completion tracked in projection");
+      const postWrkReqs = (await fakeModel.stats()).records.slice(reqCountBeforeWorker);
+      workerDelegationRequestOrder = postWrkReqs.map((r) => r.model ?? "<null>");
+      assert.deepEqual(
+        workerDelegationRequestOrder,
+        ["fake-router-1", "fake-worker-1", "fake-router-1"],
+        `W2-R4-E1: Expected clean [router -> worker -> router] request order, got ${JSON.stringify(workerDelegationRequestOrder)}`,
+      );
 
       // Eviction gap test: lower maxHistory to 5, push 8 changes, subscribe with old cursor -> MUST get resync!
       web5.projectionHub.setLimits({ maxHistory: 5 });
@@ -1310,6 +1368,7 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         sourceRevokeDraftEditDenied403: true,
         sourceRevokeApproveDenied403: true,
         sourceRevokeClaimRefusedZeroSends: true,
+        workerDelegationRequestOrder,
         projectionConcurrentStaleReadSerialized: true,
         crossPrincipalForbidden403: true,
       },

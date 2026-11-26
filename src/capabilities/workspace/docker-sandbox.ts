@@ -44,8 +44,11 @@ export function buildMinimalDockerCliEnv(sourceEnv: NodeJS.ProcessEnv = process.
 function execDockerSync(
   args: string[],
   opts?: { timeoutMs?: number; maxBuffer?: number },
-): { status: number | null; stdout: string; stderr: string; cliEnvKeys: string[] } {
+): { status: number | null; stdout: string; stderr: string; cliEnvKeys: string[]; cliEnvEntries: Array<[string, string]> } {
   const cliEnv = buildMinimalDockerCliEnv();
+  const cliEnvEntries = Object.entries(cliEnv)
+    .filter((pair): pair is [string, string] => typeof pair[1] === "string")
+    .sort((a, b) => a[0].localeCompare(b[0]));
   const res = spawnSync("docker", args, {
     encoding: "utf8",
     timeout: opts?.timeoutMs ?? 10_000,
@@ -57,16 +60,20 @@ function execDockerSync(
     status: res.status,
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? (res.error ? res.error.message : ""),
-    cliEnvKeys: Object.keys(cliEnv).sort(),
+    cliEnvKeys: cliEnvEntries.map(([k]) => k),
+    cliEnvEntries,
   };
 }
 
 async function execDockerAsync(
   args: string[],
   timeoutMs = 25_000,
-): Promise<{ status: number | null; stdout: string; stderr: string; cliEnvKeys: string[] }> {
+): Promise<{ status: number | null; stdout: string; stderr: string; cliEnvKeys: string[]; cliEnvEntries: Array<[string, string]> }> {
   const cliEnv = buildMinimalDockerCliEnv();
-  const cliEnvKeys = Object.keys(cliEnv).sort();
+  const cliEnvEntries = Object.entries(cliEnv)
+    .filter((pair): pair is [string, string] => typeof pair[1] === "string")
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const cliEnvKeys = cliEnvEntries.map(([k]) => k);
   return await new Promise((resolve) => {
     const child = spawn("docker", args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -80,7 +87,7 @@ async function execDockerAsync(
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ status, stdout, stderr, cliEnvKeys });
+      resolve({ status, stdout, stderr, cliEnvKeys, cliEnvEntries });
     };
     const timer = setTimeout(() => {
       try {
@@ -175,6 +182,16 @@ export function inspectDockerEnvironment(imageName = DEFAULT_SANDBOX_IMAGE): Doc
   };
 }
 
+export interface DockerInspectObservedInfo {
+  cliEnvEntries: Array<[string, string]>;
+  rawEnvInContainer: string[];
+  networkMode: string;
+  containerId: string;
+  containerName: string;
+  volumeName: string;
+  mounts: Array<{ source: string; destination: string; rw: boolean }>;
+}
+
 export interface SandboxTaskRunOptions {
   imageName?: string;
   /** W2-G2: Required immutable sha256:... image digest verified BEFORE docker run. */
@@ -185,6 +202,8 @@ export interface SandboxTaskRunOptions {
   volumeName?: string;
   keepRunningDetached?: boolean;
   timeoutMs?: number;
+  /** W2-S6: Ephemeral in-memory observer for raw Docker CLI env, inspect .Config.Env & .HostConfig.NetworkMode. */
+  onInspectObserved?: (info: DockerInspectObservedInfo) => void;
 }
 
 export interface SandboxTaskRunResult {
@@ -197,7 +216,7 @@ export interface SandboxTaskRunResult {
   imageName: string;
   imageId: string | null;
   executorImageId: string | null;
-  networkMode: "none";
+  networkMode: string;
   mounts: Array<{ source: string; destination: string; rw: boolean }>;
   envKeysInContainer: string[];
   dockerCliEnvKeys?: string[];
@@ -229,7 +248,7 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
       imageName,
       imageId: null,
       executorImageId: null,
-      networkMode: "none",
+      networkMode: "",
       mounts: [],
       envKeysInContainer: [],
       exitCode: null,
@@ -281,13 +300,13 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
 
   const run = execDockerSync(dockerArgs, { timeoutMs: opts.timeoutMs ?? 25_000 });
 
-  // Inspect container metadata (ID, mounts, image, env) strictly via Docker daemon
+  // Inspect container metadata (ID, mounts, image, env, NetworkMode) strictly via Docker daemon
   const insp = execDockerSync(
     [
       "inspect",
       containerName,
       "--format",
-      "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}",
+      "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}|||{{.HostConfig.NetworkMode}}",
     ],
     { timeoutMs: 10_000 },
   );
@@ -295,7 +314,9 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
   let containerId = "";
   let imageId: string | null = null;
   let mounts: Array<{ source: string; destination: string; rw: boolean }> = [];
+  let rawEnvInContainer: string[] = [];
   let envKeysInContainer: string[] = [];
+  let networkMode = "";
 
   if (insp.status === 0) {
     const parts = insp.stdout.trim().split("|||");
@@ -317,12 +338,24 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
       mounts = [];
     }
     try {
-      const rawEnv = JSON.parse(parts[3] ?? "[]") as string[];
-      envKeysInContainer = rawEnv.map((e) => e.split("=")[0] ?? "").filter(Boolean);
+      rawEnvInContainer = JSON.parse(parts[3] ?? "[]") as string[];
+      envKeysInContainer = rawEnvInContainer.map((e) => e.split("=")[0] ?? "").filter(Boolean);
     } catch {
+      rawEnvInContainer = [];
       envKeysInContainer = [];
     }
+    networkMode = (parts[4] ?? "").trim();
   }
+
+  opts.onInspectObserved?.({
+    cliEnvEntries: run.cliEnvEntries,
+    rawEnvInContainer,
+    networkMode,
+    containerId,
+    containerName,
+    volumeName,
+    mounts,
+  });
 
   return {
     ok: run.status === 0,
@@ -332,7 +365,7 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
     imageName,
     imageId,
     executorImageId: imageId ?? imgCheck.immutableImageId,
-    networkMode: "none",
+    networkMode,
     mounts,
     envKeysInContainer,
     dockerCliEnvKeys: run.cliEnvKeys,
@@ -695,7 +728,7 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
       imageName,
       imageId: null,
       executorImageId: null,
-      networkMode: "none",
+      networkMode: "",
       mounts: [],
       envKeysInContainer: [],
       exitCode: null,
@@ -747,14 +780,21 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
 
   const run = await execDockerAsync(dockerArgs, opts.timeoutMs ?? 25_000);
   const insp = await execDockerAsync(
-    ["inspect", containerName, "--format", "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}"],
+    [
+      "inspect",
+      containerName,
+      "--format",
+      "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}|||{{.HostConfig.NetworkMode}}",
+    ],
     10_000,
   );
 
   let containerId = "";
   let imageId: string | null = null;
   let mounts: Array<{ source: string; destination: string; rw: boolean }> = [];
+  let rawEnvInContainer: string[] = [];
   let envKeysInContainer: string[] = [];
+  let networkMode = "";
 
   if (insp.status === 0) {
     const parts = insp.stdout.trim().split("|||");
@@ -776,12 +816,24 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
       mounts = [];
     }
     try {
-      const rawEnv = JSON.parse(parts[3] ?? "[]") as string[];
-      envKeysInContainer = rawEnv.map((e) => e.split("=")[0] ?? "").filter(Boolean);
+      rawEnvInContainer = JSON.parse(parts[3] ?? "[]") as string[];
+      envKeysInContainer = rawEnvInContainer.map((e) => e.split("=")[0] ?? "").filter(Boolean);
     } catch {
+      rawEnvInContainer = [];
       envKeysInContainer = [];
     }
+    networkMode = (parts[4] ?? "").trim();
   }
+
+  opts.onInspectObserved?.({
+    cliEnvEntries: run.cliEnvEntries,
+    rawEnvInContainer,
+    networkMode,
+    containerId,
+    containerName,
+    volumeName,
+    mounts,
+  });
 
   return {
     ok: run.status === 0,
@@ -791,7 +843,7 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
     imageName,
     imageId,
     executorImageId: imageId ?? imgCheck.immutableImageId,
-    networkMode: "none",
+    networkMode,
     mounts,
     envKeysInContainer,
     dockerCliEnvKeys: run.cliEnvKeys,

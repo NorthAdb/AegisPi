@@ -7,7 +7,7 @@ import {
   runTaskInDockerSandboxAsync,
   stopAndRemoveContainerAsync,
 } from "./capabilities/workspace/docker-sandbox.ts";
-import { ManagedWorkspaceImporter, type TaskFrozenWorkspaceSnapshot } from "./capabilities/workspace/importer.ts";
+import { ManagedWorkspaceImporter } from "./capabilities/workspace/importer.ts";
 import {
   assertStage1LoopbackModelUrl,
   assertStage1LoopbackSmtpHost,
@@ -103,6 +103,10 @@ const faultAfterPiAdmitBeforeGovReceiptFile = args["fault-after-pi-admit-before-
 const faultAfterChatGovReceiptBeforeHttpFile = args["fault-after-chat-gov-receipt-before-http"];
 const faultChatReconcileReadFailure = args["fault-chat-reconcile-read-failure"];
 const faultAfterImportInstallBeforeReceiptFile = args["fault-after-import-install-before-receipt"];
+const s6ObserveDir = args["s6-observe-dir"] ? path.resolve(args["s6-observe-dir"]) : undefined;
+if (s6ObserveDir) {
+  mkdirSync(s6ObserveDir, { recursive: true });
+}
 
 interface TrustedConnectorsConfig {
   defaultMemoryDomain?: string;
@@ -222,6 +226,17 @@ if (connectorsCfg?.imap) {
       username: ic.username,
       credentialSlotId: slotId,
       mailbox: ic.mailbox,
+      ...(s6ObserveDir
+        ? {
+            onObserveChildEnv: (info) => {
+              const outFile = path.join(
+                s6ObserveDir,
+                `imap-child-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
+              );
+              writeFileSync(outFile, JSON.stringify({ ...info, at: new Date().toISOString() }, null, 2), "utf8");
+            },
+          }
+        : {}),
     };
   }
 }
@@ -303,7 +318,6 @@ let managedImporter: ManagedWorkspaceImporter | undefined;
 let hostRef: AegisHostRuntime | null = null;
 let mcpBridge: GitHubMcpBridge | null = null;
 const taskSnapshotsRootDir = path.join(dataDir, "sandbox-task-snapshots");
-const taskFrozenSnapshots = new Map<string, TaskFrozenWorkspaceSnapshot>();
 
 if (connectorsCfg?.workspace) {
   const wc = connectorsCfg.workspace;
@@ -394,133 +408,217 @@ const host = await AegisHostRuntime.start({
           if (!preAuth.ok) {
             return { ok: false, code: "workspace_write_denied", message: preAuth.reason };
           }
-          // W2-S3: Per-execution-root frozen input snapshot & baseline (NOT shared across sequential
-          // commands on one conversation, while still isolating overlapping tasks from advancing each other!).
+          // W2-S3: Durable run-level frozen input snapshot & baseline persisted in governance SQLite,
+          // re-verifying every /input path against live source_read_grants before EACH container launch.
           const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
           const taskSnapKey = `${wp.runtimeEpoch}:${wp.executionRootTaskId}`;
-          let frozenSnap = taskFrozenSnapshots.get(taskSnapKey);
-          if (!frozenSnap) {
-            frozenSnap = importer.createTaskFrozenSnapshot({
-              snapshotRootDir: taskSnapshotsRootDir,
-              govDb: currentHost.govDb,
-              principalId: wp.principalId,
-              scopeId: wp.scopeId,
-              candidateRelPaths: [...(wc.trackedBaselineRelPaths ?? []), cap.normalizedRelPath],
-            });
-            taskFrozenSnapshots.set(taskSnapKey, frozenSnap);
-          }
-          const hostBaseSha256 = frozenSnap.getBaseline(cap.normalizedRelPath);
-
-          const sb = await runTaskInDockerSandboxAsync({
-            approvedImageId: wc.approvedImageId,
-            imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
-            inputSnapshotDir: frozenSnap.snapshotDir,
-            nodeScript: `
-              const fs = require("node:fs");
-              const path = require("node:path");
-              const rel = ${JSON.stringify(cap.normalizedRelPath)};
-              const full = path.join("/out", rel);
-              fs.mkdirSync(path.dirname(full), { recursive: true });
-              fs.writeFileSync(full, ${JSON.stringify(wp.content)}, "utf8");
-            `,
+          const frozenRes = importer.getOrCreateTaskFrozenSnapshot({
+            snapshotKey: taskSnapKey,
+            snapshotRootDir: taskSnapshotsRootDir,
+            govDb: currentHost.govDb,
+            runtimeEpoch: wp.runtimeEpoch,
+            executionRootTaskId: wp.executionRootTaskId,
+            principalId: wp.principalId,
+            scopeId: wp.scopeId,
+            candidateRelPaths: [...(wc.trackedBaselineRelPaths ?? []), cap.normalizedRelPath],
           });
-          if (!sb.ok) {
-            if (sb.containerName) await stopAndRemoveContainerAsync(sb.containerName);
-            if (sb.volumeName) await cleanupTaskVolumeAsync(sb.volumeName);
+          if (!frozenRes.ok) {
             return {
               ok: false,
-              code: sb.code ?? "sandbox_execution_failed",
-              message: sb.error ?? (sb.stderr || "Docker sandbox failed"),
-              executorImageId: sb.executorImageId,
+              code: frozenRes.code,
+              state: "PENDING_RECONCILE",
+              message: frozenRes.reason,
             };
           }
+          const frozenSnap = frozenRes.snapshot;
+          if (frozenSnap.fromDurableDb && !frozenSnap.hasBaseline(cap.normalizedRelPath) && cap.baseSha256 !== null) {
+            return {
+              ok: false,
+              code: "frozen_snapshot_baseline_missing",
+              state: "PENDING_RECONCILE",
+              message: `Restored frozen snapshot ${frozenSnap.snapshotId} lacks frozen baseline for existing file '${cap.normalizedRelPath}'`,
+            };
+          }
+          const hostBaseSha256 = frozenSnap.getBaseline(cap.normalizedRelPath);
+          const verifiedMount = importer.prepareVerifiedMountInputDir({
+            snapshot: frozenSnap,
+            mountRootDir: taskSnapshotsRootDir,
+            govDb: currentHost.govDb,
+            principalId: wp.principalId,
+            scopeId: wp.scopeId,
+          });
 
           try {
-            // Collect related conversation IDs (e.g. parent + worker) for W2-S2 recursive source revocation checks
-            const relatedIds = new Set<string>([wp.conversationId]);
-            if (boundTask) {
-              const rows = currentHost.govDb
-                .prepare(
-                  "SELECT DISTINCT conversation_id FROM budget_task_bindings WHERE runtime_epoch = ? AND owner_task_id = ?",
-                )
-                .all(wp.runtimeEpoch, boundTask) as Array<{ conversation_id: string }>;
-              for (const r of rows) relatedIds.add(r.conversation_id);
-            }
-
-            const impRes = await importer.importFileFromTaskVolume({
-              govDb: currentHost.govDb,
-              runtimeEpoch: wp.runtimeEpoch,
-              conversationId: wp.conversationId,
-              relatedConversationIds: [...relatedIds],
-              principalId: wp.principalId,
-              scopeId: wp.scopeId,
-              logicalKey: wp.logicalKey,
-              volumeName: sb.volumeName,
+            const sb = await runTaskInDockerSandboxAsync({
               approvedImageId: wc.approvedImageId,
-              containerId: sb.containerId,
-              targetRelPath: cap.normalizedRelPath,
-              baseSha256: hostBaseSha256,
-              ...(faultAfterImportInstallBeforeReceiptFile
+              imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
+              inputSnapshotDir: verifiedMount.mountDir,
+              nodeScript: `
+                const fs = require("node:fs");
+                const path = require("node:path");
+                const rel = ${JSON.stringify(cap.normalizedRelPath)};
+                const full = path.join("/out", rel);
+                fs.mkdirSync(path.dirname(full), { recursive: true });
+                fs.writeFileSync(full, ${JSON.stringify(wp.content)}, "utf8");
+              `,
+              ...(s6ObserveDir
                 ? {
-                    onAfterAtomicInstallBeforeReceipt: (info) => {
+                    onInspectObserved: (info) => {
+                      const outFile = path.join(
+                        s6ObserveDir,
+                        `docker-sandbox-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
+                      );
                       writeFileSync(
-                        faultAfterImportInstallBeforeReceiptFile,
-                        JSON.stringify({
-                          pid: process.pid,
-                          window: "after_import_install_before_receipt",
-                          logicalKey: wp.logicalKey,
-                          conversationId: wp.conversationId,
-                          targetRelPath: cap.normalizedRelPath,
-                          ...info,
-                          at: new Date().toISOString(),
-                        }) + "\n",
+                        outFile,
+                        JSON.stringify(
+                          {
+                            ...info,
+                            mountedRelPaths: verifiedMount.mountedRelPaths,
+                            excludedRelPaths: verifiedMount.excludedRelPaths,
+                            at: new Date().toISOString(),
+                          },
+                          null,
+                          2,
+                        ),
                         "utf8",
                       );
-                      const shared = new Int32Array(new SharedArrayBuffer(4));
-                      Atomics.wait(shared, 0, 0, 60_000);
                     },
                   }
                 : {}),
             });
-            writeAuditEvent(currentHost.govDb, {
-              entityType: "sandbox_run",
-              entityId: sb.containerName || sb.volumeName,
-              eventKey: `sandbox:${wp.logicalKey}:${impRes.importId}`,
-              eventType: "docker_sandbox_observed",
-              occurredAt: Date.now(),
-              details: {
-                containerId: sb.containerId,
-                containerName: sb.containerName,
-                volumeName: sb.volumeName,
+            if (!sb.ok) {
+              if (sb.containerName) await stopAndRemoveContainerAsync(sb.containerName);
+              if (sb.volumeName) await cleanupTaskVolumeAsync(sb.volumeName);
+              return {
+                ok: false,
+                code: sb.code ?? "sandbox_execution_failed",
+                message: sb.error ?? (sb.stderr || "Docker sandbox failed"),
                 executorImageId: sb.executorImageId,
-                exporterImageId: impRes.exporterImageId ?? null,
-                networkMode: sb.networkMode,
-                mounts: sb.mounts,
-                envKeysInContainer: sb.envKeysInContainer,
-                dockerCliEnvKeys: sb.dockerCliEnvKeys ?? [],
-                inputAuthorizedFiles: frozenSnap.authorizedInputRelPaths,
+              };
+            }
+
+            try {
+              // Collect related conversation IDs (e.g. parent + worker) for W2-S2 recursive source revocation checks
+              const relatedIds = new Set<string>([wp.conversationId]);
+              if (boundTask) {
+                const rows = currentHost.govDb
+                  .prepare(
+                    "SELECT DISTINCT conversation_id FROM budget_task_bindings WHERE runtime_epoch = ? AND owner_task_id = ?",
+                  )
+                  .all(wp.runtimeEpoch, boundTask) as Array<{ conversation_id: string }>;
+                for (const r of rows) relatedIds.add(r.conversation_id);
+              }
+
+              const impRes = await importer.importFileFromTaskVolume({
+                govDb: currentHost.govDb,
+                runtimeEpoch: wp.runtimeEpoch,
+                conversationId: wp.conversationId,
+                relatedConversationIds: [...relatedIds],
+                principalId: wp.principalId,
+                scopeId: wp.scopeId,
+                logicalKey: wp.logicalKey,
+                volumeName: sb.volumeName,
+                approvedImageId: wc.approvedImageId,
+                containerId: sb.containerId,
                 targetRelPath: cap.normalizedRelPath,
-                importState: impRes.state,
-                importCode: impRes.code,
-                artifactSha256: impRes.artifactSha256,
-              },
-            });
-            return {
-              ok: impRes.ok,
-              code: impRes.code,
-              message: impRes.message,
-              importId: impRes.importId,
-              state: impRes.state,
-              targetRelPath: impRes.targetRelPath,
-              artifactSha256: impRes.artifactSha256 ?? undefined,
-              conflictPath: impRes.conflictRelPath,
-              installCount: impRes.installCount,
-              executorImageId: sb.executorImageId,
-              exporterImageId: impRes.exporterImageId,
-            };
+                baseSha256: hostBaseSha256,
+                ...(s6ObserveDir
+                  ? {
+                      onExportedFilesObserved: (expInfo) => {
+                        const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+                        const recordedFiles = expInfo.files.map((f, idx) => {
+                          const binName = `volume-export-${stamp}-${idx}.bin`;
+                          writeFileSync(path.join(s6ObserveDir, binName), f.bytes);
+                          return {
+                            relPath: f.relPath,
+                            sha256: f.sha256,
+                            sizeBytes: f.sizeBytes,
+                            bytesFile: binName,
+                          };
+                        });
+                        writeFileSync(
+                          path.join(s6ObserveDir, `volume-export-${stamp}.json`),
+                          JSON.stringify(
+                            {
+                              volumeName: expInfo.volumeName,
+                              exporterImageId: expInfo.exporterImageId,
+                              readOnlyMountVerified: expInfo.readOnlyMountVerified,
+                              files: recordedFiles,
+                              at: new Date().toISOString(),
+                            },
+                            null,
+                            2,
+                          ),
+                          "utf8",
+                        );
+                      },
+                    }
+                  : {}),
+                ...(faultAfterImportInstallBeforeReceiptFile
+                  ? {
+                      onAfterAtomicInstallBeforeReceipt: (info) => {
+                        writeFileSync(
+                          faultAfterImportInstallBeforeReceiptFile,
+                          JSON.stringify({
+                            pid: process.pid,
+                            window: "after_import_install_before_receipt",
+                            logicalKey: wp.logicalKey,
+                            conversationId: wp.conversationId,
+                            targetRelPath: cap.normalizedRelPath,
+                            ...info,
+                            at: new Date().toISOString(),
+                          }) + "\n",
+                          "utf8",
+                        );
+                        const shared = new Int32Array(new SharedArrayBuffer(4));
+                        Atomics.wait(shared, 0, 0, 60_000);
+                      },
+                    }
+                  : {}),
+              });
+              writeAuditEvent(currentHost.govDb, {
+                entityType: "sandbox_run",
+                entityId: sb.containerName || sb.volumeName,
+                eventKey: `sandbox:${wp.logicalKey}:${impRes.importId}`,
+                eventType: "docker_sandbox_observed",
+                occurredAt: Date.now(),
+                details: {
+                  containerId: sb.containerId,
+                  containerName: sb.containerName,
+                  volumeName: sb.volumeName,
+                  executorImageId: sb.executorImageId,
+                  exporterImageId: impRes.exporterImageId ?? null,
+                  networkMode: sb.networkMode,
+                  mounts: sb.mounts,
+                  envKeysInContainer: sb.envKeysInContainer,
+                  dockerCliEnvKeys: sb.dockerCliEnvKeys ?? [],
+                  inputAuthorizedFiles: verifiedMount.mountedRelPaths,
+                  excludedInputFiles: verifiedMount.excludedRelPaths,
+                  targetRelPath: cap.normalizedRelPath,
+                  importState: impRes.state,
+                  importCode: impRes.code,
+                  artifactSha256: impRes.artifactSha256,
+                },
+              });
+              return {
+                ok: impRes.ok,
+                code: impRes.code,
+                message: impRes.message,
+                importId: impRes.importId,
+                state: impRes.state,
+                targetRelPath: impRes.targetRelPath,
+                artifactSha256: impRes.artifactSha256 ?? undefined,
+                conflictPath: impRes.conflictRelPath,
+                installCount: impRes.installCount,
+                executorImageId: sb.executorImageId,
+                exporterImageId: impRes.exporterImageId,
+              };
+            } finally {
+              await stopAndRemoveContainerAsync(sb.containerName);
+              await cleanupTaskVolumeAsync(sb.volumeName);
+            }
           } finally {
-            await stopAndRemoveContainerAsync(sb.containerName);
-            await cleanupTaskVolumeAsync(sb.volumeName);
+            verifiedMount.cleanup();
           }
         },
       }
@@ -642,10 +740,6 @@ const web = await startWebServer({
 const shutdown = async (): Promise<void> => {
   await web.close().catch(() => {});
   await mcpBridge?.close().catch(() => {});
-  for (const snap of taskFrozenSnapshots.values()) {
-    snap.cleanup();
-  }
-  taskFrozenSnapshots.clear();
   await host.close().catch(() => {});
   process.exit(0);
 };

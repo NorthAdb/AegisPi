@@ -933,6 +933,197 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
     const lateApproveCheck = await runDelayedApprovalSwitchTest("approve", "/api/approvals/decide", `S4 Late Approve ${runId}`);
     const lateRejectCheck = await runDelayedApprovalSwitchTest("reject", "/api/approvals/decide", `S4 Late Reject ${runId}`);
 
+    // 3d-2. W2-S4 Edit-Version & Logout Race Checks:
+    //   (1) A -> B -> A + further local edit -> delayed Save receipt arrives + snapshot redraws -> newer local edit preserved!
+    //   (2) Delayed Save receipt arrives AFTER user logs out -> remains logged out, no SSE reopen, no card leak!
+    const editVersionReturnPreserved = await (async () => {
+      const prevCid = await cdp.evalJs<string>(`String(window.__aegisView1State.conversationId || '')`);
+      await cdp.evalJs(`document.getElementById('new-conv-btn').click();`);
+      const convA = await cdp.waitFor<string>(
+        `window.__aegisView1State.conversationId && String(window.__aegisView1State.conversationId) !== ${JSON.stringify(prevCid)} && window.__aegisView1State.snapshot && String(window.__aegisView1State.snapshot.conversationId) === String(window.__aegisView1State.conversationId) ? String(window.__aegisView1State.conversationId) : ''`,
+      );
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_s4_editver_${runId}`,
+              name: "send_email",
+              arguments: {
+                to: [`s4-editver@local.test`],
+                subject: `S4 EditVer ${runId}`,
+                body: `Initial editver body rev1`,
+              },
+            },
+          },
+          { kind: "text", text: "Queued editver." },
+        ],
+      });
+      await cdp.evalJs(`
+        document.getElementById('chat-input').value = 'Create proposal for S4 editVersion test';
+        document.getElementById('chat-send-btn').click();
+      `);
+      const cardA = await cdp.waitFor<{ proposalId: string; approvalId: string }>(
+        `(() => {
+          const p = window.__aegisView1State.snapshot?.proposals?.[0];
+          return p && p.approvalState === 'PENDING' ? { proposalId: p.proposalId, approvalId: p.approvalId } : null;
+        })()`,
+        12_000,
+      );
+
+      const newEditAfterReturn = `LOCAL_EDIT_AFTER_SWITCH_BACK_A_${runId}`;
+      const r = await cdp.evalJs<{
+        returnedToConvA: boolean;
+        newerLocalEditPreservedAfterLateSaveAndRedraw: boolean;
+        dirtyStillTrue: boolean;
+        approveDisabledStillTrue: boolean;
+        backendRev: number;
+      }>(`(async () => {
+        const s = window.__aegisView1State;
+        const origFetch = window.fetch.bind(window);
+        let releaseDraft;
+        const gate = new Promise(res => { releaseDraft = res; });
+        window.fetch = async (url, opts) => {
+          const resp = await origFetch(url, opts);
+          if (typeof url === 'string' && url.includes('/draft')) {
+            await gate;
+          }
+          return resp;
+        };
+        try {
+          const ta1 = document.querySelector('#approvals-list textarea');
+          ta1.value = 'FIRST_SAVED_VERSION_IN_FLIGHT';
+          ta1.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#approvals-list [data-action="save-draft"]').click();
+          await new Promise(res => setTimeout(res, 80));
+
+          // Switch to B
+          document.getElementById('new-conv-btn').click();
+          for (let i = 0; i < 60; i++) {
+            if (s.conversationId && String(s.conversationId) !== ${JSON.stringify(convA)} && s.snapshot && String(s.snapshot.conversationId) === String(s.conversationId)) break;
+            await new Promise(res => setTimeout(res, 25));
+          }
+          const convB = String(s.conversationId);
+
+          // Switch BACK to A while rev2 Save is STILL in flight!
+          const sel = document.getElementById('conv-select');
+          for (const opt of sel.options) {
+            if (String(opt.value).startsWith(${JSON.stringify(convA)} + '|')) {
+              sel.value = opt.value;
+              break;
+            }
+          }
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          for (let i = 0; i < 60; i++) {
+            if (String(s.conversationId) === ${JSON.stringify(convA)} && s.snapshot && String(s.snapshot.conversationId) === ${JSON.stringify(convA)} && document.querySelector('#approvals-list textarea')) break;
+            await new Promise(res => setTimeout(res, 25));
+          }
+          const returnedToConvA = String(s.conversationId) === ${JSON.stringify(convA)} && convB !== ${JSON.stringify(convA)};
+
+          // User edits proposal in A again BEFORE the earlier Save receipt arrives!
+          const ta2 = document.querySelector('#approvals-list textarea');
+          ta2.value = ${JSON.stringify(newEditAfterReturn)};
+          ta2.dispatchEvent(new Event('input', { bubbles: true }));
+
+          // Now release the earlier Save response -> view1 triggers selectAndSubscribe redraw!
+          releaseDraft();
+          await new Promise(res => setTimeout(res, 350));
+
+          const taFinal = document.querySelector('#approvals-list textarea');
+          const approveBtnFinal = document.querySelector('#approvals-list [data-action="approve"]');
+          const snapA = await (await origFetch('/api/conversations/' + encodeURIComponent(${JSON.stringify(convA)}) + '/snapshot', { credentials: 'same-origin' })).json();
+          const propA = (snapA.proposals || []).find(p => p.proposalId === ${JSON.stringify(cardA.proposalId)});
+          return {
+            returnedToConvA,
+            newerLocalEditPreservedAfterLateSaveAndRedraw: Boolean(taFinal && taFinal.value === ${JSON.stringify(newEditAfterReturn)}),
+            dirtyStillTrue: Boolean(s.dirtyByProposal && s.dirtyByProposal[${JSON.stringify(cardA.proposalId)}]),
+            approveDisabledStillTrue: Boolean(approveBtnFinal && approveBtnFinal.disabled),
+            backendRev: propA ? propA.revision : 0,
+          };
+        } finally {
+          window.fetch = origFetch;
+        }
+      })()`);
+      assert.equal(r.returnedToConvA, true);
+      assert.equal(r.backendRev, 2, "Earlier Save must still persist rev2 on backend");
+      assert.equal(
+        r.newerLocalEditPreservedAfterLateSaveAndRedraw,
+        true,
+        "W2-S4: Late Save receipt after A->B->A + newer edit MUST NOT clobber newer local draft after snapshot redraw!",
+      );
+      assert.equal(r.dirtyStillTrue, true);
+      assert.equal(r.approveDisabledStillTrue, true);
+      return r;
+    })();
+
+    const lateSavePlusLogoutClean = await (async () => {
+      const r = await cdp.evalJs<{
+        loggedOutPrincipalNull: boolean;
+        sseClosedNull: boolean;
+        authPanelVisible: boolean;
+        approvalsPanelHidden: boolean;
+        approvalsCardsZero: boolean;
+        dirtyCleared: boolean;
+        statusCleared: boolean;
+      }>(`(async () => {
+        const s = window.__aegisView1State;
+        const origFetch = window.fetch.bind(window);
+        let releaseDraft;
+        const gate = new Promise(res => { releaseDraft = res; });
+        window.fetch = async (url, opts) => {
+          const resp = await origFetch(url, opts);
+          if (typeof url === 'string' && url.includes('/draft')) {
+            await gate;
+          }
+          return resp;
+        };
+        try {
+          const ta = document.querySelector('#approvals-list textarea');
+          ta.value = 'SAVE_RIGHT_BEFORE_LOGOUT';
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#approvals-list [data-action="save-draft"]').click();
+          await new Promise(res => setTimeout(res, 80));
+
+          document.getElementById('logout-btn').click();
+          for (let i = 0; i < 60; i++) {
+            if (!s.principalId && document.getElementById('login-panel').style.display !== 'none') break;
+            await new Promise(res => setTimeout(res, 25));
+          }
+
+          releaseDraft();
+          await new Promise(res => setTimeout(res, 300));
+
+          return {
+            loggedOutPrincipalNull: s.principalId === null,
+            sseClosedNull: s.eventSource === null,
+            authPanelVisible: document.getElementById('login-panel').style.display !== 'none',
+            approvalsPanelHidden: document.getElementById('approvals-panel').style.display === 'none',
+            approvalsCardsZero: document.querySelectorAll('#approvals-list > *').length === 0,
+            dirtyCleared: Object.keys(s.dirtyByProposal || {}).length === 0,
+            statusCleared: Object.keys(s.proposalStatusById || {}).length === 0,
+          };
+        } finally {
+          window.fetch = origFetch;
+        }
+      })()`);
+      assert.equal(r.loggedOutPrincipalNull, true);
+      assert.equal(r.sseClosedNull, true);
+      assert.equal(r.authPanelVisible, true);
+      assert.equal(r.approvalsPanelHidden, true);
+      assert.equal(r.approvalsCardsZero, true);
+      assert.equal(r.dirtyCleared, true);
+      assert.equal(r.statusCleared, true);
+
+      // Log back in so subsequent browser checks in S2 / V06 continue smoothly!
+      await cdp.evalJs(`
+        document.getElementById('token-input').value = ${JSON.stringify(consoleToken)};
+        document.getElementById('login-btn').click();
+      `);
+      await cdp.waitFor<boolean>(`Boolean(window.__aegisView1State && window.__aegisView1State.principalId)`, 10_000);
+      return r;
+    })();
+
     // 3e. W2-S2 Browser Check: Local unsaved draft edit on a derived proposal -> revoke source_read_grant
     //     -> live SSE/snapshot immediately clears textarea body & local cache, disables edit/approve controls!
     const prevCidS2 = await cdp.evalJs<string>(`String(window.__aegisView1State.conversationId || '')`);
@@ -1527,6 +1718,8 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
         lateSaveReceiptNoSwitchOrReopen: lateSaveCheck,
         lateApproveReceiptNoSwitchOrReopen: lateApproveCheck,
         lateRejectReceiptNoSwitchOrReopen: lateRejectCheck,
+        editVersionPreservedOnReturnToOriginalConv: editVersionReturnPreserved,
+        lateSaveReceiptWithLogoutRemainsClean: lateSavePlusLogoutClean,
         sourceRevokeClearedLocalDraftAndDisabledControls: {
           redactedAttr: s2BrowserAfterRevoke.redactedAttr,
           textareaValueCleared: s2BrowserAfterRevoke.textareaValue === "",

@@ -147,10 +147,13 @@ function buildConflictRelPath(normalizedRelPath: string, importId: string): stri
 }
 
 export interface TaskFrozenWorkspaceSnapshot {
+  snapshotKey?: string;
   snapshotId: string;
   snapshotDir: string;
+  fromDurableDb: boolean;
   baselines: Map<string, string | null>;
   authorizedInputRelPaths: string[];
+  hasBaseline: (normalizedRelPath: string) => boolean;
   getBaseline: (normalizedRelPath: string) => string | null;
   cleanup: () => void;
 }
@@ -250,12 +253,198 @@ export class ManagedWorkspaceImporter {
     return {
       snapshotId,
       snapshotDir,
+      fromDurableDb: false,
       baselines,
       authorizedInputRelPaths,
+      hasBaseline: (normalizedRelPath: string) => baselines.has(normalizedRelPath),
       getBaseline: (normalizedRelPath: string) => baselines.get(normalizedRelPath) ?? null,
       cleanup: () => {
         try {
           rmSync(snapshotDir, { recursive: true, force: true });
+        } catch {
+          // ignore cleanup race
+        }
+      },
+    };
+  }
+
+  /**
+   * W2-S3: Durable run-level frozen snapshot index persisted in governance SQLite (`task_frozen_snapshots`).
+   * Survives host crashes/restarts in the same task run without ever re-reading modified host workspace
+   * baselines during downtime, and fails closed if persisted snapshot storage is missing.
+   */
+  getOrCreateTaskFrozenSnapshot(params: {
+    snapshotKey: string;
+    snapshotRootDir: string;
+    govDb: DatabaseSync;
+    runtimeEpoch: string;
+    executionRootTaskId: string;
+    principalId: string;
+    scopeId: string;
+    candidateRelPaths: string[];
+    now?: number;
+  }): { ok: true; snapshot: TaskFrozenWorkspaceSnapshot } | { ok: false; code: "frozen_snapshot_missing"; reason: string } {
+    const mapFromRow = (row: {
+      snapshot_id: string;
+      snapshot_dir: string;
+      baselines_json: string;
+      authorized_paths_json: string;
+    }): { ok: true; snapshot: TaskFrozenWorkspaceSnapshot } | { ok: false; code: "frozen_snapshot_missing"; reason: string } => {
+      const parsedBaselines = JSON.parse(row.baselines_json || "{}") as Record<string, string | null>;
+      const baselines = new Map<string, string | null>(Object.entries(parsedBaselines));
+      const authorizedInputRelPaths = JSON.parse(row.authorized_paths_json || "[]") as string[];
+      if (!existsSync(row.snapshot_dir)) {
+        return {
+          ok: false,
+          code: "frozen_snapshot_missing",
+          reason: `Persisted task frozen snapshot directory missing: ${row.snapshot_dir}`,
+        };
+      }
+      for (const rel of authorizedInputRelPaths) {
+        if (baselines.get(rel) !== null) {
+          const frozenFile = path.join(row.snapshot_dir, ...rel.split("/"));
+          if (!existsSync(frozenFile)) {
+            return {
+              ok: false,
+              code: "frozen_snapshot_missing",
+              reason: `Persisted task frozen snapshot file missing for '${rel}': ${frozenFile}`,
+            };
+          }
+        }
+      }
+      return {
+        ok: true,
+        snapshot: {
+          snapshotKey: params.snapshotKey,
+          snapshotId: row.snapshot_id,
+          snapshotDir: row.snapshot_dir,
+          fromDurableDb: true,
+          baselines,
+          authorizedInputRelPaths,
+          hasBaseline: (normalizedRelPath: string) => baselines.has(normalizedRelPath),
+          getBaseline: (normalizedRelPath: string) => baselines.get(normalizedRelPath) ?? null,
+          cleanup: () => {
+            try {
+              rmSync(row.snapshot_dir, { recursive: true, force: true });
+            } catch {
+              // ignore cleanup race
+            }
+          },
+        },
+      };
+    };
+
+    const existing = params.govDb
+      .prepare(
+        "SELECT snapshot_id, snapshot_dir, baselines_json, authorized_paths_json FROM task_frozen_snapshots WHERE snapshot_key = ?",
+      )
+      .get(params.snapshotKey) as
+      | { snapshot_id: string; snapshot_dir: string; baselines_json: string; authorized_paths_json: string }
+      | undefined;
+    if (existing) {
+      return mapFromRow(existing);
+    }
+
+    const fresh = this.createTaskFrozenSnapshot({
+      snapshotRootDir: params.snapshotRootDir,
+      govDb: params.govDb,
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      candidateRelPaths: params.candidateRelPaths,
+    });
+    const baselinesObj: Record<string, string | null> = {};
+    for (const [k, v] of fresh.baselines.entries()) {
+      baselinesObj[k] = v;
+    }
+    const now = params.now ?? Date.now();
+    const inserted = withImmediateTx(params.govDb, () => {
+      const res = params.govDb
+        .prepare(
+          `INSERT OR IGNORE INTO task_frozen_snapshots(
+             snapshot_key, runtime_epoch, snapshot_id,
+             snapshot_dir, baselines_json, authorized_paths_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          params.snapshotKey,
+          params.runtimeEpoch,
+          fresh.snapshotId,
+          fresh.snapshotDir,
+          JSON.stringify(baselinesObj),
+          JSON.stringify(fresh.authorizedInputRelPaths),
+          now,
+        );
+      return Number(res.changes) === 1;
+    });
+    if (!inserted) {
+      fresh.cleanup();
+      const winner = params.govDb
+        .prepare(
+          "SELECT snapshot_id, snapshot_dir, baselines_json, authorized_paths_json FROM task_frozen_snapshots WHERE snapshot_key = ?",
+        )
+        .get(params.snapshotKey) as
+        | { snapshot_id: string; snapshot_dir: string; baselines_json: string; authorized_paths_json: string }
+        | undefined;
+      if (!winner) {
+        return {
+          ok: false,
+          code: "frozen_snapshot_missing",
+          reason: `Frozen snapshot row missing after concurrent insert race for ${params.snapshotKey}`,
+        };
+      }
+      return mapFromRow(winner);
+    }
+    return {
+      ok: true,
+      snapshot: {
+        ...fresh,
+        snapshotKey: params.snapshotKey,
+      },
+    };
+  }
+
+  /**
+   * W2-S3: Re-verifies every path in an already-frozen task snapshot against live `source_read_grants`
+   * BEFORE container launch, copying only still-authorized frozen bytes into an isolated mount dir.
+   */
+  prepareVerifiedMountInputDir(params: {
+    snapshot: TaskFrozenWorkspaceSnapshot;
+    mountRootDir: string;
+    govDb: DatabaseSync;
+    principalId: string;
+    scopeId: string;
+  }): { mountDir: string; mountedRelPaths: string[]; excludedRelPaths: string[]; cleanup: () => void } {
+    const mountDir = path.join(path.resolve(params.mountRootDir), `mnt_${randomUUID().slice(0, 12)}`);
+    mkdirSync(mountDir, { recursive: true });
+    const mountedRelPaths: string[] = [];
+    const excludedRelPaths: string[] = [];
+    for (const rel of params.snapshot.authorizedInputRelPaths) {
+      const auth = checkSourceReadAuthorized(params.govDb, {
+        principalId: params.principalId,
+        scopeId: params.scopeId,
+        sourceType: "workspace_write",
+        resourceId: "workspace",
+        operation: "write",
+        path: rel,
+      });
+      if (!auth.ok) {
+        excludedRelPaths.push(rel);
+        continue;
+      }
+      const srcFull = path.join(params.snapshot.snapshotDir, ...rel.split("/"));
+      if (!existsSync(srcFull)) continue;
+      const destFull = path.join(mountDir, ...rel.split("/"));
+      mkdirSync(path.dirname(destFull), { recursive: true });
+      copyFileSync(srcFull, destFull);
+      mountedRelPaths.push(rel);
+    }
+    return {
+      mountDir,
+      mountedRelPaths,
+      excludedRelPaths,
+      cleanup: () => {
+        try {
+          rmSync(mountDir, { recursive: true, force: true });
         } catch {
           // ignore cleanup race
         }
@@ -479,6 +668,13 @@ export class ManagedWorkspaceImporter {
     maxFileBytes?: number;
     maxTotalBytes?: number;
     now?: number;
+    /** W2-S6: Ephemeral in-memory observer for pre-install read-only exported regular file bytes from volume. */
+    onExportedFilesObserved?: (info: {
+      volumeName: string;
+      exporterImageId: string | null;
+      readOnlyMountVerified: boolean;
+      files: Array<{ relPath: string; sha256: string; sizeBytes: number; bytes: Buffer }>;
+    }) => void;
     /** Test seam for V03: fires AFTER async writer-exit & read-only export, right BEFORE final commit auth check & write! */
     onBeforeCommitWrite?: () => Promise<void> | void;
     /** Test seam for V03: simulates process crash strictly AFTER atomic file install and BEFORE gov receipt commit! */
@@ -821,6 +1017,13 @@ export class ManagedWorkspaceImporter {
           writerCheck,
         };
       }
+
+      params.onExportedFilesObserved?.({
+        volumeName: exported.volumeName,
+        exporterImageId: exported.exporterImageId ?? null,
+        readOnlyMountVerified: exported.readOnlyMountVerified,
+        files: exported.files,
+      });
 
       const targetFile = exported.files.find((f) => f.relPath === normalizedRelPath);
       if (!targetFile) {

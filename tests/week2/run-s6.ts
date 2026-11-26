@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   buildMinimalDockerCliEnv,
@@ -53,6 +53,7 @@ async function spawnFormalHostForS6(opts: {
   smtpPort: number;
   connectorsConfigPath: string;
   envSecrets: Record<string, string>;
+  s6ObserveDir: string;
 }): Promise<{
   pid: number;
   baseUrl: string;
@@ -76,6 +77,8 @@ async function spawnFormalHostForS6(opts: {
       String(opts.smtpPort),
       "--connectors-config",
       opts.connectorsConfigPath,
+      "--s6-observe-dir",
+      opts.s6ObserveDir,
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
@@ -146,8 +149,10 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
   const evidenceDir = path.resolve(opts?.evidenceDir ?? path.join(rootDir, "evidence"));
   const hostDataDir = path.join(rootDir, "host-data");
   const workspaceDir = path.join(rootDir, "workspace");
+  const s6ObserveDir = path.join(rootDir, "s6-observe");
   mkdirSync(hostDataDir, { recursive: true });
   mkdirSync(workspaceDir, { recursive: true });
+  mkdirSync(s6ObserveDir, { recursive: true });
   mkdirSync(evidenceDir, { recursive: true });
 
   const dockerEnv = inspectDockerEnvironment(DEFAULT_SANDBOX_IMAGE);
@@ -348,16 +353,27 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
   const capturedHttpUrls: string[] = [];
   const samplingMatrix: SamplingPointRecord[] = [];
   const forbiddenHits: Array<{ location: string; slotId: string }> = [];
+  const checkedLocationsBySlot = new Map<string, Set<string>>();
 
   const recordPoint = (
     point: string,
-    artifacts: Array<{ name: string; content: Buffer | string }>,
+    artifacts: Array<{ name: string; content: Buffer | string; excludeSlots?: string[] }>,
   ): void => {
     const scannedArtifacts: Array<{ name: string; bytes: number; hits: number }> = [];
     let totalHits = 0;
     for (const a of artifacts) {
       const buf = typeof a.content === "string" ? Buffer.from(a.content, "utf8") : a.content;
-      const hits = scanBufferOrFile(`${point}:${a.name}`, buf, allMarkers);
+      const excluded = new Set(a.excludeSlots ?? []);
+      const applicableMarkers = allMarkers.filter((m) => !excluded.has(m.slotId));
+      for (const m of applicableMarkers) {
+        let s = checkedLocationsBySlot.get(m.slotId);
+        if (!s) {
+          s = new Set<string>();
+          checkedLocationsBySlot.set(m.slotId, s);
+        }
+        s.add(a.name);
+      }
+      const hits = scanBufferOrFile(`${point}:${a.name}`, buf, applicableMarkers);
       forbiddenHits.push(...hits);
       totalHits += hits.length;
       scannedArtifacts.push({ name: a.name, bytes: buf.length, hits: hits.length });
@@ -388,6 +404,7 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       smtpPort: fakeSmtp.smtpPort,
       connectorsConfigPath,
       envSecrets: formalStartupSecrets,
+      s6ObserveDir,
     });
 
     const loginUrl = `${formalHost1.baseUrl}/api/auth/login`;
@@ -548,18 +565,19 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       smtpPort: fakeSmtp.smtpPort,
       connectorsConfigPath,
       envSecrets: formalStartupSecrets,
+      s6ObserveDir,
     });
     recordPoint("formal_post_restart_live", [
       ...readLiveDbsAndWals(),
       { name: "formal_host2_stdout_stderr", content: formalHost2.getLogs() },
       { name: "fake_model_log", content: readFileSync(fakeModel.logPath) },
       { name: "fake_imap_log", content: readFileSync(fakeImap.logPath) },
-      { name: "fake_mcp_log", content: readFileSync(mcpLogPath, "utf8") },
+      { name: "fake_mcp_log", content: readFileSync(mcpLogPath, "utf8"), excludeSlots: ["slot:github-mcp-pat"] },
     ]);
     await formalHost2.stop();
     formalHost2 = null;
 
-    // W2-S6: Query REAL formal-host audit records from aegis-gov.sqlite (env scrub, IMAP child observed env, Docker sandbox container & volume)!
+    // W2-S6: Query REAL formal-host audit records + actual observed child/container env & pre-install volume bytes!
     const { db: postS6Db } = openGovernanceDb(path.join(hostDataDir, "aegis-gov.sqlite"));
     const scrubAuditRow = postS6Db
       .prepare("SELECT details_json FROM audit_events WHERE event_type = 'host_startup_env_scrubbed' ORDER BY occurred_at DESC LIMIT 1")
@@ -584,6 +602,7 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     assert.ok(imapAuditRow, "W2-S6: Formal host must record IMAP child observed env");
     const imapDetails = JSON.parse(imapAuditRow.details_json) as {
       childEnvKeysObserved: string[];
+      childEnvValueDigests?: Record<string, string>;
       passwordPresentInEnv: boolean;
       tlsVerified: boolean;
       readOnlyExamine: boolean;
@@ -618,28 +637,54 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       assert.equal(/(^AEGISPI_|_SECRET$|_TOKEN$|_PAT$|PERSONAL_ACCESS_TOKEN|API_KEY)/i.test(k), false, `Docker CLI env contained secret key: ${k}`);
     }
 
-    // Sampling point 4: Scan formal runtime audit observations (env keys, container inspect, mounts, IMAP child env, volume artifact)!
-    recordPoint("formal_child_and_container_observations", [
-      { name: "host_env_scrub_audit", content: scrubAuditRow.details_json },
-      { name: "imap_child_observed_env", content: imapAuditRow.details_json },
-      { name: "docker_task_container_and_volume_audit", content: dockerAuditRow.details_json },
-      { name: "docker_cli_whitelist_control_probe", content: dockerCliEnvJson },
-    ]);
+    // Read actual raw observations captured by formal src/index.ts under s6ObserveDir
+    const obsFiles = readdirSync(s6ObserveDir).sort();
+    const imapObsName = obsFiles.find((f) => f.startsWith("imap-child-") && f.endsWith(".json"));
+    const dockerObsName = obsFiles.find((f) => f.startsWith("docker-sandbox-") && f.endsWith(".json"));
+    const volExpObsName = obsFiles.find((f) => f.startsWith("volume-export-") && f.endsWith(".json"));
+    assert.ok(imapObsName, "W2-S6: Formal host MUST capture raw IMAP child process.env observation");
+    assert.ok(dockerObsName, "W2-S6: Formal host MUST capture raw Docker inspect .Config.Env & .HostConfig.NetworkMode");
+    assert.ok(volExpObsName, "W2-S6: Formal host MUST capture pre-install read-only volume export bytes");
+
+    const imapRawObs = JSON.parse(readFileSync(path.join(s6ObserveDir, imapObsName), "utf8")) as {
+      entries?: Array<[string, string]>;
+      keys?: string[];
+      valueDigests?: Record<string, string>;
+      passwordPresentInEnv: boolean;
+    };
+    assert.ok(Array.isArray(imapRawObs.entries) && imapRawObs.entries.length >= 1);
+    assert.equal(imapRawObs.passwordPresentInEnv, false);
+
+    const dockerRawObs = JSON.parse(readFileSync(path.join(s6ObserveDir, dockerObsName), "utf8")) as {
+      cliEnvEntries: Array<[string, string]>;
+      rawEnvInContainer: string[];
+      networkMode: string;
+      containerId: string;
+      volumeName: string;
+    };
+    assert.equal(dockerRawObs.networkMode, "none", "W2-S6: Docker inspect .HostConfig.NetworkMode MUST be 'none'");
+    assert.ok(dockerRawObs.rawEnvInContainer.length >= 1, "W2-S6: Docker inspect .Config.Env MUST be non-empty");
+    assert.ok(dockerRawObs.cliEnvEntries.length >= 1, "W2-S6: Docker CLI passed env entries MUST be non-empty");
+
+    const volExpMeta = JSON.parse(readFileSync(path.join(s6ObserveDir, volExpObsName), "utf8")) as {
+      volumeName: string;
+      readOnlyMountVerified: boolean;
+      files: Array<{ relPath: string; sha256: string; sizeBytes: number; bytesFile: string }>;
+    };
+    assert.equal(volExpMeta.readOnlyMountVerified, true);
+    assert.ok(volExpMeta.files.length >= 1);
+    const volExportRawBytes = Buffer.concat(
+      volExpMeta.files.map((f) => readFileSync(path.join(s6ObserveDir, f.bytesFile))),
+    );
+    assert.ok(volExportRawBytes.length > 0, "W2-S6: Pre-install volume export bytes must be non-empty");
 
     // Verify independent model server received exact per-slot auth SHA-256 prefixes (Router vs Worker!)
     const modelStats = await fakeModel.stats();
     const routerAuthPrefix = sha256Prefix16(markers.router);
     const workerAuthPrefix = sha256Prefix16(markers.worker);
-    const routerReqs = modelStats.records.filter((r) => r.model === "fake-router-1");
-    const workerReqs = modelStats.records.filter((r) => r.model === "fake-worker-1");
-    assert.ok(routerReqs.length >= 2, "Router must have made generation + compaction requests via formal host");
-    assert.ok(workerReqs.length >= 1, "Worker must have made request via formal host");
-    assert.ok(routerReqs.every((r) => r.authHeaderSha256Prefix === routerAuthPrefix));
-    assert.ok(workerReqs.every((r) => r.authHeaderSha256Prefix === workerAuthPrefix));
-    for (const r of modelStats.records) {
-      const hits = Object.values(r.markerHits ?? {}).reduce((a, b) => a + b, 0);
-      assert.equal(hits, 0, `Secret marker leaked into model prompt body: ${JSON.stringify(r.markerHits)}`);
-    }
+    const imapSecretPrefix = sha256Prefix16(markers.imap);
+    const githubPatPrefix = sha256Prefix16(markers.githubPat);
+    const consoleTokenPrefix = sha256Prefix16(markers.consoleToken);
 
     const mcpLogRaw = readFileSync(mcpLogPath, "utf8");
     const mcpLines = mcpLogRaw
@@ -649,14 +694,60 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     const mcpStartup = mcpLines.find((l) => l["kind"] === "startup") as {
       patSha256Prefix: string;
       envKeysReceived: string[];
+      envValueDigests?: Record<string, string>;
+      nonPatEnvEntries?: Array<[string, string]>;
     };
-    assert.equal(mcpStartup.patSha256Prefix, sha256Prefix16(markers.githubPat));
-    // Verify MCP child did NOT receive ANY of the other 4 formal startup secrets!
+    assert.equal(mcpStartup.patSha256Prefix, githubPatPrefix);
+    assert.ok(Array.isArray(mcpStartup.nonPatEnvEntries), "W2-S6: MCP startup MUST log nonPatEnvEntries");
+    assert.ok(mcpStartup.envValueDigests && typeof mcpStartup.envValueDigests === "object");
+    // Verify MCP child did NOT receive ANY of the other 4 formal startup secrets (neither key nor value digest)!
     const mcpEnvKeysJoined = mcpStartup.envKeysReceived.join(",");
     assert.equal(mcpEnvKeysJoined.includes("AEGISPI_CONSOLE_TOKEN"), false);
     assert.equal(mcpEnvKeysJoined.includes("AEGISPI_MODEL_ROUTER_KEY"), false);
     assert.equal(mcpEnvKeysJoined.includes("AEGISPI_MODEL_WORKER_KEY"), false);
     assert.equal(mcpEnvKeysJoined.includes("AEGISPI_IMAP_SECRET"), false);
+    for (const [k, digest] of Object.entries(mcpStartup.envValueDigests)) {
+      if (k !== "GITHUB_PERSONAL_ACCESS_TOKEN") {
+        assert.notEqual(digest, githubPatPrefix);
+      }
+      assert.notEqual(digest, routerAuthPrefix);
+      assert.notEqual(digest, workerAuthPrefix);
+      assert.notEqual(digest, imapSecretPrefix);
+      assert.notEqual(digest, consoleTokenPrefix);
+    }
+
+    // Sampling point 4: Scan ACTUAL observed child/container/CLI/MCP values and pre-install volume export bytes!
+    recordPoint("formal_child_and_container_observations", [
+      { name: "host_env_scrub_audit", content: scrubAuditRow.details_json },
+      { name: "imap_child_observed_env", content: imapAuditRow.details_json },
+      { name: "imap_child_raw_env", content: JSON.stringify(imapRawObs.entries) },
+      { name: "docker_task_container_and_volume_audit", content: dockerAuditRow.details_json },
+      { name: "docker_container_raw_env", content: JSON.stringify(dockerRawObs.rawEnvInContainer) },
+      { name: "docker_cli_passed_env", content: JSON.stringify(dockerRawObs.cliEnvEntries) },
+      { name: "docker_cli_whitelist_control_probe", content: dockerCliEnvJson },
+      { name: "volume_export_bytes", content: volExportRawBytes },
+      { name: "mcp_child_non_pat_env", content: JSON.stringify(mcpStartup.nonPatEnvEntries) },
+      { name: "mcp_child_env_digests", content: JSON.stringify(mcpStartup.envValueDigests), excludeSlots: ["slot:github-mcp-pat"] },
+    ]);
+
+    const routerReqs = modelStats.records.filter((r) => r.model === "fake-router-1");
+    const workerReqs = modelStats.records.filter((r) => r.model === "fake-worker-1");
+    assert.ok(routerReqs.length >= 2, "Router must have made generation + compaction requests via formal host");
+    assert.ok(workerReqs.length >= 1, "Worker must have made request via formal host");
+    assert.ok(routerReqs.every((r) => r.authHeaderSha256Prefix === routerAuthPrefix));
+    assert.ok(workerReqs.every((r) => r.authHeaderSha256Prefix === workerAuthPrefix));
+    for (const m of allMarkers) {
+      let s = checkedLocationsBySlot.get(m.slotId);
+      if (!s) {
+        s = new Set<string>();
+        checkedLocationsBySlot.set(m.slotId, s);
+      }
+      s.add("model_prompt_bodies");
+    }
+    for (const r of modelStats.records) {
+      const hits = Object.values(r.markerHits ?? {}).reduce((a, b) => a + b, 0);
+      assert.equal(hits, 0, `Secret marker leaked into model prompt body: ${JSON.stringify(r.markerHits)}`);
+    }
 
     const imapStats = await fakeImap.stats();
     assert.ok(imapStats.totalLogins >= 1, "Formal host must have executed real IMAP read");
@@ -682,8 +773,14 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       "fake_imap_log",
       "fake_mcp_log",
       "imap_child_observed_env",
+      "imap_child_raw_env",
       "docker_task_container_and_volume_audit",
+      "docker_container_raw_env",
+      "docker_cli_passed_env",
       "docker_cli_whitelist_control_probe",
+      "volume_export_bytes",
+      "mcp_child_non_pat_env",
+      "mcp_child_env_digests",
       "host_env_scrub_audit",
       "workspace_output_file",
     ];
@@ -700,67 +797,51 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     if (imapDetails.childEnvKeysObserved.length === 0) {
       uncollectedSamples.push("imap_child_env_keys");
     }
-    if (dockerDetails.envKeysInContainer.length === 0) {
-      uncollectedSamples.push("docker_container_env_keys");
+    if (dockerRawObs.rawEnvInContainer.length === 0) {
+      uncollectedSamples.push("docker_container_raw_env_entries");
     }
     assert.deepEqual(uncollectedSamples, [], `W2-S6: Missing required live S6 samples: ${JSON.stringify(uncollectedSamples)}`);
 
-    const checkedLocationsAll = [
-      "live_aegis-gov.sqlite",
-      "live_aegis-gov.sqlite-wal",
-      "live_pi-durable.sqlite",
-      "live_pi-durable.sqlite-wal",
-      "captured_urls",
-      "formal_host_stdout_stderr",
-      "web_snapshot",
-      "web_sse_frame",
-      "fake_model_log",
-      "fake_imap_log",
-      "fake_mcp_log",
-      "model_prompt_bodies",
-      "imap_child_observed_env",
-      "docker_task_container_env",
-      "docker_task_volume_audit",
-      "docker_cli_minimal_env_audit",
-      "docker_cli_whitelist_control_probe",
-      "workspace_output_file",
-    ];
+    const countSlotHits = (slotId: string): number =>
+      forbiddenHits.filter((h) => h.slotId === slotId).length;
+    const locationsForSlot = (slotId: string): string[] =>
+      [...(checkedLocationsBySlot.get(slotId) ?? [])].sort();
 
     const perSlotReport = [
       {
         slotId: "slot:model-router",
         markerDigestPrefix: routerAuthPrefix,
         allowedLocations: ["host_memory_vault", "loopback_fake_model_router_auth_header"],
-        checkedLocations: [...checkedLocationsAll, "mcp_child_env"],
-        forbiddenHits: 0,
+        checkedLocations: locationsForSlot("slot:model-router"),
+        forbiddenHits: countSlotHits("slot:model-router"),
       },
       {
         slotId: "slot:model-worker",
         markerDigestPrefix: workerAuthPrefix,
         allowedLocations: ["host_memory_vault", "loopback_fake_model_worker_auth_header"],
-        checkedLocations: [...checkedLocationsAll, "mcp_child_env"],
-        forbiddenHits: 0,
+        checkedLocations: locationsForSlot("slot:model-worker"),
+        forbiddenHits: countSlotHits("slot:model-worker"),
       },
       {
         slotId: "slot:imap-readonly",
-        markerDigestPrefix: sha256Prefix16(markers.imap),
+        markerDigestPrefix: imapSecretPrefix,
         allowedLocations: ["host_memory_vault", "imap_child_stdin_only"],
-        checkedLocations: [...checkedLocationsAll, "mcp_child_env"],
-        forbiddenHits: 0,
+        checkedLocations: locationsForSlot("slot:imap-readonly"),
+        forbiddenHits: countSlotHits("slot:imap-readonly"),
       },
       {
         slotId: "slot:github-mcp-pat",
-        markerDigestPrefix: sha256Prefix16(markers.githubPat),
+        markerDigestPrefix: githubPatPrefix,
         allowedLocations: ["host_memory_vault", "github_mcp_child_explicit_env"],
-        checkedLocations: checkedLocationsAll,
-        forbiddenHits: 0,
+        checkedLocations: locationsForSlot("slot:github-mcp-pat"),
+        forbiddenHits: countSlotHits("slot:github-mcp-pat"),
       },
       {
         slotId: "slot:web-console",
-        markerDigestPrefix: sha256Prefix16(markers.consoleToken),
+        markerDigestPrefix: consoleTokenPrefix,
         allowedLocations: ["host_memory_auth_config"],
-        checkedLocations: [...checkedLocationsAll, "mcp_child_env"],
-        forbiddenHits: 0,
+        checkedLocations: locationsForSlot("slot:web-console"),
+        forbiddenHits: countSlotHits("slot:web-console"),
       },
     ];
 
@@ -779,7 +860,7 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       samplingPointMatrix: samplingMatrix,
       uncollectedSamples,
       notDirectlyCapturedFromExternalOs: [
-        "docker.exe external OS GetEnvironmentStrings (verified via docker-sandbox buildMinimalDockerCliEnv allowlist keys in audit_events + whitelist control probe + docker inspect .Config.Env)",
+        "docker.exe external OS GetEnvironmentStrings (verified via formal host dockerCliEnvEntries allowlist audit + whitelist control probe + docker inspect .Config.Env)",
       ],
       dockerDigests: {
         approvedImageId,
@@ -787,18 +868,26 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
         exporterImageId: dockerDetails.exporterImageId,
       },
       dockerTaskContainer: {
-        containerId: dockerDetails.containerId,
-        volumeName: dockerDetails.volumeName,
-        networkMode: dockerDetails.networkMode,
+        containerId: dockerRawObs.containerId,
+        volumeName: dockerRawObs.volumeName,
+        networkMode: dockerRawObs.networkMode,
         mounts: dockerDetails.mounts,
         envKeysInContainer: dockerDetails.envKeysInContainer,
+        rawEnvEntriesCount: dockerRawObs.rawEnvInContainer.length,
         artifactSha256: dockerDetails.artifactSha256,
       },
-      dockerCliMinimalEnvKeysPassed: dockerDetails.dockerCliEnvKeys,
+      volumePreInstallExport: {
+        readOnlyMountVerified: volExpMeta.readOnlyMountVerified,
+        exportedFilesCount: volExpMeta.files.length,
+        exportedTotalBytes: volExportRawBytes.length,
+      },
+      dockerCliMinimalEnvKeysPassed: dockerRawObs.cliEnvEntries.map(([k]) => k),
       dockerCliWhitelistControlEnvKeys: dockerCliEnvKeys,
       imapChildObservedEnvKeys: imapDetails.childEnvKeysObserved,
+      imapChildObservedValueDigestCount: Object.keys(imapRawObs.valueDigests ?? {}).length,
       imapChildPasswordPresentInEnv: imapDetails.passwordPresentInEnv,
       mcpChildEnvKeys: mcpStartup.envKeysReceived,
+      mcpChildNonPatEntriesCount: mcpStartup.nonPatEnvEntries.length,
       capturedUrlsCount: capturedHttpUrls.length,
       totalForbiddenHits: forbiddenHits.length,
       slots: perSlotReport,

@@ -121,6 +121,7 @@ export function renderMinimalView1Html(): string {
       selectionGeneration: 0,
       dirtyByProposal: {},
       localDraftTextByProposal: {},
+      editVersionByProposal: {},
       proposalStatusById: {},
       serverClockOffsetMs: 0,
       pendingChat: { key: null, content: null, convId: null, epoch: null },
@@ -651,6 +652,7 @@ export function renderMinimalView1Html(): string {
 
           bodyBox.addEventListener('input', () => {
             if (!isActionablePending) return;
+            state.editVersionByProposal[p.proposalId] = (state.editVersionByProposal[p.proposalId] || 0) + 1;
             state.dirtyByProposal[p.proposalId] = true;
             state.localDraftTextByProposal[p.proposalId] = bodyBox.value;
             approveBtn.disabled = true;
@@ -660,6 +662,8 @@ export function renderMinimalView1Html(): string {
             const reqConvId = String(snap.conversationId);
             const reqEpoch = snap.runtimeEpoch;
             const reqGen = state.selectionGeneration;
+            const reqPrincipal = state.principalId;
+            const reqEditVersion = state.editVersionByProposal[p.proposalId] || 0;
             const nextPayload = { ...payload, body: bodyBox.value };
             const res = await api('/api/proposals/' + encodeURIComponent(p.proposalId) + '/draft', {
               method: 'POST',
@@ -669,11 +673,20 @@ export function renderMinimalView1Html(): string {
                 payload: nextPayload
               })
             });
+            // W2-S4: Ignore late Save receipt after logout or principal change
+            if (!state.principalId || state.principalId !== reqPrincipal) return;
             let msg;
+            const latestEditVersion = state.editVersionByProposal[p.proposalId] || 0;
+            const hasNewerLocalEdit = latestEditVersion !== reqEditVersion;
             if (res.ok) {
-              delete state.dirtyByProposal[p.proposalId];
-              delete state.localDraftTextByProposal[p.proposalId];
-              msg = '已保存新版本 rev=' + (res.body.revision ? res.body.revision.revision : '');
+              if (!hasNewerLocalEdit) {
+                delete state.dirtyByProposal[p.proposalId];
+                delete state.localDraftTextByProposal[p.proposalId];
+                msg = '已保存新版本 rev=' + (res.body.revision ? res.body.revision.revision : '');
+              } else {
+                state.dirtyByProposal[p.proposalId] = true;
+                msg = '已保存版本 rev=' + (res.body.revision ? res.body.revision.revision : '') + '，保留本地新编辑';
+              }
             } else {
               msg = '保存失败 (' + res.status + '): ' + (res.body.code || res.body.error || '');
             }
@@ -690,10 +703,12 @@ export function renderMinimalView1Html(): string {
             const reqConvId = String(snap.conversationId);
             const reqEpoch = snap.runtimeEpoch;
             const reqGen = state.selectionGeneration;
+            const reqPrincipal = state.principalId;
             const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
               method: 'POST',
               body: JSON.stringify({ conversationId: reqConvId })
             });
+            if (!state.principalId || state.principalId !== reqPrincipal) return;
             if (!ch.ok || !ch.body || !ch.body.nonce) {
               const chErr = '获取挑战失败 (' + ch.status + '): ' + (ch.body.code || '');
               state.proposalStatusById[p.proposalId] = chErr;
@@ -715,6 +730,7 @@ export function renderMinimalView1Html(): string {
                 decisionKey: keyPrefix + p.approvalId + '-r' + p.revision
               })
             });
+            if (!state.principalId || state.principalId !== reqPrincipal) return;
             const msg = dec.ok ? okLabel : ('决定被拒 (' + dec.status + '): ' + (dec.body.code || ''));
             state.proposalStatusById[p.proposalId] = msg;
             if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
@@ -776,7 +792,13 @@ export function renderMinimalView1Html(): string {
       state.principalId = null;
       state.conversationId = null;
       state.runtimeEpoch = null;
+      state.dirtyByProposal = {};
+      state.localDraftTextByProposal = {};
+      state.editVersionByProposal = {};
+      state.proposalStatusById = {};
       state.pendingChat = { key: null, content: null, convId: null, epoch: null };
+      document.getElementById('chat-input').value = '';
+      document.getElementById('chat-status').textContent = '';
       clearAllSessionViews();
       await loadConversations();
     });
@@ -819,7 +841,8 @@ export function renderMinimalView1Html(): string {
       const content = inputEl.value.trim();
       const reqConvId = state.conversationId;
       const reqEpoch = state.runtimeEpoch || state.activeRuntimeEpoch;
-      if (!content || !reqConvId || !reqEpoch) return;
+      const reqPrincipal = state.principalId;
+      if (!content || !reqConvId || !reqEpoch || !reqPrincipal) return;
       // W2-S4: Preserve same chatKey across retry, double-click, switch, AND browser reload for identical (principalId, epoch, convId, content)!
       const stored = loadPendingChatFor(reqConvId, reqEpoch);
       if (stored.key && stored.content === content) {
@@ -842,6 +865,7 @@ export function renderMinimalView1Html(): string {
           runtimeEpoch: reqEpoch
         })
       });
+      if (!state.principalId || state.principalId !== reqPrincipal) return;
       // W2-S4: Late receipt MUST only update original (reqConvId, reqEpoch, reqChatKey) and NEVER clobber a newly switched conversation!
       if (!state.chatStatusByConv) state.chatStatusByConv = {};
       if (r.ok) {

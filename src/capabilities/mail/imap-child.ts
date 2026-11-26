@@ -4,6 +4,7 @@
 // Supports Direct TLS and HTTP CONNECT proxy tunnel with inner target TLS verification.
 // Strictly read-only IMAP commands: EXAMINE + UID FETCH BODY.PEEK (never alters \Seen or FLAGS).
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
@@ -24,6 +25,28 @@ interface ImapChildInput {
   uid?: number;
   subjectContains?: string;
   timeoutMs?: number;
+  includeEnvValuesForAudit?: boolean;
+}
+
+function buildObservedEnvMeta(includeValues: boolean, password: string): {
+  childEnvKeysObserved: string[];
+  childEnvValueDigests: Record<string, string>;
+  passwordPresentInEnv: boolean;
+  childEnvEntriesObserved?: Array<[string, string]>;
+} {
+  const entries = Object.entries(process.env)
+    .filter((e): e is [string, string] => typeof e[1] === "string")
+    .sort(([a], [b]) => a.localeCompare(b));
+  const digests: Record<string, string> = {};
+  for (const [k, v] of entries) {
+    digests[k] = createHash("sha256").update(v, "utf8").digest("hex").slice(0, 16);
+  }
+  return {
+    childEnvKeysObserved: entries.map(([k]) => k),
+    childEnvValueDigests: digests,
+    passwordPresentInEnv: entries.some(([, v]) => password.length > 0 && v.includes(password)),
+    ...(includeValues ? { childEnvEntriesObserved: entries } : {}),
+  };
 }
 
 function scrub(text: string, secrets: string[], maxLen?: number): string {
@@ -359,10 +382,7 @@ async function main(): Promise<void> {
             mailbox: input.mailbox,
             uidValidity,
             message: null,
-            childEnvKeysObserved: Object.keys(process.env).sort(),
-            passwordPresentInEnv: Object.values(process.env).some(
-              (v) => typeof v === "string" && input.password.length > 0 && v.includes(input.password),
-            ),
+            ...buildObservedEnvMeta(Boolean(input.includeEnvValuesForAudit), input.password),
           },
           secrets,
         );
@@ -413,10 +433,7 @@ async function main(): Promise<void> {
           messageId: headers["message-id"] ?? "",
           body: rawBody,
         },
-        childEnvKeysObserved: Object.keys(process.env).sort(),
-        passwordPresentInEnv: Object.values(process.env).some(
-          (v) => typeof v === "string" && input.password.length > 0 && v.includes(input.password),
-        ),
+        ...buildObservedEnvMeta(Boolean(input.includeEnvValuesForAudit), input.password),
       },
       secrets,
     );
