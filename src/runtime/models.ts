@@ -97,6 +97,8 @@ export interface HostModelsConfig {
     requestId: string;
     firstTokenMs: number | null;
     totalMs: number;
+    stopReason?: string;
+    errorCode?: string | null;
   }) => void;
   onReservationRecorded?: (info: {
     requestId: string;
@@ -156,27 +158,72 @@ function hasUnboundedNonTextContent(context: AiContext): boolean {
 }
 
 /**
+ * S2-P0-4: Reduces any remote model error string strictly to a controlled status code.
+ * Never persists or projects arbitrary remote HTTP error bodies, headers, or provider text.
+ */
+function reduceRemoteModelErrorMessage(raw: string | undefined, stopReason: string | undefined): string {
+  if (stopReason === "aborted") {
+    return "model_request_aborted";
+  }
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return "model_provider_error";
+  const httpMatch = /model_provider_http_(\d{3})/.exec(text);
+  if (httpMatch?.[1]) {
+    return `model_provider_http_${httpMatch[1]}`;
+  }
+  const transportMatch = /(model_transport_error:[A-Za-z0-9_.-]{1,40})/.exec(text);
+  if (transportMatch?.[1]) {
+    return transportMatch[1];
+  }
+  if (/Stage [12] blocks|egress|redirect/i.test(text)) {
+    return "model_egress_blocked";
+  }
+  if (/content_filter/i.test(text)) {
+    return "model_provider_content_filter";
+  }
+  if (/network_error/i.test(text)) {
+    return "model_provider_network_error";
+  }
+  return "model_provider_error";
+}
+
+function reduceLocalFetchErrorCode(err: unknown): string {
+  const rec = err as { code?: unknown; cause?: { code?: unknown } } | null | undefined;
+  const rawCode =
+    typeof rec?.code === "string"
+      ? rec.code
+      : typeof rec?.cause?.code === "string"
+        ? rec.cause.code
+        : "";
+  const safeCode = /^[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "transport_failed";
+  return `model_transport_error:${safeCode}`;
+}
+
+/**
  * S2-P0-2: Computes a provable conservative integer microUSD upper bound for T6 budget reservation.
- * - Synthetic fixed pricing is ONLY allowed on loopback fake endpoints.
- * - Real remote endpoints MUST supply a non-synthetic versioned ModelPriceSchedule with allowTokenBoundEstimation=true.
+ * - Synthetic fixed pricing is STRICTLY limited to explicit `fake-local` provider on loopback endpoints.
+ * - ANY real provider (whether remote OR routed through a loopback local proxy!) MUST match a verified
+ *   provider+model billing bound contract in `VERIFIED_MODEL_BOUND_CONTRACTS`; otherwise fails closed!
  * - Uses worst-case byte-level BPE bound (1 UTF-8 byte = 1 token) across full systemPrompt + messages + tools
- *   plus explicit per-message / per-tool framing overhead, NEVER truncating downwards to contextWindow,
- *   and bounding output strictly by the request's enforced effectiveMaxTokens (+ optional reasoning headroom).
- * - Fails closed (returns null -> unknown_upper_bound, 0 physical sends) if price schedule is missing/invalid,
- *   if non-text unbounded content blocks (e.g. images) are present, or if effectiveMaxTokens is invalid.
+ *   plus the verified contract's per-message / per-tool / fixed prompt overhead, NEVER truncating downwards,
+ *   and bounding output strictly by effectiveMaxTokens <= contract.maxTokensHardCeiling.
  */
 function estimateUpperBoundMu(
   context: AiContext,
-  _model: Model<Api>,
+  model: Model<Api>,
   schedule: ModelPriceSchedule | null,
   effectiveBaseUrl: string,
   effectiveMaxTokens: number,
+  reasoningOption?: unknown,
 ): number | null {
-  const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule);
+  const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule, {
+    provider: model.provider,
+    modelId: model.id,
+  });
   if (!scheduleCheck.ok || !schedule) return null;
 
   if (
-    scheduleCheck.isLoopback &&
+    scheduleCheck.isExplicitFake &&
     typeof schedule.syntheticFixedUpperMu === "number" &&
     Number.isSafeInteger(schedule.syntheticFixedUpperMu) &&
     schedule.syntheticFixedUpperMu >= 0
@@ -186,13 +233,27 @@ function estimateUpperBoundMu(
   if (!schedule.allowTokenBoundEstimation) {
     return null;
   }
+  const contract = scheduleCheck.contract;
+  if (!contract) {
+    // Explicit fake-local without syntheticFixedUpperMu OR any unproven model MUST fail closed!
+    return null;
+  }
   if (
     !Number.isFinite(schedule.inputPerMTokMu) ||
     schedule.inputPerMTokMu < 0 ||
     !Number.isFinite(schedule.outputPerMTokMu) ||
     schedule.outputPerMTokMu < 0 ||
     !Number.isSafeInteger(effectiveMaxTokens) ||
-    effectiveMaxTokens <= 0
+    effectiveMaxTokens <= 0 ||
+    effectiveMaxTokens > contract.maxTokensHardCeiling
+  ) {
+    return null;
+  }
+  if (
+    reasoningOption !== undefined &&
+    reasoningOption !== null &&
+    reasoningOption !== "off" &&
+    !contract.maxTokensIncludesReasoning
   ) {
     return null;
   }
@@ -213,14 +274,11 @@ function estimateUpperBoundMu(
     return null;
   }
   const provableMaxInputTokens =
-    payloadUtf8Bytes + context.messages.length * 64 + (context.tools?.length ?? 0) * 128 + 256;
-  const reasoningHeadroom =
-    typeof schedule.maxReasoningTokens === "number" &&
-    Number.isFinite(schedule.maxReasoningTokens) &&
-    schedule.maxReasoningTokens > 0
-      ? Math.ceil(schedule.maxReasoningTokens)
-      : 0;
-  const provableMaxOutputTokens = effectiveMaxTokens + reasoningHeadroom;
+    payloadUtf8Bytes +
+    context.messages.length * contract.perMessageOverheadTokens +
+    (context.tools?.length ?? 0) * contract.perToolOverheadTokens +
+    contract.fixedPromptOverheadTokens;
+  const provableMaxOutputTokens = effectiveMaxTokens;
 
   const maxInputRateMu = Math.max(
     schedule.inputPerMTokMu,
@@ -240,15 +298,19 @@ function computeActualMu(
   msg: AssistantMessage,
   schedule: ModelPriceSchedule,
   effectiveBaseUrl: string,
+  model: Model<Api>,
 ): number | null {
-  const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule);
+  const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule, {
+    provider: model.provider,
+    modelId: model.id,
+  });
   if (!scheduleCheck.ok) return null;
   const u = msg.usage;
   if (!u) return null;
   const totalTok = (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
   if (totalTok <= 0) return null;
   if (
-    scheduleCheck.isLoopback &&
+    scheduleCheck.isExplicitFake &&
     schedule.syntheticFixedActualMu !== undefined &&
     schedule.syntheticFixedActualMu !== null
   ) {
@@ -277,12 +339,41 @@ export function createGuardedModelFetch(
       ...init,
       redirect: "manual",
     };
-    const response = await underlyingFetch(input, guardedInit);
+    let response: Response;
+    try {
+      response = await underlyingFetch(input, guardedInit);
+    } catch (err) {
+      if (err instanceof Stage1EgressBlockedError) {
+        throw err;
+      }
+      throw new Error(reduceLocalFetchErrorCode(err));
+    }
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location") ?? "(missing)";
+      void response.body?.cancel().catch(() => {});
       throw new Stage1EgressBlockedError(
         location,
         `Model egress blocks HTTP ${response.status} redirect from ${rawUrl} to ${location}`,
+      );
+    }
+    // S2-P0-4: NEVER forward arbitrary remote HTTP error bodies into pi-ai errorMessage!
+    // Cancel raw remote body immediately and substitute a controlled HTTP status JSON payload.
+    if (!response.ok) {
+      const status = Number.isInteger(response.status) ? response.status : 500;
+      void response.body?.cancel().catch(() => {});
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: `model_provider_http_${status}`,
+            type: "model_provider_http_error",
+            code: `model_provider_http_${status}`,
+          },
+        }),
+        {
+          status,
+          statusText: `HTTP ${status}`,
+          headers: { "content-type": "application/json" },
+        },
       );
     }
     return response;
@@ -522,7 +613,14 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       requestedMaxTokens !== undefined && modelMaxTokens > 0
         ? Math.min(requestedMaxTokens, modelMaxTokens)
         : modelMaxTokens;
-    const upperMu = estimateUpperBoundMu(ctx, model, slot.priceSchedule, effectiveBaseUrl, effectiveMaxTokens);
+    const upperMu = estimateUpperBoundMu(
+      ctx,
+      model,
+      slot.priceSchedule,
+      effectiveBaseUrl,
+      effectiveMaxTokens,
+      options?.reasoning,
+    );
     if (upperMu === null) {
       const msg = `Blocked model send (${requestId}): cannot determine provable conservative microUSD upper bound for ${model.provider}/${model.id}`;
       recordEgressDenial(requestId, "unknown_upper_bound", msg, {
@@ -614,6 +712,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     const slotApiKey = config.vault.resolveSecretInMemory(slot.credentialSlotId);
     const enforcedOptions: ModelsSimpleStreamOptions = {
       ...options,
+      ...(!model.reasoning ? { reasoning: undefined } : {}),
       ...(slotApiKey ? { apiKey: slotApiKey } : {}),
       maxTokens: effectiveMaxTokens,
       maxRetries: 0,
@@ -622,13 +721,29 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     const streamStartedAt = performance.now();
     const underlyingStream = inner.streamSimple(model, ctx, enforcedOptions);
 
-    // Non-invasive streaming delta tap for real-time progressive SSE projection & firstTokenMs metrics
+    // Non-invasive streaming delta tap + S2-P0-4 trust-boundary error reducer
+    // Reduces any remote error event/result strictly to a controlled status code BEFORE pi-durable sees/persists it!
     let firstTokenMs: number | null = null;
     let accumulatedText = "";
     let lastEmitAt = 0;
     const origPush = underlyingStream.push.bind(underlyingStream);
+    const origEnd = underlyingStream.end.bind(underlyingStream);
     underlyingStream.push = ((event: Parameters<AssistantMessageEventStream["push"]>[0]) => {
-      if (event.type === "text_delta" && typeof event.delta === "string" && event.delta.length > 0) {
+      if (event.type === "error" && event.error) {
+        event.error.errorMessage = reduceRemoteModelErrorMessage(
+          event.error.errorMessage,
+          event.error.stopReason,
+        );
+      } else if (
+        event.type === "done" &&
+        event.message &&
+        (event.message.stopReason === "error" || event.message.stopReason === "aborted")
+      ) {
+        event.message.errorMessage = reduceRemoteModelErrorMessage(
+          event.message.errorMessage,
+          event.message.stopReason,
+        );
+      } else if (event.type === "text_delta" && typeof event.delta === "string" && event.delta.length > 0) {
         const elapsedMs = Math.max(0, Math.round(performance.now() - streamStartedAt));
         const isFirst = firstTokenMs === null;
         if (isFirst) firstTokenMs = elapsedMs;
@@ -649,24 +764,36 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       }
       return origPush(event);
     }) as AssistantMessageEventStream["push"];
+    underlyingStream.end = ((result?: AssistantMessage) => {
+      if (result && (result.stopReason === "error" || result.stopReason === "aborted")) {
+        result.errorMessage = reduceRemoteModelErrorMessage(result.errorMessage, result.stopReason);
+      }
+      return origEnd(result);
+    }) as AssistantMessageEventStream["end"];
 
     // 7. Observe terminal AssistantMessage for idempotent settlement (T7)
     // Missing usage or transport error leaves reservation HELD for CHARGED_BOUND timeout!
     void underlyingStream.result().then(
       (finalMsg) => {
         const totalMs = Math.max(0, Math.round(performance.now() - streamStartedAt));
+        const isTerminalError = finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted";
+        const reducedErrCode = isTerminalError
+          ? reduceRemoteModelErrorMessage(finalMsg.errorMessage, finalMsg.stopReason)
+          : null;
         config.onStreamFinished?.({
           conversationId: owner.conversationId,
           ownerTaskId: owner.ownerTaskId,
           requestId,
           firstTokenMs,
           totalMs,
+          stopReason: finalMsg.stopReason,
+          errorCode: reducedErrCode,
         });
-        if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
+        if (isTerminalError) {
           return;
         }
         const actualMu = slot.priceSchedule
-          ? computeActualMu(finalMsg, slot.priceSchedule, effectiveBaseUrl)
+          ? computeActualMu(finalMsg, slot.priceSchedule, effectiveBaseUrl, model)
           : null;
         if (actualMu === null) {
           // Usage missing / all-zero: MUST stay HELD (never treat as free!)

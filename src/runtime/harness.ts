@@ -46,6 +46,7 @@ import {
   type StageEgressPolicy,
 } from "../governance/credentials.ts";
 import {
+  isStrictPlainTextEmailRequired,
   upgradeStage2ScopeAllowedTools,
   validateEmailRecipientsAllowlist,
   type GithubWriteAllowlistEntry,
@@ -369,7 +370,17 @@ export class AegisHostRuntime {
   readonly #defaultScopeId: string;
   readonly #now: () => number;
   readonly #liveStreamOverlay: Map<string, { text: string; attempt: number; firstTokenMs: number; updatedAt: number }>;
-  readonly #lastStreamMetrics: Map<string, { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }>;
+  readonly #lastStreamMetrics: Map<
+    string,
+    {
+      firstTokenMs: number | null;
+      totalMs: number;
+      requestId: string;
+      completedAt: number;
+      stopReason?: string;
+      errorCode?: string | null;
+    }
+  >;
   readonly #activeSkillLockKeyByConv: Map<string, string>;
   #routinePoller: RoutinePoller | null = null;
 
@@ -401,7 +412,17 @@ export class AegisHostRuntime {
     >;
     changeListeners: Set<(ev: ConversationLiveChange) => void>;
     liveStreamOverlay: Map<string, { text: string; attempt: number; firstTokenMs: number; updatedAt: number }>;
-    lastStreamMetrics: Map<string, { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }>;
+    lastStreamMetrics: Map<
+      string,
+      {
+        firstTokenMs: number | null;
+        totalMs: number;
+        requestId: string;
+        completedAt: number;
+        stopReason?: string;
+        errorCode?: string | null;
+      }
+    >;
     activeSkillLockKeyByConv: Map<string, string>;
     now: () => number;
   }) {
@@ -566,6 +587,18 @@ export class AegisHostRuntime {
    */
   static async start(config: AegisHostConfig): Promise<AegisHostRuntime> {
     const egressPolicy: StageEgressPolicy = config.egressPolicy ?? { stage: 1 };
+    if (egressPolicy.stage === 2 && config.strictPlainTextEmail === false) {
+      throw new Error("strictPlainTextEmail cannot be disabled in Stage 2");
+    }
+    const effectiveStrictPlainTextEmail = isStrictPlainTextEmailRequired({
+      stage: egressPolicy.stage,
+      smtpHost: config.smtpConfig.host,
+      strictPlainTextEmail: config.strictPlainTextEmail,
+    });
+    const effectiveConfig: AegisHostConfig = {
+      ...config,
+      strictPlainTextEmail: effectiveStrictPlainTextEmail,
+    };
     const smtpTlsEnabled = config.smtpConfig.tlsMode === "direct_tls" || config.smtpConfig.tlsMode === "starttls";
     // Hard egress boundary check BEFORE opening any writable DB or lock
     assertSmtpHostForStage(config.smtpConfig.host, config.smtpConfig.port, egressPolicy, {
@@ -884,7 +917,14 @@ export class AegisHostRuntime {
       >();
       const lastStreamMetrics = new Map<
         string,
-        { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }
+        {
+          firstTokenMs: number | null;
+          totalMs: number;
+          requestId: string;
+          completedAt: number;
+          stopReason?: string;
+          errorCode?: string | null;
+        }
       >();
 
       const modelsController = createHostModelsEgress({
@@ -927,6 +967,8 @@ export class AegisHostRuntime {
             totalMs: info.totalMs,
             requestId: info.requestId,
             completedAt: nowFn(),
+            stopReason: info.stopReason,
+            errorCode: info.errorCode ?? null,
           });
           emitChange({
             conversationId: info.conversationId,
@@ -963,7 +1005,7 @@ export class AegisHostRuntime {
           resolveConversationAuth: (conversationId) => resolveScopeRow(conversationId),
           smtpConfig: config.smtpConfig,
           egressPolicy,
-          strictPlainTextEmail: config.strictPlainTextEmail,
+          strictPlainTextEmail: effectiveStrictPlainTextEmail,
           allowedEmailRecipients: config.allowedEmailRecipients ?? config.allowedEmailTargets,
           githubWriteAllowlist: config.githubWriteAllowlist,
           resolveSkillLockKey,
@@ -1625,7 +1667,7 @@ export class AegisHostRuntime {
       };
 
       const host = new AegisHostRuntime({
-        config,
+        config: effectiveConfig,
         govDb,
         harness,
         telemetry,
@@ -1679,15 +1721,27 @@ export class AegisHostRuntime {
                           .join(" ")
                           .trim()
                       : "";
-                  const failed = lastAssistant?.stopReason === "error";
+                  const streamMeta = lastStreamMetrics.get(convIdStr);
+                  const failed =
+                    lastAssistant?.stopReason === "error" ||
+                    streamMeta?.stopReason === "error" ||
+                    streamMeta?.stopReason === "aborted" ||
+                    !lastAssistant;
+                  const rawErrCode =
+                    lastAssistant?.stopReason === "error" && typeof lastAssistant.errorMessage === "string"
+                      ? lastAssistant.errorMessage.trim()
+                      : typeof streamMeta?.errorCode === "string"
+                        ? streamMeta.errorCode.trim()
+                        : "";
+                  const safeErrCode = /^[A-Za-z0-9_.:-]{1,64}$/.test(rawErrCode)
+                    ? rawErrCode
+                    : "routine_run_error";
                   recordRoutineTriggerCompletion(govDb!, {
                     triggerId: trigger.trigger_id,
                     routineId: routine.routine_id,
                     conversationId: convIdStr,
                     status: failed ? "FAILED" : "SUCCEEDED",
-                    summary: failed
-                      ? (lastAssistant?.errorMessage ?? "routine_run_error")
-                      : (text || "completed"),
+                    summary: failed ? safeErrCode : (text || "completed"),
                     now: nowFn(),
                   });
                   emitChange({

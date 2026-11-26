@@ -258,7 +258,9 @@ CREATE TABLE IF NOT EXISTS mcp_tool_pins (
   server_id TEXT NOT NULL REFERENCES mcp_server_pins(server_id),
   tool_name TEXT NOT NULL,
   schema_sha256 TEXT NOT NULL,
+  observed_schema_sha256 TEXT,
   canonical_def_json TEXT NOT NULL,
+  present_in_last_list INTEGER NOT NULL DEFAULT 1 CHECK(present_in_last_list IN (0,1)),
   state TEXT NOT NULL CHECK(state IN ('APPROVED','QUARANTINED','REVOKED')),
   reason TEXT,
   updated_at INTEGER NOT NULL,
@@ -800,6 +802,24 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
       ALTER TABLE source_read_grants_v7 RENAME TO source_read_grants;
       COMMIT;
     `);
+  }
+
+  // Migration 8 (Stage 2 S2-P0-3): Track latest observed_schema_sha256 & live presence on mcp_tool_pins
+  const mcpToolCols = (
+    db.prepare("PRAGMA table_info(mcp_tool_pins)").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  if (mcpToolCols.length > 0 && !mcpToolCols.includes("observed_schema_sha256")) {
+    db.exec(`ALTER TABLE mcp_tool_pins ADD COLUMN observed_schema_sha256 TEXT;`);
+    if (mcpToolCols.includes("schema_sha256")) {
+      db.exec(`UPDATE mcp_tool_pins SET observed_schema_sha256 = schema_sha256 WHERE observed_schema_sha256 IS NULL;`);
+    } else if (mcpToolCols.includes("definition_sha256")) {
+      db.exec(`UPDATE mcp_tool_pins SET observed_schema_sha256 = definition_sha256 WHERE observed_schema_sha256 IS NULL;`);
+    }
+  }
+  if (mcpToolCols.length > 0 && !mcpToolCols.includes("present_in_last_list")) {
+    db.exec(
+      `ALTER TABLE mcp_tool_pins ADD COLUMN present_in_last_list INTEGER NOT NULL DEFAULT 1 CHECK(present_in_last_list IN (0,1));`,
+    );
   }
 }
 

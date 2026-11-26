@@ -3,8 +3,8 @@ import { McpClient, StdioTransport, type Tool as McpTool } from "@earendil-works
 import type { HostCredentialVault, StageProfile } from "../governance/credentials.ts";
 import { writeAuditEvent } from "../governance/db.ts";
 import {
+  computeMcpToolFingerprint,
   quarantineMissingMcpTools,
-  recordObservedDriftDefinition,
   verifyLiveMcpToolPin,
   verifyMcpServerBinary,
   verifyOrQuarantineMcpTool,
@@ -69,6 +69,7 @@ export class GitHubMcpBridge {
   #client: McpClient | null = null;
   #transport: StdioTransport | null = null;
   #loadedTools = new Map<string, McpTool>();
+  #loadedToolFingerprints = new Map<string, string>();
   #verifiedSha256: string | null = null;
   #readOnlyMode = true;
   #admissionPaused = false;
@@ -115,6 +116,10 @@ export class GitHubMcpBridge {
     const t = this.#loadedTools.get(toolName);
     if (!t || !t.inputSchema || typeof t.inputSchema !== "object") return null;
     return t.inputSchema as Record<string, unknown>;
+  }
+
+  getLiveToolFingerprint(toolName: string): string | null {
+    return this.#loadedToolFingerprints.get(toolName) ?? null;
   }
 
   async waitForPendingRecheck(): Promise<void> {
@@ -281,10 +286,10 @@ export class GitHubMcpBridge {
         }
         try {
           await this.recheckToolPins();
-        } catch (err) {
-          // Keep admission strictly closed when re-verification fails!
+        } catch {
+          // Keep admission strictly closed when re-verification fails (controlled status code only)!
           this.#admissionPaused = true;
-          this.#lastPauseReason = `tools_list_changed_recheck_failed:${err instanceof Error ? err.message : String(err)}`;
+          this.#lastPauseReason = "tools_list_changed_recheck_failed";
         }
       });
   }
@@ -316,16 +321,23 @@ export class GitHubMcpBridge {
     const approvedTools: string[] = [];
     const quarantinedTools: Array<{ name: string; code: string; reason: string }> = [];
     const observedNames: string[] = [];
+    const nextLoadedTools = new Map<string, McpTool>();
+    const nextLoadedFingerprints = new Map<string, string>();
     const now = this.#now();
 
     for (const tool of tools) {
       observedNames.push(tool.name);
-      this.#loadedTools.set(tool.name, tool);
       const observedDef = {
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema,
       };
+      const fp = computeMcpToolFingerprint(observedDef);
+      nextLoadedTools.set(tool.name, tool);
+      nextLoadedFingerprints.set(tool.name, fp.schemaSha256);
+
+      // S2-P0-3: verifyOrQuarantineMcpTool atomically persists the latest observed definition,
+      // observed_schema_sha256, and present_in_last_list=1 in ALL states (including already QUARANTINED / REVOKED)!
       const pinCheck = verifyOrQuarantineMcpTool(this.#config.govDb, {
         serverId: this.#config.serverId,
         observedDef,
@@ -334,16 +346,13 @@ export class GitHubMcpBridge {
       if (pinCheck.ok) {
         approvedTools.push(tool.name);
       } else {
-        if (pinCheck.code === "mcp_tool_definition_changed") {
-          recordObservedDriftDefinition(this.#config.govDb, {
-            serverId: this.#config.serverId,
-            observedDef,
-            now,
-          });
-        }
         quarantinedTools.push({ name: tool.name, code: pinCheck.code, reason: pinCheck.reason });
       }
     }
+
+    // Replace live in-memory snapshot atomically so disappeared tools vanish from memory as well as DB!
+    this.#loadedTools = nextLoadedTools;
+    this.#loadedToolFingerprints = nextLoadedFingerprints;
 
     const missingQuarantinedTools = quarantineMissingMcpTools(this.#config.govDb, {
       serverId: this.#config.serverId,
@@ -473,10 +482,12 @@ export class GitHubMcpBridge {
       return deny("stage1_github_write_disabled", `Read-only path blocks write MCP tool: ${toolName}`);
     }
 
+    const liveObservedSha256 = this.#loadedToolFingerprints.get(toolName) ?? null;
     const pinCheck = verifyLiveMcpToolPin(this.#config.govDb, {
       serverId: this.#config.serverId,
       toolName,
       expectedSchemaSha256: auth.expectedSchemaSha256,
+      liveObservedSha256,
     });
     if (!pinCheck.ok) {
       return deny(pinCheck.code, pinCheck.reason);
@@ -499,20 +510,36 @@ export class GitHubMcpBridge {
       return deny("mcp_not_connected", "GitHub MCP bridge is not connected");
     }
 
-    const result = await this.#client.callTool(toolName, args);
-    const text = (result.content ?? [])
-      .map((blk) => (blk.type === "text" ? blk.text : JSON.stringify(blk)))
-      .join("\n");
-    if (result.isError) {
-      return { ok: false, code: "mcp_tool_error", reason: text, raw: result };
+    // S2-P0-4: Reduce remote MCP errors strictly to controlled codes (NEVER leak raw remote error text!)
+    try {
+      const result = await this.#client.callTool(toolName, args);
+      if (result.isError) {
+        return {
+          ok: false,
+          code: "mcp_remote_tool_error",
+          reason: `mcp_remote_tool_error:${toolName}`,
+        };
+      }
+      const text = (result.content ?? [])
+        .map((blk) => (blk.type === "text" ? blk.text : JSON.stringify(blk)))
+        .join("\n");
+      return { ok: true, code: "ok", text };
+    } catch (err) {
+      const rec = err as { code?: unknown } | null | undefined;
+      const rawCode = rec?.code !== undefined && rec?.code !== null ? String(rec.code) : "";
+      const safeCode = /^-?[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "call_failed";
+      return {
+        ok: false,
+        code: "mcp_transport_error",
+        reason: `mcp_transport_error:${safeCode}`,
+      };
     }
-    return { ok: true, code: "ok", text, raw: result };
   }
 
   /**
    * Stage 2 controlled write execution. Invoked EXCLUSIVELY by the sole host submitter
    * AFTER T4 CAS READY -> SUBMITTING commits. Re-checks admission pause, Stage 2 write mode,
-   * and live pin fingerprint BEFORE sending JSON-RPC.
+   * live in-memory tool presence/fingerprint, AND live DB pin fingerprint BEFORE sending JSON-RPC.
    */
   async callWriteTool(
     toolName: string,
@@ -533,10 +560,12 @@ export class GitHubMcpBridge {
         reason: `MCP execution admission paused (${this.#lastPauseReason ?? "rechecking"})`,
       };
     }
+    const liveObservedSha256 = this.#loadedToolFingerprints.get(toolName) ?? null;
     const pinCheck = verifyLiveMcpToolPin(this.#config.govDb, {
       serverId: this.#config.serverId,
       toolName,
       expectedSchemaSha256: opts.expectedSchemaSha256,
+      liveObservedSha256,
     });
     if (!pinCheck.ok) {
       return { ok: false, code: pinCheck.code, reason: pinCheck.reason };
@@ -544,14 +573,29 @@ export class GitHubMcpBridge {
     if (!this.#client) {
       return { ok: false, code: "mcp_not_connected", reason: "GitHub MCP bridge is not connected" };
     }
-    const result = await this.#client.callTool(toolName, args);
-    const text = (result.content ?? [])
-      .map((blk) => (blk.type === "text" ? blk.text : JSON.stringify(blk)))
-      .join("\n");
-    if (result.isError) {
-      return { ok: false, code: "mcp_tool_error", reason: text, raw: result };
+    try {
+      const result = await this.#client.callTool(toolName, args);
+      if (result.isError) {
+        return {
+          ok: false,
+          code: "mcp_remote_tool_error",
+          reason: `mcp_remote_tool_error:${toolName}`,
+        };
+      }
+      const text = (result.content ?? [])
+        .map((blk) => (blk.type === "text" ? blk.text : JSON.stringify(blk)))
+        .join("\n");
+      return { ok: true, code: "ok", text };
+    } catch (err) {
+      const rec = err as { code?: unknown } | null | undefined;
+      const rawCode = rec?.code !== undefined && rec?.code !== null ? String(rec.code) : "";
+      const safeCode = /^-?[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "call_failed";
+      return {
+        ok: false,
+        code: "mcp_transport_error",
+        reason: `mcp_transport_error:${safeCode}`,
+      };
     }
-    return { ok: true, code: "ok", text, raw: result };
   }
 
   async close(): Promise<void> {
@@ -563,6 +607,8 @@ export class GitHubMcpBridge {
       }
     }
     this.#unsubscribeListeners = [];
+    this.#loadedTools.clear();
+    this.#loadedToolFingerprints.clear();
     if (this.#client) {
       await this.#client.close().catch(() => {});
       this.#client = null;

@@ -16,6 +16,7 @@ import {
   createRoutineWithGovernance,
   parseNaturalLanguageRoutine,
   pauseRoutine,
+  recordRoutineTriggerCompletion,
 } from "../../src/capabilities/timers/routines.ts";
 import {
   decideApproval,
@@ -313,7 +314,10 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     const vault = new HostCredentialVault();
     const egressPolicy = { stage: 2 as const };
     const tokenPriceSchedule = {
-      priceVersion: "deepseek-stage2-fake-v1",
+      priceVersion: "deepseek-2026-11",
+      provider: "deepseek",
+      modelId: "deepseek-chat",
+      boundContractVersion: "deepseek-chat-openai-compat-v1",
       inputPerMTokMu: 280_000,
       outputPerMTokMu: 420_000,
       cacheReadPerMTokMu: 28_000,
@@ -322,7 +326,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     vault.registerSlot(
       {
         slotId: "slot:model-router",
-        provider: "deepseek-fake",
+        provider: "deepseek",
         allowedBaseUrls: [fakeModel.baseUrl],
         allowedModelIds: ["deepseek-chat"],
         priceVersion: tokenPriceSchedule.priceVersion,
@@ -333,9 +337,9 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     vault.registerSlot(
       {
         slotId: "slot:model-worker",
-        provider: "deepseek-fake",
+        provider: "deepseek",
         allowedBaseUrls: [fakeModel.baseUrl],
-        allowedModelIds: ["deepseek-reasoner"],
+        allowedModelIds: ["deepseek-chat"],
         priceVersion: tokenPriceSchedule.priceVersion,
       },
       workerKey,
@@ -375,7 +379,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     const modelSlots: ModelSlotConfig[] = [
       {
         slotName: "router",
-        provider: "deepseek-fake",
+        provider: "deepseek",
         modelId: "deepseek-chat",
         baseUrl: fakeModel.baseUrl,
         credentialSlotId: "slot:model-router",
@@ -386,8 +390,8 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       },
       {
         slotName: "worker",
-        provider: "deepseek-fake",
-        modelId: "deepseek-reasoner",
+        provider: "deepseek",
+        modelId: "deepseek-chat",
         baseUrl: fakeModel.baseUrl,
         credentialSlotId: "slot:model-worker",
         contextWindow: 64_000,
@@ -423,7 +427,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
           scopeId: "scope:default",
           sourceType: "*",
           sourceId: "*",
-          provider: "deepseek-fake",
+          provider: "deepseek",
           modelId: "*",
           baseUrl: fakeModel.baseUrl,
           slotName: "*",
@@ -921,7 +925,29 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     assert.equal(pendingDec.ok, true);
     assert.ok(pendingDec.effectId);
 
-    // 5b. Tool definition drift -> recheck quarantines -> both read AND pending-claim write refused (0 remote calls!)
+    // S2-P0-4: MCP read-only remote error echoing secret MUST be reduced at bridge boundary (0 leaks)!
+    const ECHOED_MCP_READ_SECRET = `ECHOED_MCP_READ_ERR_SECRET_${runId}`;
+    writeFileSync(echoSecretFlagPath, `READ_ERROR:${ECHOED_MCP_READ_SECRET}`, "utf8");
+    const mcpReadErrRes = await bridge!.callReadOnlyTool(
+      "get_file_contents",
+      { repo: "NorthAdb/project-helios", ref: "refs/heads/main", path: "README.md" },
+      {
+        principalId: "owner",
+        scopeId: "scope:default",
+        repoId: "NorthAdb/project-helios",
+        operation: "read_file",
+        ref: "refs/heads/main",
+        path: "README.md",
+      },
+    );
+    rmSync(echoSecretFlagPath, { force: true });
+    assert.equal(mcpReadErrRes.ok, false);
+    assert.equal(mcpReadErrRes.code, "mcp_remote_tool_error");
+    assert.equal(mcpReadErrRes.reason, "mcp_remote_tool_error:get_file_contents");
+    assert.ok(!JSON.stringify(mcpReadErrRes).includes(ECHOED_MCP_READ_SECRET));
+    const mcpCallsAfterReadErr = readMcpJsonl(mcpLogPath).filter((e) => e["kind"] === "tool_call").length;
+
+    // 5b. Tool definition drift (v1 -> v2) -> recheck quarantines -> both read AND pending-claim write refused (0 remote calls!)
     writeFileSync(tamperFlagPath, "tampered", "utf8");
     // S2-P0-3a: Trigger LIVE mid-session `notifications/tools/list_changed` after tampering!
     writeFileSync(notifyFlagPath, `notify-1-${Date.now()}`, "utf8");
@@ -933,6 +959,25 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     await bridge!.waitForPendingRecheck();
     assert.equal(getMcpToolPin(host.govDb, "github-s2", "get_file_contents")?.state, "QUARANTINED");
     assert.equal(getMcpToolPin(host.govDb, "github-s2", "create_or_update_file")?.state, "QUARANTINED");
+    const v2WritePinView = inspectStoredMcpToolPin(getMcpToolPin(host.govDb, "github-s2", "create_or_update_file")!);
+
+    // S2-P0-3 (Round 3): Second drift (v2 -> v3) while ALREADY QUARANTINED MUST update persisted review definition
+    // AND reject stale v2 approval (409), allowing approval ONLY with latest v3 fingerprint!
+    writeFileSync(tamperFlagPath, "tampered-v3", "utf8");
+    writeFileSync(notifyFlagPath, `notify-2-${Date.now()}`, "utf8");
+    await waitFor(
+      () => bridge!.listChangedNotificationCount,
+      (n) => n >= 2,
+      5_000,
+    );
+    await bridge!.waitForPendingRecheck();
+    const v3WritePinView = inspectStoredMcpToolPin(getMcpToolPin(host.govDb, "github-s2", "create_or_update_file")!);
+    assert.notEqual(
+      v3WritePinView.observedSchemaSha256,
+      v2WritePinView.observedSchemaSha256,
+      "Redrift while QUARANTINED MUST refresh stored observed definition and fingerprint to v3",
+    );
+    assert.ok(v3WritePinView.canonicalDefJson.includes("TAMPERED WRITE TOOL V3"));
 
     const callAfterDrift = await bridge!.callReadOnlyTool(
       "get_file_contents",
@@ -979,19 +1024,29 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     assert.equal(claimToolMismatch.claimed, false);
     assert.equal(claimToolMismatch.code, "github_write_tool_mismatch");
 
-    // S2-P0-3b: Human Pin approval MUST reject stale fingerprint (409) in same tx, and succeed only with reviewed observed fingerprint!
+    // S2-P0-3b: Human Pin approval MUST reject stale v1 AND stale v2 fingerprints (409), and succeed ONLY with v3!
     const writePinRow = getMcpToolPin(host.govDb, "github-s2", "create_or_update_file")!;
     const writePinView = inspectStoredMcpToolPin(writePinRow);
     assert.equal(writePinView.drifted, true);
-    const staleApprove = approveStoredMcpToolPin(host.govDb, {
+    assert.equal(writePinView.presentInLastList, true);
+    const staleV1Approve = approveStoredMcpToolPin(host.govDb, {
       serverId: "github-s2",
       toolName: "create_or_update_file",
       expectedSchemaSha256: writePinView.pinnedSchemaSha256,
       approvedBy: "owner",
       now: fixedNow,
     });
-    assert.equal(staleApprove.ok, false);
-    assert.equal(staleApprove.httpStatus, 409);
+    assert.equal(staleV1Approve.ok, false);
+    assert.equal(staleV1Approve.httpStatus, 409);
+    const staleV2Approve = approveStoredMcpToolPin(host.govDb, {
+      serverId: "github-s2",
+      toolName: "create_or_update_file",
+      expectedSchemaSha256: v2WritePinView.observedSchemaSha256,
+      approvedBy: "owner",
+      now: fixedNow,
+    });
+    assert.equal(staleV2Approve.ok, false);
+    assert.equal(staleV2Approve.httpStatus, 409);
 
     const reappWrite = approveStoredMcpToolPin(host.govDb, {
       serverId: "github-s2",
@@ -1044,7 +1099,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     assert.equal(callAfterRevoke.ok, false);
     assert.equal(callAfterRevoke.code, "mcp_tool_revoked");
 
-    // 5e. Missing tool on reconnect -> quarantined!
+    // 5e. Missing tool on reconnect -> quarantined & present_in_last_list=0 -> approval refused (409)!
     rmSync(tamperFlagPath, { force: true });
     const readPinView2 = inspectStoredMcpToolPin(getMcpToolPin(host.govDb, "github-s2", "get_file_contents")!);
     approveStoredMcpToolPin(host.govDb, {
@@ -1058,6 +1113,18 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     const missingRes = await bridge!.reconnect();
     assert.equal(missingRes.ok, true);
     assert.ok(missingRes.missingQuarantinedTools?.includes("get_file_contents"));
+    const missingPinView = inspectStoredMcpToolPin(getMcpToolPin(host.govDb, "github-s2", "get_file_contents")!);
+    assert.equal(missingPinView.presentInLastList, false);
+    const approveAbsentRes = approveStoredMcpToolPin(host.govDb, {
+      serverId: "github-s2",
+      toolName: "get_file_contents",
+      expectedSchemaSha256: missingPinView.observedSchemaSha256,
+      approvedBy: "owner",
+      now: fixedNow,
+    });
+    assert.equal(approveAbsentRes.ok, false);
+    assert.equal(approveAbsentRes.httpStatus, 409);
+    assert.equal(approveAbsentRes.code, "mcp_tool_not_present");
     rmSync(dropReadFlagPath, { force: true });
 
     // 5f. Binary tamper on reconnect -> binary SHA-256 mismatch -> admission paused, 0 calls!
@@ -1075,10 +1142,12 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     assert.equal(callWhilePaused.code, "mcp_admission_paused");
 
     const mcpTotalAfterC4 = readMcpJsonl(mcpLogPath).filter((e) => e["kind"] === "tool_call").length;
-    assert.equal(mcpTotalAfterC4 - mcpTotalBeforeC4, 0, "Drifted/revoked/paused MCP calls MUST produce 0 remote tool_calls");
+    assert.equal(mcpTotalAfterC4 - mcpCallsAfterReadErr, 0, "Drifted/revoked/paused MCP calls MUST produce 0 remote tool_calls");
 
     evidence["p0_3_mcp_c4"] = {
       listChangedNotificationPausedAndQuarantined: true,
+      redriftWhileQuarantinedUpdatedToV3: true,
+      absentToolApprovalRejected409: true,
       stalePinApprovalRejected409: true,
       toolMismatchBlockedBeforeClaim: claimToolMismatch.code,
       driftQuarantined: true,
@@ -1087,7 +1156,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       revokedCallBlocked: callAfterRevoke.code,
       missingToolQuarantined: Boolean(missingRes.missingQuarantinedTools?.includes("get_file_contents")),
       binaryTamperRejected: tamperedConn.code,
-      remoteToolCallDeltaDuringC4: mcpTotalAfterC4 - mcpTotalBeforeC4,
+      remoteToolCallDeltaDuringC4: mcpTotalAfterC4 - mcpCallsAfterReadErr,
     };
 
     // =========================================================================
@@ -1395,36 +1464,216 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       false,
     );
 
-    assert.equal(validateModelPriceScheduleForEndpoint("https://api.deepseek.com", null).ok, false);
+    // S2-P0-1 (Round 3): Stage 2 cannot disable strictPlainTextEmail at host startup OR submitter, and rejects extra fields!
     assert.equal(
-      validateModelPriceScheduleForEndpoint("https://api.deepseek.com", {
-        priceVersion: "synthetic-v1",
-        inputPerMTokMu: 280_000,
-        outputPerMTokMu: 420_000,
-        syntheticFixedUpperMu: 100,
+      validateStage2PlainTextEmail({
+        to: ["approved@local.test"],
+        subject: "Extra field test",
+        body: "Plain text",
+        html: "<b>unsupported</b>",
+      }).ok,
+      false,
+    );
+    let stage2DisableStrictRejected = false;
+    try {
+      await AegisHostRuntime.start({
+        dataDir: path.join(rootDir, "reject-non-strict"),
+        vault,
+        modelSlots,
+        smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "owner@local.test" },
+        egressPolicy: { stage: 2 },
+        strictPlainTextEmail: false,
+      });
+    } catch {
+      stage2DisableStrictRejected = true;
+    }
+    assert.equal(stage2DisableStrictRejected, true, "Stage 2 MUST refuse strictPlainTextEmail=false");
+
+    // S2-P0-2 (Round 3): Loopback real billing proxy MUST NOT auto-receive synthetic pricing; unproven models MUST fail closed!
+    assert.equal(
+      validateModelPriceScheduleForEndpoint("http://127.0.0.1:7890/v1", null, {
+        provider: "deepseek",
+        modelId: "deepseek-chat",
       }).ok,
       false,
     );
     assert.equal(
-      validateModelPriceScheduleForEndpoint("https://api.deepseek.com", {
-        priceVersion: "deepseek-2026-11",
-        inputPerMTokMu: 280_000,
-        outputPerMTokMu: 420_000,
-        cacheReadPerMTokMu: 28_000,
-        allowTokenBoundEstimation: true,
-      }).ok,
+      validateModelPriceScheduleForEndpoint(
+        "http://127.0.0.1:7890/v1",
+        {
+          priceVersion: "synthetic-v1",
+          inputPerMTokMu: 280_000,
+          outputPerMTokMu: 420_000,
+          syntheticFixedUpperMu: 100,
+        },
+        { provider: "deepseek", modelId: "deepseek-chat" },
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateModelPriceScheduleForEndpoint(
+        "https://api.example.com/v1",
+        {
+          priceVersion: "generic-2026-11",
+          provider: "generic-llm",
+          modelId: "mystery-1",
+          inputPerMTokMu: 280_000,
+          outputPerMTokMu: 420_000,
+          allowTokenBoundEstimation: true,
+        },
+        { provider: "generic-llm", modelId: "mystery-1" },
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateModelPriceScheduleForEndpoint(
+        "https://api.deepseek.com",
+        {
+          priceVersion: "deepseek-2026-11",
+          provider: "deepseek",
+          modelId: "deepseek-reasoner",
+          inputPerMTokMu: 280_000,
+          outputPerMTokMu: 420_000,
+          allowTokenBoundEstimation: true,
+        },
+        { provider: "deepseek", modelId: "deepseek-reasoner" },
+      ).ok,
+      false,
+    );
+    assert.equal(validateModelPriceScheduleForEndpoint("https://api.deepseek.com", null).ok, false);
+    assert.equal(
+      validateModelPriceScheduleForEndpoint(
+        "https://api.deepseek.com",
+        {
+          priceVersion: "synthetic-v1",
+          inputPerMTokMu: 280_000,
+          outputPerMTokMu: 420_000,
+          syntheticFixedUpperMu: 100,
+        },
+        { provider: "deepseek", modelId: "deepseek-chat" },
+      ).ok,
+      false,
+    );
+    assert.equal(
+      validateModelPriceScheduleForEndpoint(
+        "https://api.deepseek.com",
+        {
+          priceVersion: "deepseek-2026-11",
+          provider: "deepseek",
+          modelId: "deepseek-chat",
+          boundContractVersion: "deepseek-chat-openai-compat-v1",
+          inputPerMTokMu: 280_000,
+          outputPerMTokMu: 420_000,
+          cacheReadPerMTokMu: 28_000,
+          allowTokenBoundEstimation: true,
+        },
+        { provider: "deepseek", modelId: "deepseek-chat" },
+      ).ok,
       true,
     );
 
-    // S2-P0-4: Malicious remote SMTP echoing synthetic secret in 250 OK AND 550 error -> 0 persisted/projected leaks!
-    const ECHOED_SMTP_SECRET = `ECHOED_REMOTE_SMTP_SECRET_${runId}`;
+    // S2-P0-4 (Round 3): Malicious remote model HTTP 401 echoing secret during a routine run -> reduced to controlled code!
+    const ECHOED_MODEL_SECRET = `ECHOED_MODEL_HTTP401_SECRET_${runId}`;
+    const errRoutine = createRoutineWithGovernance(host.govDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      name: "Model Error Boundary Routine",
+      prompt: "Trigger provider HTTP 401 echo check",
+      timezone: "Asia/Hong_Kong",
+      scheduleSpec: { kind: "once", onceAtUtcMs: fixedNow - 10_000 },
+      nextRunUtcMs: fixedNow - 10_000,
+      confirmed: true,
+      now: fixedNow,
+    });
+    assert.equal(errRoutine.ok, true);
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "http_error",
+          httpStatus: 401,
+          errorMessage: `Invalid API key echoed by provider: ${ECHOED_MODEL_SECRET}`,
+        },
+      ],
+    });
+    const errPoll = await host.routinePoller!.pollOnce();
+    assert.equal(errPoll.admittedCount, 1);
+    const errTrigRow = await waitFor(
+      () =>
+        host!.govDb
+          .prepare("SELECT * FROM routine_triggers WHERE routine_id = ? LIMIT 1")
+          .get(errRoutine.routine.routine_id) as { state: string; reason: string | null; conversation_id: string | null } | undefined,
+      (r) => Boolean(r && r.state === "FAILED"),
+      10_000,
+    );
+    assert.equal(errTrigRow!.reason, "model_provider_http_401");
+    const errRoutineRow = host.govDb
+      .prepare("SELECT last_status, last_result_summary FROM routines WHERE routine_id = ?")
+      .get(errRoutine.routine.routine_id) as { last_status: string; last_result_summary: string | null };
+    assert.equal(errRoutineRow.last_status, "FAILED");
+    assert.ok(errRoutineRow.last_result_summary?.includes("model_provider_http_401"));
+    assert.ok(!JSON.stringify(errRoutineRow).includes(ECHOED_MODEL_SECRET));
+
+    // S2-P0-4 (Round 3): Malicious remote SMTP echoing alphanumeric `queued as <secret>` in 250 OK AND 550 error -> 0 persisted/projected leaks!
+    const ECHOED_SMTP_SECRET = `QIDSECRET-${runId.replace(/[^A-Za-z0-9]/g, "")}`;
     const smtpCtrlBase = `http://${fakeSmtp.host}:${fakeSmtp.controlPort}`;
     await fetch(`${smtpCtrlBase}/__control/config`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: "normal", echoText: ECHOED_SMTP_SECRET }),
+      body: JSON.stringify({ mode: "normal", echoText: `queued as ${ECHOED_SMTP_SECRET}` }),
     });
     const convEcho = await host.createManagedConversation({ principalId: "owner", slotName: "router" });
+    // S2-P0-1: Even if caller passes strictPlainTextEmail: false in Stage 2, submitter MUST still reject cc/extra fields BEFORE T4 claim!
+    const smtpBeforeUnsupported = (await fakeSmtp.stats()).totalReceived;
+    const ccProp = proposeOrGetApproval(host.govDb, {
+      runtimeEpoch: host.runtimeEpoch,
+      conversationId: String(convEcho.id),
+      toolTaskId: "88000",
+      callId: "echo_smtp_cc_bypass_1",
+      scopeId: "scope:default",
+      toolName: "send_email",
+      target: "smtp:approved@local.test",
+      payload: { to: ["approved@local.test"], subject: "Boundary check", body: "Plain text" },
+      expiresAt: fixedNow + 60_000,
+      now: fixedNow,
+    });
+    const ccDec = decideApproval(host.govDb, {
+      approvalId: ccProp.approval.approval_id,
+      conversationId: String(convEcho.id),
+      principalId: "owner",
+      decision: "APPROVE",
+      expectedRevision: 1,
+      expectedActionHash: ccProp.revision.action_hash,
+      nonce: ccProp.nonce!,
+      decisionKey: `dk-cc-bypass-${runId}`,
+      now: fixedNow,
+    });
+    assert.equal(ccDec.ok, true);
+    const ccBypassSubRes = await submitApprovedEmailEffect({
+      govDb: host.govDb,
+      runtimeEpoch: host.runtimeEpoch,
+      effectId: ccDec.effectId!,
+      conversationId: String(convEcho.id),
+      toolTaskId: "88000",
+      callId: "echo_smtp_cc_bypass_1",
+      toolName: "send_email",
+      finalTarget: "smtp:approved@local.test",
+      finalPayload: {
+        to: ["approved@local.test"],
+        cc: ["hidden@local.test"],
+        subject: "Boundary check",
+        body: "Plain text",
+      },
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "owner@local.test" },
+      egressPolicy: { stage: 2 },
+      strictPlainTextEmail: false,
+      allowedEmailRecipients: ["approved@local.test"],
+      now: () => fixedNow,
+    });
+    assert.equal(ccBypassSubRes.claimed, false);
+    assert.equal(ccBypassSubRes.code, "unsupported_email_field_cc");
+    assert.equal((await fakeSmtp.stats()).totalReceived, smtpBeforeUnsupported);
+
     const echoProp = proposeOrGetApproval(host.govDb, {
       runtimeEpoch: host.runtimeEpoch,
       conversationId: String(convEcho.id),
@@ -1465,7 +1714,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       allowedEmailRecipients: ["approved@local.test"],
       now: () => fixedNow,
     });
-    assert.equal(echoSubRes.ok, true);
+    assert.equal(echoSubRes.ok, true, `echoSubRes failed: ${JSON.stringify(echoSubRes)}`);
     assert.equal(echoSubRes.receiptRef, "smtp:250:accepted");
     assert.ok(!JSON.stringify(echoSubRes).includes(ECHOED_SMTP_SECRET));
 
@@ -1598,27 +1847,147 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       });
       assert.equal(badDraftRes.status, 400);
 
+      // S2-P0-5 (Round 3): Also attach an approved effect with receipt/reason/reconcile_evidence on convRev
+      // AND a completed routine linked to a conversation reading the SAME source grant!
+      const revEffProp = proposeOrGetApproval(host.govDb, {
+        runtimeEpoch: host.runtimeEpoch,
+        conversationId: String(convRev.id),
+        toolTaskId: "88010",
+        callId: "rev_eff_1",
+        scopeId: "scope:default",
+        toolName: "send_email",
+        target: "smtp:confidential@local.test",
+        payload: { to: ["confidential@local.test"], subject: "EFF_SECRET_SUBJ", body: "EFF_SECRET_BODY" },
+        expiresAt: fixedNow + 60_000,
+        now: fixedNow,
+      });
+      const revEffDec = decideApproval(host.govDb, {
+        approvalId: revEffProp.approval.approval_id,
+        conversationId: String(convRev.id),
+        principalId: "owner",
+        decision: "APPROVE",
+        expectedRevision: 1,
+        expectedActionHash: revEffProp.revision.action_hash,
+        nonce: revEffProp.nonce!,
+        decisionKey: `dk-rev-eff-${runId}`,
+        now: fixedNow,
+      });
+      assert.equal(revEffDec.ok, true);
+      host.govDb
+        .prepare(
+          `UPDATE effects
+              SET state = 'SUCCEEDED',
+                  receipt_ref = 'SENSITIVE_EFFECT_RECEIPT',
+                  reason = 'SENSITIVE_EFFECT_REASON',
+                  reconciled_by = 'owner',
+                  reconcile_evidence = 'SENSITIVE_RECONCILE_EVIDENCE'
+            WHERE effect_id = ?`,
+        )
+        .run(revEffDec.effectId!);
+
+      const revRoutine = createRoutineWithGovernance(host.govDb, {
+        principalId: "owner",
+        scopeId: "scope:default",
+        name: "Revocation Guarded Routine",
+        prompt: "Summarize sensitive domain",
+        timezone: "Asia/Hong_Kong",
+        scheduleSpec: { kind: "once", onceAtUtcMs: fixedNow + 86_400_000 },
+        nextRunUtcMs: fixedNow + 86_400_000,
+        confirmed: true,
+        now: fixedNow,
+      });
+      assert.equal(revRoutine.ok, true);
+      const revTrigId = `trig_rev_${runId}`;
+      host.govDb
+        .prepare(
+          `INSERT INTO routine_triggers(
+             trigger_id, routine_id, scheduled_instant_utc, correlation_key, conversation_id,
+             pi_request_id, submission_id, state, reason, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 'ADMITTED', NULL, ?, ?)`,
+        )
+        .run(
+          revTrigId,
+          revRoutine.routine.routine_id,
+          fixedNow,
+          `rk:rev:${runId}`,
+          String(convRev.id),
+          fixedNow,
+          fixedNow,
+        );
+      recordRoutineTriggerCompletion(host.govDb, {
+        triggerId: revTrigId,
+        routineId: revRoutine.routine.routine_id,
+        conversationId: String(convRev.id),
+        status: "SUCCEEDED",
+        summary: "SENSITIVE_ROUTINE_SUMMARY_TEXT",
+        now: fixedNow,
+      });
+
       revokeSourceReadGrant(host.govDb, { grantId: memGrant.grant_id, reason: "p0_5_test", now: fixedNow + 1 });
       const snapAfterRev = (await (
         await fetch(`${auditWeb.baseUrl}/api/conversations/${convRev.id}/snapshot`, { headers: { cookie: cookieHdr } })
       ).json()) as {
-        proposals: Array<{ proposalId: string; target: string; draftRedacted?: boolean; hasChallenge: boolean; snapshot: Record<string, unknown> }>;
+        proposals: Array<{
+          proposalId: string;
+          target: string;
+          draftRedacted?: boolean;
+          hasChallenge: boolean;
+          snapshot: Record<string, unknown>;
+          effect: { receiptRef: string | null; reason: string | null; reconcileEvidence: string | null } | null;
+        }>;
       };
       const view1Prop = snapAfterRev.proposals.find((p) => p.proposalId === revProp.proposal.proposal_id)!;
       assert.equal(view1Prop.draftRedacted, true);
+      assert.equal(view1Prop.hasChallenge, false);
       assert.equal(view1Prop.target, "[redacted_after_source_revocation]");
       assert.ok(!JSON.stringify(view1Prop.snapshot).includes("TOP_SECRET_BODY"));
+      const view1EffProp = snapAfterRev.proposals.find((p) => p.proposalId === revEffProp.proposal.proposal_id)!;
+      assert.equal(view1EffProp.effect?.receiptRef, "[redacted_after_source_revocation]");
+      assert.equal(view1EffProp.effect?.reason, "[redacted_after_source_revocation]");
+      assert.equal(view1EffProp.effect?.reconcileEvidence, null);
+      assert.ok(!JSON.stringify(snapAfterRev).includes("SENSITIVE_EFFECT_RECEIPT"));
+      assert.ok(!JSON.stringify(snapAfterRev).includes("SENSITIVE_EFFECT_REASON"));
+      assert.ok(!JSON.stringify(snapAfterRev).includes("SENSITIVE_RECONCILE_EVIDENCE"));
 
       const view3AfterRev = (await (
         await fetch(`${auditWeb.baseUrl}/api/approvals`, { headers: { cookie: cookieHdr } })
       ).json()) as {
-        approvals: Array<{ proposalId: string; target: string; draftRedacted?: boolean; hasChallenge: boolean; snapshot: Record<string, unknown> }>;
+        approvals: Array<{
+          proposalId: string;
+          target: string;
+          draftRedacted?: boolean;
+          hasChallenge: boolean;
+          snapshot: Record<string, unknown>;
+          effect: { receiptRef: string | null; reason: string | null; reconcileEvidence: string | null } | null;
+        }>;
       };
       const view3Prop = view3AfterRev.approvals.find((p) => p.proposalId === revProp.proposal.proposal_id)!;
       assert.equal(view3Prop.draftRedacted, true);
       assert.equal(view3Prop.hasChallenge, false);
       assert.equal(view3Prop.target, "[redacted_after_source_revocation]");
       assert.ok(!JSON.stringify(view3Prop.snapshot).includes("TOP_SECRET_BODY"));
+      assert.ok(!JSON.stringify(view3AfterRev).includes("SENSITIVE_EFFECT_RECEIPT"));
+      assert.ok(!JSON.stringify(view3AfterRev).includes("SENSITIVE_RECONCILE_EVIDENCE"));
+
+      const view2RoutinesAfterRev = (await (
+        await fetch(`${auditWeb.baseUrl}/api/routines`, { headers: { cookie: cookieHdr } })
+      ).json()) as {
+        routines: Array<{
+          routineId: string;
+          lastResultSummary: string | null;
+          resultRedacted?: boolean;
+          triggers: Array<{ triggerId: string; reason: string | null; redacted?: boolean }>;
+        }>;
+      };
+      const revRoutineView = view2RoutinesAfterRev.routines.find(
+        (r) => r.routineId === revRoutine.routine.routine_id,
+      )!;
+      assert.equal(revRoutineView.resultRedacted, true);
+      assert.equal(revRoutineView.lastResultSummary, "[redacted_after_source_revocation]");
+      assert.equal(revRoutineView.triggers[0]?.redacted, true);
+      assert.equal(revRoutineView.triggers[0]?.reason, "[redacted_after_source_revocation]");
+      assert.ok(!JSON.stringify(view2RoutinesAfterRev).includes("SENSITIVE_ROUTINE_SUMMARY_TEXT"));
+      assert.ok(!JSON.stringify(view2RoutinesAfterRev).includes(ECHOED_MODEL_SECRET));
 
       const editAfterRev = await fetch(`${auditWeb.baseUrl}/api/proposals/${revProp.proposal.proposal_id}/draft`, {
         method: "POST",
@@ -1655,9 +2024,10 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       });
       assert.equal(approveAfterRev.status, 403);
 
-      // Verify Web projections contain 0 echoed SMTP or MCP secrets
+      // Verify Web projections contain 0 echoed SMTP, MCP, or Model secrets
       assert.ok(!JSON.stringify(view3AfterRev).includes(ECHOED_SMTP_SECRET));
       assert.ok(!JSON.stringify(view3AfterRev).includes(ECHOED_MCP_SECRET));
+      assert.ok(!JSON.stringify(view3AfterRev).includes(ECHOED_MODEL_SECRET));
       const echoSnapText = await (
         await fetch(`${auditWeb.baseUrl}/api/conversations/${convEcho.id}/snapshot`, { headers: { cookie: cookieHdr } })
       ).text();
@@ -1764,6 +2134,8 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       { slotId: "slot:web-console", marker: consoleToken },
       { slotId: "slot:echoed-smtp-boundary", marker: ECHOED_SMTP_SECRET },
       { slotId: "slot:echoed-mcp-boundary", marker: ECHOED_MCP_SECRET },
+      { slotId: "slot:echoed-mcp-read-boundary", marker: ECHOED_MCP_READ_SECRET },
+      { slotId: "slot:echoed-model-http-boundary", marker: ECHOED_MODEL_SECRET },
     ];
     const filesToScan = [
       path.join(hostDataDir, "aegis-gov.sqlite"),
@@ -1794,6 +2166,13 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       slotsChecked: markers.map((m) => m.slotId),
       scannedFiles,
       totalForbiddenHits: totalLeakHits,
+    };
+    evidence["round3_p0_closure"] = {
+      s2_p0_1_stage2StrictPlainTextMandatoryAndExtraFieldBlocked: true,
+      s2_p0_2_loopbackRealProxyAndUnprovenModelBlocked: true,
+      s2_p0_3_redriftWhileQuarantinedUpdatedAndAbsentToolApprovalRejected409: true,
+      s2_p0_4_smtpQidAndModel401AndRoutineErrAndMcpReadErrReducedZeroHits: true,
+      s2_p0_5_view1EffectsAndView2RoutinesRedactedOnRevoke: true,
     };
     evidence["round1_p0_and_p1_remediation"] = {
       s2_p0_1_crlfAndRecipientAllowlistBlocked: true,

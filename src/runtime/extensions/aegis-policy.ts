@@ -33,6 +33,7 @@ import { verifyLiveMcpToolPin } from "../../governance/mcp-pin.ts";
 import { recordConversationSource } from "../../governance/policy.ts";
 import {
   evaluateGithubWritePolicy,
+  isStrictPlainTextEmailRequired,
   resolveControlledGithubMcpTool,
   validateEmailEnvelopeSingleLine,
   validateEmailRecipientsAllowlist,
@@ -250,6 +251,11 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         }
       }
 
+      const enforceStrictPlainText = isStrictPlainTextEmailRequired({
+        stage: options.egressPolicy?.stage,
+        smtpHost: options.smtpConfig.host,
+        strictPlainTextEmail: options.strictPlainTextEmail,
+      });
       const res = await submitApprovedEmailEffect({
         govDb: options.govDb,
         runtimeEpoch,
@@ -262,7 +268,7 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         finalPayload,
         smtpConfig: options.smtpConfig,
         egressPolicy: options.egressPolicy,
-        strictPlainTextEmail: options.strictPlainTextEmail,
+        strictPlainTextEmail: enforceStrictPlainText,
         allowedEmailRecipients: options.allowedEmailRecipients,
         vault: options.vault,
         now: nowFn,
@@ -1027,14 +1033,29 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
             return { block: `Default-deny policy: unapproved tool ${call.name}` };
           }
 
-          if (options.strictPlainTextEmail) {
+          const enforceStrictPlainText = isStrictPlainTextEmailRequired({
+            stage: options.egressPolicy?.stage,
+            smtpHost: options.smtpConfig.host,
+            strictPlainTextEmail: options.strictPlainTextEmail,
+          });
+          let payload: EmailSubmissionPayload;
+          let target: string;
+          if (enforceStrictPlainText) {
             const plainCheck = validateStage2PlainTextEmail(call.arguments as Record<string, unknown>);
             if (!plainCheck.ok) {
               return { block: `${plainCheck.code}: ${plainCheck.reason}` };
             }
+            payload = {
+              to: plainCheck.to,
+              subject: plainCheck.subject,
+              body: plainCheck.body,
+            };
+            target = `smtp:${plainCheck.to.join(",")}`;
+          } else {
+            const normalized = normalizeEmailPayload(call.arguments as Record<string, unknown>);
+            payload = normalized.payload;
+            target = normalized.target;
           }
-
-          const { payload, target } = normalizeEmailPayload(call.arguments as Record<string, unknown>);
           const singleLineCheck = validateEmailEnvelopeSingleLine({
             from: options.smtpConfig.fromAddress,
             to: payload.to,

@@ -13,6 +13,7 @@ import {
 import { verifyLiveMcpToolPin } from "../governance/mcp-pin.ts";
 import {
   evaluateGithubWritePolicy,
+  isStrictPlainTextEmailRequired,
   resolveControlledGithubMcpTool,
   validateEmailEnvelopeSingleLine,
   validateEmailRecipientsAllowlist,
@@ -128,8 +129,14 @@ export async function submitApprovedEmailEffect(
     };
   }
 
+  const enforceStrictPlainText = isStrictPlainTextEmailRequired({
+    stage: params.egressPolicy?.stage,
+    smtpHost: params.smtpConfig.host,
+    strictPlainTextEmail: params.strictPlainTextEmail,
+  });
+
   // S2-P0-1: Validate final email snapshot (single-line headers, Stage 2 plain-text, recipient allowlist, target match)
-  // BEFORE T4 claim CAS so malformed/injected/out-of-scope emails NEVER claim or serialize!
+  // BEFORE T4 claim CAS so malformed/injected/out-of-scope/unsupported-field emails NEVER claim or serialize!
   const emailPrecheck = (): { ok: true; payload: EmailSubmissionPayload } | { ok: false; code: string; message: string } => {
     const headerCheck = validateEmailEnvelopeSingleLine({
       from: params.smtpConfig.fromAddress,
@@ -140,7 +147,7 @@ export async function submitApprovedEmailEffect(
       return { ok: false, code: headerCheck.code, message: headerCheck.reason };
     }
     let validatedPayload = params.finalPayload;
-    if (params.strictPlainTextEmail) {
+    if (enforceStrictPlainText) {
       const plainCheck = validateStage2PlainTextEmail(params.finalPayload as unknown as Record<string, unknown>);
       if (!plainCheck.ok) {
         return { ok: false, code: plainCheck.code, message: plainCheck.reason };
@@ -220,16 +227,22 @@ export async function submitApprovedEmailEffect(
   }
 
   const verifiedPayload = checkedEmail.payload;
-  const normalizedPayload: Record<string, unknown> = {
-    to: [...verifiedPayload.to],
-    ...(verifiedPayload.cc ? { cc: [...verifiedPayload.cc] } : {}),
-    ...(verifiedPayload.bcc ? { bcc: [...verifiedPayload.bcc] } : {}),
-    subject: verifiedPayload.subject,
-    body: verifiedPayload.body,
-    ...(verifiedPayload.attachmentDigests
-      ? { attachmentDigests: verifiedPayload.attachmentDigests }
-      : {}),
-  };
+  const normalizedPayload: Record<string, unknown> = enforceStrictPlainText
+    ? {
+        to: [...verifiedPayload.to],
+        subject: verifiedPayload.subject,
+        body: verifiedPayload.body,
+      }
+    : {
+        to: [...verifiedPayload.to],
+        ...(verifiedPayload.cc ? { cc: [...verifiedPayload.cc] } : {}),
+        ...(verifiedPayload.bcc ? { bcc: [...verifiedPayload.bcc] } : {}),
+        subject: verifiedPayload.subject,
+        body: verifiedPayload.body,
+        ...(verifiedPayload.attachmentDigests
+          ? { attachmentDigests: verifiedPayload.attachmentDigests }
+          : {}),
+      };
 
   // T4: Claim CAS READY -> SUBMITTING
   const claim = claimEffectForSubmission(params.govDb, {
@@ -284,10 +297,10 @@ export async function submitApprovedEmailEffect(
     auth: smtpAuth,
   });
 
-  // T5 / S2-P0-4: Persist ONLY reduced controlled status codes & validated identifiers (never raw remote text!)
+  // T5 / S2-P0-4: Persist ONLY reduced controlled status codes (never raw remote text or remote queue tokens!)
   if (smtpRes.status === "succeeded") {
     const safeReceipt =
-      smtpRes.receiptRef && /^smtp:\d{3}:[A-Za-z0-9._=-]{1,80}$/.test(smtpRes.receiptRef)
+      smtpRes.receiptRef && /^smtp:2\d{2}:accepted$/.test(smtpRes.receiptRef)
         ? smtpRes.receiptRef
         : "smtp:250:accepted";
     const rec = recordEffectResult(params.govDb, {
@@ -441,6 +454,7 @@ export async function submitApprovedGithubWriteEffect(params: {
     serverId: params.bridge.serverId,
     toolName: controlledTool,
     expectedSchemaSha256: params.finalPayload.mcpSchemaSha256,
+    liveObservedSha256: params.bridge.getLiveToolFingerprint(controlledTool),
   });
   if (!pinPreCheck.ok) {
     return {
@@ -474,6 +488,7 @@ export async function submitApprovedGithubWriteEffect(params: {
         serverId: params.bridge.serverId,
         toolName: controlledTool,
         expectedSchemaSha256: params.finalPayload.mcpSchemaSha256,
+        liveObservedSha256: params.bridge.getLiveToolFingerprint(controlledTool),
       });
       return livePin.ok;
     },

@@ -827,6 +827,14 @@ export class RoutinePoller {
         }
 
         const doneAt = this.#now();
+        const safeAdmissionReason =
+          admission.reason && /^[A-Za-z0-9_.:-]{1,64}$/.test(admission.reason.trim())
+            ? admission.reason.trim()
+            : admission.outcome === "PENDING_RECONCILE"
+              ? "admission_pending_reconcile"
+              : admission.outcome === "FAILED"
+                ? "admission_failed"
+                : null;
         withImmediateTx(this.#db, () => {
           this.#db
             .prepare(
@@ -844,7 +852,7 @@ export class RoutinePoller {
               admission.conversationId ?? null,
               admission.piRequestId ?? null,
               admission.submissionId ?? null,
-              admission.reason ?? null,
+              safeAdmissionReason,
               doneAt,
               reg.trigger.trigger_id,
             );
@@ -861,8 +869,8 @@ export class RoutinePoller {
               admission.outcome === "ADMITTED"
                 ? `已受理 · 会话 #${admission.conversationId ?? "?"}`
                 : admission.outcome === "PENDING_RECONCILE"
-                  ? `受理待核对 (${admission.reason ?? "unknown"})`
-                  : `执行受阻 (${admission.reason ?? "failed"})`,
+                  ? `受理待核对 (${safeAdmissionReason ?? "unknown"})`
+                  : `执行受阻 (${safeAdmissionReason ?? "failed"})`,
               doneAt,
               routine.routine_id,
             );
@@ -885,9 +893,16 @@ export class RoutinePoller {
   }
 }
 
+function reduceControlledRoutineCode(raw: string | undefined, fallback: string): string {
+  if (!raw) return fallback;
+  const trimmed = raw.trim();
+  return /^[A-Za-z0-9_.:-]{1,64}$/.test(trimmed) ? trimmed : fallback;
+}
+
 /**
- * S2-P1-3: Records actual task completion outcome back onto routine_triggers and routines
- * so View ② shows real task results (and provides a conversation link) instead of stopping at ADMITTED.
+ * S2-P1-3 / S2-P0-4: Records task completion outcome back onto routine_triggers and routines.
+ * On FAILED outcomes, persists ONLY a reduced controlled error code (NEVER arbitrary remote error text!).
+ * On SUCCEEDED outcomes, View ② (/api/routines) enforces live scope + source revocation redaction on read.
  */
 export function recordRoutineTriggerCompletion(
   db: DatabaseSync,
@@ -900,7 +915,10 @@ export function recordRoutineTriggerCompletion(
     now: number;
   },
 ): void {
-  const safeSummary = params.summary.replace(/\s+/g, " ").trim().slice(0, 240);
+  const safeReason =
+    params.status === "FAILED"
+      ? reduceControlledRoutineCode(params.summary, "routine_run_error")
+      : params.summary.replace(/\s+/g, " ").trim().slice(0, 240);
   withImmediateTx(db, () => {
     db.prepare(
       `UPDATE routine_triggers
@@ -908,7 +926,7 @@ export function recordRoutineTriggerCompletion(
               reason = ?,
               updated_at = ?
         WHERE trigger_id = ? AND state IN ('ADMITTED','REGISTERED')`,
-    ).run(params.status, safeSummary, params.now, params.triggerId);
+    ).run(params.status, safeReason, params.now, params.triggerId);
     db.prepare(
       `UPDATE routines
           SET last_status = ?,
@@ -918,8 +936,8 @@ export function recordRoutineTriggerCompletion(
     ).run(
       params.status,
       params.status === "SUCCEEDED"
-        ? `已完成 · 会话 #${params.conversationId}：${safeSummary || "ok"}`
-        : `执行失败 · 会话 #${params.conversationId}：${safeSummary || "failed"}`,
+        ? `已完成 · 会话 #${params.conversationId}：${safeReason || "ok"}`
+        : `执行失败 · 会话 #${params.conversationId} (${safeReason})`,
       params.now,
       params.routineId,
     );
@@ -933,7 +951,7 @@ export function recordRoutineTriggerCompletion(
         routineId: params.routineId,
         conversationId: params.conversationId,
         status: params.status,
-        summaryLength: safeSummary.length,
+        ...(params.status === "FAILED" ? { errorCode: safeReason } : { summaryLength: safeReason.length }),
       },
     });
   });

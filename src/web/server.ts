@@ -66,6 +66,7 @@ import {
 import {
   createRememberedRule,
   evaluateGithubWritePolicy,
+  isStrictPlainTextEmailRequired,
   listRememberedRules,
   resolveControlledGithubMcpTool,
   revokeRememberedRule,
@@ -202,6 +203,23 @@ export function uiStatusLabelFor(approvalState: string, effectState: string | nu
   if (approvalState === "EXPIRED") return "已过期";
   if (approvalState === "SUPERSEDED") return "已替代";
   return approvalState;
+}
+
+/**
+ * S2-P0-5: Shared effect projection used by BOTH View ① (/snapshot) and View ③ (/api/approvals)
+ * so revoked conversations redact receiptRef, reason, and reconcileEvidence identically across all views!
+ */
+function projectEffectForAuthorization(effect: EffectRow | undefined, redacted: boolean) {
+  if (!effect) return null;
+  return {
+    effectId: effect.effect_id,
+    state: effect.state,
+    claimedAt: effect.claimed_at,
+    receiptRef: redacted && effect.receipt_ref ? "[redacted_after_source_revocation]" : effect.receipt_ref,
+    reason: redacted && effect.reason ? "[redacted_after_source_revocation]" : effect.reason,
+    reconciledBy: effect.reconciled_by,
+    reconcileEvidence: redacted ? null : effect.reconcile_evidence,
+  };
 }
 
 export async function startWebServer(config: WebServerConfig): Promise<RunningWebServer> {
@@ -364,7 +382,9 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         .get(p.proposal_id, p.head_rev) as unknown as ApprovalRow;
       const isExpiredNow = apr.state === "EXPIRED" || (apr.state === "PENDING" && now >= apr.expires_at);
       const effectiveApprovalState = isExpiredNow && apr.state === "PENDING" ? "EXPIRED" : apr.state;
+      const redacted = revokedSourceCount > 0;
       const hasChallenge =
+        !redacted &&
         effectiveApprovalState === "PENDING" &&
         Boolean(
           config.host.govDb
@@ -375,10 +395,9 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         .prepare("SELECT * FROM effects WHERE approval_id = ?")
         .get(apr.approval_id) as EffectRow | undefined;
 
-      const safeDraftSnapshot =
-        revokedSourceCount > 0
-          ? { redacted: true, reason: "redacted_after_source_revocation" }
-          : (JSON.parse(draft.canonical_snapshot) as Record<string, unknown>);
+      const safeDraftSnapshot = redacted
+        ? { redacted: true, reason: "redacted_after_source_revocation" }
+        : (JSON.parse(draft.canonical_snapshot) as Record<string, unknown>);
 
       return {
         proposalId: p.proposal_id,
@@ -387,27 +406,17 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         toolTaskId: p.tool_task_id,
         callId: p.call_id,
         toolName: p.tool_name,
-        target: revokedSourceCount > 0 ? "[redacted_after_source_revocation]" : p.target,
+        target: redacted ? "[redacted_after_source_revocation]" : p.target,
         revision: p.head_rev,
         actionHash: draft.action_hash,
         snapshot: safeDraftSnapshot,
-        draftRedacted: revokedSourceCount > 0,
+        draftRedacted: redacted,
         approvalId: apr.approval_id,
         approvalState: effectiveApprovalState,
         expiresAt: apr.expires_at,
         expired: isExpiredNow,
         hasChallenge,
-        effect: effect
-          ? {
-              effectId: effect.effect_id,
-              state: effect.state,
-              claimedAt: effect.claimed_at,
-              receiptRef: effect.receipt_ref,
-              reason: effect.reason,
-              reconciledBy: effect.reconciled_by,
-              reconcileEvidence: effect.reconcile_evidence,
-            }
-          : null,
+        effect: projectEffectForAuthorization(effect, redacted),
         uiStatusLabel: uiStatusLabelFor(effectiveApprovalState, effect?.state ?? null),
       };
     });
@@ -983,7 +992,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
 
       // S2-P0-1: Apply IDENTICAL plain-text, single-line header, and SMTP recipient allowlist validation on draft edit!
       if (existingProposal.tool_name === "send_email") {
-        if (config.host.config.strictPlainTextEmail) {
+        const enforceStrictPlainText = isStrictPlainTextEmailRequired({
+          stage: config.host.config.egressPolicy?.stage,
+          smtpHost: config.host.config.smtpConfig.host,
+          strictPlainTextEmail: config.host.config.strictPlainTextEmail,
+        });
+        if (enforceStrictPlainText) {
           const plainCheck = validateStage2PlainTextEmail(body.payload);
           if (!plainCheck.ok) {
             return c.json({ ok: false, code: plainCheck.code, message: plainCheck.reason }, 400);
@@ -1376,6 +1390,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         canonicalDefJson: view.canonicalDefJson,
         inputSchema: view.inputSchema,
         drifted: view.drifted,
+        presentInLastList: view.presentInLastList,
         description: view.description,
         state: view.state,
         reason: view.reason,
@@ -1400,8 +1415,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       }
       const res = await bridge.recheckToolPins();
       return c.json({ ok: true, ...res });
-    } catch (err) {
-      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 409);
+    } catch {
+      return c.json({ ok: false, error: "mcp_recheck_failed" }, 409);
     }
   });
 
@@ -1553,38 +1568,134 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     return c.json({ ok: true, skill: res.skill });
   });
 
+  // S2-P0-5: Enforce live scope + conversation lineage + source_read_grants authorization on View ② routines!
   app.get("/api/routines", (c) => {
     const session = c.get("authSession");
+    const activeEpoch = config.host.runtimeEpoch;
     const rows = listRoutines(config.host.govDb, session.principalId);
-    return c.json({
-      ok: true,
-      routines: rows.map((r) => ({
-        routineId: r.routine_id,
-        scopeId: r.scope_id,
-        name: r.name,
-        prompt: r.prompt,
-        timezone: r.timezone,
-        scheduleKind: r.schedule_kind,
-        scheduleSpec: JSON.parse(r.schedule_json),
-        skipCondition: r.skip_condition_json ? JSON.parse(r.skip_condition_json) : null,
-        enabled: r.enabled === 1,
-        nextRunUtcMs: r.next_run_utc_ms,
-        nextRunLocalText: r.next_run_utc_ms ? formatUtcInTimezone(r.next_run_utc_ms, r.timezone) : null,
-        lastRunUtcMs: r.last_run_utc_ms,
-        lastStatus: r.last_status,
-        lastResultSummary: r.last_result_summary,
-        lastConversationId: r.triggers.find((t) => Boolean(t.conversation_id))?.conversation_id ?? null,
-        triggers: r.triggers.map((t) => ({
+    const scopeCache = new Map<string, ScopeRow | null>();
+    const revokedCache = new Map<string, number>();
+
+    const getScope = (scopeId: string): ScopeRow | null => {
+      let cached = scopeCache.get(scopeId);
+      if (cached === undefined) {
+        cached =
+          (config.host.govDb
+            .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+            .get(scopeId) as ScopeRow | undefined) ?? null;
+        scopeCache.set(scopeId, cached);
+      }
+      return cached;
+    };
+
+    const evaluateTriggerAuth = (t: {
+      correlation_key: string;
+      conversation_id: string | null;
+    }): { redacted: boolean; revokedSourceCount: number } => {
+      if (!t.conversation_id) {
+        return { redacted: false, revokedSourceCount: 0 };
+      }
+      const cmdRow = config.host.govDb
+        .prepare(
+          `SELECT runtime_epoch
+             FROM chat_commands
+            WHERE chat_key = ? AND conversation_id = ?
+            ORDER BY CASE WHEN runtime_epoch = ? THEN 0 ELSE 1 END, created_at DESC
+            LIMIT 1`,
+        )
+        .get(t.correlation_key, t.conversation_id, activeEpoch) as { runtime_epoch: string } | undefined;
+
+      const convScopeRow = cmdRow
+        ? (config.host.govDb
+            .prepare(
+              `SELECT runtime_epoch, scope_id, principal_id
+                 FROM conversation_scopes
+                WHERE runtime_epoch = ? AND conversation_id = ?`,
+            )
+            .get(cmdRow.runtime_epoch, t.conversation_id) as
+            | { runtime_epoch: string; scope_id: string; principal_id: string }
+            | undefined)
+        : (config.host.govDb
+            .prepare(
+              `SELECT runtime_epoch, scope_id, principal_id
+                 FROM conversation_scopes
+                WHERE conversation_id = ?
+                ORDER BY CASE WHEN runtime_epoch = ? THEN 0 ELSE 1 END, created_at DESC
+                LIMIT 1`,
+            )
+            .get(t.conversation_id, activeEpoch) as
+            | { runtime_epoch: string; scope_id: string; principal_id: string }
+            | undefined);
+
+      if (!convScopeRow || convScopeRow.principal_id !== session.principalId) {
+        return { redacted: true, revokedSourceCount: 1 };
+      }
+      const convScope = getScope(convScopeRow.scope_id);
+      if (!convScope || !isPrincipalAuthorizedForScope(convScope, session.principalId)) {
+        return { redacted: true, revokedSourceCount: 1 };
+      }
+      const cacheKey = `${convScopeRow.runtime_epoch}:${t.conversation_id}:${convScopeRow.scope_id}`;
+      let revokedCount = revokedCache.get(cacheKey);
+      if (revokedCount === undefined) {
+        revokedCount = countRevokedSourcesForConversation({
+          runtimeEpoch: convScopeRow.runtime_epoch,
+          conversationId: t.conversation_id,
+          principalId: session.principalId,
+          scopeId: convScopeRow.scope_id,
+        });
+        revokedCache.set(cacheKey, revokedCount);
+      }
+      return { redacted: revokedCount > 0, revokedSourceCount: revokedCount };
+    };
+
+    const routines = rows.flatMap((r) => {
+      const routineScope = getScope(r.scope_id);
+      if (!routineScope || !isPrincipalAuthorizedForScope(routineScope, session.principalId)) {
+        return [];
+      }
+      const triggers = r.triggers.map((t) => {
+        const auth = evaluateTriggerAuth(t);
+        return {
           triggerId: t.trigger_id,
           scheduledInstantUtc: t.scheduled_instant_utc,
           correlationKey: t.correlation_key,
           conversationId: t.conversation_id,
           state: t.state,
-          reason: t.reason,
+          reason: auth.redacted && t.reason ? "[redacted_after_source_revocation]" : t.reason,
+          redacted: auth.redacted,
+          revokedSourceCount: auth.revokedSourceCount,
           updatedAt: t.updated_at,
-        })),
-      })),
+        };
+      });
+      const latestTrigger = triggers[0] ?? null;
+      const latestConvTrigger = triggers.find((t) => Boolean(t.conversationId)) ?? null;
+      const summaryRedacted = Boolean(latestTrigger?.redacted || latestConvTrigger?.redacted);
+      return [
+        {
+          routineId: r.routine_id,
+          scopeId: r.scope_id,
+          name: r.name,
+          prompt: r.prompt,
+          timezone: r.timezone,
+          scheduleKind: r.schedule_kind,
+          scheduleSpec: JSON.parse(r.schedule_json),
+          skipCondition: r.skip_condition_json ? JSON.parse(r.skip_condition_json) : null,
+          enabled: r.enabled === 1,
+          nextRunUtcMs: r.next_run_utc_ms,
+          nextRunLocalText: r.next_run_utc_ms ? formatUtcInTimezone(r.next_run_utc_ms, r.timezone) : null,
+          lastRunUtcMs: r.last_run_utc_ms,
+          lastStatus: r.last_status,
+          lastResultSummary:
+            summaryRedacted && r.last_result_summary
+              ? "[redacted_after_source_revocation]"
+              : r.last_result_summary,
+          resultRedacted: summaryRedacted,
+          lastConversationId: latestConvTrigger?.conversationId ?? null,
+          triggers,
+        },
+      ];
     });
+    return c.json({ ok: true, routines });
   });
 
   app.post("/api/routines/preview", async (c) => {
@@ -1787,17 +1898,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
           expiresAt: apr.expires_at,
           expired: isExpiredNow,
           hasChallenge,
-          effect: effect
-            ? {
-                effectId: effect.effect_id,
-                state: effect.state,
-                claimedAt: effect.claimed_at,
-                receiptRef: redacted && effect.receipt_ref ? "[redacted_after_source_revocation]" : effect.receipt_ref,
-                reason: redacted && effect.reason ? "[redacted_after_source_revocation]" : effect.reason,
-                reconciledBy: effect.reconciled_by,
-                reconcileEvidence: redacted ? null : effect.reconcile_evidence,
-              }
-            : null,
+          effect: projectEffectForAuthorization(effect, redacted),
           uiStatusLabel: uiStatusLabelFor(effectiveApprovalState, effect?.state ?? null),
           createdAt: p.created_at,
         },

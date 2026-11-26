@@ -333,9 +333,24 @@ export function validateEmailRecipientsAllowlist(params: {
   return { ok: true };
 }
 
+const STAGE2_SUPPORTED_EMAIL_FIELDS = new Set(["to", "subject", "body"]);
+
+/**
+ * S2-P0-1: Strict plain-text email is ALWAYS mandatory in Stage 2 or for any non-loopback SMTP host.
+ * Config cannot disable it in Stage 2, guaranteeing approved snapshot === transmitted SMTP fields.
+ */
+export function isStrictPlainTextEmailRequired(params: {
+  stage?: 1 | 2;
+  smtpHost: string;
+  strictPlainTextEmail?: boolean;
+}): boolean {
+  return params.stage === 2 || !isLoopbackHost(params.smtpHost) || Boolean(params.strictPlainTextEmail);
+}
+
 /**
  * S2-P0-1: Shared Stage 2 plain-text email validator used at proposal creation, draft revision save,
- * and sole submitter pre-claim verification.
+ * and sole submitter pre-claim verification. Rejects cc/bcc/attachments and ANY extra unsupported fields
+ * so the approved snapshot contains ONLY { to, subject, body } matching what SMTP transmits.
  */
 export function validateStage2PlainTextEmail(raw: Record<string, unknown>): {
   ok: true;
@@ -365,6 +380,17 @@ export function validateStage2PlainTextEmail(raw: Record<string, unknown>): {
       code: "unsupported_email_attachments",
       reason: "Stage 2 plain-text slice rejects email attachments",
     };
+  }
+  for (const [k, v] of Object.entries(raw)) {
+    if (STAGE2_SUPPORTED_EMAIL_FIELDS.has(k)) continue;
+    if (k === "cc" || k === "bcc" || k === "attachments" || k === "attachmentDigests") continue;
+    if (v !== undefined && v !== null) {
+      return {
+        ok: false,
+        code: "unsupported_email_field",
+        reason: `Stage 2 plain-text email rejects unsupported field '${k}'`,
+      };
+    }
   }
   const toRaw = raw["to"];
   const to = Array.isArray(toRaw)

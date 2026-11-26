@@ -258,15 +258,29 @@ const workerSecret =
   process.env["AEGISPI_FAKE_MODEL_KEY"] ??
   routerSecret;
 
-// S2-P0-2: Synthetic fixed price schedules are STRICTLY limited to loopback fake endpoints!
-// Non-loopback real model endpoints MUST supply a versioned real ModelPriceSchedule; missing/invalid fails closed!
+// S2-P0-1: Stage 2 cannot disable strictPlainTextEmail (approved snapshot must match transmitted SMTP fields).
+if (stage === 2 && connectorsCfg?.strictPlainTextEmail === false) {
+  process.stderr.write(
+    "Refusing startup: strictPlainTextEmail cannot be disabled in Stage 2 (approved snapshot must match transmitted SMTP fields)\n",
+  );
+  process.exit(1);
+}
+
+// S2-P0-2: Synthetic fixed price schedules are STRICTLY limited to explicit fake-local loopback endpoints!
+// ANY real provider (even on a loopback local proxy!) MUST supply a provider+model-bound verified ModelPriceSchedule!
 const modelIsLoopback = isLoopbackHost(new URL(effectiveModelBaseUrl).hostname);
+const isExplicitSyntheticFake =
+  modelIsLoopback &&
+  modelProvider.trim().toLowerCase() === "fake-local" &&
+  !(stage === 2 && connectorsCfg?.modelProfile && connectorsCfg.modelProfile.provider.trim().toLowerCase() !== "fake-local");
 const effectivePriceSchedule: ModelPriceSchedule | null =
   stage === 2 && connectorsCfg?.modelProfile?.priceSchedule
     ? connectorsCfg.modelProfile.priceSchedule
-    : modelIsLoopback
+    : isExplicitSyntheticFake
       ? {
           priceVersion: "synthetic-v1",
+          provider: "fake-local",
+          modelId: routerModelId,
           inputPerMTokMu: 300_000,
           outputPerMTokMu: 1_200_000,
           syntheticFixedUpperMu: syntheticUpperMu,
@@ -274,10 +288,18 @@ const effectivePriceSchedule: ModelPriceSchedule | null =
         }
       : null;
 
-const priceStartupCheck = validateModelPriceScheduleForEndpoint(effectiveModelBaseUrl, effectivePriceSchedule);
-if (!priceStartupCheck.ok) {
-  process.stderr.write(`Refusing startup: ${priceStartupCheck.code} (${priceStartupCheck.reason})\n`);
-  process.exit(1);
+for (const modelId of new Set([routerModelId, workerModelId])) {
+  const priceStartupCheck = validateModelPriceScheduleForEndpoint(
+    effectiveModelBaseUrl,
+    effectivePriceSchedule,
+    { provider: modelProvider, modelId },
+  );
+  if (!priceStartupCheck.ok) {
+    process.stderr.write(
+      `Refusing startup: ${priceStartupCheck.code} (${priceStartupCheck.reason})\n`,
+    );
+    process.exit(1);
+  }
 }
 const effectivePriceVersion = effectivePriceSchedule!.priceVersion;
 
@@ -540,7 +562,7 @@ const host = await AegisHostRuntime.start({
   modelSlots,
   smtpConfig: configuredSmtpConfig,
   egressPolicy,
-  strictPlainTextEmail: stage === 2 ? (connectorsCfg?.strictPlainTextEmail ?? true) : false,
+  strictPlainTextEmail: stage === 2,
   ...(configuredAllowedEmailRecipients ? { allowedEmailRecipients: configuredAllowedEmailRecipients } : {}),
   githubWriteAllowlist: stage === 2 ? (connectorsCfg?.githubMcp?.writeAllowlist ?? []) : [],
   skillsEnabled: stage === 2 ? (connectorsCfg?.skillsEnabled ?? true) : false,

@@ -45,17 +45,11 @@ function reduceLocalSmtpErrorCode(prefix: string, err: unknown): string {
 }
 
 /**
- * S2-P0-4: Reduces remote SMTP DATA 2xx reply strictly to a validated status code and optional
- * safe queue-id token; never persists or projects arbitrary remote server text.
+ * S2-P0-4: Reduces remote SMTP DATA 2xx reply strictly to its numeric status code ONLY;
+ * never persists or projects ANY remote server text or optional remote queue-id token.
  */
-function parseSafeSmtpReceiptRef(code: number, lines: string[]): string {
+function parseSafeSmtpReceiptRef(code: number): string {
   const safeCode = Number.isInteger(code) && code >= 200 && code < 300 ? code : 250;
-  for (const line of lines) {
-    const m = /(?:queued\s+as|id=)\s*([A-Za-z0-9-]{4,36})(?:\s|$)/i.exec(line);
-    if (m?.[1]) {
-      return `smtp:${safeCode}:qid=${m[1]}`;
-    }
-  }
   return `smtp:${safeCode}:accepted`;
 }
 
@@ -98,7 +92,9 @@ async function openConnectTunnelTcp(params: {
       const statusLine = buf.slice(0, buf.indexOf("\r\n"));
       if (!/^HTTP\/1\.[01]\s+200\b/i.test(statusLine)) {
         sock.destroy();
-        reject(new Error(`SMTP CONNECT proxy rejected tunnel: ${statusLine}`));
+        const err = new Error("smtp_connect_proxy_rejected") as Error & { code?: string };
+        err.code = "smtp_connect_proxy_rejected";
+        reject(err);
         return;
       }
       resolve(sock);
@@ -472,7 +468,7 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
         writeCmd(messagePayload);
         const dataReply = await nextReply();
         if (dataReply.code >= 200 && dataReply.code < 300) {
-          const receiptRef = parseSafeSmtpReceiptRef(dataReply.code, dataReply.lines);
+          const receiptRef = parseSafeSmtpReceiptRef(dataReply.code);
           writeCmd("QUIT");
           finish({ status: "succeeded", receiptRef, bytesSent });
         } else if (dataReply.code >= 500) {

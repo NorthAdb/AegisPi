@@ -134,8 +134,61 @@ export interface CredentialSlotBinding {
   priceVersion: string;
 }
 
+export interface VerifiedModelBoundContract {
+  provider: string;
+  modelId: string;
+  contractVersion: string;
+  tokenizerUpperBoundKind: "utf8_byte_bpe";
+  /** Documented provider hard cap on output tokens enforced via max_tokens. */
+  maxTokensHardCeiling: number;
+  /** Whether enforced max_tokens covers all billed output tokens (no hidden unbounded reasoning tokens). */
+  maxTokensIncludesReasoning: boolean;
+  perMessageOverheadTokens: number;
+  perToolOverheadTokens: number;
+  fixedPromptOverheadTokens: number;
+  supportsNonTextInput: false;
+}
+
+/**
+ * S2-P0-2: Verified real-provider billing upper-bound contract registry.
+ * Any non-fake model lacking an explicit verified provider+model contract MUST fail closed!
+ */
+const VERIFIED_MODEL_BOUND_CONTRACTS: ReadonlyArray<VerifiedModelBoundContract> = [
+  {
+    provider: "deepseek",
+    modelId: "deepseek-chat",
+    contractVersion: "deepseek-chat-openai-compat-v1",
+    tokenizerUpperBoundKind: "utf8_byte_bpe",
+    maxTokensHardCeiling: 8192,
+    maxTokensIncludesReasoning: true,
+    perMessageOverheadTokens: 64,
+    perToolOverheadTokens: 256,
+    fixedPromptOverheadTokens: 512,
+    supportsNonTextInput: false,
+  },
+];
+
+export function getVerifiedModelBoundContract(
+  provider: string | undefined,
+  modelId: string | undefined,
+): VerifiedModelBoundContract | null {
+  const normProv = typeof provider === "string" ? provider.trim().toLowerCase() : "";
+  const normModel = typeof modelId === "string" ? modelId.trim() : "";
+  if (!normProv || !normModel) return null;
+  return (
+    VERIFIED_MODEL_BOUND_CONTRACTS.find(
+      (c) => c.provider === normProv && c.modelId === normModel,
+    ) ?? null
+  );
+}
+
 export interface ModelPriceSchedule {
   priceVersion: string;
+  /** S2-P0-2: Explicit provider & model binding required for all real-billing schedules. */
+  provider?: string;
+  modelId?: string;
+  /** Optional explicit contract version check matching VerifiedModelBoundContract.contractVersion. */
+  boundContractVersion?: string;
   /** Per-1M token rates in integer microUSD (1 USD = 1_000_000 mu). */
   inputPerMTokMu: number;
   outputPerMTokMu: number;
@@ -143,22 +196,31 @@ export interface ModelPriceSchedule {
   cacheWritePerMTokMu?: number;
   /** Optional explicit reasoning-token headroom added on top of maxTokens when computing output upper bound. */
   maxReasoningTokens?: number;
-  /** Provable integer microUSD per-request upper bound required for T6 reservation in Stage 1 loopback fakes ONLY. */
+  /** Provable integer microUSD per-request upper bound required for T6 reservation in explicit fake-local loopback tests ONLY. */
   syntheticFixedUpperMu?: number | null;
   syntheticFixedActualMu?: number | null;
-  /** Stage 2 real-provider mode: compute provable integer microUSD upper bound from input UTF-8 bytes + maxTokens. */
+  /** Stage 2 real-provider mode: compute provable integer microUSD upper bound under verified provider+model contract. */
   allowTokenBoundEstimation?: boolean;
 }
 
 /**
- * S2-P0-2: Validates whether a model price schedule is lawful for the given endpoint URL.
- * Synthetic fixed pricing is ONLY allowed on loopback fake endpoints.
- * Non-loopback real endpoints MUST provide a non-synthetic versioned schedule with token-bound estimation enabled.
+ * S2-P0-2: Validates whether a model price schedule is lawful for the given endpoint & provider/model identity.
+ * - Synthetic fixed pricing is STRICTLY limited to explicit `fake-local` provider on loopback hosts.
+ * - ANY real provider (even when routed through a loopback local proxy!) MUST supply a non-synthetic,
+ *   provider+model-bound schedule matching a verified billing upper-bound contract; otherwise fails closed!
  */
 export function validateModelPriceScheduleForEndpoint(
   baseUrl: string,
   schedule: ModelPriceSchedule | null | undefined,
-): { ok: true; isLoopback: boolean } | { ok: false; code: string; reason: string } {
+  identity?: { provider?: string; modelId?: string },
+):
+  | {
+      ok: true;
+      isLoopback: boolean;
+      isExplicitFake: boolean;
+      contract: VerifiedModelBoundContract | null;
+    }
+  | { ok: false; code: string; reason: string } {
   let parsed: URL;
   try {
     parsed = new URL(baseUrl);
@@ -173,23 +235,69 @@ export function validateModelPriceScheduleForEndpoint(
   if (!version || version.toLowerCase() === "unknown") {
     return { ok: false, code: "missing_price_version", reason: "Model price schedule requires non-empty priceVersion" };
   }
-  if (!loopback) {
+
+  const effectiveProvider = (identity?.provider ?? schedule.provider ?? "").trim().toLowerCase();
+  const effectiveModelId = (identity?.modelId ?? schedule.modelId ?? "").trim();
+  const isExplicitFake = loopback && effectiveProvider === "fake-local";
+
+  if (!isExplicitFake) {
     if (
       version.toLowerCase().startsWith("synthetic") ||
-      schedule.syntheticFixedUpperMu !== undefined && schedule.syntheticFixedUpperMu !== null ||
-      schedule.syntheticFixedActualMu !== undefined && schedule.syntheticFixedActualMu !== null
+      (schedule.syntheticFixedUpperMu !== undefined && schedule.syntheticFixedUpperMu !== null) ||
+      (schedule.syntheticFixedActualMu !== undefined && schedule.syntheticFixedActualMu !== null)
     ) {
       return {
         ok: false,
-        code: "synthetic_price_forbidden_on_remote",
-        reason: `Remote model endpoint ${parsed.hostname} cannot use synthetic fixed pricing (${version})`,
+        code: "synthetic_price_forbidden_for_real_provider",
+        reason: `Synthetic fixed pricing (${version}) is strictly forbidden outside explicit fake-local loopback tests`,
       };
     }
     if (!schedule.allowTokenBoundEstimation) {
       return {
         ok: false,
         code: "token_bound_estimation_required",
-        reason: `Remote model endpoint ${parsed.hostname} requires allowTokenBoundEstimation=true`,
+        reason: `Real model endpoint ${parsed.hostname} requires allowTokenBoundEstimation=true`,
+      };
+    }
+    const schedProv = typeof schedule.provider === "string" ? schedule.provider.trim().toLowerCase() : "";
+    const schedModel = typeof schedule.modelId === "string" ? schedule.modelId.trim() : "";
+    if (!schedProv || !schedModel) {
+      return {
+        ok: false,
+        code: "price_schedule_missing_model_binding",
+        reason: "Real model price schedule must explicitly bind provider and modelId",
+      };
+    }
+    if (effectiveProvider && schedProv !== effectiveProvider) {
+      return {
+        ok: false,
+        code: "price_schedule_provider_mismatch",
+        reason: `Price schedule provider '${schedProv}' does not match slot provider '${effectiveProvider}'`,
+      };
+    }
+    if (effectiveModelId && schedModel !== effectiveModelId) {
+      return {
+        ok: false,
+        code: "price_schedule_model_mismatch",
+        reason: `Price schedule modelId '${schedModel}' does not match slot modelId '${effectiveModelId}'`,
+      };
+    }
+    const contract = getVerifiedModelBoundContract(schedProv, schedModel);
+    if (!contract) {
+      return {
+        ok: false,
+        code: "unproven_model_bound_contract",
+        reason: `No verified billing upper-bound contract exists for ${schedProv}/${schedModel}; refusing unprovable real billing`,
+      };
+    }
+    if (
+      schedule.boundContractVersion !== undefined &&
+      schedule.boundContractVersion !== contract.contractVersion
+    ) {
+      return {
+        ok: false,
+        code: "model_bound_contract_version_mismatch",
+        reason: `Price schedule boundContractVersion '${schedule.boundContractVersion}' does not match verified contract '${contract.contractVersion}'`,
       };
     }
     if (
@@ -205,11 +313,13 @@ export function validateModelPriceScheduleForEndpoint(
       return {
         ok: false,
         code: "invalid_price_rates",
-        reason: `Remote model endpoint ${parsed.hostname} has invalid negative or non-finite token rates`,
+        reason: `Real model endpoint ${parsed.hostname} has invalid negative or non-finite token rates`,
       };
     }
+    return { ok: true, isLoopback: loopback, isExplicitFake: false, contract };
   }
-  return { ok: true, isLoopback: loopback };
+
+  return { ok: true, isLoopback: true, isExplicitFake: true, contract: null };
 }
 
 export interface ImapCredentialBinding {
