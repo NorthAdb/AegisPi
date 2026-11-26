@@ -471,9 +471,27 @@ $auditDir = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\round3-1795621206347'
 
 | 核对项 | 第 4 轮审计复跑结果 | 备注 / 复跑 runId |
 |---|---|---|
-| 核对第 4 轮候选 `69ce7b9` | 待填写 | |
-| 干净目录全量复跑（25/25） | 待填写 | |
-| 独立复跑 W1-A、W1-B | 待填写 | |
-| R3/G1 旧治理库迁移与二次开库幂等 | 待填写 | |
-| 无代际 `budget_denial` 补齐与快照/SSE 隔离 | 待填写 | |
-| **第 4 轮签收结论** | **待填写（同意放行第 2 周 / 继续整改）** | |
+| 核对第 4 轮候选 `69ce7b9` | 通过 | 复验前工作区干净；HEAD `8a706ac` 相对实施候选只增加报告更新。lockfile SHA-256 与报告一致。 |
+| 干净目录全量复跑 | 通过 | `week1_1778444f`，退出码 0；类型检查通过，S1–S5 5/5，矩阵 25/25。 |
+| 独立复跑 W1-A、W1-B | 通过 | `w1a_7d1699cf` 的三个足额对照各发送 1 次、六个额度不足用例各发送 0 次。 `w1b_aa6b9a11` 强杀重启后累计收件和成功领取各 1 次，效果为 UNKNOWN，重复 SDK 唤醒返回 `closed`。Edge 在全量运行的恢复数据副本上刷新前后均显示“结果待核对”。 |
+| R3/G1 旧治理库迁移与二次开库幂等 | 通过 | 从第 2 轮原治理库带 WAL 的只读连接做 SQLite Backup，再从正常入口开库两次。主键从 `conversation_id` 迁为 `(runtime_epoch, conversation_id)`，8 条授权以及审批、效果、账户和预留通过摘要比对保留，外键检查 0 项异常。迁移事件数两次均为 2，审计行数两次均为 39。 |
+| 旧预算拒绝记录与跨代际读隔离 | 通过 | 第 2 轮库的 6 条旧拒绝均有唯一归属，补齐后逐条核对按代际查询。`R3-LEGACY-UPGRADE` 另覆盖归属不明事件保留在内部审计，既不进入快照也不进入 SSE。换代后两份同 ID 授权并存，两主体对另一代际的请求均为 403。 |
+| **第 4 轮签收结论** | **第 1 周通过，准予进入第 2 周** | Codex 独立复审，2026-11-26（香港时间）。 |
+
+### 独立复跑证据
+
+本机规划目录 `audit-reruns/round4-1795655498209/` 保存全量及单跑证据、`browser-check.json`、`legacy-schema-check.json` 和实际使用的迁移核验脚本。环境为 Windows x64、Node 22.23.5、SQLite 3.54.1、npm 10.9.9。夹具和旧库核验命令均退出 0。以下命令在实现仓根目录执行，重新运行夹具时请使用新数据目录。
+
+```powershell
+$nodeExe = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+$auditDir = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\round4-1795655498209'
+& $nodeExe tests/week1/run-all.ts --data-dir "$auditDir\all\data" --evidence-dir "$auditDir\all\evidence" --keep-data true
+& $nodeExe tests/week1/run-w1-a.ts --data-dir "$auditDir\w1-a\data" --evidence-dir "$auditDir\w1-a\evidence"
+& $nodeExe tests/week1/run-w1-b.ts --data-dir "$auditDir\w1-b\data" --evidence-dir "$auditDir\w1-b\evidence"
+$legacySource = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\round2-1795619937294\data\w1-a\host-data\aegis-gov.sqlite'
+$probe = Get-Content -Raw -Encoding UTF8 "$auditDir\legacy-schema-probe.mjs"
+$copyLabel = [guid]::NewGuid().ToString('N')
+& $nodeExe --input-type=module -e $probe $legacySource "$auditDir\legacy-$copyLabel.sqlite" "$auditDir\legacy-$copyLabel.json"
+```
+
+第 2 周按任务书的 V01–V06 与 S6 单独验收，只读连接器及其数据出站继续按基线的授权要求执行。
