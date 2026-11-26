@@ -428,13 +428,78 @@ export function recordObservedDriftDefinition(
 }
 
 /**
- * C4: Human approval of a quarantined/revoked MCP tool using its currently stored canonical_def_json.
- * Computes the canonical SHA-256 fresh from canonical_def_json and transitions state -> APPROVED.
+ * S2-P0-3b: Returns full canonical definition & freshly computed observed SHA-256 for human Pin review.
+ */
+export function inspectStoredMcpToolPin(row: McpToolPinRow): {
+  serverId: string;
+  toolName: string;
+  pinnedSchemaSha256: string;
+  observedSchemaSha256: string;
+  canonicalDefJson: string;
+  description: string;
+  inputSchema: Record<string, unknown> | null;
+  drifted: boolean;
+  state: McpToolPinRow["state"];
+  reason: string | null;
+  updatedAt: number;
+} {
+  let description = "";
+  let inputSchema: Record<string, unknown> | null = null;
+  let canonicalDefJson = row.canonical_def_json;
+  let observedSchemaSha256 = row.schema_sha256;
+  try {
+    const parsed = JSON.parse(row.canonical_def_json) as McpToolDefinitionInput;
+    description = typeof parsed.description === "string" ? parsed.description : "";
+    inputSchema =
+      parsed.inputSchema && typeof parsed.inputSchema === "object"
+        ? (parsed.inputSchema as Record<string, unknown>)
+        : null;
+    const fp = computeMcpToolFingerprint(parsed);
+    canonicalDefJson = fp.canonicalDefJson;
+    observedSchemaSha256 = fp.schemaSha256;
+  } catch {
+    // keep stored values
+  }
+  return {
+    serverId: row.server_id,
+    toolName: row.tool_name,
+    pinnedSchemaSha256: row.schema_sha256,
+    observedSchemaSha256,
+    canonicalDefJson,
+    description,
+    inputSchema,
+    drifted: observedSchemaSha256 !== row.schema_sha256,
+    state: row.state,
+    reason: row.reason,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * C4 / S2-P0-3b: Human approval of a quarantined/revoked MCP tool strictly bound to the
+ * exact canonical definition and SHA-256 fingerprint the human reviewed.
+ * Stale or mismatched approval requests are rejected atomically inside the same IMMEDIATE transaction!
  */
 export function approveStoredMcpToolPin(
   db: DatabaseSync,
-  params: { serverId: string; toolName: string; approvedBy: string; now: number },
-): { ok: true; pin: McpToolPinRow } | { ok: false; code: string; reason: string } {
+  params: {
+    serverId: string;
+    toolName: string;
+    expectedSchemaSha256: string;
+    expectedCanonicalDefJson?: string;
+    approvedBy: string;
+    now: number;
+  },
+): { ok: true; pin: McpToolPinRow } | { ok: false; httpStatus: 400 | 404 | 409; code: string; reason: string } {
+  const expectedSha = typeof params.expectedSchemaSha256 === "string" ? params.expectedSchemaSha256.trim().toLowerCase() : "";
+  if (!expectedSha) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      code: "mcp_pin_expected_sha_required",
+      reason: "Human Pin approval requires expectedSchemaSha256 matching the reviewed definition",
+    };
+  }
   return withImmediateTx(db, () => {
     const existing = db
       .prepare("SELECT * FROM mcp_tool_pins WHERE server_id = ? AND tool_name = ?")
@@ -442,12 +507,32 @@ export function approveStoredMcpToolPin(
     if (!existing) {
       return {
         ok: false,
+        httpStatus: 404,
         code: "mcp_tool_not_found",
         reason: `MCP tool ${params.serverId}:${params.toolName} not found`,
       };
     }
     const parsed = JSON.parse(existing.canonical_def_json) as McpToolDefinitionInput;
     const { canonicalDefJson, schemaSha256 } = computeMcpToolFingerprint(parsed);
+    if (schemaSha256.toLowerCase() !== expectedSha) {
+      return {
+        ok: false,
+        httpStatus: 409,
+        code: "mcp_pin_fingerprint_mismatch",
+        reason: `Stale MCP tool Pin approval: expected ${expectedSha.slice(0, 12)}, stored definition is ${schemaSha256.slice(0, 12)}`,
+      };
+    }
+    if (
+      params.expectedCanonicalDefJson !== undefined &&
+      params.expectedCanonicalDefJson !== canonicalDefJson
+    ) {
+      return {
+        ok: false,
+        httpStatus: 409,
+        code: "mcp_pin_definition_mismatch",
+        reason: "Stale MCP tool Pin approval: canonical definition changed since review",
+      };
+    }
     db.prepare(
       `UPDATE mcp_tool_pins
           SET schema_sha256 = ?,

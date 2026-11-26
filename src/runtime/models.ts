@@ -29,6 +29,7 @@ import { mintId } from "../governance/canonical.ts";
 import {
   assertModelUrlForStage,
   Stage1EgressBlockedError,
+  validateModelPriceScheduleForEndpoint,
   type HostCredentialVault,
   type ModelPriceSchedule,
   type StageEgressPolicy,
@@ -138,19 +139,44 @@ function createImmediateErrorStream(model: Model<Api>, errorMessage: string, now
   return stream;
 }
 
+function hasUnboundedNonTextContent(context: AiContext): boolean {
+  for (const msg of context.messages) {
+    const content = (msg as { content?: unknown }).content;
+    if (typeof content === "string" || content === undefined || content === null) continue;
+    if (!Array.isArray(content)) return true;
+    for (const block of content) {
+      if (!block || typeof block !== "object") return true;
+      const t = (block as { type?: unknown }).type;
+      if (t !== "text" && t !== "thinking" && t !== "toolCall" && t !== "tool_use" && t !== "tool_result") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
- * Computes a provable conservative integer microUSD upper bound for T6 budget reservation.
- * Stage 1 fails closed (returns null -> unknown_upper_bound, 0 physical sends) for any
- * price schedule without an explicitly verified per-request integer upper bound;
- * approximate character-length heuristics are explicitly rejected.
+ * S2-P0-2: Computes a provable conservative integer microUSD upper bound for T6 budget reservation.
+ * - Synthetic fixed pricing is ONLY allowed on loopback fake endpoints.
+ * - Real remote endpoints MUST supply a non-synthetic versioned ModelPriceSchedule with allowTokenBoundEstimation=true.
+ * - Uses worst-case byte-level BPE bound (1 UTF-8 byte = 1 token) across full systemPrompt + messages + tools
+ *   plus explicit per-message / per-tool framing overhead, NEVER truncating downwards to contextWindow,
+ *   and bounding output strictly by the request's enforced effectiveMaxTokens (+ optional reasoning headroom).
+ * - Fails closed (returns null -> unknown_upper_bound, 0 physical sends) if price schedule is missing/invalid,
+ *   if non-text unbounded content blocks (e.g. images) are present, or if effectiveMaxTokens is invalid.
  */
 function estimateUpperBoundMu(
   context: AiContext,
-  model: Model<Api>,
+  _model: Model<Api>,
   schedule: ModelPriceSchedule | null,
+  effectiveBaseUrl: string,
+  effectiveMaxTokens: number,
 ): number | null {
-  if (!schedule) return null;
+  const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule);
+  if (!scheduleCheck.ok || !schedule) return null;
+
   if (
+    scheduleCheck.isLoopback &&
     typeof schedule.syntheticFixedUpperMu === "number" &&
     Number.isSafeInteger(schedule.syntheticFixedUpperMu) &&
     schedule.syntheticFixedUpperMu >= 0
@@ -165,40 +191,76 @@ function estimateUpperBoundMu(
     schedule.inputPerMTokMu < 0 ||
     !Number.isFinite(schedule.outputPerMTokMu) ||
     schedule.outputPerMTokMu < 0 ||
-    !Number.isFinite(model.maxTokens) ||
-    model.maxTokens <= 0
+    !Number.isSafeInteger(effectiveMaxTokens) ||
+    effectiveMaxTokens <= 0
   ) {
     return null;
   }
-  // Provably conservative upper bound: UTF-8 byte length / 2 >= worst-case BPE token count + framing margin
-  let inputBytes = 0;
+  if (hasUnboundedNonTextContent(context)) {
+    return null;
+  }
+  let payloadUtf8Bytes = 0;
   try {
-    inputBytes = Buffer.byteLength(JSON.stringify(context), "utf8");
+    payloadUtf8Bytes = Buffer.byteLength(
+      JSON.stringify({
+        systemPrompt: context.systemPrompt ?? "",
+        messages: context.messages,
+        tools: context.tools ?? [],
+      }),
+      "utf8",
+    );
   } catch {
     return null;
   }
-  const conservativeInputTokens = Math.min(model.contextWindow || 128_000, Math.ceil(inputBytes / 2) + 512);
-  const conservativeOutputTokens = Math.max(1, Math.ceil(model.maxTokens));
-  const rawMu =
-    (conservativeInputTokens * schedule.inputPerMTokMu) / 1_000_000 +
-    (conservativeOutputTokens * schedule.outputPerMTokMu) / 1_000_000;
-  return Math.max(1, Math.ceil(rawMu * 1.1));
+  const provableMaxInputTokens =
+    payloadUtf8Bytes + context.messages.length * 64 + (context.tools?.length ?? 0) * 128 + 256;
+  const reasoningHeadroom =
+    typeof schedule.maxReasoningTokens === "number" &&
+    Number.isFinite(schedule.maxReasoningTokens) &&
+    schedule.maxReasoningTokens > 0
+      ? Math.ceil(schedule.maxReasoningTokens)
+      : 0;
+  const provableMaxOutputTokens = effectiveMaxTokens + reasoningHeadroom;
+
+  const maxInputRateMu = Math.max(
+    schedule.inputPerMTokMu,
+    schedule.cacheReadPerMTokMu ?? 0,
+    schedule.cacheWritePerMTokMu ?? 0,
+  );
+  const inputUpperMu = Math.ceil((provableMaxInputTokens * maxInputRateMu) / 1_000_000);
+  const outputUpperMu = Math.ceil((provableMaxOutputTokens * schedule.outputPerMTokMu) / 1_000_000);
+  const totalUpperMu = Math.max(1, inputUpperMu + outputUpperMu);
+  if (!Number.isSafeInteger(totalUpperMu) || totalUpperMu <= 0) {
+    return null;
+  }
+  return totalUpperMu;
 }
 
-function computeActualMu(msg: AssistantMessage, schedule: ModelPriceSchedule): number | null {
+function computeActualMu(
+  msg: AssistantMessage,
+  schedule: ModelPriceSchedule,
+  effectiveBaseUrl: string,
+): number | null {
+  const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule);
+  if (!scheduleCheck.ok) return null;
   const u = msg.usage;
   if (!u) return null;
   const totalTok = (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-  // Missing usage or all-zero usage MUST stay HELD (never treated as free!)
   if (totalTok <= 0) return null;
-  if (schedule.syntheticFixedActualMu !== undefined && schedule.syntheticFixedActualMu !== null) {
+  if (
+    scheduleCheck.isLoopback &&
+    schedule.syntheticFixedActualMu !== undefined &&
+    schedule.syntheticFixedActualMu !== null
+  ) {
     return schedule.syntheticFixedActualMu;
   }
-  const cacheRate = schedule.cacheReadPerMTokMu ?? schedule.inputPerMTokMu;
+  const cacheReadRate = schedule.cacheReadPerMTokMu ?? schedule.inputPerMTokMu;
+  const cacheWriteRate = schedule.cacheWritePerMTokMu ?? schedule.inputPerMTokMu;
   const inputCost = ((u.input ?? 0) * schedule.inputPerMTokMu) / 1_000_000;
-  const cacheReadCost = ((u.cacheRead ?? 0) * cacheRate) / 1_000_000;
+  const cacheReadCost = ((u.cacheRead ?? 0) * cacheReadRate) / 1_000_000;
+  const cacheWriteCost = ((u.cacheWrite ?? 0) * cacheWriteRate) / 1_000_000;
   const outputCost = ((u.output ?? 0) * schedule.outputPerMTokMu) / 1_000_000;
-  return Math.max(1, Math.ceil(inputCost + cacheReadCost + outputCost));
+  return Math.max(1, Math.ceil(inputCost + cacheReadCost + cacheWriteCost + outputCost));
 }
 
 export function createGuardedModelFetch(
@@ -448,10 +510,21 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       return createImmediateErrorStream(model, msg, now);
     }
 
-    // 3. Calculate conservative integer microUSD upper bound (fail closed if unknown!)
-    const upperMu = estimateUpperBoundMu(ctx, model, slot.priceSchedule);
+    // 3. Calculate provable conservative integer microUSD upper bound (fail closed if unknown!)
+    const effectiveBaseUrl = model.baseUrl ?? slot.baseUrl;
+    const requestedMaxTokens =
+      typeof options?.maxTokens === "number" && Number.isFinite(options.maxTokens) && options.maxTokens > 0
+        ? Math.floor(options.maxTokens)
+        : undefined;
+    const modelMaxTokens =
+      Number.isFinite(model.maxTokens) && model.maxTokens > 0 ? Math.floor(model.maxTokens) : 0;
+    const effectiveMaxTokens =
+      requestedMaxTokens !== undefined && modelMaxTokens > 0
+        ? Math.min(requestedMaxTokens, modelMaxTokens)
+        : modelMaxTokens;
+    const upperMu = estimateUpperBoundMu(ctx, model, slot.priceSchedule, effectiveBaseUrl, effectiveMaxTokens);
     if (upperMu === null) {
-      const msg = `Blocked model send (${requestId}): cannot determine conservative microUSD upper bound for ${model.provider}/${model.id}`;
+      const msg = `Blocked model send (${requestId}): cannot determine provable conservative microUSD upper bound for ${model.provider}/${model.id}`;
       recordEgressDenial(requestId, "unknown_upper_bound", msg, {
         conversationId: owner.conversationId,
         ownerTaskId: owner.ownerTaskId,
@@ -512,9 +585,8 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       return createImmediateErrorStream(model, `Pre-transport failure (released): ${preTransportErr}`, now);
     }
 
-    // 6. Enforce maxRetries: 0 (no hidden provider retries; durable retries must re-reserve!)
+    // 6. Enforce maxRetries: 0 & explicit maxTokens ceiling matching reserved output bound!
     // Also re-verify egress URL strictly before transport dispatch.
-    const effectiveBaseUrl = model.baseUrl ?? slot.baseUrl;
     try {
       assertModelUrlForStage(effectiveBaseUrl, egressPolicy);
     } catch (err) {
@@ -543,6 +615,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     const enforcedOptions: ModelsSimpleStreamOptions = {
       ...options,
       ...(slotApiKey ? { apiKey: slotApiKey } : {}),
+      maxTokens: effectiveMaxTokens,
       maxRetries: 0,
       fetch: guardedFetch,
     };
@@ -592,7 +665,9 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
         if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
           return;
         }
-        const actualMu = slot.priceSchedule ? computeActualMu(finalMsg, slot.priceSchedule) : null;
+        const actualMu = slot.priceSchedule
+          ? computeActualMu(finalMsg, slot.priceSchedule, effectiveBaseUrl)
+          : null;
         if (actualMu === null) {
           // Usage missing / all-zero: MUST stay HELD (never treat as free!)
           return;
@@ -602,7 +677,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
             requestId,
             actualMu,
             eventKey: `provider_usage:${requestId}`,
-            evidenceRef: `usage:in=${finalMsg.usage.input},out=${finalMsg.usage.output},cacheRead=${finalMsg.usage.cacheRead ?? 0}`,
+            evidenceRef: `usage:in=${finalMsg.usage.input},out=${finalMsg.usage.output},cacheRead=${finalMsg.usage.cacheRead ?? 0},cacheWrite=${finalMsg.usage.cacheWrite ?? 0}`,
             now: nowFn(),
           });
         } catch {

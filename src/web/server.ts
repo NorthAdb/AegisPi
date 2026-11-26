@@ -3,28 +3,25 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import {
-  deleteMemoryNoteWithTombstone,
-  freezeDomainL0Snapshot,
-  recallMemory,
-  type MemoryNoteRow,
-} from "../capabilities/memory/store.ts";
-import {
   computeActiveSkillSetHash,
-  listSkillsIndex,
-  readSkillDisclosure,
-  revokeSkill,
-  setSkillActiveVersion,
-} from "../capabilities/skills/store.ts";
-import {
   createRoutineWithGovernance,
+  deleteMemoryNoteWithTombstone,
   formatUtcInTimezone,
+  freezeDomainL0Snapshot,
+  listManagedFileImportsForConversation,
   listRoutines,
+  listSkillsIndex,
   parseNaturalLanguageRoutine,
   pauseRoutine,
+  readSkillDisclosure,
+  recallMemory,
   resumeRoutine,
+  revokeSkill,
+  setSkillActiveVersion,
+  type MemoryNoteRow,
   type RoutineScheduleSpec,
   type RoutineSkipCondition,
-} from "../capabilities/timers/routines.ts";
+} from "../runtime/console-facade.ts";
 import {
   decideApproval,
   fetchAuthorizedApprovalChallenge,
@@ -55,11 +52,11 @@ import {
 } from "../governance/effects.ts";
 import {
   approveStoredMcpToolPin,
+  inspectStoredMcpToolPin,
   listMcpServerPins,
   listMcpToolPins,
   revokeMcpTool,
 } from "../governance/mcp-pin.ts";
-import { listManagedFileImportsForConversation } from "../capabilities/workspace/importer.ts";
 import {
   checkRecordedSourceReadStillAuthorized,
   getSourceReadRevocationWatermark,
@@ -68,8 +65,13 @@ import {
 } from "../governance/policy.ts";
 import {
   createRememberedRule,
+  evaluateGithubWritePolicy,
   listRememberedRules,
+  resolveControlledGithubMcpTool,
   revokeRememberedRule,
+  validateEmailEnvelopeSingleLine,
+  validateEmailRecipientsAllowlist,
+  validateStage2PlainTextEmail,
 } from "../governance/rules.ts";
 import type { AegisHostRuntime } from "../runtime/harness.ts";
 import {
@@ -883,7 +885,44 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     return c.json({ ...envelope.snapshot, serverNow: nowFn() });
   });
 
+  // Shared live source revocation check for View ③ (/api/approvals) and mutation endpoints (S2-P0-5)
+  const countRevokedSourcesForConversation = (params: {
+    runtimeEpoch: string;
+    conversationId: string;
+    principalId: string;
+    scopeId: string;
+  }): number => {
+    const boundTask = config.host.getConversationBudgetTaskId(params.conversationId, params.runtimeEpoch);
+    const relIds = new Set<string>([params.conversationId]);
+    if (boundTask) {
+      const boundRows = config.host.govDb
+        .prepare(
+          `SELECT DISTINCT conversation_id FROM budget_task_bindings
+            WHERE runtime_epoch = ? AND owner_task_id = ?`,
+        )
+        .all(params.runtimeEpoch, boundTask) as Array<{ conversation_id: string }>;
+      for (const br of boundRows) relIds.add(br.conversation_id);
+    }
+    let revokedCount = 0;
+    const checkedIds = new Set<string>();
+    for (const cid of relIds) {
+      for (const s of listConversationSources(config.host.govDb, params.runtimeEpoch, cid)) {
+        if (checkedIds.has(s.record_id)) continue;
+        checkedIds.add(s.record_id);
+        const stillOk = checkRecordedSourceReadStillAuthorized(config.host.govDb, {
+          principalId: params.principalId,
+          scopeId: params.scopeId,
+          source: s,
+        });
+        if (!stillOk.ok) revokedCount++;
+      }
+    }
+    return revokedCount;
+  };
+
   // G3: Dedicated authorized endpoint to fetch single-use approval challenge nonce
+  // (Remains available after source revocation so user can REJECT/cancel a restricted pending proposal;
+  // APPROVE is hard-blocked 403 source_read_revoked in decideApproval and hidden in both View ① and View ③.)
   app.post("/api/approvals/:id/challenge", async (c) => {
     const session = c.get("authSession");
     const approvalId = c.req.param("id");
@@ -916,13 +955,129 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     if (!body.conversationId || typeof body.expectedHeadRev !== "number" || !body.payload) {
       return c.json({ error: "invalid_draft_request" }, 400);
     }
+
+    const existingProposal = config.host.govDb
+      .prepare("SELECT * FROM proposals WHERE proposal_id = ?")
+      .get(proposalId) as ProposalRow | undefined;
+    let effectiveTarget = body.target;
+    let effectivePayload: Record<string, unknown> = body.payload;
+
+    if (existingProposal) {
+      // S2-P0-5: Refuse draft edits once any underlying source read grant has been revoked!
+      const revokedCount = countRevokedSourcesForConversation({
+        runtimeEpoch: existingProposal.runtime_epoch,
+        conversationId: existingProposal.conversation_id,
+        principalId: session.principalId,
+        scopeId: existingProposal.scope_id,
+      });
+      if (revokedCount > 0) {
+        return c.json(
+          {
+            ok: false,
+            code: "source_read_revoked",
+            message: "Draft editing is disabled after underlying source read grant revocation",
+          },
+          403,
+        );
+      }
+
+      // S2-P0-1: Apply IDENTICAL plain-text, single-line header, and SMTP recipient allowlist validation on draft edit!
+      if (existingProposal.tool_name === "send_email") {
+        if (config.host.config.strictPlainTextEmail) {
+          const plainCheck = validateStage2PlainTextEmail(body.payload);
+          if (!plainCheck.ok) {
+            return c.json({ ok: false, code: plainCheck.code, message: plainCheck.reason }, 400);
+          }
+          effectivePayload = {
+            to: plainCheck.to,
+            subject: plainCheck.subject,
+            body: plainCheck.body,
+          };
+        }
+        const toRaw = effectivePayload["to"];
+        const toList = Array.isArray(toRaw)
+          ? toRaw.map((x) => String(x).trim()).filter(Boolean)
+          : typeof toRaw === "string"
+            ? [toRaw.trim()].filter(Boolean)
+            : [];
+        const singleLineCheck = validateEmailEnvelopeSingleLine({
+          from: config.host.config.smtpConfig.fromAddress,
+          to: toList,
+          subject: String(effectivePayload["subject"] ?? ""),
+        });
+        if (!singleLineCheck.ok) {
+          return c.json({ ok: false, code: singleLineCheck.code, message: singleLineCheck.reason }, 400);
+        }
+        const recipCheck = validateEmailRecipientsAllowlist({
+          to: toList,
+          allowedRecipients: config.host.config.allowedEmailRecipients ?? config.host.config.allowedEmailTargets,
+          smtpHost: config.host.config.smtpConfig.host,
+        });
+        if (!recipCheck.ok) {
+          return c.json({ ok: false, code: recipCheck.code, message: recipCheck.reason }, 403);
+        }
+        const derivedTarget = `smtp:${toList.join(",")}`;
+        if (body.target !== undefined && body.target !== derivedTarget) {
+          return c.json(
+            {
+              ok: false,
+              code: "smtp_target_payload_mismatch",
+              message: `Draft target '${body.target}' does not match validated recipients '${derivedTarget}'`,
+            },
+            400,
+          );
+        }
+        effectiveTarget = derivedTarget;
+      }
+
+      // S2-P0-3c: Prevent draft edits on github_write_file from tampering mcpToolName/mcpServerId/mcpSchemaSha256 or bypassing allowlist!
+      if (existingProposal.tool_name === "github_write_file") {
+        const curDraft = config.host.govDb
+          .prepare("SELECT canonical_snapshot FROM draft_revisions WHERE proposal_id = ? AND revision = ?")
+          .get(existingProposal.proposal_id, existingProposal.head_rev) as { canonical_snapshot: string } | undefined;
+        const curSnap = curDraft
+          ? (JSON.parse(curDraft.canonical_snapshot) as { payload?: Record<string, unknown> })
+          : null;
+        const origPayload = curSnap?.payload ?? {};
+        const repoId = String(body.payload["repoId"] ?? "").trim();
+        const operation = String(body.payload["operation"] ?? "").trim();
+        const ref = String(body.payload["ref"] ?? "").trim();
+        const relPath = String(body.payload["path"] ?? "").trim();
+        const controlledTool = resolveControlledGithubMcpTool(operation);
+        if (!controlledTool) {
+          return c.json({ ok: false, code: "github_write_uncontrolled_operation", message: "Unsupported GitHub write operation" }, 400);
+        }
+        if (
+          body.payload["mcpToolName"] !== controlledTool ||
+          body.payload["mcpServerId"] !== origPayload["mcpServerId"] ||
+          body.payload["mcpSchemaSha256"] !== origPayload["mcpSchemaSha256"]
+        ) {
+          return c.json(
+            { ok: false, code: "github_write_tool_binding_immutable", message: "MCP tool binding cannot be altered in draft revision" },
+            400,
+          );
+        }
+        const policyCheck = evaluateGithubWritePolicy({
+          repoId,
+          operation,
+          ref,
+          path: relPath,
+          allowlist: config.host.config.githubWriteAllowlist ?? [],
+        });
+        if (!policyCheck.allowed) {
+          return c.json({ ok: false, code: policyCheck.code, message: policyCheck.reason }, 403);
+        }
+        effectiveTarget = `github:${repoId}@${ref}:${relPath}`;
+      }
+    }
+
     const res = saveDraftRevision(config.host.govDb, {
       proposalId,
       conversationId: body.conversationId,
       principalId: session.principalId,
       expectedHeadRev: body.expectedHeadRev,
-      target: body.target,
-      payload: body.payload,
+      target: effectiveTarget,
+      payload: effectivePayload,
       expiresAt: nowFn() + (config.host.config.approvalTtlMs ?? 30 * 60 * 1000),
       now: nowFn(),
     });
@@ -1209,22 +1364,22 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       approvedBy: s.approved_by,
       approvedAt: s.approved_at,
     }));
+    // S2-P0-3b: Expose FULL canonical definition & observed fingerprint so humans review exact schema before approving!
     const tools = listMcpToolPins(config.host.govDb).map((t) => {
-      let description = "";
-      try {
-        const parsed = JSON.parse(t.canonical_def_json) as { description?: string };
-        description = parsed.description ?? "";
-      } catch {
-        description = "";
-      }
+      const view = inspectStoredMcpToolPin(t);
       return {
-        serverId: t.server_id,
-        toolName: t.tool_name,
-        schemaSha256: t.schema_sha256,
-        description,
-        state: t.state,
-        reason: t.reason,
-        updatedAt: t.updated_at,
+        serverId: view.serverId,
+        toolName: view.toolName,
+        schemaSha256: view.observedSchemaSha256,
+        pinnedSchemaSha256: view.pinnedSchemaSha256,
+        observedSchemaSha256: view.observedSchemaSha256,
+        canonicalDefJson: view.canonicalDefJson,
+        inputSchema: view.inputSchema,
+        drifted: view.drifted,
+        description: view.description,
+        state: view.state,
+        reason: view.reason,
+        updatedAt: view.updatedAt,
       };
     });
     return c.json({ ok: true, servers, tools });
@@ -1250,18 +1405,37 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     }
   });
 
-  app.post("/api/mcp/pins/:serverId/:toolName/approve", (c) => {
+  // S2-P0-3b: Human Pin approval MUST bind to the reviewed observed fingerprint & canonical definition!
+  app.post("/api/mcp/pins/:serverId/:toolName/approve", async (c) => {
     const session = c.get("authSession");
     const serverId = c.req.param("serverId");
     const toolName = c.req.param("toolName");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      expectedSchemaSha256?: string;
+      expectedCanonicalDefJson?: string;
+    };
+    if (!body.expectedSchemaSha256 || typeof body.expectedSchemaSha256 !== "string") {
+      return c.json(
+        {
+          ok: false,
+          code: "mcp_pin_expected_sha_required",
+          error: "Approval requires expectedSchemaSha256 matching the reviewed canonical definition",
+        },
+        400,
+      );
+    }
     const res = approveStoredMcpToolPin(config.host.govDb, {
       serverId,
       toolName,
+      expectedSchemaSha256: body.expectedSchemaSha256,
+      ...(typeof body.expectedCanonicalDefJson === "string"
+        ? { expectedCanonicalDefJson: body.expectedCanonicalDefJson }
+        : {}),
       approvedBy: session.principalId,
       now: nowFn(),
     });
     if (!res.ok) {
-      return c.json({ ok: false, code: res.code, error: res.reason }, 404);
+      return c.json({ ok: false, code: res.code, error: res.reason }, res.httpStatus);
     }
     return c.json({
       ok: true,
@@ -1301,13 +1475,41 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     });
   });
 
+  // S2-P0-3d: Enforce live principal + scope authorization on L2 skill body disclosure!
   app.get("/api/skills/:skillId/body", (c) => {
+    const session = c.get("authSession");
     const skillId = c.req.param("skillId");
     const convId = c.req.query("conversationId");
     const verRaw = c.req.query("version");
+    const requestedScopeId = c.req.query("scopeId");
+    let scopeId = requestedScopeId ?? config.host.config.defaultScopeId ?? "scope:default";
+    let lockKey: string | undefined;
+
+    if (convId) {
+      const convScope = config.host.govDb
+        .prepare(
+          "SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+        )
+        .get(config.host.runtimeEpoch, convId) as { scope_id: string; principal_id: string } | undefined;
+      if (!convScope || convScope.principal_id !== session.principalId) {
+        return c.json({ ok: false, code: "forbidden", error: "Principal is not authorized for this conversation" }, 403);
+      }
+      scopeId = convScope.scope_id;
+      lockKey = config.host.getActiveSkillLockKey(convId);
+    }
+
+    const scopeRow = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(scopeId) as ScopeRow | undefined;
+    if (!scopeRow || scopeRow.cancelled === 1 || !isPrincipalAuthorizedForScope(scopeRow, session.principalId)) {
+      return c.json({ ok: false, code: "forbidden_scope", error: "Principal is not authorized for this scope" }, 403);
+    }
+
     const res = readSkillDisclosure(config.host.govDb, {
       skillId,
-      ...(convId ? { runtimeEpoch: config.host.runtimeEpoch, conversationId: convId } : {}),
+      principalId: session.principalId,
+      scopeId,
+      ...(convId ? { runtimeEpoch: config.host.runtimeEpoch, conversationId: convId, lockKey } : {}),
       ...(verRaw && /^\d+$/.test(verRaw) ? { requestedVersion: Number(verRaw) } : {}),
     });
     if (!res.ok) {
@@ -1371,6 +1573,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         lastRunUtcMs: r.last_run_utc_ms,
         lastStatus: r.last_status,
         lastResultSummary: r.last_result_summary,
+        lastConversationId: r.triggers.find((t) => Boolean(t.conversation_id))?.conversation_id ?? null,
         triggers: r.triggers.map((t) => ({
           triggerId: t.trigger_id,
           scheduledInstantUtc: t.scheduled_instant_utc,
@@ -1494,13 +1697,14 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     });
   });
 
+  // S2-P0-5: Reuse identical live scope + source_read_grants verification and redaction as View ①!
   app.get("/api/approvals", (c) => {
     const session = c.get("authSession");
     const now = nowFn();
     const activeEpoch = config.host.runtimeEpoch;
     const rows = config.host.govDb
       .prepare(
-        `SELECT p.*, cs.principal_id AS owner_principal
+        `SELECT p.*, cs.principal_id AS owner_principal, cs.scope_id AS conv_scope_id
            FROM proposals p
            JOIN conversation_scopes cs
              ON cs.runtime_epoch = p.runtime_epoch AND cs.conversation_id = p.conversation_id
@@ -1508,9 +1712,38 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
           ORDER BY p.created_at DESC
           LIMIT 100`,
       )
-      .all(activeEpoch, session.principalId) as unknown as Array<ProposalRow & { owner_principal: string }>;
+      .all(activeEpoch, session.principalId) as unknown as Array<
+      ProposalRow & { owner_principal: string; conv_scope_id: string }
+    >;
 
-    const items = rows.map((p) => {
+    const scopeCache = new Map<string, ScopeRow | null>();
+    const revokedCache = new Map<string, number>();
+
+    const items = rows.flatMap((p) => {
+      let scope = scopeCache.get(p.conv_scope_id);
+      if (scope === undefined) {
+        scope =
+          (config.host.govDb
+            .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+            .get(p.conv_scope_id) as ScopeRow | undefined) ?? null;
+        scopeCache.set(p.conv_scope_id, scope);
+      }
+      if (!scope || !isPrincipalAuthorizedForScope(scope, session.principalId)) {
+        return [];
+      }
+
+      const cacheKey = `${p.runtime_epoch}:${p.conversation_id}:${p.conv_scope_id}`;
+      let revokedSourceCount = revokedCache.get(cacheKey);
+      if (revokedSourceCount === undefined) {
+        revokedSourceCount = countRevokedSourcesForConversation({
+          runtimeEpoch: p.runtime_epoch,
+          conversationId: p.conversation_id,
+          principalId: session.principalId,
+          scopeId: p.conv_scope_id,
+        });
+        revokedCache.set(cacheKey, revokedSourceCount);
+      }
+
       const draft = config.host.govDb
         .prepare("SELECT * FROM draft_revisions WHERE proposal_id = ? AND revision = ?")
         .get(p.proposal_id, p.head_rev) as unknown as DraftRevisionRow;
@@ -1522,7 +1755,9 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         .get(apr.approval_id) as EffectRow | undefined;
       const isExpiredNow = apr.state === "EXPIRED" || (apr.state === "PENDING" && now >= apr.expires_at);
       const effectiveApprovalState = isExpiredNow && apr.state === "PENDING" ? "EXPIRED" : apr.state;
+      const redacted = revokedSourceCount > 0;
       const hasChallenge =
+        !redacted &&
         effectiveApprovalState === "PENDING" &&
         Boolean(
           config.host.govDb
@@ -1531,36 +1766,42 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         );
       const autoIssuedTier0 = typeof apr.decision_key === "string" && apr.decision_key.startsWith("auto:tier0:");
       const tier = autoIssuedTier0 ? 0 : p.tool_name === "send_email" || p.tool_name === "github_write_file" ? 2 : 1;
-      return {
-        proposalId: p.proposal_id,
-        runtimeEpoch: p.runtime_epoch,
-        conversationId: p.conversation_id,
-        toolName: p.tool_name,
-        target: p.target,
-        tier,
-        autoIssuedTier0,
-        revision: p.head_rev,
-        actionHash: draft.action_hash,
-        snapshot: JSON.parse(draft.canonical_snapshot) as Record<string, unknown>,
-        approvalId: apr.approval_id,
-        approvalState: effectiveApprovalState,
-        expiresAt: apr.expires_at,
-        expired: isExpiredNow,
-        hasChallenge,
-        effect: effect
-          ? {
-              effectId: effect.effect_id,
-              state: effect.state,
-              claimedAt: effect.claimed_at,
-              receiptRef: effect.receipt_ref,
-              reason: effect.reason,
-              reconciledBy: effect.reconciled_by,
-              reconcileEvidence: effect.reconcile_evidence,
-            }
-          : null,
-        uiStatusLabel: uiStatusLabelFor(effectiveApprovalState, effect?.state ?? null),
-        createdAt: p.created_at,
-      };
+      return [
+        {
+          proposalId: p.proposal_id,
+          runtimeEpoch: p.runtime_epoch,
+          conversationId: p.conversation_id,
+          toolName: p.tool_name,
+          target: redacted ? "[redacted_after_source_revocation]" : p.target,
+          tier,
+          autoIssuedTier0,
+          revision: p.head_rev,
+          actionHash: draft.action_hash,
+          snapshot: redacted
+            ? { redacted: true, reason: "redacted_after_source_revocation" }
+            : (JSON.parse(draft.canonical_snapshot) as Record<string, unknown>),
+          draftRedacted: redacted,
+          revokedSourceCount,
+          approvalId: apr.approval_id,
+          approvalState: effectiveApprovalState,
+          expiresAt: apr.expires_at,
+          expired: isExpiredNow,
+          hasChallenge,
+          effect: effect
+            ? {
+                effectId: effect.effect_id,
+                state: effect.state,
+                claimedAt: effect.claimed_at,
+                receiptRef: redacted && effect.receipt_ref ? "[redacted_after_source_revocation]" : effect.receipt_ref,
+                reason: redacted && effect.reason ? "[redacted_after_source_revocation]" : effect.reason,
+                reconciledBy: effect.reconciled_by,
+                reconcileEvidence: redacted ? null : effect.reconcile_evidence,
+              }
+            : null,
+          uiStatusLabel: uiStatusLabelFor(effectiveApprovalState, effect?.state ?? null),
+          createdAt: p.created_at,
+        },
+      ];
     });
     return c.json({ ok: true, runtimeEpoch: activeEpoch, serverNow: now, approvals: items });
   });
@@ -1777,6 +2018,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     });
   });
 
+  // S2-P1-4: Aggregate daily settled/charged-bound/held totals strictly across ALL rows of the current chargeDay
+  // (day_account), then query recent historical rows separately with LIMIT 100!
   app.get("/api/budget/summary", (c) => {
     const zone = config.host.config.zone ?? DEFAULT_TIME_ZONE;
     const today = formatChargeDay(nowFn(), zone);
@@ -1784,11 +2027,14 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     const accounts = config.host.govDb
       .prepare("SELECT * FROM budget_accounts ORDER BY kind ASC, account_id ASC")
       .all() as unknown as BudgetAccountRow[];
+    const dayAccountId = `acct:day:${zone}:${today}`;
+    const todayReservations = config.host.govDb
+      .prepare("SELECT * FROM budget_reservations WHERE day_account = ?")
+      .all(dayAccountId) as unknown as BudgetReservationRow[];
     const reservations = config.host.govDb
       .prepare("SELECT * FROM budget_reservations WHERE runtime_epoch = ? ORDER BY reserved_at DESC LIMIT 100")
       .all(activeEpoch) as unknown as BudgetReservationRow[];
 
-    const dayAccountId = `acct:day:${zone}:${today}`;
     const dayAccount = accounts.find((a) => a.account_id === dayAccountId) ?? null;
     const taskAccounts = accounts.filter((a) => a.kind === "TASK");
 
@@ -1798,7 +2044,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     let heldMu = 0;
     const byPurpose: Record<string, { count: number; chargedMu: number; heldMu: number; boundMu: number }> = {};
 
-    for (const r of reservations) {
+    for (const r of todayReservations) {
       const bucket = byPurpose[r.purpose] ?? { count: 0, chargedMu: 0, heldMu: 0, boundMu: 0 };
       bucket.count++;
       if (r.state === "SETTLED") {

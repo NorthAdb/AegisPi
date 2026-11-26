@@ -11,9 +11,10 @@ import {
 
 interface WorkspaceViewProps {
   onToast: (msg: string) => void;
+  onJumpToConversation?: (conversationId: string) => void;
 }
 
-export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast }) => {
+export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast, onJumpToConversation }) => {
   const [connectors, setConnectors] = useState<ConnectorsStatus | null>(null);
   const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
   const [testing, setTesting] = useState(false);
@@ -244,8 +245,8 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast }) => {
                   data-pin-state={t.state}
                   className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
                 >
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="flex items-center gap-2">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono font-semibold text-slate-900">
                         {t.serverId} / {t.toolName}
                       </span>
@@ -260,11 +261,29 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast }) => {
                       >
                         {t.state}
                       </span>
+                      {t.drifted && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-900 border border-amber-300">
+                          定义已漂移 · 需审阅新指纹
+                        </span>
+                      )}
                     </div>
                     <div className="text-slate-500">{t.description || "(无描述)"}</div>
-                    <div className="font-mono text-[10px] text-slate-400">
-                      schema_sha256: {t.schemaSha256.slice(0, 20)} {t.reason ? `· ${t.reason}` : ""}
+                    <div className="font-mono text-[10px] text-slate-500 break-all">
+                      observed_sha256: {t.observedSchemaSha256}
+                      {t.drifted ? ` (pinned: ${t.pinnedSchemaSha256.slice(0, 16)})` : ""}
+                      {t.reason ? ` · ${t.reason}` : ""}
                     </div>
+                    <details className="pt-1">
+                      <summary className="cursor-pointer text-[11px] font-medium text-blue-700 hover:underline">
+                        审阅完整规范化工具定义 (canonical_def_json)
+                      </summary>
+                      <pre
+                        data-mcp-pin-canonical-def={`${t.serverId}:${t.toolName}`}
+                        className="mt-1.5 p-2 rounded-lg bg-slate-50 border border-slate-200 font-mono text-[10px] text-slate-700 overflow-x-auto whitespace-pre-wrap break-all"
+                      >
+                        {t.canonicalDefJson}
+                      </pre>
+                    </details>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {t.state !== "APPROVED" && (
@@ -272,13 +291,16 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast }) => {
                         type="button"
                         data-action="approve-mcp-pin"
                         onClick={async () => {
-                          const r = await api.approveMcpPin(t.serverId, t.toolName);
-                          onToast(r.data.ok ? `已核准 ${t.toolName}` : `核准失败: ${r.data.error}`);
+                          const r = await api.approveMcpPin(t.serverId, t.toolName, {
+                            expectedSchemaSha256: t.observedSchemaSha256,
+                            expectedCanonicalDefJson: t.canonicalDefJson,
+                          });
+                          onToast(r.data.ok ? `已按审阅指纹核准 ${t.toolName}` : `核准失败: ${r.data.error ?? r.data.code}`);
                           await loadAll();
                         }}
                         className="px-2.5 py-1 rounded-md bg-emerald-700 text-white text-xs"
                       >
-                        人工核准
+                        按审阅指纹核准
                       </button>
                     )}
                     {t.state !== "REVOKED" && (
@@ -515,6 +537,16 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast }) => {
                     {r.lastResultSummary && <div className="text-slate-500">最近结果：{r.lastResultSummary}</div>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
+                    {r.lastConversationId && onJumpToConversation && (
+                      <button
+                        type="button"
+                        data-action="open-routine-result"
+                        onClick={() => onJumpToConversation(r.lastConversationId!)}
+                        className="px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700"
+                      >
+                        打开结果会话 #{r.lastConversationId}
+                      </button>
+                    )}
                     {r.enabled ? (
                       <button
                         type="button"

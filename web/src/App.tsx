@@ -241,7 +241,15 @@ export const App: React.FC = () => {
             onGlobalRefresh={refreshGlobalData}
           />
         )}
-        {activeView === "workspace" && <WorkspaceView onToast={showToast} />}
+        {activeView === "workspace" && (
+          <WorkspaceView
+            onToast={showToast}
+            onJumpToConversation={(convId) => {
+              setSelectedConversationId(convId);
+              setActiveView("chat");
+            }}
+          />
+        )}
         {activeView === "approvals" && (
           <ApprovalsView
             onJumpToConversation={(convId) => {

@@ -884,3 +884,57 @@ export class RoutinePoller {
     }
   }
 }
+
+/**
+ * S2-P1-3: Records actual task completion outcome back onto routine_triggers and routines
+ * so View ② shows real task results (and provides a conversation link) instead of stopping at ADMITTED.
+ */
+export function recordRoutineTriggerCompletion(
+  db: DatabaseSync,
+  params: {
+    triggerId: string;
+    routineId: string;
+    conversationId: string;
+    status: "SUCCEEDED" | "FAILED";
+    summary: string;
+    now: number;
+  },
+): void {
+  const safeSummary = params.summary.replace(/\s+/g, " ").trim().slice(0, 240);
+  withImmediateTx(db, () => {
+    db.prepare(
+      `UPDATE routine_triggers
+          SET state = ?,
+              reason = ?,
+              updated_at = ?
+        WHERE trigger_id = ? AND state IN ('ADMITTED','REGISTERED')`,
+    ).run(params.status, safeSummary, params.now, params.triggerId);
+    db.prepare(
+      `UPDATE routines
+          SET last_status = ?,
+              last_result_summary = ?,
+              updated_at = ?
+        WHERE routine_id = ?`,
+    ).run(
+      params.status,
+      params.status === "SUCCEEDED"
+        ? `已完成 · 会话 #${params.conversationId}：${safeSummary || "ok"}`
+        : `执行失败 · 会话 #${params.conversationId}：${safeSummary || "failed"}`,
+      params.now,
+      params.routineId,
+    );
+    writeAuditEvent(db, {
+      entityType: "routine_trigger",
+      entityId: params.triggerId,
+      eventKey: `complete:${params.triggerId}:${params.status}`,
+      eventType: "routine_trigger_completed",
+      occurredAt: params.now,
+      details: {
+        routineId: params.routineId,
+        conversationId: params.conversationId,
+        status: params.status,
+        summaryLength: safeSummary.length,
+      },
+    });
+  });
+}

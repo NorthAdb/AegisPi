@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS source_read_grants (
   grant_id TEXT PRIMARY KEY NOT NULL,
   principal_id TEXT NOT NULL,
   scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
-  source_type TEXT NOT NULL CHECK(source_type IN ('memory','imap','github_mcp','workspace_write')),
+  source_type TEXT NOT NULL CHECK(source_type IN ('memory','imap','github_mcp','workspace_write','skill')),
   resource_id TEXT NOT NULL,
   operations_json TEXT NOT NULL DEFAULT '[]',
   constraints_json TEXT NOT NULL DEFAULT '{}',
@@ -776,6 +776,31 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
       UNIQUE(routine_id, scheduled_instant_utc)
     );
   `);
+
+  // Migration 7 (Stage 2): Forward-only extension of source_read_grants.source_type CHECK constraint to include 'skill'
+  const srgDef = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'source_read_grants'")
+    .get() as { sql?: string } | undefined;
+  if (srgDef?.sql && !srgDef.sql.includes("'skill'")) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE source_read_grants_v7 (
+        grant_id TEXT PRIMARY KEY NOT NULL,
+        principal_id TEXT NOT NULL,
+        scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+        source_type TEXT NOT NULL CHECK(source_type IN ('memory','imap','github_mcp','workspace_write','skill')),
+        resource_id TEXT NOT NULL,
+        operations_json TEXT NOT NULL DEFAULT '[]',
+        constraints_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
+      INSERT INTO source_read_grants_v7 SELECT * FROM source_read_grants;
+      DROP TABLE source_read_grants;
+      ALTER TABLE source_read_grants_v7 RENAME TO source_read_grants;
+      COMMIT;
+    `);
+  }
 }
 
 export function withImmediateTx<T>(db: DatabaseSync, fn: () => T): T {

@@ -32,6 +32,7 @@ export interface AegisContextExtensionOptions {
     slotName: string;
   } | null;
   skillsEnabled?: boolean;
+  resolveSkillLockKey?: (conversationId: string) => string;
   now?: () => number;
 }
 
@@ -69,9 +70,11 @@ export function createAegisContextExtension(options: AegisContextExtensionOption
   const skillsSection = section("aegis-skills", (input) => {
     if (!options.skillsEnabled) return undefined;
     const convId = String(input.conversationId);
+    const lockKey = options.resolveSkillLockKey ? options.resolveSkillLockKey(convId) : convId;
     const locked = getOrLockConversationSkillSet(options.govDb, {
       runtimeEpoch: options.getRuntimeEpoch(),
       conversationId: convId,
+      lockKey,
       now: nowFn(),
     });
     return locked.renderedL1Index.length > 0 ? locked.renderedL1Index : undefined;

@@ -81,6 +81,7 @@ if (tlsCn) {
 
 let records: SmtpReceiptRecord[] = readJsonl<SmtpReceiptRecord>(logPath);
 let mode: SmtpMode = (args["mode"] as SmtpMode | undefined) ?? "normal";
+let echoText = "";
 
 interface HeldConnection {
   seq: number;
@@ -125,7 +126,7 @@ const handleSocket = (socket: net.Socket): void => {
         const currentMode = mode;
 
         if (currentMode === "reject_550") {
-          sendLine("550 5.7.1 Synthetic SMTP rejection");
+          sendLine(`550 5.7.1 Synthetic SMTP rejection${echoText ? " " + echoText : ""}`);
           mailFrom = "";
           rcptTo = [];
           dataLines = [];
@@ -133,6 +134,7 @@ const handleSocket = (socket: net.Socket): void => {
         }
 
         const seq = records.length + 1;
+        const okReply = `250 2.0.0 OK fake-msg-${seq}${echoText ? " " + echoText : ""}`;
         const rec: SmtpReceiptRecord = {
           seq,
           receivedAt: new Date().toISOString(),
@@ -142,7 +144,7 @@ const handleSocket = (socket: net.Socket): void => {
           rawData,
           rawSha256,
           modeAtArrival: currentMode,
-          replySent: currentMode === "normal" ? `250 2.0.0 OK fake-msg-${seq}` : null,
+          replySent: currentMode === "normal" ? okReply : null,
         };
         // Persist durably BEFORE any reply or hold so count survives any crash/kill.
         appendJsonlDurable(logPath, rec);
@@ -156,14 +158,14 @@ const handleSocket = (socket: net.Socket): void => {
         if (currentMode === "hold_after_receive") {
           heldConnections.push({
             seq,
-            release: (replyLine = `250 2.0.0 OK fake-msg-${seq}`) => {
+            release: (replyLine = okReply) => {
               sendLine(replyLine);
             },
           });
           return;
         }
 
-        sendLine(rec.replySent ?? `250 2.0.0 OK fake-msg-${seq}`);
+        sendLine(rec.replySent ?? okReply);
         return;
       }
       // RFC 5321 dot-unstuffing
@@ -285,7 +287,10 @@ const controlServer = http.createServer(async (req, res) => {
       if (body["mode"] === "normal" || body["mode"] === "hold_after_receive" || body["mode"] === "reject_550") {
         mode = body["mode"];
       }
-      json(200, { ok: true, mode, totalReceived: records.length });
+      if (typeof body["echoText"] === "string") {
+        echoText = body["echoText"];
+      }
+      json(200, { ok: true, mode, echoTextSet: echoText.length > 0, totalReceived: records.length });
       return;
     }
 

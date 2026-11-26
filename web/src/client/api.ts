@@ -182,6 +182,11 @@ export interface McpPinsResponse {
     serverId: string;
     toolName: string;
     schemaSha256: string;
+    pinnedSchemaSha256: string;
+    observedSchemaSha256: string;
+    canonicalDefJson: string;
+    inputSchema: Record<string, unknown> | null;
+    drifted: boolean;
     description: string;
     state: "APPROVED" | "QUARANTINED" | "REVOKED";
     reason: string | null;
@@ -244,6 +249,7 @@ export interface RoutineItem {
   lastRunUtcMs: number | null;
   lastStatus: string | null;
   lastResultSummary: string | null;
+  lastConversationId: string | null;
   triggers: Array<{
     triggerId: string;
     scheduledInstantUtc: number;
@@ -480,10 +486,14 @@ export const api = {
     }),
   getMcpPins: () => reqJson<{ ok: boolean } & McpPinsResponse>("/api/mcp/pins"),
   recheckMcpPins: () => reqJson<{ ok: boolean; error?: string }>("/api/mcp/pins/recheck", { method: "POST" }),
-  approveMcpPin: (serverId: string, toolName: string) =>
-    reqJson<{ ok: boolean; error?: string }>(
+  approveMcpPin: (
+    serverId: string,
+    toolName: string,
+    params: { expectedSchemaSha256: string; expectedCanonicalDefJson?: string },
+  ) =>
+    reqJson<{ ok: boolean; code?: string; error?: string }>(
       `/api/mcp/pins/${encodeURIComponent(serverId)}/${encodeURIComponent(toolName)}/approve`,
-      { method: "POST" },
+      { method: "POST", body: JSON.stringify(params) },
     ),
   revokeMcpPin: (serverId: string, toolName: string, reason?: string) =>
     reqJson<{ ok: boolean; error?: string }>(

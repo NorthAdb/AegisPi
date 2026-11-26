@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { canonicalJson, sha256Hex } from "../../governance/canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "../../governance/db.ts";
+import { checkSourceReadAuthorized, grantSourceRead } from "../../governance/policy.ts";
 
 export interface SkillScriptRef {
   scriptId: string;
@@ -168,40 +169,66 @@ export function registerSkillVersion(
 
 /**
  * Seeds the built-in 3-level Stage 2 skill ("weekly-brief-helper") idempotently if absent.
+ * Grants ONLY L2 `read_body` for the default principal/scope if provided; L3 `execute_script`
+ * is NEVER granted by default and requires explicit independent authorization.
  */
-export function ensureDefaultStage2Skills(db: DatabaseSync, now: number): void {
+export function ensureDefaultStage2Skills(
+  db: DatabaseSync,
+  now: number,
+  opts?: { defaultPrincipalId?: string; defaultScopeId?: string },
+): void {
   const existing = db.prepare("SELECT skill_id FROM skills WHERE skill_id = ?").get("weekly-brief-helper");
-  if (existing) return;
-  registerSkillVersion(db, {
-    skillId: "weekly-brief-helper",
-    name: "Weekly Brief & Schedule Diff Helper",
-    version: 1,
-    summary: "Compare email updates and repository milestones, draft structured status replies, and run an audited summary formatter.",
-    body: [
-      "# Weekly Brief & Schedule Diff Helper (v1)",
-      "",
-      "## Level 2 Instructions (On-Demand Disclosure)",
-      "1. Read authorized project memory notes first to identify the target repository and milestone dates.",
-      "2. Fetch only the authorized latest email via read-only IMAP (BODY.PEEK) and authorized repo files via pinned GitHub MCP.",
-      "3. List every date or milestone mismatch clearly with source citations (UID + repo ref/path).",
-      "4. If an outbound email reply is requested, draft a concise plain-text reply and park for explicit Tier 2 approval.",
-      "5. For batch formatting, invoke the reviewed L3 script `format-weekly-brief` in the no-net sandbox after independent authorization.",
-    ].join("\n"),
-    scripts: [
-      {
-        scriptId: "format-weekly-brief",
-        name: "format-weekly-brief.cjs",
-        description: "Deterministic no-net Node formatter that renders a reconciled markdown weekly brief into /out.",
-        runtime: "node",
-        scriptSha256: DEFAULT_WEEKLY_BRIEF_SCRIPT_SHA256,
-        reviewedBy: "host-security-review",
-        sourceCode: DEFAULT_WEEKLY_BRIEF_SCRIPT_CODE,
-      },
-    ],
-    reviewedBy: "host-security-review",
-    activate: true,
-    now,
-  });
+  if (!existing) {
+    registerSkillVersion(db, {
+      skillId: "weekly-brief-helper",
+      name: "Weekly Brief & Schedule Diff Helper",
+      version: 1,
+      summary: "Compare email updates and repository milestones, draft structured status replies, and run an audited summary formatter.",
+      body: [
+        "# Weekly Brief & Schedule Diff Helper (v1)",
+        "",
+        "## Level 2 Instructions (On-Demand Disclosure)",
+        "1. Read authorized project memory notes first to identify the target repository and milestone dates.",
+        "2. Fetch only the authorized latest email via read-only IMAP (BODY.PEEK) and authorized repo files via pinned GitHub MCP.",
+        "3. List every date or milestone mismatch clearly with source citations (UID + repo ref/path).",
+        "4. If an outbound email reply is requested, draft a concise plain-text reply and park for explicit Tier 2 approval.",
+        "5. For batch formatting, invoke the reviewed L3 script `format-weekly-brief` in the no-net sandbox after independent authorization.",
+      ].join("\n"),
+      scripts: [
+        {
+          scriptId: "format-weekly-brief",
+          name: "format-weekly-brief.cjs",
+          description: "Deterministic no-net Node formatter that renders a reconciled markdown weekly brief into /out.",
+          runtime: "node",
+          scriptSha256: DEFAULT_WEEKLY_BRIEF_SCRIPT_SHA256,
+          reviewedBy: "host-security-review",
+          sourceCode: DEFAULT_WEEKLY_BRIEF_SCRIPT_CODE,
+        },
+      ],
+      reviewedBy: "host-security-review",
+      activate: true,
+      now,
+    });
+  }
+  if (opts?.defaultPrincipalId && opts?.defaultScopeId) {
+    const existingGrant = db
+      .prepare(
+        `SELECT grant_id FROM source_read_grants
+          WHERE principal_id = ? AND scope_id = ? AND source_type = 'skill' AND resource_id = 'skill:weekly-brief-helper'
+          LIMIT 1`,
+      )
+      .get(opts.defaultPrincipalId, opts.defaultScopeId);
+    if (!existingGrant) {
+      grantSourceRead(db, {
+        principalId: opts.defaultPrincipalId,
+        scopeId: opts.defaultScopeId,
+        sourceType: "skill",
+        resourceId: "skill:weekly-brief-helper",
+        operations: ["read_body"],
+        now,
+      });
+    }
+  }
 }
 
 export function listSkillsIndex(db: DatabaseSync): SkillIndexEntry[] {
@@ -254,18 +281,20 @@ export function computeActiveSkillSetHash(db: DatabaseSync): LockedSkillSet {
 }
 
 /**
- * Locks the conversation's skill_set_hash on first prompt build so version switches apply only to new tasks,
+ * Locks the active task/run's skill_set_hash (S2-P1-2: keyed by lockKey = conversation+run so
+ * in-flight tasks stay locked while subsequent new tasks in the SAME conversation get updated versions!),
  * while dynamically excluding any skill that has been REVOKED since lock time.
  */
 export function getOrLockConversationSkillSet(
   db: DatabaseSync,
-  params: { runtimeEpoch: string; conversationId: string; now: number },
+  params: { runtimeEpoch: string; conversationId: string; lockKey?: string; now: number },
 ): LockedSkillSet {
+  const effectiveLockKey = params.lockKey ?? params.conversationId;
   const existing = db
     .prepare(
       "SELECT skill_set_hash, locked_skills_json FROM conversation_skill_locks WHERE runtime_epoch = ? AND conversation_id = ?",
     )
-    .get(params.runtimeEpoch, params.conversationId) as
+    .get(params.runtimeEpoch, effectiveLockKey) as
     | { skill_set_hash: string; locked_skills_json: string }
     | undefined;
 
@@ -277,7 +306,7 @@ export function getOrLockConversationSkillSet(
          VALUES (?, ?, ?, ?, ?)`,
       ).run(
         params.runtimeEpoch,
-        params.conversationId,
+        effectiveLockKey,
         computed.skillSetHash,
         JSON.stringify(computed.skills),
         params.now,
@@ -292,7 +321,6 @@ export function getOrLockConversationSkillSet(
     summary: string;
     version: number;
   }>;
-  // Immediate revocation enforcement: filter out any skill whose live state is REVOKED
   const liveStates = new Map<string, string>();
   for (const row of db.prepare("SELECT skill_id, state FROM skills").all() as Array<{ skill_id: string; state: string }>) {
     liveStates.set(row.skill_id, row.state);
@@ -314,14 +342,17 @@ export function getOrLockConversationSkillSet(
 
 /**
  * Level 2 on-demand body disclosure + Level 3 reviewed script metadata (hash + description, without executing).
- * Refuses immediately if the skill is REVOKED.
+ * S2-P0-3d: Enforces live principal+scope `skill` `read_body` authorization AND refuses immediately if REVOKED.
  */
 export function readSkillDisclosure(
   db: DatabaseSync,
   params: {
     skillId: string;
+    principalId: string;
+    scopeId: string;
     runtimeEpoch?: string;
     conversationId?: string;
+    lockKey?: string;
     requestedVersion?: number;
   },
 ):
@@ -343,6 +374,21 @@ export function readSkillDisclosure(
       }>;
     }
   | { ok: false; code: string; reason: string } {
+  const auth = checkSourceReadAuthorized(db, {
+    principalId: params.principalId,
+    scopeId: params.scopeId,
+    sourceType: "skill",
+    resourceId: `skill:${params.skillId}`,
+    operation: "read_body",
+  });
+  if (!auth.ok) {
+    return {
+      ok: false,
+      code: "skill_read_denied",
+      reason: `Principal ${params.principalId} lacks active read_body authorization for skill ${params.skillId} in scope ${params.scopeId}`,
+    };
+  }
+
   const skill = db.prepare("SELECT * FROM skills WHERE skill_id = ?").get(params.skillId) as
     | SkillRow
     | undefined;
@@ -358,12 +404,13 @@ export function readSkillDisclosure(
   }
 
   let versionToRead = params.requestedVersion ?? skill.active_version;
-  if (params.runtimeEpoch && params.conversationId && params.requestedVersion === undefined) {
+  const effectiveLockKey = params.lockKey ?? params.conversationId;
+  if (params.runtimeEpoch && effectiveLockKey && params.requestedVersion === undefined) {
     const lock = db
       .prepare(
         "SELECT locked_skills_json FROM conversation_skill_locks WHERE runtime_epoch = ? AND conversation_id = ?",
       )
-      .get(params.runtimeEpoch, params.conversationId) as { locked_skills_json: string } | undefined;
+      .get(params.runtimeEpoch, effectiveLockKey) as { locked_skills_json: string } | undefined;
     if (lock) {
       const locked = JSON.parse(lock.locked_skills_json) as Array<{ skillId: string; version: number }>;
       const match = locked.find((l) => l.skillId === params.skillId);
@@ -406,18 +453,39 @@ export function readSkillDisclosure(
 }
 
 /**
- * Resolves a human-reviewed L3 skill script and verifies its exact SHA-256 digest before sandbox execution.
+ * Resolves a human-reviewed L3 skill script and verifies:
+ * 1. Active `read_body` grant for (principalId, scopeId, skill).
+ * 2. Skill is ACTIVE and script integrity SHA-256 matches stored & optional expected hash.
+ * 3. Independent active `execute_script` grant for (principalId, scopeId, skill, scriptId, scriptSha256)! (S2-P0-3d)
  */
 export function resolveVerifiedSkillScript(
   db: DatabaseSync,
   params: {
     skillId: string;
     scriptId: string;
+    principalId: string;
+    scopeId: string;
     expectedSha256?: string;
     runtimeEpoch?: string;
     conversationId?: string;
+    lockKey?: string;
   },
 ): { ok: true; script: SkillScriptRef; version: number } | { ok: false; code: string; reason: string } {
+  const readAuth = checkSourceReadAuthorized(db, {
+    principalId: params.principalId,
+    scopeId: params.scopeId,
+    sourceType: "skill",
+    resourceId: `skill:${params.skillId}`,
+    operation: "read_body",
+  });
+  if (!readAuth.ok) {
+    return {
+      ok: false,
+      code: "skill_read_denied",
+      reason: `Principal ${params.principalId} lacks active read_body authorization for skill ${params.skillId}`,
+    };
+  }
+
   const skill = db.prepare("SELECT * FROM skills WHERE skill_id = ?").get(params.skillId) as
     | SkillRow
     | undefined;
@@ -429,12 +497,13 @@ export function resolveVerifiedSkillScript(
   }
 
   let versionToUse = skill.active_version;
-  if (params.runtimeEpoch && params.conversationId) {
+  const effectiveLockKey = params.lockKey ?? params.conversationId;
+  if (params.runtimeEpoch && effectiveLockKey) {
     const lock = db
       .prepare(
         "SELECT locked_skills_json FROM conversation_skill_locks WHERE runtime_epoch = ? AND conversation_id = ?",
       )
-      .get(params.runtimeEpoch, params.conversationId) as { locked_skills_json: string } | undefined;
+      .get(params.runtimeEpoch, effectiveLockKey) as { locked_skills_json: string } | undefined;
     if (lock) {
       const locked = JSON.parse(lock.locked_skills_json) as Array<{ skillId: string; version: number }>;
       const match = locked.find((l) => l.skillId === params.skillId);
@@ -472,6 +541,24 @@ export function resolveVerifiedSkillScript(
       reason: `Script ${params.scriptId} hash changed (${params.expectedSha256.slice(0, 12)} != ${actualSha.slice(0, 12)})`,
     };
   }
+
+  const execAuth = checkSourceReadAuthorized(db, {
+    principalId: params.principalId,
+    scopeId: params.scopeId,
+    sourceType: "skill",
+    resourceId: `skill:${params.skillId}`,
+    operation: "execute_script",
+    scriptId: script.scriptId,
+    scriptSha256: actualSha,
+  });
+  if (!execAuth.ok) {
+    return {
+      ok: false,
+      code: "skill_script_execution_denied",
+      reason: `Principal ${params.principalId} lacks independent execute_script permission for ${params.skillId}/${script.scriptId}`,
+    };
+  }
+
   return { ok: true, script, version: versionToUse };
 }
 

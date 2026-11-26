@@ -37,6 +37,9 @@ function checkLayerBoundary(): { ok: boolean; violations: string[] } {
     if (rel.startsWith("runtime/") && /from\s+["']\.\.\/web\//.test(content)) {
       violations.push(`l3-upward-import:${rel}`);
     }
+    if (rel.startsWith("web/") && /from\s+["']\.\.\/capabilities\//.test(content)) {
+      violations.push(`l4-bypass-runtime-import-capabilities:${rel}`);
+    }
   }
   return { ok: violations.length === 0, violations };
 }

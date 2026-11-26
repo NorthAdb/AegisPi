@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { mintId } from "./canonical.ts";
+import { isLoopbackHost } from "./credentials.ts";
 import { withImmediateTx, writeAuditEvent } from "./db.ts";
 
 export type ActionTier = 0 | 1 | 2;
@@ -11,10 +12,14 @@ export interface GithubWriteAllowlistEntry {
   operations: string[];
   /** Explicitly allowed refs (branches), e.g. ["refs/heads/aegis-stage2-test"] */
   allowedRefs: string[];
-  /** Explicitly allowed relative file paths (exact or prefix ending with "/") */
+  /** Explicitly allowed relative file paths (exact or prefix ending with "/"). MUST be non-empty for file-write ops! */
   allowedPaths: string[];
   /** Tier 0 = host positive-list auto-issue (2 CAS, no popup); Tier 2 = explicit approval card. */
   tier: 0 | 2;
+  /** S2-P0-3c: Refs explicitly confirmed as non-protected (required for Tier 0 auto-issue; unconfirmed refs escalate to Tier 2). */
+  confirmedNonProtectedRefs?: string[];
+  /** Optional explicit repository-specific protected refs (always excluded from Tier 0). */
+  protectedRefs?: string[];
 }
 
 export interface GithubWritePolicyDecision {
@@ -22,7 +27,21 @@ export interface GithubWritePolicyDecision {
   tier: 0 | 2 | null;
   code: string;
   reason: string;
+  controlledMcpToolName?: string;
   matchedEntry?: GithubWriteAllowlistEntry;
+}
+
+const CONTROLLED_GITHUB_WRITE_TOOL_MAP: Readonly<Record<string, string>> = {
+  create_or_update_file: "create_or_update_file",
+};
+
+const FILE_WRITE_GITHUB_OPS = new Set(["create_or_update_file", "push_files", "delete_file"]);
+
+export function resolveControlledGithubMcpTool(operation: string): string | null {
+  const op = operation.trim();
+  return Object.prototype.hasOwnProperty.call(CONTROLLED_GITHUB_WRITE_TOOL_MAP, op)
+    ? CONTROLLED_GITHUB_WRITE_TOOL_MAP[op]!
+    : null;
 }
 
 const PROTECTED_REFS = new Set(["main", "master", "refs/heads/main", "refs/heads/master"]);
@@ -50,11 +69,14 @@ function isWorkflowOrReleasePath(relPath: string): boolean {
   );
 }
 
-function isProtectedRef(ref: string): boolean {
+function isProtectedRef(ref: string, extraProtectedRefs?: string[]): boolean {
   const norm = ref.trim();
   const lower = norm.toLowerCase();
   if (PROTECTED_REFS.has(lower)) return true;
   if (lower.startsWith("refs/tags/")) return true;
+  if (extraProtectedRefs && extraProtectedRefs.some((p) => p.trim().toLowerCase() === lower)) {
+    return true;
+  }
   return false;
 }
 
@@ -75,8 +97,11 @@ function pathMatchesAllowlist(relPath: string, allowedPaths: string[]): boolean 
 
 /**
  * Evaluates a Stage 2 GitHub write operation strictly against the host-configured positive allowlist.
- * Default-deny. Protected branches, workflows, tags/releases, force-push, and deletes are ALWAYS excluded from Tier 0.
- * Repo name prefixes, frontend toggles, and MCP tool visibility NEVER grant permission.
+ * S2-P0-3c:
+ * - Binds policy, pin, and transport dispatch to one controlled operation -> MCP tool mapping.
+ * - File writes MUST match an explicit non-empty allowedPaths list (empty allowedPaths is denied).
+ * - Tier 0 is strictly limited to NorthAdb/* owned repos AND explicitly confirmed non-protected refs (`refs/heads/...`).
+ * - Protected branches, unconfirmed refs, workflows, tags/releases, force-push, and deletes are ALWAYS excluded from Tier 0.
  */
 export function evaluateGithubWritePolicy(params: {
   repoId: string;
@@ -98,6 +123,23 @@ export function evaluateGithubWritePolicy(params: {
       reason: "GitHub write requires explicit repoId, operation, and ref",
     };
   }
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repoId)) {
+    return {
+      allowed: false,
+      tier: null,
+      code: "github_write_invalid_repo_id",
+      reason: `GitHub write requires owner/repo format, got: ${repoId}`,
+    };
+  }
+  const controlledMcpToolName = resolveControlledGithubMcpTool(operation);
+  if (!controlledMcpToolName) {
+    return {
+      allowed: false,
+      tier: null,
+      code: "github_write_uncontrolled_operation",
+      reason: `Operation '${operation}' is not a controlled Stage 2 GitHub write tool`,
+    };
+  }
   if (relPath.includes("..") || relPath.includes("\0")) {
     return {
       allowed: false,
@@ -107,27 +149,34 @@ export function evaluateGithubWritePolicy(params: {
     };
   }
 
-  const highRisk =
-    HIGH_RISK_GITHUB_OPS.has(operation.toLowerCase()) ||
-    isProtectedRef(ref) ||
-    (relPath.length > 0 && isWorkflowOrReleasePath(relPath));
+  const requiresExplicitPath = FILE_WRITE_GITHUB_OPS.has(operation.toLowerCase());
 
   for (const entry of params.allowlist) {
     if (entry.repoId !== repoId) continue;
     if (!entry.operations.includes(operation)) continue;
     if (!entry.allowedRefs.includes(ref)) continue;
-    if (entry.allowedPaths.length > 0) {
+
+    // S2-P0-3c: File writes MUST match a non-empty explicit allowedPaths list!
+    if (requiresExplicitPath) {
+      if (!Array.isArray(entry.allowedPaths) || entry.allowedPaths.length === 0) continue;
+      if (!relPath || !pathMatchesAllowlist(relPath, entry.allowedPaths)) continue;
+    } else if (entry.allowedPaths.length > 0) {
       if (!relPath || !pathMatchesAllowlist(relPath, entry.allowedPaths)) continue;
     }
 
+    const highRisk =
+      HIGH_RISK_GITHUB_OPS.has(operation.toLowerCase()) ||
+      isProtectedRef(ref, entry.protectedRefs) ||
+      (relPath.length > 0 && isWorkflowOrReleasePath(relPath));
+
     if (entry.tier === 0) {
-      // Tier 0 strictly limited to explicit NorthAdb/* owned repos & non-high-risk operations/refs/paths
       if (!repoId.startsWith("NorthAdb/")) {
         return {
           allowed: true,
           tier: 2,
           code: "github_write_escalated_external_repo",
           reason: `External repository ${repoId} cannot use Tier 0; escalated to Tier 2 approval`,
+          controlledMcpToolName,
           matchedEntry: entry,
         };
       }
@@ -137,6 +186,22 @@ export function evaluateGithubWritePolicy(params: {
           tier: 2,
           code: "github_write_escalated_high_risk",
           reason: `High-risk ref/path/op (${operation} on ${ref}:${relPath}) excluded from Tier 0; escalated to Tier 2`,
+          controlledMcpToolName,
+          matchedEntry: entry,
+        };
+      }
+      const isExplicitHeadBranch = ref.startsWith("refs/heads/");
+      const confirmedNonProtected =
+        isExplicitHeadBranch &&
+        Array.isArray(entry.confirmedNonProtectedRefs) &&
+        entry.confirmedNonProtectedRefs.includes(ref);
+      if (!confirmedNonProtected) {
+        return {
+          allowed: true,
+          tier: 2,
+          code: "github_write_escalated_unconfirmed_ref",
+          reason: `Ref ${ref} is not explicitly confirmed non-protected for Tier 0; escalated to Tier 2 approval`,
+          controlledMcpToolName,
           matchedEntry: entry,
         };
       }
@@ -145,6 +210,7 @@ export function evaluateGithubWritePolicy(params: {
         tier: 0,
         code: "github_write_tier0_allowlisted",
         reason: `Matched host Tier 0 positive allowlist for ${repoId}@${ref}:${relPath || "(n/a)"}`,
+        controlledMcpToolName,
         matchedEntry: entry,
       };
     }
@@ -154,6 +220,7 @@ export function evaluateGithubWritePolicy(params: {
       tier: 2,
       code: "github_write_tier2_allowlisted",
       reason: `Matched Tier 2 approval allowlist for ${repoId}@${ref}:${relPath || "(n/a)"}`,
+      controlledMcpToolName,
       matchedEntry: entry,
     };
   }
@@ -166,8 +233,109 @@ export function evaluateGithubWritePolicy(params: {
   };
 }
 
+const SMTP_HEADER_CONTROL_RE = /[\r\n\0\x01-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
+export function hasSmtpHeaderControlChars(value: string): boolean {
+  return SMTP_HEADER_CONTROL_RE.test(value);
+}
+
 /**
- * Stage 2 first-slice plain-text email guard: rejects unsupported attachments and unsupported cc/bcc fields at proposal time.
+ * S2-P0-1: Unconditional single-line header safety guard shared across proposal, draft edit,
+ * submitter claim, and SMTP serialization to eliminate header injection / MIME smuggling.
+ */
+export function validateEmailEnvelopeSingleLine(params: {
+  from?: string;
+  to: string[];
+  subject: string;
+  headers?: Record<string, string>;
+}): { ok: true } | { ok: false; code: string; reason: string } {
+  if (params.from !== undefined) {
+    if (!params.from || hasSmtpHeaderControlChars(params.from) || /[<>]/.test(params.from)) {
+      return {
+        ok: false,
+        code: "invalid_smtp_from_header",
+        reason: "SMTP From header contains forbidden control or angle-bracket characters",
+      };
+    }
+  }
+  if (!Array.isArray(params.to) || params.to.length === 0) {
+    return { ok: false, code: "missing_email_recipient", reason: "Email requires at least one recipient in 'to'" };
+  }
+  for (const addr of params.to) {
+    if (typeof addr !== "string" || !addr.trim() || hasSmtpHeaderControlChars(addr) || /[<>]/.test(addr)) {
+      return {
+        ok: false,
+        code: "invalid_email_recipient",
+        reason: "Email recipient contains forbidden control or angle-bracket characters",
+      };
+    }
+  }
+  if (typeof params.subject !== "string" || hasSmtpHeaderControlChars(params.subject)) {
+    return {
+      ok: false,
+      code: "invalid_email_subject_multiline",
+      reason: "Email subject must be a single line without CR/LF or control characters",
+    };
+  }
+  if (params.headers) {
+    for (const [k, v] of Object.entries(params.headers)) {
+      if (!k || hasSmtpHeaderControlChars(k) || /[:\s]/.test(k) || hasSmtpHeaderControlChars(v)) {
+        return {
+          ok: false,
+          code: "invalid_smtp_header",
+          reason: "SMTP extra header contains forbidden control characters",
+        };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * S2-P0-1: Validates outbound email recipients against the host-bound SMTP recipient allowlist.
+ * For non-loopback real SMTP endpoints, an explicit non-empty allowlist with ZERO '*' wildcards is mandatory.
+ */
+export function validateEmailRecipientsAllowlist(params: {
+  to: string[];
+  allowedRecipients?: string[];
+  smtpHost: string;
+}): { ok: true } | { ok: false; code: string; reason: string } {
+  const loopback = isLoopbackHost(params.smtpHost);
+  const rawList = (params.allowedRecipients ?? [])
+    .map((x) => x.trim().toLowerCase())
+    .filter((x) => x.length > 0);
+
+  if (!loopback) {
+    if (rawList.length === 0 || rawList.includes("*") || rawList.includes("smtp:*")) {
+      return {
+        ok: false,
+        code: "smtp_recipient_allowlist_required",
+        reason: `Remote SMTP host ${params.smtpHost} requires an explicit non-wildcard recipient allowlist`,
+      };
+    }
+  }
+
+  if (rawList.length === 0 || (loopback && (rawList.includes("*") || rawList.includes("smtp:*")))) {
+    return { ok: true };
+  }
+
+  const allowedSet = new Set(rawList.map((e) => (e.startsWith("smtp:") ? e.slice(5) : e)));
+  for (const addr of params.to) {
+    const norm = addr.trim().toLowerCase();
+    if (!allowedSet.has(norm)) {
+      return {
+        ok: false,
+        code: "smtp_recipient_not_allowlisted",
+        reason: `Recipient ${norm} is outside the host-approved SMTP recipient allowlist`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * S2-P0-1: Shared Stage 2 plain-text email validator used at proposal creation, draft revision save,
+ * and sole submitter pre-claim verification.
  */
 export function validateStage2PlainTextEmail(raw: Record<string, unknown>): {
   ok: true;
@@ -180,15 +348,18 @@ export function validateStage2PlainTextEmail(raw: Record<string, unknown>): {
   reason: string;
 } {
   const cc = raw["cc"];
-  if (Array.isArray(cc) && cc.length > 0) {
+  if ((Array.isArray(cc) && cc.length > 0) || (cc !== undefined && cc !== null && !Array.isArray(cc) && String(cc).trim() !== "")) {
     return { ok: false, code: "unsupported_email_field_cc", reason: "Stage 2 plain-text slice rejects cc recipients" };
   }
   const bcc = raw["bcc"];
-  if (Array.isArray(bcc) && bcc.length > 0) {
+  if ((Array.isArray(bcc) && bcc.length > 0) || (bcc !== undefined && bcc !== null && !Array.isArray(bcc) && String(bcc).trim() !== "")) {
     return { ok: false, code: "unsupported_email_field_bcc", reason: "Stage 2 plain-text slice rejects bcc recipients" };
   }
   const attachments = raw["attachments"] ?? raw["attachmentDigests"];
-  if (Array.isArray(attachments) && attachments.length > 0) {
+  if (
+    (Array.isArray(attachments) && attachments.length > 0) ||
+    (attachments !== undefined && attachments !== null && !Array.isArray(attachments))
+  ) {
     return {
       ok: false,
       code: "unsupported_email_attachments",
@@ -205,16 +376,75 @@ export function validateStage2PlainTextEmail(raw: Record<string, unknown>): {
     return { ok: false, code: "missing_email_recipient", reason: "Email requires at least one recipient in 'to'" };
   }
   for (const addr of to) {
-    if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(addr)) {
+    if (hasSmtpHeaderControlChars(addr) || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(addr)) {
       return { ok: false, code: "invalid_email_recipient", reason: `Invalid email recipient: ${addr}` };
     }
   }
-  const subject = String(raw["subject"] ?? "").trim();
-  const body = String(raw["body"] ?? "");
+  if (typeof raw["subject"] !== "string") {
+    return { ok: false, code: "missing_email_subject", reason: "Email requires a string subject" };
+  }
+  const rawSubject = raw["subject"];
+  if (hasSmtpHeaderControlChars(rawSubject)) {
+    return {
+      ok: false,
+      code: "invalid_email_subject_multiline",
+      reason: "Email subject must be a single line without CR/LF or control characters",
+    };
+  }
+  const subject = rawSubject.trim();
   if (!subject) {
     return { ok: false, code: "missing_email_subject", reason: "Email requires a non-empty subject" };
   }
+  if (typeof raw["body"] !== "string") {
+    return { ok: false, code: "invalid_email_body", reason: "Email requires a plain-text string body" };
+  }
+  const body = raw["body"];
   return { ok: true, to, subject, body };
+}
+
+/**
+ * S2-P1-1: Upgrades an existing Stage 1 scope row's allowed_tools_json (without editing frozen approvals.ts)
+ * so upgraded Stage 1 databases gain authorized Stage 2 tools while preserving scope_epoch/policy_version.
+ */
+export function upgradeStage2ScopeAllowedTools(
+  db: DatabaseSync,
+  params: { scopeId: string; requiredTools: string[]; now: number },
+): boolean {
+  return withImmediateTx(db, () => {
+    const row = db
+      .prepare("SELECT allowed_tools_json FROM scopes WHERE scope_id = ?")
+      .get(params.scopeId) as { allowed_tools_json: string } | undefined;
+    if (!row) return false;
+    let existing: string[] = [];
+    try {
+      const parsed = JSON.parse(row.allowed_tools_json) as unknown;
+      if (Array.isArray(parsed)) existing = parsed.map(String);
+    } catch {
+      existing = [];
+    }
+    const merged = new Set(existing);
+    let changed = false;
+    for (const tool of params.requiredTools) {
+      if (!merged.has(tool)) {
+        merged.add(tool);
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+    db.prepare("UPDATE scopes SET allowed_tools_json = ? WHERE scope_id = ?").run(
+      JSON.stringify([...merged]),
+      params.scopeId,
+    );
+    writeAuditEvent(db, {
+      entityType: "scope",
+      entityId: params.scopeId,
+      eventKey: `stage2_tools_upgrade:${params.scopeId}:${merged.size}`,
+      eventType: "scope_tools_upgraded_stage2",
+      occurredAt: params.now,
+      details: { scopeId: params.scopeId, addedTools: params.requiredTools.filter((t) => !existing.includes(t)) },
+    });
+    return true;
+  });
 }
 
 export interface ApprovalRuleRow {

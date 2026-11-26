@@ -4,6 +4,7 @@ import {
   assertSmtpHostForStage,
   type StageEgressPolicy,
 } from "../../governance/credentials.ts";
+import { validateEmailEnvelopeSingleLine } from "../../governance/rules.ts";
 
 export interface SmtpSendRequest {
   host: string;
@@ -36,9 +37,26 @@ export interface SmtpSendResult {
   tlsPeerSubject?: string;
 }
 
-function scrubSmtpSecret(text: string, secret?: string): string {
-  if (!secret || secret.length === 0) return text;
-  return text.split(secret).join("[REDACTED_CREDENTIAL]");
+function reduceLocalSmtpErrorCode(prefix: string, err: unknown): string {
+  const rec = err as { code?: unknown } | null | undefined;
+  const rawCode = typeof rec?.code === "string" ? rec.code : "";
+  const safeCode = /^[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "transport_error";
+  return `${prefix}:${safeCode}`;
+}
+
+/**
+ * S2-P0-4: Reduces remote SMTP DATA 2xx reply strictly to a validated status code and optional
+ * safe queue-id token; never persists or projects arbitrary remote server text.
+ */
+function parseSafeSmtpReceiptRef(code: number, lines: string[]): string {
+  const safeCode = Number.isInteger(code) && code >= 200 && code < 300 ? code : 250;
+  for (const line of lines) {
+    const m = /(?:queued\s+as|id=)\s*([A-Za-z0-9-]{4,36})(?:\s|$)/i.exec(line);
+    if (m?.[1]) {
+      return `smtp:${safeCode}:qid=${m[1]}`;
+    }
+  }
+  return `smtp:${safeCode}:accepted`;
 }
 
 function dotStuff(text: string): string {
@@ -200,14 +218,29 @@ async function openSmtpTransportSocket(req: {
  */
 export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendResult> {
   const tlsMode = req.tlsMode ?? "none";
+  // S2-P0-1: Enforce single-line header safety BEFORE opening socket or sending any bytes!
+  const headerCheck = validateEmailEnvelopeSingleLine({
+    from: req.from,
+    to: req.to,
+    subject: req.subject,
+    headers: req.headers,
+  });
+  if (!headerCheck.ok) {
+    return {
+      status: "failed_local",
+      reason: headerCheck.code,
+      bytesSent: 0,
+      tlsVerified: false,
+    };
+  }
   try {
     assertSmtpHostForStage(req.host, req.port, req.egressPolicy, {
       tlsEnabled: tlsMode === "direct_tls" || tlsMode === "starttls",
     });
-  } catch (err) {
+  } catch {
     return {
       status: "failed_local",
-      reason: scrubSmtpSecret(err instanceof Error ? err.message : String(err), req.auth?.password),
+      reason: "stage_egress_blocked",
       bytesSent: 0,
       tlsVerified: false,
     };
@@ -215,7 +248,7 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
   if (req.auth && tlsMode === "none") {
     return {
       status: "failed_local",
-      reason: "SMTP AUTH requires verified TLS (direct_tls or starttls)",
+      reason: "smtp_auth_requires_tls",
       bytesSent: 0,
       tlsVerified: false,
     };
@@ -237,7 +270,7 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
   } catch (err) {
     return {
       status: "failed_local",
-      reason: scrubSmtpSecret(err instanceof Error ? err.message : String(err), req.auth?.password),
+      reason: reduceLocalSmtpErrorCode("smtp_connect_error", err),
       bytesSent: 0,
       tlsVerified: false,
     };
@@ -258,7 +291,6 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
       activeSocket.destroy();
       resolve({
         ...result,
-        ...(result.reason ? { reason: scrubSmtpSecret(result.reason, req.auth?.password) } : {}),
         tlsVerified,
         ...(tlsPeerSubject ? { tlsPeerSubject } : {}),
       });
@@ -297,7 +329,7 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
       sock.on("error", (err) => {
         finish({
           status: dataTransmitted ? "unknown" : bytesSent === 0 ? "failed_local" : "unknown",
-          reason: `smtp_socket_error: ${err.message}`,
+          reason: reduceLocalSmtpErrorCode("smtp_socket_error", err),
           bytesSent,
         });
       });
@@ -348,13 +380,13 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
       try {
         const greeting = await nextReply();
         if (greeting.code !== 220) {
-          finish({ status: "failed_remote", reason: `unexpected greeting: ${greeting.lines.join(" | ")}`, bytesSent });
+          finish({ status: "failed_remote", reason: `smtp_greeting_rejected:${greeting.code}`, bytesSent });
           return;
         }
         writeCmd("EHLO aegispi.local");
         let ehlo = await nextReply();
         if (ehlo.code !== 250) {
-          finish({ status: "failed_remote", reason: `EHLO failed: ${ehlo.lines.join(" | ")}`, bytesSent });
+          finish({ status: "failed_remote", reason: `smtp_ehlo_rejected:${ehlo.code}`, bytesSent });
           return;
         }
 
@@ -362,7 +394,7 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
           writeCmd("STARTTLS");
           const st = await nextReply();
           if (st.code !== 220) {
-            finish({ status: "failed_remote", reason: `STARTTLS rejected: ${st.lines.join(" | ")}`, bytesSent });
+            finish({ status: "failed_remote", reason: `smtp_starttls_rejected:${st.code}`, bytesSent });
             return;
           }
           activeSocket.removeAllListeners("data");
@@ -383,21 +415,21 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
           writeCmd("EHLO aegispi.local");
           ehlo = await nextReply();
           if (ehlo.code !== 250) {
-            finish({ status: "failed_remote", reason: `Post-STARTTLS EHLO failed: ${ehlo.lines.join(" | ")}`, bytesSent });
+            finish({ status: "failed_remote", reason: `smtp_post_starttls_ehlo_rejected:${ehlo.code}`, bytesSent });
             return;
           }
         }
 
         if (req.auth) {
           if (!tlsVerified) {
-            finish({ status: "failed_local", reason: "Refusing SMTP AUTH on unverified transport", bytesSent });
+            finish({ status: "failed_local", reason: "smtp_auth_unverified_transport", bytesSent });
             return;
           }
           const plainB64 = Buffer.from(`\u0000${req.auth.username}\u0000${req.auth.password}`, "utf8").toString("base64");
           writeCmd(`AUTH PLAIN ${plainB64}`);
           const authReply = await nextReply();
           if (authReply.code !== 235) {
-            finish({ status: "failed_remote", reason: `SMTP AUTH failed (${authReply.code})`, bytesSent });
+            finish({ status: "failed_remote", reason: `smtp_auth_rejected:${authReply.code}`, bytesSent });
             return;
           }
         }
@@ -405,21 +437,21 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
         writeCmd(`MAIL FROM:<${req.from}>`);
         const mf = await nextReply();
         if (mf.code !== 250) {
-          finish({ status: "failed_remote", reason: `MAIL FROM failed: ${mf.lines.join(" | ")}`, bytesSent });
+          finish({ status: "failed_remote", reason: `smtp_mail_from_rejected:${mf.code}`, bytesSent });
           return;
         }
         for (const recipient of req.to) {
           writeCmd(`RCPT TO:<${recipient}>`);
           const rt = await nextReply();
           if (rt.code !== 250 && rt.code !== 251) {
-            finish({ status: "failed_remote", reason: `RCPT TO failed: ${rt.lines.join(" | ")}`, bytesSent });
+            finish({ status: "failed_remote", reason: `smtp_rcpt_to_rejected:${rt.code}`, bytesSent });
             return;
           }
         }
         writeCmd("DATA");
         const dataReady = await nextReply();
         if (dataReady.code !== 354) {
-          finish({ status: "failed_remote", reason: `DATA rejected: ${dataReady.lines.join(" | ")}`, bytesSent });
+          finish({ status: "failed_remote", reason: `smtp_data_rejected:${dataReady.code}`, bytesSent });
           return;
         }
 
@@ -440,19 +472,19 @@ export async function sendSmtpMessage(req: SmtpSendRequest): Promise<SmtpSendRes
         writeCmd(messagePayload);
         const dataReply = await nextReply();
         if (dataReply.code >= 200 && dataReply.code < 300) {
-          const receiptRef = dataReply.lines[dataReply.lines.length - 1] ?? "250 OK";
+          const receiptRef = parseSafeSmtpReceiptRef(dataReply.code, dataReply.lines);
           writeCmd("QUIT");
           finish({ status: "succeeded", receiptRef, bytesSent });
         } else if (dataReply.code >= 500) {
           writeCmd("QUIT");
-          finish({ status: "failed_remote", reason: dataReply.lines.join(" | "), bytesSent });
+          finish({ status: "failed_remote", reason: `smtp_data_failed:${dataReply.code}`, bytesSent });
         } else {
-          finish({ status: "unknown", reason: `ambiguous DATA reply: ${dataReply.lines.join(" | ")}`, bytesSent });
+          finish({ status: "unknown", reason: `smtp_data_ambiguous:${dataReply.code}`, bytesSent });
         }
       } catch (err) {
         finish({
           status: dataTransmitted ? "unknown" : "failed_local",
-          reason: err instanceof Error ? err.message : String(err),
+          reason: reduceLocalSmtpErrorCode("smtp_io_error", err),
           bytesSent,
         });
       }
@@ -517,18 +549,22 @@ export async function testSmtpConnectivity(req: {
     });
     sock.write("QUIT\r\n");
     sock.destroy();
-    const ok = greeting.startsWith("220");
+    const codeMatch = /^(\d{3})/.exec(greeting);
+    const code = codeMatch ? Number(codeMatch[1]) : 0;
+    const ok = code === 220;
     return {
       ok,
       tlsVerified: transport.tlsVerified,
       tlsPeerSubject: transport.tlsPeerSubject,
-      message: ok ? `Connected (${greeting.slice(0, 60)})` : `Unexpected greeting: ${greeting.slice(0, 60)}`,
+      message: ok
+        ? `SMTP ${transport.tlsVerified ? "TLS" : "明文"} 连通 (${code})`
+        : `smtp_greeting_rejected:${code || "invalid"}`,
     };
   } catch (err) {
     return {
       ok: false,
       tlsVerified: false,
-      message: scrubSmtpSecret(err instanceof Error ? err.message : String(err), req.auth?.password),
+      message: reduceLocalSmtpErrorCode("smtp_connectivity_error", err),
     };
   }
 }

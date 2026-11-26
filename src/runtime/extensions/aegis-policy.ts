@@ -33,6 +33,9 @@ import { verifyLiveMcpToolPin } from "../../governance/mcp-pin.ts";
 import { recordConversationSource } from "../../governance/policy.ts";
 import {
   evaluateGithubWritePolicy,
+  resolveControlledGithubMcpTool,
+  validateEmailEnvelopeSingleLine,
+  validateEmailRecipientsAllowlist,
   validateStage2PlainTextEmail,
   type GithubWriteAllowlistEntry,
 } from "../../governance/rules.ts";
@@ -98,7 +101,9 @@ export interface AegisPolicyExtensionOptions {
   smtpConfig: SmtpEndpointConfig;
   egressPolicy?: StageEgressPolicy;
   strictPlainTextEmail?: boolean;
+  allowedEmailRecipients?: string[];
   githubWriteAllowlist?: GithubWriteAllowlistEntry[];
+  resolveSkillLockKey?: (conversationId: string) => string;
   skillScriptRunner?: (params: {
     skillId: string;
     scriptId: string;
@@ -257,6 +262,8 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         finalPayload,
         smtpConfig: options.smtpConfig,
         egressPolicy: options.egressPolicy,
+        strictPlainTextEmail: options.strictPlainTextEmail,
+        allowedEmailRecipients: options.allowedEmailRecipients,
         vault: options.vault,
         now: nowFn,
         onAfterClaimBeforeTransport: options.onAfterClaimBeforeTransport,
@@ -505,13 +512,29 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
       const conversationId = String(api.conversationId);
       const auth = resolveAuth(conversationId);
       const now = nowFn();
+      // S2-P1-1: Map owner/repo according to the pinned get_file_contents tool inputSchema
+      const readSchema = bridge.getToolInputSchema("get_file_contents");
+      const readProps =
+        readSchema && typeof readSchema["properties"] === "object"
+          ? (readSchema["properties"] as Record<string, unknown>)
+          : null;
+      const usesOwnerField = Boolean(readProps && Object.prototype.hasOwnProperty.call(readProps, "owner"));
+      const slashIdx = typed.repoId.indexOf("/");
+      const readArgs: Record<string, unknown> = usesOwnerField
+        ? {
+            owner: slashIdx > 0 ? typed.repoId.slice(0, slashIdx) : "",
+            repo: slashIdx > 0 ? typed.repoId.slice(slashIdx + 1) : typed.repoId,
+            ref: typed.ref,
+            path: typed.path,
+          }
+        : {
+            repo: typed.repoId,
+            ref: typed.ref,
+            path: typed.path,
+          };
       const res = await bridge.callReadOnlyTool(
         "get_file_contents",
-        {
-          repo: typed.repoId,
-          ref: typed.ref,
-          path: typed.path,
-        },
+        readArgs,
         {
           principalId: auth.principalId,
           scopeId: auth.scopeId,
@@ -706,10 +729,15 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
     async execute(args, api): Promise<ToolExecutionResult> {
       const typed = args as { skillId: string };
       const conversationId = String(api.conversationId);
+      const auth = resolveAuth(conversationId);
+      const lockKey = options.resolveSkillLockKey ? options.resolveSkillLockKey(conversationId) : conversationId;
       const res = readSkillDisclosure(options.govDb, {
         skillId: typed.skillId,
+        principalId: auth.principalId,
+        scopeId: auth.scopeId,
         runtimeEpoch: options.getRuntimeEpoch(),
         conversationId,
+        lockKey,
       });
       if (!res.ok) {
         return {
@@ -749,12 +777,16 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
       const typed = args as { skillId: string; scriptId: string; expectedSha256?: string; inputJson?: string };
       const conversationId = String(api.conversationId);
       const auth = resolveAuth(conversationId);
+      const lockKey = options.resolveSkillLockKey ? options.resolveSkillLockKey(conversationId) : conversationId;
       const verified = resolveVerifiedSkillScript(options.govDb, {
         skillId: typed.skillId,
         scriptId: typed.scriptId,
+        principalId: auth.principalId,
+        scopeId: auth.scopeId,
         expectedSha256: typed.expectedSha256,
         runtimeEpoch: options.getRuntimeEpoch(),
         conversationId,
+        lockKey,
       });
       if (!verified.ok) {
         return {
@@ -902,12 +934,13 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
               path: relPath,
               allowlist: options.githubWriteAllowlist ?? [],
             });
-            if (!policyDecision.allowed || policyDecision.tier === null) {
+            const controlledMcpTool = resolveControlledGithubMcpTool(operation);
+            if (!policyDecision.allowed || policyDecision.tier === null || !controlledMcpTool) {
               return { block: `${policyDecision.code}: ${policyDecision.reason}` };
             }
             const pinCheck = verifyLiveMcpToolPin(options.govDb, {
               serverId: bridge.serverId,
-              toolName: operation,
+              toolName: controlledMcpTool,
             });
             if (!pinCheck.ok) {
               return { block: `${pinCheck.code}: ${pinCheck.reason}` };
@@ -921,7 +954,7 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
               content,
               message,
               mcpServerId: bridge.serverId,
-              mcpToolName: operation,
+              mcpToolName: controlledMcpTool,
               mcpSchemaSha256: pinCheck.pin.schema_sha256,
             };
             const target = `github:${repoId}@${ref}:${relPath}`;
@@ -1002,6 +1035,22 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
           }
 
           const { payload, target } = normalizeEmailPayload(call.arguments as Record<string, unknown>);
+          const singleLineCheck = validateEmailEnvelopeSingleLine({
+            from: options.smtpConfig.fromAddress,
+            to: payload.to,
+            subject: payload.subject,
+          });
+          if (!singleLineCheck.ok) {
+            return { block: `${singleLineCheck.code}: ${singleLineCheck.reason}` };
+          }
+          const recipCheck = validateEmailRecipientsAllowlist({
+            to: payload.to,
+            allowedRecipients: options.allowedEmailRecipients,
+            smtpHost: options.smtpConfig.host,
+          });
+          if (!recipCheck.ok) {
+            return { block: `${recipCheck.code}: ${recipCheck.reason}` };
+          }
           const snap = proposeOrGetApproval(options.govDb, {
             runtimeEpoch,
             conversationId,

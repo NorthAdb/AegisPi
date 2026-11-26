@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { mintId } from "./canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "./db.ts";
 
-export type SourceType = "memory" | "imap" | "github_mcp" | "workspace_write";
+export type SourceType = "memory" | "imap" | "github_mcp" | "workspace_write" | "skill";
 
 export interface SourceReadGrantRow {
   grant_id: string;
@@ -128,6 +128,8 @@ export function checkSourceReadAuthorized(
     operation: string;
     ref?: string;
     path?: string;
+    scriptId?: string;
+    scriptSha256?: string;
   },
 ): { ok: true; grant: SourceReadGrantRow } | { ok: false; code: string; reason: string } {
   const wildcardPrefix = `${params.sourceType}:*`;
@@ -155,6 +157,8 @@ export function checkSourceReadAuthorized(
       allowedRefs?: string[];
       allowedPaths?: string[];
       allowedRelPaths?: string[];
+      allowedScriptIds?: string[];
+      allowedScriptSha256?: string[];
     };
     if (params.ref && Array.isArray(constraints.allowedRefs)) {
       if (!constraints.allowedRefs.includes(params.ref) && !constraints.allowedRefs.includes("*")) {
@@ -171,13 +175,25 @@ export function checkSourceReadAuthorized(
         continue;
       }
     }
+    if (params.scriptId && Array.isArray(constraints.allowedScriptIds)) {
+      if (!constraints.allowedScriptIds.includes(params.scriptId) && !constraints.allowedScriptIds.includes("*")) {
+        continue;
+      }
+    }
+    if (params.scriptSha256 && Array.isArray(constraints.allowedScriptSha256)) {
+      const targetSha = params.scriptSha256.toLowerCase();
+      const allowedLower = constraints.allowedScriptSha256.map((s) => s.toLowerCase());
+      if (!allowedLower.includes(targetSha)) {
+        continue;
+      }
+    }
     return { ok: true, grant: row };
   }
 
   return {
     ok: false,
     code: "source_read_denied",
-    reason: `No active ${params.sourceType} grant for principal=${params.principalId} scope=${params.scopeId} resource=${params.resourceId} op=${params.operation}${params.ref ? ` ref=${params.ref}` : ""}${params.path ? ` path=${params.path}` : ""}`,
+    reason: `No active ${params.sourceType} grant for principal=${params.principalId} scope=${params.scopeId} resource=${params.resourceId} op=${params.operation}${params.ref ? ` ref=${params.ref}` : ""}${params.path ? ` path=${params.path}` : ""}${params.scriptId ? ` scriptId=${params.scriptId}` : ""}`,
   };
 }
 

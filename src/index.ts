@@ -17,6 +17,8 @@ import {
   assertModelUrlForStage,
   assertSmtpHostForStage,
   HostCredentialVault,
+  isLoopbackHost,
+  validateModelPriceScheduleForEndpoint,
   type ModelPriceSchedule,
   type StageEgressPolicy,
   type StageProfile,
@@ -27,7 +29,7 @@ import {
   scanBufferInMemory,
 } from "./governance/leak-scanner.ts";
 import { checkSourceReadAuthorized } from "./governance/policy.ts";
-import type { GithubWriteAllowlistEntry } from "./governance/rules.ts";
+import { validateEmailRecipientsAllowlist, type GithubWriteAllowlistEntry } from "./governance/rules.ts";
 import { AegisHostRuntime } from "./runtime/harness.ts";
 import { GitHubMcpBridge } from "./runtime/mcp-bridge.ts";
 import type { ModelSlotConfig } from "./runtime/models.ts";
@@ -122,6 +124,10 @@ if (s6ObserveDir) {
 interface TrustedConnectorsConfig {
   defaultMemoryDomain?: string;
   skillsEnabled?: boolean;
+  /** S2-P0-3d: L3 skill script execution MUST be explicitly enabled (never inferred solely from workspace config). */
+  skills?: {
+    allowScriptExecution?: boolean;
+  };
   routinesEnabled?: boolean;
   routinePollIntervalMs?: number;
   strictPlainTextEmail?: boolean;
@@ -148,6 +154,8 @@ interface TrustedConnectorsConfig {
     credentialSlotId?: string;
     secretEnvVar?: string;
     allowedRemoteHosts?: string[];
+    /** S2-P0-1: Explicit approved recipient allowlist (mandatory with zero '*' for non-loopback real SMTP). */
+    allowedRecipients?: string[];
   };
   imap?: {
     mode: "direct" | "connect_tunnel";
@@ -204,12 +212,31 @@ const effectiveSmtpHost = stage === 2 && connectorsCfg?.smtp?.host ? connectorsC
 const effectiveSmtpPort = stage === 2 && connectorsCfg?.smtp?.port ? connectorsCfg.smtp.port : smtpPort;
 const effectiveSmtpTlsMode = stage === 2 ? (connectorsCfg?.smtp?.tlsMode ?? "none") : "none";
 
-// G2: Hard egress boundary — refuse disallowed model or SMTP endpoints BEFORE opening DB or Web!
+const cliAllowedEmailTargets = (args["allowed-email-targets"] ?? process.env["AEGISPI_ALLOWED_EMAIL_TARGETS"] ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+const configuredAllowedEmailRecipients: string[] | undefined =
+  connectorsCfg?.smtp?.allowedRecipients && connectorsCfg.smtp.allowedRecipients.length > 0
+    ? connectorsCfg.smtp.allowedRecipients
+    : cliAllowedEmailTargets.length > 0
+      ? cliAllowedEmailTargets
+      : undefined;
+
+// G2 & S2-P0-1: Hard egress + recipient allowlist boundary — refuse disallowed endpoints BEFORE opening DB or Web!
 try {
   assertModelUrlForStage(effectiveModelBaseUrl, egressPolicy);
   assertSmtpHostForStage(effectiveSmtpHost, effectiveSmtpPort, egressPolicy, {
     tlsEnabled: effectiveSmtpTlsMode === "direct_tls" || effectiveSmtpTlsMode === "starttls",
   });
+  const recipStartupCheck = validateEmailRecipientsAllowlist({
+    to: [],
+    allowedRecipients: configuredAllowedEmailRecipients,
+    smtpHost: effectiveSmtpHost,
+  });
+  if (!recipStartupCheck.ok) {
+    throw new Error(recipStartupCheck.reason);
+  }
 } catch (err) {
   process.stderr.write(`Refusing startup: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exit(1);
@@ -230,16 +257,29 @@ const workerSecret =
   process.env["AEGISPI_MODEL_WORKER_KEY"] ??
   process.env["AEGISPI_FAKE_MODEL_KEY"] ??
   routerSecret;
-const effectivePriceSchedule: ModelPriceSchedule =
+
+// S2-P0-2: Synthetic fixed price schedules are STRICTLY limited to loopback fake endpoints!
+// Non-loopback real model endpoints MUST supply a versioned real ModelPriceSchedule; missing/invalid fails closed!
+const modelIsLoopback = isLoopbackHost(new URL(effectiveModelBaseUrl).hostname);
+const effectivePriceSchedule: ModelPriceSchedule | null =
   stage === 2 && connectorsCfg?.modelProfile?.priceSchedule
     ? connectorsCfg.modelProfile.priceSchedule
-    : {
-        priceVersion: "synthetic-v1",
-        inputPerMTokMu: 300_000,
-        outputPerMTokMu: 1_200_000,
-        syntheticFixedUpperMu: syntheticUpperMu,
-        syntheticFixedActualMu: syntheticActualMu,
-      };
+    : modelIsLoopback
+      ? {
+          priceVersion: "synthetic-v1",
+          inputPerMTokMu: 300_000,
+          outputPerMTokMu: 1_200_000,
+          syntheticFixedUpperMu: syntheticUpperMu,
+          syntheticFixedActualMu: syntheticActualMu,
+        }
+      : null;
+
+const priceStartupCheck = validateModelPriceScheduleForEndpoint(effectiveModelBaseUrl, effectivePriceSchedule);
+if (!priceStartupCheck.ok) {
+  process.stderr.write(`Refusing startup: ${priceStartupCheck.code} (${priceStartupCheck.reason})\n`);
+  process.exit(1);
+}
+const effectivePriceVersion = effectivePriceSchedule!.priceVersion;
 
 vault.registerSlot(
   {
@@ -247,7 +287,7 @@ vault.registerSlot(
     provider: modelProvider,
     allowedBaseUrls: [effectiveModelBaseUrl],
     allowedModelIds: [routerModelId],
-    priceVersion: effectivePriceSchedule.priceVersion,
+    priceVersion: effectivePriceVersion,
   },
   routerSecret,
   egressPolicy,
@@ -258,7 +298,7 @@ vault.registerSlot(
     provider: modelProvider,
     allowedBaseUrls: [effectiveModelBaseUrl],
     allowedModelIds: [workerModelId],
-    priceVersion: effectivePriceSchedule.priceVersion,
+    priceVersion: effectivePriceVersion,
   },
   workerSecret,
   egressPolicy,
@@ -270,7 +310,7 @@ vault.registerSlot(
     provider: modelProvider,
     allowedBaseUrls: [effectiveModelBaseUrl],
     allowedModelIds: [routerModelId, workerModelId],
-    priceVersion: effectivePriceSchedule.priceVersion,
+    priceVersion: effectivePriceVersion,
   },
   routerSecret,
   egressPolicy,
@@ -501,13 +541,28 @@ const host = await AegisHostRuntime.start({
   smtpConfig: configuredSmtpConfig,
   egressPolicy,
   strictPlainTextEmail: stage === 2 ? (connectorsCfg?.strictPlainTextEmail ?? true) : false,
+  ...(configuredAllowedEmailRecipients ? { allowedEmailRecipients: configuredAllowedEmailRecipients } : {}),
   githubWriteAllowlist: stage === 2 ? (connectorsCfg?.githubMcp?.writeAllowlist ?? []) : [],
   skillsEnabled: stage === 2 ? (connectorsCfg?.skillsEnabled ?? true) : false,
   routinesEnabled: stage === 2 ? (connectorsCfg?.routinesEnabled ?? true) : false,
   routinePollIntervalMs: connectorsCfg?.routinePollIntervalMs ?? 30_000,
-  ...(stage === 2 && connectorsCfg?.workspace
+  // S2-P0-3d: L3 skill script execution requires explicit skills.allowScriptExecution=true AND live execute_script grant!
+  ...(stage === 2 && connectorsCfg?.workspace && connectorsCfg?.skills?.allowScriptExecution === true
     ? {
         skillScriptRunner: async (sp) => {
+          const currentHost = hostRef!;
+          const execPerm = checkSourceReadAuthorized(currentHost.govDb, {
+            principalId: sp.principalId,
+            scopeId: sp.scopeId,
+            sourceType: "skill",
+            resourceId: `skill:${sp.skillId}`,
+            operation: "execute_script",
+            scriptId: sp.scriptId,
+            scriptSha256: sp.scriptSha256,
+          });
+          if (!execPerm.ok) {
+            return { ok: false, code: "skill_script_execution_denied", output: "", error: execPerm.reason };
+          }
           const wc = connectorsCfg!.workspace!;
           const sb = await runTaskInDockerSandboxAsync({
             approvedImageId: wc.approvedImageId,

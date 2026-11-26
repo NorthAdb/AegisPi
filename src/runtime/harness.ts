@@ -45,9 +45,13 @@ import {
   type HostCredentialVault,
   type StageEgressPolicy,
 } from "../governance/credentials.ts";
-import type { GithubWriteAllowlistEntry } from "../governance/rules.ts";
+import {
+  upgradeStage2ScopeAllowedTools,
+  validateEmailRecipientsAllowlist,
+  type GithubWriteAllowlistEntry,
+} from "../governance/rules.ts";
 import { ensureDefaultStage2Skills } from "../capabilities/skills/store.ts";
-import { RoutinePoller } from "../capabilities/timers/routines.ts";
+import { recordRoutineTriggerCompletion, RoutinePoller } from "../capabilities/timers/routines.ts";
 import { openGovernanceDb, type GovDbPragmas } from "../governance/db.ts";
 import {
   quarantineReadyEffect,
@@ -120,6 +124,8 @@ export interface AegisHostConfig {
   defaultScopeId?: string;
   defaultMemoryDomain?: string;
   allowedEmailTargets?: string[];
+  /** S2-P0-1: Explicit host-bound SMTP recipient allowlist (mandatory with zero '*' for non-loopback SMTP). */
+  allowedEmailRecipients?: string[];
   imapEndpoint?: ImapEndpointConfig | (() => ImapEndpointConfig | null);
   githubMcpBridge?: GitHubMcpBridge | (() => GitHubMcpBridge | null);
   workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
@@ -364,6 +370,7 @@ export class AegisHostRuntime {
   readonly #now: () => number;
   readonly #liveStreamOverlay: Map<string, { text: string; attempt: number; firstTokenMs: number; updatedAt: number }>;
   readonly #lastStreamMetrics: Map<string, { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }>;
+  readonly #activeSkillLockKeyByConv: Map<string, string>;
   #routinePoller: RoutinePoller | null = null;
 
   private constructor(params: {
@@ -395,6 +402,7 @@ export class AegisHostRuntime {
     changeListeners: Set<(ev: ConversationLiveChange) => void>;
     liveStreamOverlay: Map<string, { text: string; attempt: number; firstTokenMs: number; updatedAt: number }>;
     lastStreamMetrics: Map<string, { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }>;
+    activeSkillLockKeyByConv: Map<string, string>;
     now: () => number;
   }) {
     this.config = params.config;
@@ -416,6 +424,7 @@ export class AegisHostRuntime {
     this.#changeListeners = params.changeListeners;
     this.#liveStreamOverlay = params.liveStreamOverlay;
     this.#lastStreamMetrics = params.lastStreamMetrics;
+    this.#activeSkillLockKeyByConv = params.activeSkillLockKeyByConv;
     this.#defaultPrincipalId = params.config.defaultPrincipalId ?? "owner";
     this.#defaultScopeId = params.config.defaultScopeId ?? "scope:default";
     this.#now = params.now;
@@ -599,14 +608,41 @@ export class AegisHostRuntime {
               "routine_create",
             ]
           : ["send_email", "run_worker"];
+      // S2-P0-1: Non-loopback SMTP requires explicit non-wildcard recipient allowlist
+      const remoteSmtpRecipCheck = validateEmailRecipientsAllowlist({
+        to: [],
+        allowedRecipients: config.allowedEmailRecipients ?? config.allowedEmailTargets,
+        smtpHost: config.smtpConfig.host,
+      });
+      if (!remoteSmtpRecipCheck.ok) {
+        throw new Error(remoteSmtpRecipCheck.reason);
+      }
+
+      const defaultScopeTargets =
+        config.allowedEmailTargets ??
+        (config.allowedEmailRecipients && config.allowedEmailRecipients.length > 0
+          ? config.allowedEmailRecipients.map((r) => (r.startsWith("smtp:") ? r : `smtp:${r}`))
+          : ["*"]);
+
       ensureScope(govDb, {
         scopeId: defaultScopeId,
         allowedPrincipals: [defaultPrincipalId],
         allowedTools: defaultAllowedTools,
-        allowedTargets: config.allowedEmailTargets ?? ["*"],
+        allowedTargets: defaultScopeTargets,
       });
+      if (egressPolicy.stage === 2) {
+        // S2-P1-1: Upgrade pre-existing Stage 1 scope:default rows to include Stage 2 tools without modifying frozen approvals.ts
+        upgradeStage2ScopeAllowedTools(govDb, {
+          scopeId: defaultScopeId,
+          requiredTools: defaultAllowedTools,
+          now: nowFn(),
+        });
+      }
       if (config.skillsEnabled) {
-        ensureDefaultStage2Skills(govDb, nowFn());
+        ensureDefaultStage2Skills(govDb, nowFn(), {
+          defaultPrincipalId,
+          defaultScopeId,
+        });
       }
 
       const { epoch, manifest } = ensureActiveEpochAndManifest(govDb, nowFn());
@@ -900,6 +936,20 @@ export class AegisHostRuntime {
         },
       });
 
+      const activeSkillLockKeyByConv = new Map<string, string>();
+      const resolveSkillLockKey = (conversationId: string): string => {
+        const mapped = activeSkillLockKeyByConv.get(conversationId);
+        if (mapped) return mapped;
+        const latestCmd = govDb!
+          .prepare(
+            `SELECT command_id FROM chat_commands
+              WHERE runtime_epoch = ? AND conversation_id = ?
+              ORDER BY created_at DESC LIMIT 1`,
+          )
+          .get(epochBox.current, conversationId) as { command_id: string } | undefined;
+        return latestCmd ? `${conversationId}#cmd:${latestCmd.command_id}` : conversationId;
+      };
+
       const workerSlot = config.modelSlots.find((s) => s.slotName === "worker") ?? config.modelSlots[0];
       const routerSlot = config.modelSlots.find((s) => s.slotName === "router") ?? config.modelSlots[0];
       const registry = createRegistry();
@@ -914,7 +964,9 @@ export class AegisHostRuntime {
           smtpConfig: config.smtpConfig,
           egressPolicy,
           strictPlainTextEmail: config.strictPlainTextEmail,
+          allowedEmailRecipients: config.allowedEmailRecipients ?? config.allowedEmailTargets,
           githubWriteAllowlist: config.githubWriteAllowlist,
+          resolveSkillLockKey,
           skillScriptRunner: config.skillScriptRunner,
           imapEndpoint: () =>
             typeof config.imapEndpoint === "function"
@@ -1113,6 +1165,7 @@ export class AegisHostRuntime {
             };
           },
           skillsEnabled: config.skillsEnabled,
+          resolveSkillLockKey,
           now: nowFn,
         });
         contextExtRef = contextExt;
@@ -1245,6 +1298,7 @@ export class AegisHostRuntime {
           changeListeners,
           liveStreamOverlay,
           lastStreamMetrics,
+          activeSkillLockKeyByConv,
           now: nowFn,
         });
       }
@@ -1332,6 +1386,7 @@ export class AegisHostRuntime {
           changeListeners,
           liveStreamOverlay,
           lastStreamMetrics,
+          activeSkillLockKeyByConv,
           now: nowFn,
         });
       }
@@ -1587,6 +1642,7 @@ export class AegisHostRuntime {
         changeListeners,
         liveStreamOverlay,
         lastStreamMetrics,
+        activeSkillLockKeyByConv,
         now: nowFn,
       });
 
@@ -1601,17 +1657,51 @@ export class AegisHostRuntime {
               scopeId: routine.scope_id,
               slotName: "router",
             });
+            const convIdStr = String(conv.id);
             const res = await host.submitChatCommand({
               principalId: routine.principal_id,
               runtimeEpoch: host.runtimeEpoch,
-              conversationId: String(conv.id),
+              conversationId: convIdStr,
               chatKey: trigger.correlation_key,
               content: `[例程触发 · ${routine.name}] ${routine.prompt}`,
             });
             if (res.ok && res.status === "ADMITTED") {
+              // S2-P1-3: Observe routine conversation completion asynchronously and flow actual result back to View ②!
+              void (async () => {
+                try {
+                  await conv.waitForIdle(BACKGROUND_CONTEXT);
+                  const ctxView = await conv.context(BACKGROUND_CONTEXT);
+                  const lastAssistant = [...ctxView.messages].reverse().find((m) => m.role === "assistant");
+                  const text =
+                    lastAssistant && Array.isArray(lastAssistant.content)
+                      ? lastAssistant.content
+                          .map((b) => (b.type === "text" ? b.text : ""))
+                          .join(" ")
+                          .trim()
+                      : "";
+                  const failed = lastAssistant?.stopReason === "error";
+                  recordRoutineTriggerCompletion(govDb!, {
+                    triggerId: trigger.trigger_id,
+                    routineId: routine.routine_id,
+                    conversationId: convIdStr,
+                    status: failed ? "FAILED" : "SUCCEEDED",
+                    summary: failed
+                      ? (lastAssistant?.errorMessage ?? "routine_run_error")
+                      : (text || "completed"),
+                    now: nowFn(),
+                  });
+                  emitChange({
+                    conversationId: convIdStr,
+                    kind: "governance",
+                    detail: { routineId: routine.routine_id, triggerId: trigger.trigger_id, status: failed ? "FAILED" : "SUCCEEDED" },
+                  });
+                } catch {
+                  // Ignore if host closes before routine finishes
+                }
+              })();
               return {
                 outcome: "ADMITTED",
-                conversationId: String(conv.id),
+                conversationId: convIdStr,
                 piRequestId: res.piRequestId,
                 submissionId: res.submissionId ?? null,
               };
@@ -1619,14 +1709,14 @@ export class AegisHostRuntime {
             if (res.status === "PENDING_RECONCILE") {
               return {
                 outcome: "PENDING_RECONCILE",
-                conversationId: String(conv.id),
+                conversationId: convIdStr,
                 piRequestId: res.piRequestId,
                 reason: res.message ?? res.code,
               };
             }
             return {
               outcome: "FAILED",
-              conversationId: String(conv.id),
+              conversationId: convIdStr,
               piRequestId: res.piRequestId,
               reason: res.message ?? res.code,
             };
@@ -1895,6 +1985,9 @@ export class AegisHostRuntime {
 
     const admitPromise = (async (): Promise<SubmitChatCommandResult> => {
       const cmd = reg.command;
+      // S2-P1-2: Advance active skill lock key per admitted task/command so in-flight tasks stay locked
+      // while subsequent new tasks in the SAME conversation acquire newly activated skill versions!
+      this.#activeSkillLockKeyByConv.set(params.conversationId, `${params.conversationId}#cmd:${cmd.command_id}`);
       this.emitConversationChange({
         conversationId: params.conversationId,
         kind: "governance",
@@ -1974,6 +2067,19 @@ export class AegisHostRuntime {
     }
   }
 
+  getActiveSkillLockKey(conversationId: string): string {
+    const mapped = this.#activeSkillLockKeyByConv.get(conversationId);
+    if (mapped) return mapped;
+    const latestCmd = this.govDb
+      .prepare(
+        `SELECT command_id FROM chat_commands
+          WHERE runtime_epoch = ? AND conversation_id = ?
+          ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(this.#epochBox.current, conversationId) as { command_id: string } | undefined;
+    return latestCmd ? `${conversationId}#cmd:${latestCmd.command_id}` : conversationId;
+  }
+
   async submitChatInput(params: {
     conversationId: string;
     content: string;
@@ -1985,6 +2091,10 @@ export class AegisHostRuntime {
     if (!bound) return { ok: false, code: "unknown_budget_owner" };
     const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
     if (!conv) return { ok: false, code: "conversation_not_found" };
+    this.#activeSkillLockKeyByConv.set(
+      params.conversationId,
+      `${params.conversationId}#input:${params.requestId ?? `${this.#now()}-${Math.random().toString(16).slice(2, 8)}`}`,
+    );
     const sub = await conv.submit(
       {
         type: "input",

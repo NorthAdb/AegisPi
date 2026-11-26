@@ -13,9 +13,39 @@ import {
 import { verifyLiveMcpToolPin } from "../governance/mcp-pin.ts";
 import {
   evaluateGithubWritePolicy,
+  resolveControlledGithubMcpTool,
+  validateEmailEnvelopeSingleLine,
+  validateEmailRecipientsAllowlist,
+  validateStage2PlainTextEmail,
   type GithubWriteAllowlistEntry,
 } from "../governance/rules.ts";
 import type { GitHubMcpBridge } from "./mcp-bridge.ts";
+
+function sanitizeControlledCode(raw: string | undefined, fallback: string): string {
+  if (!raw) return fallback;
+  const trimmed = raw.trim();
+  return /^[A-Za-z0-9_.:-]{1,80}$/.test(trimmed) ? trimmed : fallback;
+}
+
+function parseSafeGithubCommitReceipt(rawText: string | undefined): string {
+  if (!rawText) return "github:write:committed";
+  try {
+    const parsed = JSON.parse(rawText) as {
+      commitSha?: unknown;
+      commit?: { sha?: unknown };
+      content?: { sha?: unknown };
+    };
+    const candidates = [parsed.commitSha, parsed.commit?.sha, parsed.content?.sha];
+    for (const c of candidates) {
+      if (typeof c === "string" && /^[0-9a-f]{7,64}$/i.test(c.trim())) {
+        return `github:commit:${c.trim().toLowerCase()}`;
+      }
+    }
+  } catch {
+    // Ignore untrusted/non-JSON remote text; never persist raw remote MCP text!
+  }
+  return "github:write:committed";
+}
 
 export interface SmtpEndpointConfig {
   host: string;
@@ -51,6 +81,8 @@ export interface SubmitEmailEffectParams {
   finalPayload: EmailSubmissionPayload;
   smtpConfig: SmtpEndpointConfig;
   egressPolicy?: StageEgressPolicy;
+  strictPlainTextEmail?: boolean;
+  allowedEmailRecipients?: string[];
   vault?: HostCredentialVault;
   now: () => number;
   precondition?: () => boolean;
@@ -96,6 +128,60 @@ export async function submitApprovedEmailEffect(
     };
   }
 
+  // S2-P0-1: Validate final email snapshot (single-line headers, Stage 2 plain-text, recipient allowlist, target match)
+  // BEFORE T4 claim CAS so malformed/injected/out-of-scope emails NEVER claim or serialize!
+  const emailPrecheck = (): { ok: true; payload: EmailSubmissionPayload } | { ok: false; code: string; message: string } => {
+    const headerCheck = validateEmailEnvelopeSingleLine({
+      from: params.smtpConfig.fromAddress,
+      to: params.finalPayload.to,
+      subject: params.finalPayload.subject,
+    });
+    if (!headerCheck.ok) {
+      return { ok: false, code: headerCheck.code, message: headerCheck.reason };
+    }
+    let validatedPayload = params.finalPayload;
+    if (params.strictPlainTextEmail) {
+      const plainCheck = validateStage2PlainTextEmail(params.finalPayload as unknown as Record<string, unknown>);
+      if (!plainCheck.ok) {
+        return { ok: false, code: plainCheck.code, message: plainCheck.reason };
+      }
+      validatedPayload = {
+        to: plainCheck.to,
+        subject: plainCheck.subject,
+        body: plainCheck.body,
+      };
+    }
+    const recipCheck = validateEmailRecipientsAllowlist({
+      to: validatedPayload.to,
+      allowedRecipients: params.allowedEmailRecipients,
+      smtpHost: params.smtpConfig.host,
+    });
+    if (!recipCheck.ok) {
+      return { ok: false, code: recipCheck.code, message: recipCheck.reason };
+    }
+    const expectedTarget = `smtp:${validatedPayload.to.join(",")}`;
+    if (params.finalTarget !== expectedTarget) {
+      return {
+        ok: false,
+        code: "smtp_target_payload_mismatch",
+        message: `Email target '${params.finalTarget}' does not match validated recipients '${expectedTarget}'`,
+      };
+    }
+    return { ok: true, payload: validatedPayload };
+  };
+
+  const checkedEmail = emailPrecheck();
+  if (!checkedEmail.ok) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: checkedEmail.code,
+      message: checkedEmail.message,
+    };
+  }
+
   let smtpAuth: { username: string; password: string } | undefined;
   if (params.smtpConfig.credentialSlotId && params.smtpConfig.username) {
     if (!params.vault) {
@@ -133,14 +219,15 @@ export async function submitApprovedEmailEffect(
     await params.onBeforeClaim(params.effectId);
   }
 
+  const verifiedPayload = checkedEmail.payload;
   const normalizedPayload: Record<string, unknown> = {
-    to: [...params.finalPayload.to],
-    ...(params.finalPayload.cc ? { cc: [...params.finalPayload.cc] } : {}),
-    ...(params.finalPayload.bcc ? { bcc: [...params.finalPayload.bcc] } : {}),
-    subject: params.finalPayload.subject,
-    body: params.finalPayload.body,
-    ...(params.finalPayload.attachmentDigests
-      ? { attachmentDigests: params.finalPayload.attachmentDigests }
+    to: [...verifiedPayload.to],
+    ...(verifiedPayload.cc ? { cc: [...verifiedPayload.cc] } : {}),
+    ...(verifiedPayload.bcc ? { bcc: [...verifiedPayload.bcc] } : {}),
+    subject: verifiedPayload.subject,
+    body: verifiedPayload.body,
+    ...(verifiedPayload.attachmentDigests
+      ? { attachmentDigests: verifiedPayload.attachmentDigests }
       : {}),
   };
 
@@ -155,7 +242,10 @@ export async function submitApprovedEmailEffect(
     finalTarget: params.finalTarget,
     finalPayload: normalizedPayload,
     now: params.now(),
-    precondition: params.precondition,
+    precondition: () => {
+      if (!emailPrecheck().ok) return false;
+      return params.precondition ? params.precondition() : true;
+    },
   });
 
   if (!claim.claimed) {
@@ -178,9 +268,9 @@ export async function submitApprovedEmailEffect(
     host: params.smtpConfig.host,
     port: params.smtpConfig.port,
     from: params.smtpConfig.fromAddress,
-    to: params.finalPayload.to,
-    subject: params.finalPayload.subject,
-    body: params.finalPayload.body,
+    to: verifiedPayload.to,
+    subject: verifiedPayload.subject,
+    body: verifiedPayload.body,
     headers: {
       "X-AegisPi-Effect-Id": params.effectId,
       "X-AegisPi-Action-Hash": claim.actionHash ?? "",
@@ -194,12 +284,16 @@ export async function submitApprovedEmailEffect(
     auth: smtpAuth,
   });
 
-  // T5: Record outcome
+  // T5 / S2-P0-4: Persist ONLY reduced controlled status codes & validated identifiers (never raw remote text!)
   if (smtpRes.status === "succeeded") {
+    const safeReceipt =
+      smtpRes.receiptRef && /^smtp:\d{3}:[A-Za-z0-9._=-]{1,80}$/.test(smtpRes.receiptRef)
+        ? smtpRes.receiptRef
+        : "smtp:250:accepted";
     const rec = recordEffectResult(params.govDb, {
       effectId: params.effectId,
       outcome: "SUCCEEDED",
-      receiptRef: smtpRes.receiptRef ?? "250 OK",
+      receiptRef: safeReceipt,
       now: params.now(),
     });
     return {
@@ -208,16 +302,17 @@ export async function submitApprovedEmailEffect(
       effectId: params.effectId,
       effectState: rec.state,
       code: "succeeded",
-      message: `Email delivered (${smtpRes.receiptRef ?? "250 OK"})`,
-      receiptRef: smtpRes.receiptRef ?? null,
+      message: `Email delivered (${safeReceipt})`,
+      receiptRef: safeReceipt,
     };
   }
 
   if (smtpRes.status === "failed_remote" || smtpRes.status === "failed_local") {
+    const safeReason = sanitizeControlledCode(smtpRes.reason, "smtp_delivery_failed");
     const rec = recordEffectResult(params.govDb, {
       effectId: params.effectId,
       outcome: "FAILED",
-      reason: `${smtpRes.status}: ${smtpRes.reason ?? "send failed"}`,
+      reason: `${smtpRes.status}:${safeReason}`,
       now: params.now(),
     });
     return {
@@ -226,14 +321,15 @@ export async function submitApprovedEmailEffect(
       effectId: params.effectId,
       effectState: rec.state,
       code: smtpRes.status,
-      message: smtpRes.reason ?? "SMTP delivery failed",
+      message: `SMTP delivery failed (${safeReason})`,
     };
   }
 
+  const safeUnknownReason = sanitizeControlledCode(smtpRes.reason, "smtp_outcome_unknown");
   const rec = recordEffectResult(params.govDb, {
     effectId: params.effectId,
     outcome: "UNKNOWN",
-    reason: smtpRes.reason ?? "smtp_outcome_unknown",
+    reason: safeUnknownReason,
     now: params.now(),
   });
   return {
@@ -242,7 +338,7 @@ export async function submitApprovedEmailEffect(
     effectId: params.effectId,
     effectState: rec.state,
     code: "unknown",
-    message: `Delivery outcome unknown (${smtpRes.reason ?? "no receipt"}); manual reconciliation required`,
+    message: `Delivery outcome unknown (${safeUnknownReason}); manual reconciliation required`,
   };
 }
 
@@ -300,6 +396,29 @@ export async function submitApprovedGithubWriteEffect(params: {
     };
   }
 
+  // S2-P0-3c: Bind policy, Pin, and actual transport dispatch strictly to the SAME controlled operation!
+  const controlledTool = resolveControlledGithubMcpTool(params.finalPayload.operation);
+  if (!controlledTool || params.finalPayload.mcpToolName !== controlledTool) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: "github_write_tool_mismatch",
+      message: `Controlled operation '${params.finalPayload.operation}' does not match MCP tool '${params.finalPayload.mcpToolName}'`,
+    };
+  }
+  if (params.finalPayload.mcpServerId !== params.bridge.serverId) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: "github_write_server_mismatch",
+      message: `MCP server '${params.finalPayload.mcpServerId}' does not match connected bridge '${params.bridge.serverId}'`,
+    };
+  }
+
   const policyDecision = evaluateGithubWritePolicy({
     repoId: params.finalPayload.repoId,
     operation: params.finalPayload.operation,
@@ -307,7 +426,7 @@ export async function submitApprovedGithubWriteEffect(params: {
     path: params.finalPayload.path,
     allowlist: params.allowlist,
   });
-  if (!policyDecision.allowed) {
+  if (!policyDecision.allowed || policyDecision.controlledMcpToolName !== controlledTool) {
     return {
       ok: false,
       claimed: false,
@@ -319,8 +438,8 @@ export async function submitApprovedGithubWriteEffect(params: {
   }
 
   const pinPreCheck = verifyLiveMcpToolPin(params.govDb, {
-    serverId: params.finalPayload.mcpServerId,
-    toolName: params.finalPayload.mcpToolName,
+    serverId: params.bridge.serverId,
+    toolName: controlledTool,
     expectedSchemaSha256: params.finalPayload.mcpSchemaSha256,
   });
   if (!pinPreCheck.ok) {
@@ -350,9 +469,10 @@ export async function submitApprovedGithubWriteEffect(params: {
     now: params.now(),
     precondition: () => {
       if (!params.bridge || params.bridge.isAdmissionPaused) return false;
+      if (params.finalPayload.mcpToolName !== controlledTool) return false;
       const livePin = verifyLiveMcpToolPin(params.govDb, {
-        serverId: params.finalPayload.mcpServerId,
-        toolName: params.finalPayload.mcpToolName,
+        serverId: params.bridge.serverId,
+        toolName: controlledTool,
         expectedSchemaSha256: params.finalPayload.mcpSchemaSha256,
       });
       return livePin.ok;
@@ -375,21 +495,42 @@ export async function submitApprovedGithubWriteEffect(params: {
   }
 
   try {
+    // S2-P1-1: Map controlled owner/repo arguments according to the pinned tool's actual inputSchema!
+    const schema = params.bridge.getToolInputSchema(controlledTool);
+    const props = schema && typeof schema["properties"] === "object" ? (schema["properties"] as Record<string, unknown>) : null;
+    const usesOwnerField = Boolean(props && Object.prototype.hasOwnProperty.call(props, "owner"));
+    const slashIdx = params.finalPayload.repoId.indexOf("/");
+    const ownerPart = slashIdx > 0 ? params.finalPayload.repoId.slice(0, slashIdx) : "";
+    const repoPart = slashIdx > 0 ? params.finalPayload.repoId.slice(slashIdx + 1) : params.finalPayload.repoId;
+    const branchName = params.finalPayload.ref.replace(/^refs\/heads\//, "");
+
+    const mcpArgs: Record<string, unknown> = usesOwnerField
+      ? {
+          owner: ownerPart,
+          repo: repoPart,
+          branch: branchName,
+          path: params.finalPayload.path,
+          content: params.finalPayload.content,
+          message: params.finalPayload.message,
+        }
+      : {
+          repo: params.finalPayload.repoId,
+          ref: params.finalPayload.ref,
+          branch: branchName,
+          path: params.finalPayload.path,
+          content: params.finalPayload.content,
+          message: params.finalPayload.message,
+        };
+
     const mcpRes = await params.bridge.callWriteTool(
-      params.finalPayload.mcpToolName,
-      {
-        repo: params.finalPayload.repoId,
-        ref: params.finalPayload.ref,
-        branch: params.finalPayload.ref.replace(/^refs\/heads\//, ""),
-        path: params.finalPayload.path,
-        content: params.finalPayload.content,
-        message: params.finalPayload.message,
-      },
+      controlledTool,
+      mcpArgs,
       { expectedSchemaSha256: params.finalPayload.mcpSchemaSha256 },
     );
 
+    // S2-P0-4: Reduce remote MCP response strictly to validated commit SHA or controlled status code!
     if (mcpRes.ok) {
-      const receiptRef = mcpRes.text?.slice(0, 200) ?? "github_mcp_ok";
+      const receiptRef = parseSafeGithubCommitReceipt(mcpRes.text);
       const rec = recordEffectResult(params.govDb, {
         effectId: params.effectId,
         outcome: "SUCCEEDED",
@@ -402,15 +543,16 @@ export async function submitApprovedGithubWriteEffect(params: {
         effectId: params.effectId,
         effectState: rec.state,
         code: "succeeded",
-        message: `GitHub write committed (${mcpRes.text?.slice(0, 120) ?? "ok"})`,
+        message: `GitHub write committed (${receiptRef})`,
         receiptRef,
       };
     }
 
+    const safeCode = sanitizeControlledCode(mcpRes.code, "github_mcp_write_failed");
     const rec = recordEffectResult(params.govDb, {
       effectId: params.effectId,
       outcome: "FAILED",
-      reason: `${mcpRes.code}: ${mcpRes.reason ?? "mcp_write_failed"}`,
+      reason: safeCode,
       now: params.now(),
     });
     return {
@@ -418,15 +560,16 @@ export async function submitApprovedGithubWriteEffect(params: {
       claimed: true,
       effectId: params.effectId,
       effectState: rec.state,
-      code: mcpRes.code,
-      message: mcpRes.reason ?? "GitHub MCP write failed",
+      code: safeCode,
+      message: `GitHub MCP write failed (${safeCode})`,
     };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const errCode = sanitizeControlledCode((err as { code?: string } | null)?.code, "transport_uncertain");
+    const safeReason = `github_mcp_transport_uncertain:${errCode}`;
     const rec = recordEffectResult(params.govDb, {
       effectId: params.effectId,
       outcome: "UNKNOWN",
-      reason: `github_mcp_transport_uncertain: ${reason}`,
+      reason: safeReason,
       now: params.now(),
     });
     return {
@@ -435,7 +578,7 @@ export async function submitApprovedGithubWriteEffect(params: {
       effectId: params.effectId,
       effectState: rec.state,
       code: "unknown",
-      message: `GitHub write outcome unknown (${reason}); manual reconciliation required`,
+      message: `GitHub write outcome unknown (${safeReason}); manual reconciliation required`,
     };
   }
 }

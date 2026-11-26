@@ -73,6 +73,9 @@ export class GitHubMcpBridge {
   #readOnlyMode = true;
   #admissionPaused = false;
   #lastPauseReason: string | null = null;
+  #pendingRecheck: Promise<void> = Promise.resolve();
+  #listChangedCount = 0;
+  #unsubscribeListeners: Array<() => void> = [];
 
   constructor(config: GitHubMcpBridgeConfig) {
     this.#config = config;
@@ -102,6 +105,20 @@ export class GitHubMcpBridge {
 
   get isReadOnlyMode(): boolean {
     return this.#readOnlyMode;
+  }
+
+  get listChangedNotificationCount(): number {
+    return this.#listChangedCount;
+  }
+
+  getToolInputSchema(toolName: string): Record<string, unknown> | null {
+    const t = this.#loadedTools.get(toolName);
+    if (!t || !t.inputSchema || typeof t.inputSchema !== "object") return null;
+    return t.inputSchema as Record<string, unknown>;
+  }
+
+  async waitForPendingRecheck(): Promise<void> {
+    await this.#pendingRecheck;
   }
 
   getStatus(): {
@@ -212,6 +229,19 @@ export class GitHubMcpBridge {
       requestTimeoutMs: 15_000,
     });
 
+    // S2-P0-3a: Subscribe to MCP `notifications/tools/list_changed` & unexpected close BEFORE connect
+    // so mid-session tool list changes IMMEDIATELY pause admission and trigger full Pin re-verification!
+    const offListChanged = client.onNotification("notifications/tools/list_changed", () => {
+      this.#handleToolsListChangedNotification();
+    });
+    const offClose = client.onClose(() => {
+      if (this.#client === client) {
+        this.#admissionPaused = true;
+        this.#lastPauseReason = "mcp_connection_closed";
+      }
+    });
+    this.#unsubscribeListeners.push(offListChanged, offClose);
+
     await client.connect(transport);
     this.#transport = transport;
     this.#client = client;
@@ -226,6 +256,37 @@ export class GitHubMcpBridge {
       quarantinedTools: pinRes.quarantinedTools,
       missingQuarantinedTools: pinRes.missingQuarantinedTools,
     };
+  }
+
+  #handleToolsListChangedNotification(): void {
+    this.#listChangedCount++;
+    this.#admissionPaused = true;
+    this.#lastPauseReason = "tools_list_changed_rechecking";
+    const now = this.#now();
+    writeAuditEvent(this.#config.govDb, {
+      entityType: "mcp_server",
+      entityId: this.#config.serverId,
+      eventKey: `tools_list_changed:${this.#config.serverId}:${this.#listChangedCount}:${now}`,
+      eventType: "mcp_tools_list_changed_received",
+      occurredAt: now,
+      details: { serverId: this.#config.serverId, notificationSeq: this.#listChangedCount },
+    });
+    this.#pendingRecheck = this.#pendingRecheck
+      .catch(() => {})
+      .then(async () => {
+        if (!this.#client) {
+          this.#admissionPaused = true;
+          this.#lastPauseReason = "mcp_not_connected";
+          return;
+        }
+        try {
+          await this.recheckToolPins();
+        } catch (err) {
+          // Keep admission strictly closed when re-verification fails!
+          this.#admissionPaused = true;
+          this.#lastPauseReason = `tools_list_changed_recheck_failed:${err instanceof Error ? err.message : String(err)}`;
+        }
+      });
   }
 
   /**
@@ -494,6 +555,14 @@ export class GitHubMcpBridge {
   }
 
   async close(): Promise<void> {
+    for (const off of this.#unsubscribeListeners) {
+      try {
+        off();
+      } catch {
+        // ignore
+      }
+    }
+    this.#unsubscribeListeners = [];
     if (this.#client) {
       await this.#client.close().catch(() => {});
       this.#client = null;

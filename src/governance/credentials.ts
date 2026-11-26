@@ -140,11 +140,76 @@ export interface ModelPriceSchedule {
   inputPerMTokMu: number;
   outputPerMTokMu: number;
   cacheReadPerMTokMu?: number;
-  /** Provable integer microUSD per-request upper bound required for T6 reservation in Stage 1. */
+  cacheWritePerMTokMu?: number;
+  /** Optional explicit reasoning-token headroom added on top of maxTokens when computing output upper bound. */
+  maxReasoningTokens?: number;
+  /** Provable integer microUSD per-request upper bound required for T6 reservation in Stage 1 loopback fakes ONLY. */
   syntheticFixedUpperMu?: number | null;
   syntheticFixedActualMu?: number | null;
-  /** Stage 2 real-provider mode: compute conservative integer microUSD upper bound from input + maxTokens. */
+  /** Stage 2 real-provider mode: compute provable integer microUSD upper bound from input UTF-8 bytes + maxTokens. */
   allowTokenBoundEstimation?: boolean;
+}
+
+/**
+ * S2-P0-2: Validates whether a model price schedule is lawful for the given endpoint URL.
+ * Synthetic fixed pricing is ONLY allowed on loopback fake endpoints.
+ * Non-loopback real endpoints MUST provide a non-synthetic versioned schedule with token-bound estimation enabled.
+ */
+export function validateModelPriceScheduleForEndpoint(
+  baseUrl: string,
+  schedule: ModelPriceSchedule | null | undefined,
+): { ok: true; isLoopback: boolean } | { ok: false; code: string; reason: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return { ok: false, code: "invalid_model_url", reason: `Malformed model URL: ${baseUrl}` };
+  }
+  const loopback = isLoopbackHost(parsed.hostname);
+  if (!schedule) {
+    return { ok: false, code: "missing_price_schedule", reason: `Missing price schedule for ${baseUrl}` };
+  }
+  const version = typeof schedule.priceVersion === "string" ? schedule.priceVersion.trim() : "";
+  if (!version || version.toLowerCase() === "unknown") {
+    return { ok: false, code: "missing_price_version", reason: "Model price schedule requires non-empty priceVersion" };
+  }
+  if (!loopback) {
+    if (
+      version.toLowerCase().startsWith("synthetic") ||
+      schedule.syntheticFixedUpperMu !== undefined && schedule.syntheticFixedUpperMu !== null ||
+      schedule.syntheticFixedActualMu !== undefined && schedule.syntheticFixedActualMu !== null
+    ) {
+      return {
+        ok: false,
+        code: "synthetic_price_forbidden_on_remote",
+        reason: `Remote model endpoint ${parsed.hostname} cannot use synthetic fixed pricing (${version})`,
+      };
+    }
+    if (!schedule.allowTokenBoundEstimation) {
+      return {
+        ok: false,
+        code: "token_bound_estimation_required",
+        reason: `Remote model endpoint ${parsed.hostname} requires allowTokenBoundEstimation=true`,
+      };
+    }
+    if (
+      !Number.isFinite(schedule.inputPerMTokMu) ||
+      schedule.inputPerMTokMu < 0 ||
+      !Number.isFinite(schedule.outputPerMTokMu) ||
+      schedule.outputPerMTokMu < 0 ||
+      (schedule.cacheReadPerMTokMu !== undefined &&
+        (!Number.isFinite(schedule.cacheReadPerMTokMu) || schedule.cacheReadPerMTokMu < 0)) ||
+      (schedule.cacheWritePerMTokMu !== undefined &&
+        (!Number.isFinite(schedule.cacheWritePerMTokMu) || schedule.cacheWritePerMTokMu < 0))
+    ) {
+      return {
+        ok: false,
+        code: "invalid_price_rates",
+        reason: `Remote model endpoint ${parsed.hostname} has invalid negative or non-finite token rates`,
+      };
+    }
+  }
+  return { ok: true, isLoopback: loopback };
 }
 
 export interface ImapCredentialBinding {
