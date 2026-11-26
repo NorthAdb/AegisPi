@@ -1,0 +1,519 @@
+{
+  "suite": "W1-A",
+  "runId": "w1a_50aba5c5",
+  "status": "PASS",
+  "environment": {
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "platform": "win32",
+    "zone": "Asia/Hong_Kong",
+    "chargeDay": "2026-11-26"
+  },
+  "priceModel": {
+    "upperMu": 100,
+    "actualMu": 60
+  },
+  "fakeModelFinalPhysicalRequests": 8,
+  "cases": [
+    {
+      "caseId": "W1A-CTRL-ROUTER",
+      "entry": "router",
+      "kind": "positive_control",
+      "ownerTaskId": "w1a-ctrl-router",
+      "conversationId": "8",
+      "upperMu": 100,
+      "serverCountBefore": 0,
+      "serverCountAfter": 1,
+      "serverCountDelta": 1,
+      "taskAccountBefore": null,
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-ctrl-router",
+        "kind": "TASK",
+        "limit_mu": 800000,
+        "held_mu": 0,
+        "charged_mu": 60,
+        "frozen": 0
+      },
+      "dayAccountBefore": null,
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 5000000,
+        "held_mu": 0,
+        "charged_mu": 60,
+        "frozen": 0
+      },
+      "reservationsCreated": [
+        {
+          "request_id": "mreq_cbf3252f421a4db7a5836d022e2d11d1",
+          "runtime_epoch": "ep_01ab4d6787374d7b8208f4f5809ab9d8",
+          "conversation_id": "8",
+          "owner_task_id": "w1a-ctrl-router",
+          "purpose": "router",
+          "task_account": "acct:task:w1a-ctrl-router",
+          "day_account": "acct:day:Asia/Hong_Kong:2026-11-26",
+          "charge_day": "2026-11-26",
+          "zone": "Asia/Hong_Kong",
+          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:54144\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"streamSimple\",\"modelId\":\"fake-router-1\",\"piTaskId\":16,\"piTaskName\":\"pi.generation\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
+          "upper_mu": 100,
+          "actual_mu": 60,
+          "reserved_at": 1795660390431,
+          "settle_due_at": 1795660690431,
+          "state": "SETTLED"
+        }
+      ],
+      "view1Denials": [],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-CTRL-WORKER",
+      "entry": "worker",
+      "kind": "positive_control",
+      "ownerTaskId": "w1a-ctrl-worker",
+      "conversationId": "19",
+      "upperMu": 100,
+      "serverCountBefore": 1,
+      "serverCountAfter": 2,
+      "serverCountDelta": 1,
+      "taskAccountBefore": null,
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-ctrl-worker",
+        "kind": "TASK",
+        "limit_mu": 800000,
+        "held_mu": 0,
+        "charged_mu": 60,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 5000000,
+        "held_mu": 0,
+        "charged_mu": 60,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 5000000,
+        "held_mu": 0,
+        "charged_mu": 120,
+        "frozen": 0
+      },
+      "reservationsCreated": [
+        {
+          "request_id": "mreq_f176d198d578439b991ab5cba3145a59",
+          "runtime_epoch": "ep_01ab4d6787374d7b8208f4f5809ab9d8",
+          "conversation_id": "19",
+          "owner_task_id": "w1a-ctrl-worker",
+          "purpose": "worker",
+          "task_account": "acct:task:w1a-ctrl-worker",
+          "day_account": "acct:day:Asia/Hong_Kong:2026-11-26",
+          "charge_day": "2026-11-26",
+          "zone": "Asia/Hong_Kong",
+          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:54144\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"streamSimple\",\"modelId\":\"fake-worker-1\",\"piTaskId\":27,\"piTaskName\":\"pi.generation\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
+          "upper_mu": 100,
+          "actual_mu": 60,
+          "reserved_at": 1795660390431,
+          "settle_due_at": 1795660690431,
+          "state": "SETTLED"
+        }
+      ],
+      "view1Denials": [],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-CTRL-COMPACTION",
+      "entry": "compaction",
+      "kind": "positive_control",
+      "ownerTaskId": "w1a-ctrl-compaction",
+      "conversationId": "8",
+      "upperMu": 100,
+      "serverCountBefore": 3,
+      "serverCountAfter": 4,
+      "serverCountDelta": 1,
+      "taskAccountBefore": null,
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-ctrl-compaction",
+        "kind": "TASK",
+        "limit_mu": 800000,
+        "held_mu": 0,
+        "charged_mu": 60,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 5000000,
+        "held_mu": 0,
+        "charged_mu": 180,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 5000000,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "reservationsCreated": [
+        {
+          "request_id": "mreq_2f4bdf24a5fb4bdbbdd557efb3f2a67f",
+          "runtime_epoch": "ep_01ab4d6787374d7b8208f4f5809ab9d8",
+          "conversation_id": "8",
+          "owner_task_id": "w1a-ctrl-compaction",
+          "purpose": "compaction",
+          "task_account": "acct:task:w1a-ctrl-compaction",
+          "day_account": "acct:day:Asia/Hong_Kong:2026-11-26",
+          "charge_day": "2026-11-26",
+          "zone": "Asia/Hong_Kong",
+          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:54144\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"completeSimple\",\"modelId\":\"fake-router-1\",\"piTaskId\":34,\"piTaskName\":\"pi.compaction\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
+          "upper_mu": 100,
+          "actual_mu": 60,
+          "reserved_at": 1795660390431,
+          "settle_due_at": 1795660690431,
+          "state": "SETTLED"
+        }
+      ],
+      "view1Denials": [],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-NEG-1-ROUTER-TASK",
+      "entry": "router",
+      "kind": "negative_task_short_1mu",
+      "ownerTaskId": "w1a-neg-router-task",
+      "conversationId": "37",
+      "upperMu": 100,
+      "serverCountBefore": 4,
+      "serverCountAfter": 4,
+      "serverCountDelta": 0,
+      "taskAccountBefore": {
+        "account_id": "acct:task:w1a-neg-router-task",
+        "kind": "TASK",
+        "limit_mu": 99,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-neg-router-task",
+        "kind": "TASK",
+        "limit_mu": 99,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 10240,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 10240,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "reservationsCreated": [],
+      "view1Denials": [
+        {
+          "seq": 15,
+          "requestId": "mreq_54ab1bc8eb3e43a2b0ec62dc2b1eca5c",
+          "occurredAt": 1795660390431,
+          "code": "task_budget_exceeded",
+          "message": "Insufficient task budget: need 100 microUSD, available 99 microUSD (acct:task:w1a-neg-router-task)",
+          "ownerTaskId": "w1a-neg-router-task",
+          "purpose": "router"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-NEG-2-ROUTER-DAY",
+      "entry": "router",
+      "kind": "negative_day_short_1mu",
+      "ownerTaskId": "w1a-neg-router-day",
+      "conversationId": "48",
+      "upperMu": 100,
+      "serverCountBefore": 4,
+      "serverCountAfter": 4,
+      "serverCountDelta": 0,
+      "taskAccountBefore": {
+        "account_id": "acct:task:w1a-neg-router-day",
+        "kind": "TASK",
+        "limit_mu": 10000,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-neg-router-day",
+        "kind": "TASK",
+        "limit_mu": 10000,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 339,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 339,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "reservationsCreated": [],
+      "view1Denials": [
+        {
+          "seq": 20,
+          "requestId": "mreq_bf1faec61cc24e788a2d9c03571e98ce",
+          "occurredAt": 1795660390431,
+          "code": "day_budget_exceeded",
+          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-26)",
+          "ownerTaskId": "w1a-neg-router-day",
+          "purpose": "router"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-NEG-3-WORKER-TASK",
+      "entry": "worker",
+      "kind": "negative_task_short_1mu",
+      "ownerTaskId": "w1a-neg-worker-task",
+      "conversationId": "59",
+      "upperMu": 100,
+      "serverCountBefore": 4,
+      "serverCountAfter": 4,
+      "serverCountDelta": 0,
+      "taskAccountBefore": {
+        "account_id": "acct:task:w1a-neg-worker-task",
+        "kind": "TASK",
+        "limit_mu": 99,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-neg-worker-task",
+        "kind": "TASK",
+        "limit_mu": 99,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 10240,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 10240,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "reservationsCreated": [],
+      "view1Denials": [
+        {
+          "seq": 25,
+          "requestId": "mreq_5ac5483940144d83b555e8f8b753af26",
+          "occurredAt": 1795660390431,
+          "code": "task_budget_exceeded",
+          "message": "Insufficient task budget: need 100 microUSD, available 99 microUSD (acct:task:w1a-neg-worker-task)",
+          "ownerTaskId": "w1a-neg-worker-task",
+          "purpose": "worker"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-NEG-4-WORKER-DAY",
+      "entry": "worker",
+      "kind": "negative_day_short_1mu",
+      "ownerTaskId": "w1a-neg-worker-day",
+      "conversationId": "70",
+      "upperMu": 100,
+      "serverCountBefore": 4,
+      "serverCountAfter": 4,
+      "serverCountDelta": 0,
+      "taskAccountBefore": {
+        "account_id": "acct:task:w1a-neg-worker-day",
+        "kind": "TASK",
+        "limit_mu": 10000,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-neg-worker-day",
+        "kind": "TASK",
+        "limit_mu": 10000,
+        "held_mu": 0,
+        "charged_mu": 0,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 339,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 339,
+        "held_mu": 0,
+        "charged_mu": 240,
+        "frozen": 0
+      },
+      "reservationsCreated": [],
+      "view1Denials": [
+        {
+          "seq": 29,
+          "requestId": "mreq_2242e0ff11614439bd292059625c7710",
+          "occurredAt": 1795660390431,
+          "code": "day_budget_exceeded",
+          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-26)",
+          "ownerTaskId": "w1a-neg-worker-day",
+          "purpose": "worker"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-NEG-5-COMPACTION-TASK",
+      "entry": "compaction",
+      "kind": "negative_task_short_1mu",
+      "ownerTaskId": "w1a-neg-compaction-task",
+      "conversationId": "81",
+      "upperMu": 100,
+      "serverCountBefore": 6,
+      "serverCountAfter": 6,
+      "serverCountDelta": 0,
+      "taskAccountBefore": {
+        "account_id": "acct:task:w1a-neg-compaction-task",
+        "kind": "TASK",
+        "limit_mu": 219,
+        "held_mu": 0,
+        "charged_mu": 120,
+        "frozen": 0
+      },
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-neg-compaction-task",
+        "kind": "TASK",
+        "limit_mu": 219,
+        "held_mu": 0,
+        "charged_mu": 120,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 10360,
+        "held_mu": 0,
+        "charged_mu": 360,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 10360,
+        "held_mu": 0,
+        "charged_mu": 360,
+        "frozen": 0
+      },
+      "reservationsCreated": [],
+      "view1Denials": [
+        {
+          "seq": 37,
+          "requestId": "mreq_0c1c8420f3274e11be159359be67252a",
+          "occurredAt": 1795660390431,
+          "code": "task_budget_exceeded",
+          "message": "Insufficient task budget: need 100 microUSD, available 99 microUSD (acct:task:w1a-neg-compaction-task)",
+          "ownerTaskId": "w1a-neg-compaction-task",
+          "purpose": "compaction"
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "caseId": "W1A-NEG-6-COMPACTION-DAY",
+      "entry": "compaction",
+      "kind": "negative_day_short_1mu",
+      "ownerTaskId": "w1a-neg-compaction-day",
+      "conversationId": "97",
+      "upperMu": 100,
+      "serverCountBefore": 8,
+      "serverCountAfter": 8,
+      "serverCountDelta": 0,
+      "taskAccountBefore": {
+        "account_id": "acct:task:w1a-neg-compaction-day",
+        "kind": "TASK",
+        "limit_mu": 10120,
+        "held_mu": 0,
+        "charged_mu": 120,
+        "frozen": 0
+      },
+      "taskAccountAfter": {
+        "account_id": "acct:task:w1a-neg-compaction-day",
+        "kind": "TASK",
+        "limit_mu": 10120,
+        "held_mu": 0,
+        "charged_mu": 120,
+        "frozen": 0
+      },
+      "dayAccountBefore": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 579,
+        "held_mu": 0,
+        "charged_mu": 480,
+        "frozen": 0
+      },
+      "dayAccountAfter": {
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
+        "kind": "DAY",
+        "limit_mu": 579,
+        "held_mu": 0,
+        "charged_mu": 480,
+        "frozen": 0
+      },
+      "reservationsCreated": [],
+      "view1Denials": [
+        {
+          "seq": 45,
+          "requestId": "mreq_500a6ce00a9849c49fe47f42e4349a02",
+          "occurredAt": 1795660390431,
+          "code": "day_budget_exceeded",
+          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-26)",
+          "ownerTaskId": "w1a-neg-compaction-day",
+          "purpose": "compaction"
+        }
+      ],
+      "status": "PASS"
+    }
+  ]
+}

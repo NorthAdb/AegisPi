@@ -1,0 +1,29 @@
+{
+  "suite": "V04_V05",
+  "runId": "v04v05_43885a5b",
+  "status": "PASS",
+  "v04": {
+    "window1_gov_register_and_reconcile_read_failure": "PASS (PENDING_RECONCILE / 受理待核对, 0 extra sends)",
+    "window2_pi_admit_kill_reconcile": {
+      "status": "PASS",
+      "piRequestId": "chatreq:1434dc2c39336407a70fdcebeb4c0b0a",
+      "submissionId": 15,
+      "conflict409Verified": true,
+      "wrongEpoch409Verified": true,
+      "concurrentDoubleClickSingleSubmission": true
+    },
+    "window3_receipt_committed_http_lost": {
+      "status": "PASS",
+      "submissionId": 15
+    }
+  },
+  "v05": {
+    "snapshotCursor": "str_2cec90be-896:1",
+    "firstReplayedEventIdAfterGapApprove": "str_2cec90be-896:2",
+    "evictedHistoryResyncReason": "cursor_history_evicted",
+    "slowClientResyncReason": "slow_client_queue_overflow",
+    "sameEpochRestartResyncReason": "stream_instance_changed",
+    "postLogoutBusinessFrames": 0,
+    "crossPrincipalForbidden403": true
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "runId": "week2_203150f4",
+  "commitSha": "ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb",
+  "executedAt": "2026-11-26T02:36:34.805Z",
+  "environment": {
+    "nodeExe": "node.exe",
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "results": {
+    "typecheck": {
+      "status": "PASS",
+      "exitCode": 0
+    },
+    "layerBoundary": {
+      "status": "PASS",
+      "violations": []
+    },
+    "s6": {
+      "status": "PASS",
+      "runId": "s6_317c0d82",
+      "totalForbiddenHits": 0
+    },
+    "v04_v05": {
+      "status": "PASS",
+      "runId": "v04v05_43885a5b"
+    },
+    "v02": {
+      "status": "PASS",
+      "runId": "v02_e07a4c6e",
+      "environmentMode": "substitute_local_fakes",
+      "realConnectorsStatus": "待验证（缺少本次实机账号授权、GITHUB_PAT 与 github-mcp-server.exe）"
+    },
+    "v03": {
+      "status": "PASS",
+      "runId": "v03_6ecb96be"
+    },
+    "v01_v05_v06_browser": {
+      "status": "PASS",
+      "runId": "v01v06_667b26b0"
+    }
+  }
+}

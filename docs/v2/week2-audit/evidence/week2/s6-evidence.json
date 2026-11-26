@@ -1,0 +1,151 @@
+{
+  "suite": "S6",
+  "runId": "s6_317c0d82",
+  "status": "PASS",
+  "scannerPositiveControl": {
+    "plantedMarkers": 2,
+    "detectedHits": 2
+  },
+  "samplingPointsCovered": [
+    "router_generation",
+    "worker_generation",
+    "compaction",
+    "imap_and_mcp_connectors",
+    "docker_sandbox",
+    "post_restart"
+  ],
+  "imapChildEnvKeysCount": 13,
+  "mcpChildEnvKeys": [
+    "COMSPEC",
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_READ_ONLY",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOGONSERVER",
+    "PATH",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "WINDIR"
+  ],
+  "dockerContainerEnvKeys": [
+    "PATH",
+    "NODE_VERSION",
+    "YARN_VERSION"
+  ],
+  "totalForbiddenHits": 0,
+  "slots": [
+    {
+      "slotId": "slot:model-router",
+      "markerDigestPrefix": "dd73716856640277",
+      "allowedLocations": [
+        "host_memory_vault",
+        "loopback_fake_model_router_auth_header"
+      ],
+      "checkedLocations": [
+        "web_snapshot",
+        "web_sse_frame",
+        "fake_model_log",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "aegis-gov.sqlite",
+        "pi-durable.sqlite",
+        "model_prompt_bodies",
+        "imap_child_env",
+        "mcp_child_env",
+        "docker_container_env"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:model-worker",
+      "markerDigestPrefix": "9d8c0c2cf8820ab9",
+      "allowedLocations": [
+        "host_memory_vault",
+        "loopback_fake_model_worker_auth_header"
+      ],
+      "checkedLocations": [
+        "web_snapshot",
+        "web_sse_frame",
+        "fake_model_log",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "aegis-gov.sqlite",
+        "pi-durable.sqlite",
+        "model_prompt_bodies",
+        "imap_child_env",
+        "mcp_child_env",
+        "docker_container_env"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:imap-readonly",
+      "markerDigestPrefix": "2be59062f9e9724b",
+      "allowedLocations": [
+        "host_memory_vault",
+        "imap_child_stdin_only"
+      ],
+      "checkedLocations": [
+        "web_snapshot",
+        "web_sse_frame",
+        "fake_model_log",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "aegis-gov.sqlite",
+        "pi-durable.sqlite",
+        "model_prompt_bodies",
+        "imap_child_env",
+        "mcp_child_env",
+        "docker_container_env"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:github-mcp-pat",
+      "markerDigestPrefix": "d2dad418c79ba025",
+      "allowedLocations": [
+        "host_memory_vault",
+        "github_mcp_child_explicit_env"
+      ],
+      "checkedLocations": [
+        "web_snapshot",
+        "web_sse_frame",
+        "fake_model_log",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "aegis-gov.sqlite",
+        "pi-durable.sqlite",
+        "model_prompt_bodies",
+        "imap_child_env",
+        "docker_container_env"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:web-console",
+      "markerDigestPrefix": "e96a3809a1387dd0",
+      "allowedLocations": [
+        "host_memory_auth_config"
+      ],
+      "checkedLocations": [
+        "web_snapshot",
+        "web_sse_frame",
+        "fake_model_log",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "aegis-gov.sqlite",
+        "pi-durable.sqlite",
+        "model_prompt_bodies",
+        "imap_child_env",
+        "mcp_child_env",
+        "docker_container_env"
+      ],
+      "forbiddenHits": 0
+    }
+  ]
+}

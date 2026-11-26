@@ -1,0 +1,68 @@
+{
+  "suite": "V01_V05_V06_BROWSER",
+  "runId": "v01v06_667b26b0",
+  "status": "PASS",
+  "environment": {
+    "os": "win32 10.0.26300 (x64)",
+    "cpus": 6,
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "dockerVersion": "29.9.2/29.9.2",
+    "browserExe": "msedge.exe",
+    "webBaseUrl": "http://127.0.0.1:60802",
+    "networkCondition": "loopback_127.0.0.1_substitute_fakes",
+    "modelSlots": [
+      "fake-local/fake-router-1 (router)",
+      "fake-local/fake-worker-1 (worker)"
+    ]
+  },
+  "v01": {
+    "demoPrompt": "按我记忆里的项目名，读最新一封周报和仓库 README，把两边时间不一致的地方写到 reports/weekly.md。",
+    "conversationId": "8",
+    "timings": {
+      "firstTokenMs": "待验证（本地替身按整段 SSE 块返回，未细分首 token 流）",
+      "firstToolProgressMs": 168,
+      "completionMs": 12557
+    },
+    "sourcesVisibleAfterRefresh": [
+      "memory",
+      "memory",
+      "imap",
+      "github_mcp",
+      "workspace_file"
+    ],
+    "budgetSlotsVisible": [
+      "router",
+      "router",
+      "worker",
+      "worker",
+      "worker",
+      "worker",
+      "router"
+    ],
+    "reportPath": "reports/weekly.md",
+    "expectedSha256": "2ffb1928c26898842201a80b8f45f56fc1dbfa9a25ea31874ecd2365feb8286d",
+    "actualSha256": "2ffb1928c26898842201a80b8f45f56fc1dbfa9a25ea31874ecd2365feb8286d",
+    "tombstonedAndInjectedExcludedFromUi": true,
+    "xssPlainTextVerified": true
+  },
+  "v05Browser": {
+    "duplicateFramesIgnored": 1,
+    "gapTriggeredResyncCount": 1,
+    "stalePartialOverwrittenBySnapshot": true,
+    "oldSessionCardsAfterSwitch": 0,
+    "logoutClosedStreamAndReturned401": true
+  },
+  "v06Browser": {
+    "unsavedEditDisabledApprove": true,
+    "savedNewRevision": 2,
+    "staleRevisionOldTabStatus": 409,
+    "expiredCardDisabledApprove": true,
+    "expiredOldTabStatus": 410,
+    "expiredSmtpSentDelta": 0,
+    "unknownPersistedAfterReloadLabel": "结果待核对",
+    "badOriginStatus": 403,
+    "missingOriginStatus": 403,
+    "unauthStatus": 401
+  }
+}
