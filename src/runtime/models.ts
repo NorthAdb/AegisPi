@@ -33,6 +33,7 @@ import {
   type ModelPriceSchedule,
 } from "../governance/credentials.ts";
 import { withImmediateTx, writeAuditEvent } from "../governance/db.ts";
+import { checkConversationModelDisclosure } from "../governance/policy.ts";
 import type { HostPhaseTelemetry, PhaseAttribution } from "./telemetry.ts";
 
 export interface ModelSlotConfig {
@@ -60,6 +61,7 @@ export interface HostModelsConfig {
   telemetry: HostPhaseTelemetry;
   slots: ModelSlotConfig[];
   resolveBudgetOwner: (attr: PhaseAttribution, model: Model<Api>) => ResolvedBudgetOwner | null;
+  resolveConversationAuth?: (conversationId: string) => { principalId: string; scopeId: string } | null;
   now?: () => number;
   zone?: string;
   defaultTaskLimitMu?: number;
@@ -340,6 +342,38 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       });
       return createImmediateErrorStream(model, msg, now);
     }
+
+    // 2b. V02 Data Disclosure re-verification on EVERY send (generation, delegation, compaction, durable retry)
+    if (config.resolveConversationAuth) {
+      const convAuth = config.resolveConversationAuth(owner.conversationId);
+      if (convAuth) {
+        const disclosureSlot = owner.purpose === "compaction" ? "compaction" : slot.slotName;
+        const discCheck = checkConversationModelDisclosure(config.govDb, {
+          runtimeEpoch: config.getRuntimeEpoch(),
+          conversationId: owner.conversationId,
+          principalId: convAuth.principalId,
+          scopeId: convAuth.scopeId,
+          provider: model.provider,
+          modelId: model.id,
+          baseUrl: model.baseUrl ?? slot.baseUrl,
+          slotName: disclosureSlot,
+        });
+        if (!discCheck.ok) {
+          const msg = `Blocked model send (${requestId}): ${discCheck.reason}`;
+          recordEgressDenial(requestId, "disclosure_denied", msg, {
+            conversationId: owner.conversationId,
+            ownerTaskId: owner.ownerTaskId,
+            purpose: owner.purpose,
+            blockedSource: discCheck.blockedSource,
+            provider: model.provider,
+            modelId: model.id,
+            baseUrl: model.baseUrl ?? slot.baseUrl,
+            slotName: disclosureSlot,
+          });
+          return createImmediateErrorStream(model, msg, now);
+        }
+      }
+    }
     const bindingCheck = config.vault.validateBinding({
       slotId: slot.credentialSlotId,
       provider: model.provider,
@@ -446,8 +480,11 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       config.fetchImpl ?? globalThis.fetch,
       config.onHttpFetchAttempt,
     );
+    // Resolve this exact slot's secret strictly in host memory (S6 per-slot credential separation)
+    const slotApiKey = config.vault.resolveSecretInMemory(slot.credentialSlotId);
     const enforcedOptions: ModelsSimpleStreamOptions = {
       ...options,
+      ...(slotApiKey ? { apiKey: slotApiKey } : {}),
       maxRetries: 0,
       fetch: guardedFetch,
     };

@@ -17,10 +17,16 @@ import {
   type BudgetReservationRow,
 } from "../governance/budget.ts";
 import {
+  chatCommandUiStatusLabel,
+  listChatCommandsForConversation,
+} from "../governance/chat-commands.ts";
+import {
   reconcileUnknownEffect,
   revokeOrCancelScope,
   type EffectRow,
 } from "../governance/effects.ts";
+import { listManagedFileImportsForConversation } from "../capabilities/workspace/importer.ts";
+import { listConversationSources } from "../governance/policy.ts";
 import type { AegisHostRuntime } from "../runtime/harness.ts";
 import {
   buildClearSessionCookie,
@@ -37,6 +43,7 @@ import {
   validateWebSession,
   type AuthSession,
 } from "./auth.ts";
+import { ConversationProjectionHub } from "./projection.ts";
 import { renderMinimalView1Html } from "./view1.ts";
 
 export interface WebServerConfig {
@@ -49,14 +56,23 @@ export interface WebServerConfig {
   consoleTokens?: Record<string, string>;
   defaultPrincipalId?: string;
   now?: () => number;
+  maxSseHistory?: number;
+  maxSseClientQueue?: number;
   /** Explicit test-only seam for E02 real process kill before T2 commit. */
   injectBeforeT2Commit?: () => void;
+  /** Optional extra snapshot augmentor (wired by Week 2 capabilities: sources, file imports). */
+  augmentSnapshot?: (params: {
+    principalId: string;
+    runtimeEpoch: string;
+    conversationId: string;
+  }) => Record<string, unknown>;
 }
 
 export interface RunningWebServer {
   server: ServerType;
   port: number;
   baseUrl: string;
+  projectionHub: ConversationProjectionHub<Record<string, unknown>>;
   close: () => Promise<void>;
 }
 
@@ -103,8 +119,264 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   const nowFn = config.now ?? (() => Date.now());
   const rateLimiter = new LoginRateLimiter(20, 60_000);
   let boundPort = config.port ?? 4310;
-  let snapshotVersion = 1;
-  const activeSseClosers = new Set<() => void>();
+
+  function verifyConversationAccess(targetEpoch: string, convIdStr: string, principalId: string): boolean {
+    const convScope = config.host.govDb
+      .prepare(
+        "SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+      )
+      .get(targetEpoch, convIdStr) as { scope_id: string; principal_id: string } | undefined;
+    if (!convScope || convScope.principal_id !== principalId) {
+      return false;
+    }
+    const scope = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(convScope.scope_id) as ScopeRow | undefined;
+    return Boolean(scope && isPrincipalAuthorizedForScope(scope, principalId));
+  }
+
+  function verifyActiveEpochConversationAccess(convIdStr: string, principalId: string): boolean {
+    return verifyConversationAccess(config.host.runtimeEpoch, convIdStr, principalId);
+  }
+
+  /**
+   * Builds the authoritative conversation snapshot scoped strictly to (targetEpoch, conversationId).
+   * R3/G1: Enforces epoch-scoped conversation ACLs; live Pi transcript is read ONLY for the active epoch.
+   * G3: Plaintext approval nonce is NEVER included here (only hasChallenge).
+   */
+  async function buildAuthoritativeSnapshot(params: {
+    principalId: string;
+    runtimeEpoch: string;
+    conversationId: string;
+  }): Promise<Record<string, unknown> | null> {
+    const activeEpoch = config.host.runtimeEpoch;
+    const targetEpoch = params.runtimeEpoch;
+    const convIdStr = params.conversationId;
+    const principalId = params.principalId;
+
+    const convScope = config.host.govDb
+      .prepare(
+        "SELECT scope_id, principal_id, runtime_epoch FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+      )
+      .get(targetEpoch, convIdStr) as { scope_id: string; principal_id: string; runtime_epoch: string } | undefined;
+    if (!convScope || convScope.principal_id !== principalId) {
+      return null;
+    }
+    const scope = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(convScope.scope_id) as ScopeRow | undefined;
+    if (!scope || !isPrincipalAuthorizedForScope(scope, principalId)) {
+      return null;
+    }
+
+    const now = nowFn();
+    const proposalRows = config.host.govDb
+      .prepare(
+        `SELECT * FROM proposals
+          WHERE runtime_epoch = ? AND conversation_id = ?
+          ORDER BY created_at ASC`,
+      )
+      .all(targetEpoch, convIdStr) as unknown as ProposalRow[];
+
+    const proposals = proposalRows.map((p) => {
+      const draft = config.host.govDb
+        .prepare("SELECT * FROM draft_revisions WHERE proposal_id = ? AND revision = ?")
+        .get(p.proposal_id, p.head_rev) as unknown as DraftRevisionRow;
+      const apr = config.host.govDb
+        .prepare("SELECT * FROM approvals WHERE proposal_id = ? AND revision = ?")
+        .get(p.proposal_id, p.head_rev) as unknown as ApprovalRow;
+      const isExpiredNow = apr.state === "EXPIRED" || (apr.state === "PENDING" && now >= apr.expires_at);
+      const effectiveApprovalState = isExpiredNow && apr.state === "PENDING" ? "EXPIRED" : apr.state;
+      const hasChallenge =
+        effectiveApprovalState === "PENDING" &&
+        Boolean(
+          config.host.govDb
+            .prepare("SELECT 1 AS ok FROM approval_challenges WHERE approval_id = ?")
+            .get(apr.approval_id),
+        );
+      const effect = config.host.govDb
+        .prepare("SELECT * FROM effects WHERE approval_id = ?")
+        .get(apr.approval_id) as EffectRow | undefined;
+
+      return {
+        proposalId: p.proposal_id,
+        runtimeEpoch: p.runtime_epoch,
+        conversationId: p.conversation_id,
+        toolTaskId: p.tool_task_id,
+        callId: p.call_id,
+        toolName: p.tool_name,
+        target: p.target,
+        revision: p.head_rev,
+        actionHash: draft.action_hash,
+        snapshot: JSON.parse(draft.canonical_snapshot) as Record<string, unknown>,
+        approvalId: apr.approval_id,
+        approvalState: effectiveApprovalState,
+        expiresAt: apr.expires_at,
+        expired: isExpiredNow,
+        hasChallenge,
+        effect: effect
+          ? {
+              effectId: effect.effect_id,
+              state: effect.state,
+              claimedAt: effect.claimed_at,
+              receiptRef: effect.receipt_ref,
+              reason: effect.reason,
+              reconciledBy: effect.reconciled_by,
+              reconcileEvidence: effect.reconcile_evidence,
+            }
+          : null,
+        uiStatusLabel: uiStatusLabelFor(effectiveApprovalState, effect?.state ?? null),
+      };
+    });
+
+    const chatCommandRows = listChatCommandsForConversation(config.host.govDb, targetEpoch, convIdStr);
+    const chatCommands = chatCommandRows.map((c) => ({
+      commandId: c.command_id,
+      chatKey: c.chat_key,
+      piRequestId: c.pi_request_id,
+      submissionId: c.submission_id,
+      status: c.status,
+      reason: c.reason,
+      contentPreview: c.content_preview,
+      uiStatusLabel: chatCommandUiStatusLabel(c.status),
+      createdAt: c.created_at,
+      updatedAt: c.updated_at,
+    }));
+
+    const boundTask = config.host.getConversationBudgetTaskId(convIdStr, targetEpoch);
+    const reservations = (
+      boundTask
+        ? config.host.govDb
+            .prepare(
+              `SELECT * FROM budget_reservations
+                WHERE runtime_epoch = ? AND (conversation_id = ? OR owner_task_id = ?)
+                ORDER BY reserved_at ASC`,
+            )
+            .all(targetEpoch, convIdStr, boundTask)
+        : config.host.govDb
+            .prepare(
+              `SELECT * FROM budget_reservations
+                WHERE runtime_epoch = ? AND conversation_id = ?
+                ORDER BY reserved_at ASC`,
+            )
+            .all(targetEpoch, convIdStr)
+    ) as unknown as BudgetReservationRow[];
+
+    const relatedConvIds = new Set<string>([convIdStr]);
+    if (boundTask) {
+      const boundRows = config.host.govDb
+        .prepare(
+          `SELECT DISTINCT conversation_id FROM budget_task_bindings
+            WHERE runtime_epoch = ? AND owner_task_id = ?`,
+        )
+        .all(targetEpoch, boundTask) as Array<{ conversation_id: string }>;
+      for (const br of boundRows) relatedConvIds.add(br.conversation_id);
+    }
+
+    const visibleAccountIds = new Set<string>();
+    if (boundTask) visibleAccountIds.add(`acct:task:${boundTask}`);
+    for (const r of reservations) {
+      visibleAccountIds.add(r.task_account);
+      visibleAccountIds.add(r.day_account);
+    }
+    const allAccounts = config.host.govDb
+      .prepare("SELECT * FROM budget_accounts ORDER BY account_id ASC")
+      .all() as unknown as BudgetAccountRow[];
+    const accounts = allAccounts.filter((a) => visibleAccountIds.has(a.account_id));
+
+    const budgetDenials = listBudgetDenialsForConversation(config.host.govDb, convIdStr, targetEpoch);
+
+    // R3/G1: ONLY read live Pi trace DB when inspecting the ACTIVE epoch!
+    const isActiveEpoch = targetEpoch === activeEpoch;
+    const live = isActiveEpoch
+      ? await config.host.readConversationLiveState(convIdStr)
+      : { messages: [], livePartial: null, activeTools: [], workerTasks: [] };
+
+    const sources = listConversationSources(config.host.govDb, targetEpoch, convIdStr).map((s) => ({
+      recordId: s.record_id,
+      sourceType: s.source_type,
+      sourceId: s.source_id,
+      versionRef: s.version_ref,
+      title: s.title,
+      contentDigest: s.content_digest,
+      metadata: JSON.parse(s.metadata_json) as Record<string, unknown>,
+      parentSourceIds: JSON.parse(s.parent_source_ids_json) as string[],
+      createdAt: s.created_at,
+    }));
+
+    const fileImports = listManagedFileImportsForConversation(
+      config.host.govDb,
+      targetEpoch,
+      [...relatedConvIds],
+    ).map((f) => ({
+      importId: f.import_id,
+      logicalKey: f.logical_key,
+      targetRelPath: f.target_rel_path,
+      baseSha256: f.base_sha256,
+      artifactSha256: f.artifact_sha256,
+      artifactBytes: f.artifact_bytes,
+      volumeName: f.volume_name,
+      state: f.state,
+      conflictRelPath: f.conflict_rel_path,
+      installCount: f.install_count,
+      reason: f.reason,
+      createdAt: f.created_at,
+      updatedAt: f.updated_at,
+    }));
+
+    const extra = config.augmentSnapshot
+      ? config.augmentSnapshot({ principalId, runtimeEpoch: targetEpoch, conversationId: convIdStr })
+      : {};
+
+    return {
+      conversationId: convIdStr,
+      scopeId: convScope.scope_id,
+      runtimeEpoch: targetEpoch,
+      activeRuntimeEpoch: activeEpoch,
+      isActiveEpoch,
+      health: config.host.health,
+      proposals,
+      chatCommands,
+      sources,
+      fileImports,
+      budgetAccounts: accounts,
+      budgetReservations: reservations,
+      budgetDenials,
+      messages: live.messages,
+      livePartial: live.livePartial,
+      activeTools: live.activeTools,
+      workerTasks: live.workerTasks,
+      ...extra,
+    };
+  }
+
+  const projectionHub = new ConversationProjectionHub<Record<string, unknown>>({
+    buildSnapshot: buildAuthoritativeSnapshot,
+    attachPiObserver: async ({ runtimeEpoch, conversationId, onUpdate, onEnd }) => {
+      // Only attach live Pi observer for the active epoch
+      if (runtimeEpoch !== config.host.runtimeEpoch) {
+        return null;
+      }
+      return await config.host.attachConversationObserver({
+        conversationId,
+        onUpdate,
+        onEnd,
+      });
+    },
+    maxHistory: config.maxSseHistory ?? 200,
+    maxClientQueue: config.maxSseClientQueue ?? 32,
+    now: nowFn,
+  });
+
+  // Subscribe host runtime changes so background worker completions and governance mutations push into projections
+  const offHostChanges = config.host.onConversationChange((ev) => {
+    void projectionHub.notifyConversationChanged({
+      runtimeEpoch: config.host.runtimeEpoch,
+      conversationId: ev.conversationId,
+      reason: ev.kind,
+      detail: ev.detail,
+    });
+  });
 
   const app = new Hono<{ Variables: { authSession: AuthSession } }>();
 
@@ -139,6 +411,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       runtimeEpoch: config.host.runtimeEpoch,
       recoveredSubmittingToUnknown: config.host.startupReport.recoveredSubmittingToUnknown,
       reconciledQuarantinedEffects: config.host.startupReport.reconciledQuarantinedEffects,
+      reconciledChatCommands: config.host.startupReport.reconciledChatCommands,
       chargedBoundReservations: config.host.startupReport.chargedBoundReservations,
       selfCheckErrors: config.host.startupReport.selfCheckErrors,
       pairedCheckOk: config.host.startupReport.pairedCheck.ok,
@@ -154,7 +427,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     if (typeof body.token !== "string" || body.token.length === 0) {
       return c.json({ error: "invalid_credentials" }, 401);
     }
-    // G1: Always derive principalId strictly from host-bound credential match (never trust request body principalId!)
+    // G1: Always derive principalId strictly from host-bound credential match
     let matchedPrincipal: string | null = null;
     for (const cred of principalCredentials) {
       if (constantTimeTokenMatch(cred.token, body.token)) {
@@ -191,7 +464,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   app.post("/api/auth/logout", (c) => {
     const session = c.get("authSession");
     revokeWebSession(config.host.govDb, session.tokenDigest, nowFn());
-    for (const closer of activeSseClosers) closer();
+    projectionHub.closeStreamsForSession(session.tokenDigest);
     c.header("set-cookie", buildClearSessionCookie());
     return c.json({ ok: true });
   });
@@ -214,6 +487,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       created_at: number;
     }>;
     return c.json({
+      activeRuntimeEpoch: activeEpoch,
       conversations: rows.map((r) => ({
         conversationId: r.conversation_id,
         scopeId: r.scope_id,
@@ -242,14 +516,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         return c.json({ error: "forbidden_scope" }, 403);
       }
     }
-    // R1: Never accept client-supplied budgetTaskId on ordinary Web routes; host always owns the budget binding!
     const conv = await config.host.createManagedConversation({
       principalId: session.principalId,
       slotName: body.slotName,
       scopeId: body.scopeId,
     });
     const budgetTaskId = config.host.getConversationBudgetTaskId(String(conv.id), config.host.runtimeEpoch);
-    snapshotVersion++;
     return c.json({
       ok: true,
       conversationId: String(conv.id),
@@ -258,45 +530,72 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     });
   });
 
-  function verifyActiveEpochConversationAccess(convIdStr: string, principalId: string): boolean {
-    const activeEpoch = config.host.runtimeEpoch;
-    const convScope = config.host.govDb
-      .prepare(
-        "SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
-      )
-      .get(activeEpoch, convIdStr) as { scope_id: string; principal_id: string } | undefined;
-    if (!convScope || convScope.principal_id !== principalId) {
-      return false;
-    }
-    const scope = config.host.govDb
-      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
-      .get(convScope.scope_id) as ScopeRow | undefined;
-    return Boolean(scope && isPrincipalAuthorizedForScope(scope, principalId));
-  }
-
+  // V04: Idempotent cross-DB chat admission requiring explicit runtimeEpoch and chatKey
   app.post("/api/conversations/:id/chat", async (c) => {
     if (!config.host.isAcceptingCommands) {
       return c.json({ error: "host_not_ready", health: config.host.health }, 503);
     }
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
-    if (!verifyActiveEpochConversationAccess(convIdStr, session.principalId)) {
-      return c.json({ error: "forbidden" }, 403);
-    }
-    const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      content?: string;
+      chatKey?: string;
+      runtimeEpoch?: string;
+    };
     if (!body.content || typeof body.content !== "string") {
       return c.json({ error: "missing_content" }, 400);
     }
-    // R1: Ordinary Web chat always uses the conversation's host-owned budget binding.
-    const res = await config.host.submitChatInput({
+    if (!body.chatKey || typeof body.chatKey !== "string" || body.chatKey.trim().length === 0) {
+      return c.json({ error: "missing_chat_key" }, 400);
+    }
+    if (!body.runtimeEpoch || typeof body.runtimeEpoch !== "string" || body.runtimeEpoch.trim().length === 0) {
+      return c.json({ error: "missing_runtime_epoch" }, 400);
+    }
+
+    const res = await config.host.submitChatCommand({
+      principalId: session.principalId,
+      runtimeEpoch: body.runtimeEpoch.trim(),
       conversationId: convIdStr,
+      chatKey: body.chatKey.trim(),
       content: body.content,
     });
-    if (!res.ok) {
-      return c.json({ error: res.code }, 404);
+
+    if (res.ok) {
+      await projectionHub.notifyConversationChanged({
+        runtimeEpoch: config.host.runtimeEpoch,
+        conversationId: convIdStr,
+        reason: "chat_command",
+        detail: { commandId: res.commandId, status: res.status },
+      });
     }
-    snapshotVersion++;
-    return c.json({ ok: true, submissionId: res.submissionId, conversationId: convIdStr });
+
+    return c.json(
+      res.ok
+        ? {
+            ok: true,
+            code: res.code,
+            idempotentReplay: Boolean(res.idempotentReplay),
+            commandId: res.commandId,
+            chatKey: res.chatKey,
+            piRequestId: res.piRequestId,
+            submissionId: res.submissionId,
+            status: res.status,
+            uiStatusLabel: res.uiStatusLabel,
+            conversationId: convIdStr,
+            runtimeEpoch: res.runtimeEpoch,
+          }
+        : {
+            ok: false,
+            error: res.code,
+            code: res.code,
+            message: res.message,
+            commandId: res.commandId,
+            status: res.status,
+            uiStatusLabel: res.uiStatusLabel,
+            runtimeEpoch: res.runtimeEpoch,
+          },
+      res.httpStatus,
+    );
   });
 
   app.post("/api/conversations/:id/compact", async (c) => {
@@ -309,7 +608,6 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       return c.json({ error: "forbidden" }, 403);
     }
     const body = (await c.req.json().catch(() => ({}))) as { instructions?: string };
-    // R1: Ordinary Web compaction ALWAYS uses the conversation's host-owned budget binding (ignores any client budgetTaskId!).
     const res = await config.host.triggerCompaction({
       conversationId: convIdStr,
       instructions: body.instructions,
@@ -317,144 +615,32 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     if (!res.ok) {
       return c.json({ error: res.code }, 404);
     }
-    snapshotVersion++;
+    await projectionHub.notifyConversationChanged({
+      runtimeEpoch: config.host.runtimeEpoch,
+      conversationId: convIdStr,
+      reason: "compaction_triggered",
+    });
     return c.json({ ok: true, compactionTaskId: res.compactionTaskId, conversationId: convIdStr });
   });
-
-  /**
-   * Builds the authoritative conversation snapshot scoped strictly to (targetEpoch, conversationId).
-   * R3/G1: Enforces epoch-scoped conversation ACLs; live Pi transcript is read ONLY for the active epoch
-   * so retired-epoch principals can inspect their own historical governance records without ever reading
-   * a reused numeric conversation ID's new-epoch transcript!
-   * G3: Plaintext approval nonce is NEVER included here (zero exposure in SSE frames or general snapshots).
-   */
-  async function buildAuthoritativeSnapshot(convIdStr: string, principalId: string, requestedEpoch?: string) {
-    const activeEpoch = config.host.runtimeEpoch;
-    const targetEpoch = requestedEpoch && requestedEpoch.trim().length > 0 ? requestedEpoch.trim() : activeEpoch;
-    const convScope = config.host.govDb
-      .prepare(
-        "SELECT scope_id, principal_id, runtime_epoch FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
-      )
-      .get(targetEpoch, convIdStr) as { scope_id: string; principal_id: string; runtime_epoch: string } | undefined;
-    if (!convScope || convScope.principal_id !== principalId) {
-      return null;
-    }
-    const scope = config.host.govDb
-      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
-      .get(convScope.scope_id) as ScopeRow | undefined;
-    if (!scope || !isPrincipalAuthorizedForScope(scope, principalId)) {
-      return null;
-    }
-
-    const proposalRows = config.host.govDb
-      .prepare(
-        `SELECT * FROM proposals
-          WHERE runtime_epoch = ? AND conversation_id = ?
-          ORDER BY created_at ASC`,
-      )
-      .all(targetEpoch, convIdStr) as unknown as ProposalRow[];
-
-    const proposals = proposalRows.map((p) => {
-      const draft = config.host.govDb
-        .prepare("SELECT * FROM draft_revisions WHERE proposal_id = ? AND revision = ?")
-        .get(p.proposal_id, p.head_rev) as unknown as DraftRevisionRow;
-      const apr = config.host.govDb
-        .prepare("SELECT * FROM approvals WHERE proposal_id = ? AND revision = ?")
-        .get(p.proposal_id, p.head_rev) as unknown as ApprovalRow;
-      const hasChallenge =
-        apr.state === "PENDING" &&
-        Boolean(
-          config.host.govDb
-            .prepare("SELECT 1 AS ok FROM approval_challenges WHERE approval_id = ?")
-            .get(apr.approval_id),
-        );
-      const effect = config.host.govDb
-        .prepare("SELECT * FROM effects WHERE approval_id = ?")
-        .get(apr.approval_id) as EffectRow | undefined;
-
-      return {
-        proposalId: p.proposal_id,
-        runtimeEpoch: p.runtime_epoch,
-        conversationId: p.conversation_id,
-        toolTaskId: p.tool_task_id,
-        callId: p.call_id,
-        toolName: p.tool_name,
-        target: p.target,
-        revision: p.head_rev,
-        actionHash: draft.action_hash,
-        snapshot: JSON.parse(draft.canonical_snapshot) as Record<string, unknown>,
-        approvalId: apr.approval_id,
-        approvalState: apr.state,
-        hasChallenge,
-        effect: effect
-          ? {
-              effectId: effect.effect_id,
-              state: effect.state,
-              claimedAt: effect.claimed_at,
-              receiptRef: effect.receipt_ref,
-              reason: effect.reason,
-              reconciledBy: effect.reconciled_by,
-              reconcileEvidence: effect.reconcile_evidence,
-            }
-          : null,
-        uiStatusLabel: uiStatusLabelFor(apr.state, effect?.state ?? null),
-      };
-    });
-
-    const reservations = config.host.govDb
-      .prepare(
-        `SELECT * FROM budget_reservations
-          WHERE runtime_epoch = ? AND conversation_id = ?
-          ORDER BY reserved_at ASC`,
-      )
-      .all(targetEpoch, convIdStr) as unknown as BudgetReservationRow[];
-
-    const visibleAccountIds = new Set<string>();
-    const boundTask = config.host.getConversationBudgetTaskId(convIdStr, targetEpoch);
-    if (boundTask) visibleAccountIds.add(`acct:task:${boundTask}`);
-    for (const r of reservations) {
-      visibleAccountIds.add(r.task_account);
-      visibleAccountIds.add(r.day_account);
-    }
-    const allAccounts = config.host.govDb
-      .prepare("SELECT * FROM budget_accounts ORDER BY account_id ASC")
-      .all() as unknown as BudgetAccountRow[];
-    const accounts = allAccounts.filter((a) => visibleAccountIds.has(a.account_id));
-
-    const budgetDenials = listBudgetDenialsForConversation(config.host.govDb, convIdStr, targetEpoch);
-
-    // R3/G1: ONLY read live Pi trace DB when inspecting the ACTIVE epoch!
-    const isActiveEpoch = targetEpoch === activeEpoch;
-    const messages = isActiveEpoch ? await config.host.readConversationMessages(convIdStr) : [];
-
-    return {
-      conversationId: convIdStr,
-      scopeId: convScope.scope_id,
-      runtimeEpoch: targetEpoch,
-      activeRuntimeEpoch: activeEpoch,
-      isActiveEpoch,
-      health: config.host.health,
-      snapshotVersion,
-      proposals,
-      budgetAccounts: accounts,
-      budgetReservations: reservations,
-      budgetDenials,
-      messages,
-    };
-  }
 
   app.get("/api/conversations/:id/snapshot", async (c) => {
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
     const requestedEpoch = c.req.query("epoch");
-    const snap = await buildAuthoritativeSnapshot(convIdStr, session.principalId, requestedEpoch);
-    if (!snap) {
+    const targetEpoch =
+      requestedEpoch && requestedEpoch.trim().length > 0 ? requestedEpoch.trim() : config.host.runtimeEpoch;
+    const envelope = await projectionHub.getSnapshotAndCursor({
+      principalId: session.principalId,
+      runtimeEpoch: targetEpoch,
+      conversationId: convIdStr,
+    });
+    if (!envelope) {
       return c.json({ error: "forbidden_or_not_found" }, 403);
     }
-    return c.json(snap);
+    return c.json({ ...envelope.snapshot, serverNow: nowFn() });
   });
 
-  // G3: Dedicated authorized endpoint to fetch single-use approval challenge nonce (never in SSE/URL/logs)
+  // G3: Dedicated authorized endpoint to fetch single-use approval challenge nonce
   app.post("/api/approvals/:id/challenge", async (c) => {
     const session = c.get("authSession");
     const approvalId = c.req.param("id");
@@ -497,8 +683,14 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       expiresAt: nowFn() + 30 * 60 * 1000,
       now: nowFn(),
     });
-    if (res.ok) snapshotVersion++;
-    // Do not return plaintext nonce in generic edit response; decision UI fetches via /api/approvals/:id/challenge
+    if (res.ok) {
+      await projectionHub.notifyConversationChanged({
+        runtimeEpoch: config.host.runtimeEpoch,
+        conversationId: body.conversationId,
+        reason: "draft_revision_saved",
+        detail: { proposalId, revision: res.revision?.revision },
+      });
+    }
     const { nonce: _omitted, ...safeRes } = res;
     void _omitted;
     return c.json(safeRes, res.httpStatus);
@@ -544,8 +736,19 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       injectCrashBeforeCommit: config.injectBeforeT2Commit,
     });
 
+    if (res.ok || res.httpStatus === 410) {
+      await projectionHub.notifyConversationChanged({
+        runtimeEpoch: config.host.runtimeEpoch,
+        conversationId: body.conversationId,
+        reason: "approval_decided",
+        detail: {
+          approvalId: body.approvalId,
+          approvalState: res.approvalState,
+          effectId: res.effectId ?? null,
+        },
+      });
+    }
     if (res.ok) {
-      snapshotVersion++;
       void config.host.deliverPendingOutbox({ respectPause: true }).catch(() => {});
     }
 
@@ -587,7 +790,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       return c.json({ error: "runtime_epoch_retired" }, 409);
     }
     const result = await config.host.replayApprovalSignal(approvalId);
-    snapshotVersion++;
+    await projectionHub.notifyConversationChanged({
+      runtimeEpoch: lineage.runtime_epoch,
+      conversationId: lineage.conversation_id,
+      reason: "signal_redelivered",
+    });
     return c.json({ ok: true, ...result });
   });
 
@@ -610,7 +817,9 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       receiptRef: body.receiptRef,
       now: nowFn(),
     });
-    if (res.ok) snapshotVersion++;
+    if (res.ok) {
+      await projectionHub.notifyAllActive("effect_reconciled");
+    }
     return c.json(res, res.httpStatus);
   });
 
@@ -625,52 +834,104 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       markCancelled: body.markCancelled,
       now: nowFn(),
     });
-    if (res.ok) snapshotVersion++;
+    if (res.ok) {
+      await projectionHub.notifyAllActive("scope_revoked");
+    }
     return c.json(res, res.httpStatus);
   });
 
+  // V05: Principal-, epoch-, and conversation-scoped SSE with cursor continuity & Last-Event-ID
   app.get("/api/conversations/:id/events", async (c) => {
     const session = c.get("authSession");
     const convIdStr = c.req.param("id");
     const requestedEpoch = c.req.query("epoch");
-    const initial = await buildAuthoritativeSnapshot(convIdStr, session.principalId, requestedEpoch);
-    if (!initial) {
+    const targetEpoch =
+      requestedEpoch && requestedEpoch.trim().length > 0 ? requestedEpoch.trim() : config.host.runtimeEpoch;
+    const cursorRaw = c.req.header("last-event-id") ?? c.req.query("cursor") ?? null;
+
+    if (!verifyConversationAccess(targetEpoch, convIdStr, session.principalId)) {
       return c.json({ error: "forbidden_or_not_found" }, 403);
     }
+
+    const subRes = await projectionHub.openSubscription({
+      tokenDigest: session.tokenDigest,
+      principalId: session.principalId,
+      runtimeEpoch: targetEpoch,
+      conversationId: convIdStr,
+      cursorRaw,
+    });
+
+    if (!subRes.ok) {
+      if (subRes.resyncReason === "forbidden_or_not_found") {
+        return c.json({ error: "forbidden_or_not_found" }, 403);
+      }
+      return streamSSE(c, async (stream) => {
+        await stream.writeSSE({
+          event: "resync",
+          data: JSON.stringify({
+            reason: subRes.resyncReason,
+            streamInstanceId: subRes.streamInstanceId ?? null,
+            currentSeq: subRes.currentSeq ?? null,
+          }),
+        });
+      });
+    }
+
+    const { subscriber, unsubscribe } = subRes;
+
+    const isSessionAndAclStillValid = (): boolean => {
+      const stillValid = config.host.govDb
+        .prepare("SELECT revoked_at, expires_at FROM sessions WHERE token_digest = ?")
+        .get(session.tokenDigest) as { revoked_at: number | null; expires_at: number } | undefined;
+      if (!stillValid || stillValid.revoked_at !== null || nowFn() >= stillValid.expires_at) {
+        return false;
+      }
+      return verifyConversationAccess(targetEpoch, convIdStr, session.principalId);
+    };
+
     return streamSSE(c, async (stream) => {
-      let open = true;
-      const closeMe = (): void => {
-        open = false;
-      };
-      activeSseClosers.add(closeMe);
+      stream.onAbort(() => {
+        unsubscribe();
+      });
       try {
-        let lastSentVersion = -1;
-        while (open) {
-          const stillValid = config.host.govDb
-            .prepare("SELECT revoked_at, expires_at FROM sessions WHERE token_digest = ?")
-            .get(session.tokenDigest) as { revoked_at: number | null; expires_at: number } | undefined;
-          if (!stillValid || stillValid.revoked_at !== null || nowFn() >= stillValid.expires_at) {
+        for (;;) {
+          if (!isSessionAndAclStillValid()) {
             break;
           }
-          if (snapshotVersion !== lastSentVersion) {
-            const snap = await buildAuthoritativeSnapshot(convIdStr, session.principalId, requestedEpoch);
-            if (!snap) break;
-            lastSentVersion = snap.snapshotVersion;
+          while (subscriber.queue.length > 0) {
+            if (!isSessionAndAclStillValid()) {
+              subscriber.queue.length = 0;
+              return;
+            }
+            const frame = subscriber.queue.shift()!;
             await stream.writeSSE({
-              id: String(snap.snapshotVersion),
-              event: "snapshot",
-              data: JSON.stringify(snap),
+              event: frame.event,
+              ...(frame.id ? { id: frame.id } : {}),
+              data: frame.data,
             });
+            if (frame.event === "resync") {
+              return;
+            }
           }
-          await stream.sleep(200);
+          if (subscriber.closed) {
+            break;
+          }
+          await new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, 100);
+            subscriber.wake = () => {
+              clearTimeout(t);
+              subscriber.wake = null;
+              resolve();
+            };
+          });
         }
       } finally {
-        activeSseClosers.delete(closeMe);
+        unsubscribe();
       }
     });
   });
 
-  const server = await new Promise<ServerType>((resolve) => {
+  const server = await new Promise<ServerType>((resolve, reject) => {
     const srv = serve(
       {
         fetch: app.fetch,
@@ -679,17 +940,24 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       },
       (info) => {
         boundPort = info.port;
+        srv.off("error", onErr);
         resolve(srv);
       },
     );
+    const onErr = (err: Error): void => {
+      reject(err);
+    };
+    srv.once("error", onErr);
   });
 
   return {
     server,
     port: boundPort,
     baseUrl: `http://${bindHost}:${boundPort}`,
+    projectionHub,
     close: async () => {
-      for (const closer of activeSseClosers) closer();
+      offHostChanges();
+      projectionHub.closeAll();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
       });

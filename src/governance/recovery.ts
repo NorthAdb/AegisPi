@@ -312,6 +312,13 @@ export function isolateAndRotateEpoch(
       }
     }
 
+    // Mark any unconfirmed REGISTERED chat commands of the retired epoch as PENDING_RECONCILE
+    db.prepare(
+      `UPDATE chat_commands
+          SET status = 'PENDING_RECONCILE', reason = ?, updated_at = ?
+        WHERE runtime_epoch = ? AND status = 'REGISTERED'`,
+    ).run(`epoch_retired:${params.reason}`, params.now, oldEpoch.runtime_epoch);
+
     // Preserve all HELD budget reservations untouched (audit + conservative bound path)
     const heldRows = db
       .prepare("SELECT request_id FROM budget_reservations WHERE runtime_epoch = ? AND state = 'HELD'")

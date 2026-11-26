@@ -1346,7 +1346,7 @@ async function testE02(rootDir: string): Promise<MatrixCaseResult> {
     await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
-      body: JSON.stringify({ content: "trigger e02" }),
+      body: JSON.stringify({ content: "trigger e02", chatKey: "matrix-e02-chat", runtimeEpoch: proc1.runtimeEpoch }),
     });
 
     // Wait for pending proposal
@@ -1536,7 +1536,7 @@ async function testE03(rootDir: string): Promise<MatrixCaseResult> {
     await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
-      body: JSON.stringify({ content: "trigger e03" }),
+      body: JSON.stringify({ content: "trigger e03", chatKey: "matrix-e03-chat", runtimeEpoch: proc1.runtimeEpoch }),
     });
 
     let card: { approvalId: string; revision: number; actionHash: string } | null = null;
@@ -2001,7 +2001,7 @@ async function testE05(rootDir: string): Promise<MatrixCaseResult> {
     await fetch(`${proc1.baseUrl}/api/conversations/${conversationId}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: login1.cookie, origin: proc1.baseUrl },
-      body: JSON.stringify({ content: "trigger e05" }),
+      body: JSON.stringify({ content: "trigger e05", chatKey: "matrix-e05-chat", runtimeEpoch: proc1.runtimeEpoch }),
     });
 
     let card: { approvalId: string; revision: number; actionHash: string } | null = null;

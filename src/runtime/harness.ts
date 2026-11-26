@@ -17,8 +17,19 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import {
   ensureScope,
   expireOverdueApprovals,
+  isPrincipalAuthorizedForScope,
   registerConversationScope,
+  type ScopeRow,
 } from "../governance/approvals.ts";
+import {
+  chatCommandUiStatusLabel,
+  listUnreconciledChatCommands,
+  markChatCommandPendingReconcile,
+  recordChatCommandAdmitted,
+  registerOrLookupChatCommand,
+  type ChatCommandRow,
+  type ChatCommandStatus,
+} from "../governance/chat-commands.ts";
 import {
   chargeBoundExpiredReservations,
   correctChargedBoundReservation,
@@ -57,7 +68,12 @@ import {
   AEGIS_POLICY_EXTENSION_NAME,
   AegisApprovalSignal,
   createAegisPolicyExtension,
+  type ManagedWorkspaceWriteHandler,
 } from "./extensions/aegis-policy.ts";
+import { createAegisContextExtension } from "./extensions/aegis-context.ts";
+import type { ImapEndpointConfig } from "../capabilities/mail/imap-client.ts";
+import { inheritConversationSources } from "../governance/policy.ts";
+import type { GitHubMcpBridge } from "./mcp-bridge.ts";
 import {
   createHostModelsEgress,
   type HostModelsController,
@@ -76,7 +92,11 @@ export interface AegisHostConfig {
   smtpConfig: SmtpEndpointConfig;
   defaultPrincipalId?: string;
   defaultScopeId?: string;
+  defaultMemoryDomain?: string;
   allowedEmailTargets?: string[];
+  imapEndpoint?: ImapEndpointConfig | (() => ImapEndpointConfig | null);
+  githubMcpBridge?: GitHubMcpBridge | (() => GitHubMcpBridge | null);
+  workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
   now?: () => number;
   zone?: string;
   defaultTaskLimitMu?: number;
@@ -129,6 +149,31 @@ export interface AegisHostConfig {
     upperMu: number;
     method: "streamSimple" | "completeSimple";
   }) => void;
+  /** V04 deterministic test barriers */
+  onAfterChatGovRegister?: (cmd: ChatCommandRow) => void | Promise<void>;
+  onAfterPiAdmitBeforeGovReceipt?: (info: {
+    commandId: string;
+    piRequestId: string;
+    submissionId: number;
+    conversationId: string;
+  }) => void | Promise<void>;
+  onAfterChatGovReceiptBeforeHttp?: (info: {
+    commandId: string;
+    piRequestId: string;
+    submissionId: number;
+    conversationId: string;
+  }) => void | Promise<void>;
+  injectChatReconcileReadFailure?: (cmd: ChatCommandRow) => string | null;
+}
+
+export interface ChatCommandReconcileReport {
+  commandId: string;
+  chatKey: string;
+  conversationId: string;
+  piRequestId: string;
+  outcome: "admitted_backfilled" | "kept_registered" | "pending_reconcile";
+  submissionId?: number | null;
+  reason?: string;
 }
 
 export interface StartupReport {
@@ -141,8 +186,46 @@ export interface StartupReport {
   chargedBoundReservations: string[];
   pairedCheck: PairedCheckResult;
   reconciledQuarantinedEffects: string[];
+  reconciledChatCommands: ChatCommandReconcileReport[];
   selfCheckErrors: string[];
   schedulingBeforeRelease: "paused" | "running" | "closing" | null;
+}
+
+export interface ConversationLiveChange {
+  conversationId: string;
+  kind: "pi_view" | "pi_task_graph" | "worker_completed" | "governance";
+  detail?: Record<string, unknown>;
+}
+
+export interface ConversationLiveSummary {
+  messages: Array<{ role: string; content: unknown }>;
+  livePartial: { text: string; attempt: number } | null;
+  activeTools: Array<{ callId: string; name: string; status: string }>;
+  workerTasks: Array<{
+    workerConversationId: string;
+    parentConversationId: string;
+    ownerTaskId: string;
+    status: "running" | "done" | "error";
+    slotName: string;
+    summary?: string;
+    updatedAt: number;
+  }>;
+}
+
+export interface SubmitChatCommandResult {
+  ok: boolean;
+  httpStatus: 200 | 202 | 400 | 403 | 404 | 409 | 503;
+  code: string;
+  message?: string;
+  idempotentReplay?: boolean;
+  commandId?: string;
+  chatKey?: string;
+  piRequestId?: string;
+  submissionId?: number | null;
+  status?: ChatCommandStatus;
+  uiStatusLabel?: string;
+  conversationId?: string;
+  runtimeEpoch?: string;
 }
 
 /**
@@ -220,6 +303,20 @@ export class AegisHostRuntime {
   readonly #taskBudgetOwner = new Map<number, { ownerTaskId: string; purpose: BudgetPurpose; conversationId: string }>();
   readonly #conversationBudgetOwner = new Map<number, { ownerTaskId: string; purpose: BudgetPurpose }>();
   readonly #knownTaskConversation = new Map<number, number>();
+  readonly #inFlightChatAdmissions = new Map<string, Promise<SubmitChatCommandResult>>();
+  readonly #changeListeners = new Set<(ev: ConversationLiveChange) => void>();
+  readonly #workerTasksByParent: Map<
+    string,
+    Array<{
+      workerConversationId: string;
+      parentConversationId: string;
+      ownerTaskId: string;
+      status: "running" | "done" | "error";
+      slotName: string;
+      summary?: string;
+      updatedAt: number;
+    }>
+  >;
   readonly #defaultPrincipalId: string;
   readonly #defaultScopeId: string;
   readonly #now: () => number;
@@ -238,6 +335,19 @@ export class AegisHostRuntime {
     taskBudgetOwner: Map<number, { ownerTaskId: string; purpose: BudgetPurpose; conversationId: string }>;
     conversationBudgetOwner: Map<number, { ownerTaskId: string; purpose: BudgetPurpose }>;
     knownTaskConversation: Map<number, number>;
+    workerTasksByParent: Map<
+      string,
+      Array<{
+        workerConversationId: string;
+        parentConversationId: string;
+        ownerTaskId: string;
+        status: "running" | "done" | "error";
+        slotName: string;
+        summary?: string;
+        updatedAt: number;
+      }>
+    >;
+    changeListeners: Set<(ev: ConversationLiveChange) => void>;
     now: () => number;
   }) {
     this.config = params.config;
@@ -255,12 +365,31 @@ export class AegisHostRuntime {
     this.#taskBudgetOwner = params.taskBudgetOwner;
     this.#conversationBudgetOwner = params.conversationBudgetOwner;
     this.#knownTaskConversation = params.knownTaskConversation;
+    this.#workerTasksByParent = params.workerTasksByParent;
+    this.#changeListeners = params.changeListeners;
     this.#defaultPrincipalId = params.config.defaultPrincipalId ?? "owner";
     this.#defaultScopeId = params.config.defaultScopeId ?? "scope:default";
     this.#now = params.now;
 
     if (this.#health === "READY") {
       this.#startMaintenanceLoop();
+    }
+  }
+
+  onConversationChange(listener: (ev: ConversationLiveChange) => void): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
+  }
+
+  emitConversationChange(ev: ConversationLiveChange): void {
+    for (const fn of [...this.#changeListeners]) {
+      try {
+        fn(ev);
+      } catch {
+        // never break caller on listener error
+      }
     }
   }
 
@@ -418,6 +547,39 @@ export class AegisHostRuntime {
       >();
       const conversationBudgetOwner = new Map<number, { ownerTaskId: string; purpose: BudgetPurpose }>();
       const knownTaskConversation = new Map<number, number>();
+      const workerTasksByParent = new Map<
+        string,
+        Array<{
+          workerConversationId: string;
+          parentConversationId: string;
+          ownerTaskId: string;
+          status: "running" | "done" | "error";
+          slotName: string;
+          summary?: string;
+          updatedAt: number;
+        }>
+      >();
+      const parentByWorkerConv = new Map<string, string>();
+      const changeListeners = new Set<(ev: ConversationLiveChange) => void>();
+      const emitChange = (ev: ConversationLiveChange): void => {
+        for (const fn of [...changeListeners]) {
+          try {
+            fn(ev);
+          } catch {
+            // ignore listener error
+          }
+        }
+        const parentCid = parentByWorkerConv.get(ev.conversationId);
+        if (parentCid && parentCid !== ev.conversationId) {
+          for (const fn of [...changeListeners]) {
+            try {
+              fn({ ...ev, conversationId: parentCid });
+            } catch {
+              // ignore listener error
+            }
+          }
+        }
+      };
       let harnessRef: HarnessInstance | null = null;
 
       // Hydrate persisted budget task bindings for the active epoch from aegis-gov.sqlite (survives restarts!)
@@ -509,6 +671,17 @@ export class AegisHostRuntime {
         return null;
       };
 
+      const resolveScopeRow = (conversationId: string): { scopeId: string; principalId: string } => {
+        const row = govDb!
+          .prepare("SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+          .get(epochBox.current, conversationId) as { scope_id: string; principal_id: string } | undefined;
+        return {
+          scopeId: row?.scope_id ?? defaultScopeId,
+          principalId: row?.principal_id ?? defaultPrincipalId,
+        };
+      };
+      const resolveScopeId = (conversationId: string): string => resolveScopeRow(conversationId).scopeId;
+
       const modelsController = createHostModelsEgress({
         govDb,
         getRuntimeEpoch: () => epochBox.current,
@@ -516,6 +689,7 @@ export class AegisHostRuntime {
         telemetry,
         slots: config.modelSlots,
         resolveBudgetOwner,
+        resolveConversationAuth: (conversationId) => resolveScopeRow(conversationId),
         now: nowFn,
         zone: config.zone,
         defaultTaskLimitMu: config.defaultTaskLimitMu,
@@ -529,25 +703,30 @@ export class AegisHostRuntime {
         onReservationRecorded: config.onReservationRecorded,
       });
 
-      const resolveScopeRow = (conversationId: string): { scopeId: string; principalId: string } => {
-        const row = govDb!
-          .prepare("SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
-          .get(epochBox.current, conversationId) as { scope_id: string; principal_id: string } | undefined;
-        return {
-          scopeId: row?.scope_id ?? defaultScopeId,
-          principalId: row?.principal_id ?? defaultPrincipalId,
-        };
-      };
-      const resolveScopeId = (conversationId: string): string => resolveScopeRow(conversationId).scopeId;
-
       const workerSlot = config.modelSlots.find((s) => s.slotName === "worker") ?? config.modelSlots[0];
+      const routerSlot = config.modelSlots.find((s) => s.slotName === "router") ?? config.modelSlots[0];
       const registry = createRegistry();
       if (!config.faultInjectMissingPolicyHook) {
+        let contextExtRef: ReturnType<typeof createAegisContextExtension> | null = null;
         const policyExt = createAegisPolicyExtension({
           govDb,
+          vault: config.vault,
           getRuntimeEpoch: () => epochBox.current,
           resolveScopeId,
+          resolveConversationAuth: (conversationId) => resolveScopeRow(conversationId),
           smtpConfig: config.smtpConfig,
+          imapEndpoint: () =>
+            typeof config.imapEndpoint === "function"
+              ? config.imapEndpoint()
+              : (config.imapEndpoint ?? null),
+          githubMcpBridge: () =>
+            typeof config.githubMcpBridge === "function"
+              ? config.githubMcpBridge()
+              : (config.githubMcpBridge ?? null),
+          workspaceWriteHandler: config.workspaceWriteHandler,
+          onGovernanceMutated: (conversationId, reason) => {
+            emitChange({ conversationId, kind: "governance", detail: { reason } });
+          },
           now: nowFn,
           onBeforeToolAfterProposal: config.onBeforeToolAfterProposal,
           onAfterClaimBeforeTransport: config.onAfterClaimBeforeTransport,
@@ -558,7 +737,6 @@ export class AegisHostRuntime {
               return { ok: false, text: "", error: "Harness or worker slot unavailable" };
             }
             const activeEpoch = epochBox.current;
-            // Authoritatively inherit parent's host budget task; NEVER trust model args or mint a fresh default task!
             const parentTidNum = Number(parentTaskId);
             const parentCidNum = Number(parentConversationId);
             const parentOwnerTaskId =
@@ -589,7 +767,7 @@ export class AegisHostRuntime {
                 ownership: { kind: "ownerless" },
                 agent: {
                   model: { provider: workerSlot.provider, modelId: workerSlot.modelId },
-                  extensions: [],
+                  extensions: contextExtRef ? [policyExt, contextExtRef] : [policyExt],
                 },
               },
               BACKGROUND_CONTEXT,
@@ -615,8 +793,50 @@ export class AegisHostRuntime {
               runtimeEpoch: activeEpoch,
               now: nowFn(),
             });
+            // Inherit parent provenance/taint into worker BEFORE worker model call (V02 disclosure propagation!)
+            inheritConversationSources(govDb!, {
+              runtimeEpoch: activeEpoch,
+              fromConversationId: parentConversationId,
+              toConversationId: String(workerConv.id),
+              principalId: parentScope.principalId,
+              now: nowFn(),
+            });
+            const workerEntry: {
+              workerConversationId: string;
+              parentConversationId: string;
+              ownerTaskId: string;
+              status: "running" | "done" | "error";
+              slotName: string;
+              summary?: string;
+              updatedAt: number;
+            } = {
+              workerConversationId: String(workerConv.id),
+              parentConversationId,
+              ownerTaskId: parentOwnerTaskId,
+              status: "running",
+              slotName: workerSlot.slotName,
+              updatedAt: nowFn(),
+            };
+            const list = workerTasksByParent.get(parentConversationId) ?? [];
+            list.push(workerEntry);
+            workerTasksByParent.set(parentConversationId, list);
+            parentByWorkerConv.set(String(workerConv.id), parentConversationId);
+            emitChange({
+              conversationId: parentConversationId,
+              kind: "pi_task_graph",
+              detail: { workerConversationId: String(workerConv.id), status: "running" },
+            });
+
             const sub = await workerConv.submit({ type: "input", content: prompt }, BACKGROUND_CONTEXT);
             const settled = await sub.wait(BACKGROUND_CONTEXT);
+            // Propagate any sources read by the worker back into parent conversation provenance!
+            inheritConversationSources(govDb!, {
+              runtimeEpoch: activeEpoch,
+              fromConversationId: String(workerConv.id),
+              toConversationId: parentConversationId,
+              principalId: parentScope.principalId,
+              now: nowFn(),
+            });
             if (settled.status === "done") {
               const ctxView = await workerConv.context(BACKGROUND_CONTEXT);
               const lastMsg = [...ctxView.messages].reverse().find((m) => m.role === "assistant");
@@ -626,8 +846,24 @@ export class AegisHostRuntime {
                       .map((b) => (b.type === "text" ? b.text : ""))
                       .join("\n")
                   : "ok";
+              workerEntry.status = "done";
+              workerEntry.summary = text.slice(0, 200);
+              workerEntry.updatedAt = nowFn();
+              emitChange({
+                conversationId: parentConversationId,
+                kind: "worker_completed",
+                detail: { workerConversationId: String(workerConv.id), status: "done" },
+              });
               return { ok: true, text, workerConversationId: workerConv.id };
             }
+            workerEntry.status = "error";
+            workerEntry.summary = `worker_${settled.reason}: ${String(settled.detail ?? "")}`;
+            workerEntry.updatedAt = nowFn();
+            emitChange({
+              conversationId: parentConversationId,
+              kind: "worker_completed",
+              detail: { workerConversationId: String(workerConv.id), status: "error" },
+            });
             return {
               ok: false,
               text: "",
@@ -637,6 +873,30 @@ export class AegisHostRuntime {
           },
         });
         registry.install(policyExt);
+
+        const contextExt = createAegisContextExtension({
+          govDb,
+          getRuntimeEpoch: () => epochBox.current,
+          resolveConversationAuth: (conversationId) => {
+            const s = resolveScopeRow(conversationId);
+            return { ...s, domain: config.defaultMemoryDomain ?? "default" };
+          },
+          resolveModelDestinationForConversation: (conversationId) => {
+            const cidNum = Number(conversationId);
+            const binding = Number.isFinite(cidNum) ? conversationBudgetOwner.get(cidNum) : undefined;
+            const slot = binding?.purpose === "worker" ? workerSlot : routerSlot;
+            if (!slot) return null;
+            return {
+              provider: slot.provider,
+              modelId: slot.modelId,
+              baseUrl: slot.baseUrl,
+              slotName: slot.slotName,
+            };
+          },
+          now: nowFn,
+        });
+        contextExtRef = contextExt;
+        registry.install(contextExt);
       }
 
       // Verify installed extension & wrapped models before opening Pi
@@ -682,8 +942,10 @@ export class AegisHostRuntime {
         {
           advance: (call) => {
             if (call.kind !== "value") return;
+            const touchedConvs = new Set<string>();
             for (const node of Object.values(call.value.tasks)) {
               knownTaskConversation.set(node.id, node.conversationId);
+              touchedConvs.add(String(node.conversationId));
               if (node.owner !== undefined && !taskBudgetOwner.has(node.id)) {
                 const ownerBinding = taskBudgetOwner.get(node.owner);
                 if (ownerBinding) {
@@ -711,6 +973,9 @@ export class AegisHostRuntime {
                 }
               }
             }
+            for (const cidStr of touchedConvs) {
+              emitChange({ conversationId: cidStr, kind: "pi_task_graph" });
+            }
           },
           end: () => {},
         },
@@ -737,6 +1002,7 @@ export class AegisHostRuntime {
           chargedBoundReservations,
           pairedCheck: { ok: true, observedChangeCounter: 0 },
           reconciledQuarantinedEffects: [],
+          reconciledChatCommands: [],
           selfCheckErrors,
           schedulingBeforeRelease: inspBeforeRelease.scheduling,
         };
@@ -754,6 +1020,8 @@ export class AegisHostRuntime {
           taskBudgetOwner,
           conversationBudgetOwner,
           knownTaskConversation,
+          workerTasksByParent,
+          changeListeners,
           now: nowFn,
         });
       }
@@ -818,6 +1086,7 @@ export class AegisHostRuntime {
           chargedBoundReservations,
           pairedCheck,
           reconciledQuarantinedEffects: [],
+          reconciledChatCommands: [],
           selfCheckErrors: [`paired_trace_mismatch:${pairedCheck.code}`],
           schedulingBeforeRelease: inspBeforeRelease.scheduling,
         };
@@ -835,6 +1104,8 @@ export class AegisHostRuntime {
           taskBudgetOwner,
           conversationBudgetOwner,
           knownTaskConversation,
+          workerTasksByParent,
+          changeListeners,
           now: nowFn,
         });
       }
@@ -899,6 +1170,157 @@ export class AegisHostRuntime {
         }
       }
 
+      // 5b: V04 Chat Command cross-DB reconciliation strictly BEFORE scheduling release / intake open!
+      // Queries Pi's durable submissions via Tx.submissionByRequest (covers queued, placed, and completed submissions)
+      // without calling resume(). Never infers admission from message text or last message!
+      const reconciledChatCommands: ChatCommandReconcileReport[] = [];
+      const unreconciledChats = listUnreconciledChatCommands(govDb, epochBox.current);
+      for (const cmd of unreconciledChats) {
+        const cidNum = Number(cmd.conversation_id) as ConversationId;
+        const injectedFailure = config.injectChatReconcileReadFailure?.(cmd) ?? null;
+        if (injectedFailure) {
+          markChatCommandPendingReconcile(govDb, {
+            commandId: cmd.command_id,
+            reason: injectedFailure,
+            now: nowFn(),
+          });
+          reconciledChatCommands.push({
+            commandId: cmd.command_id,
+            chatKey: cmd.chat_key,
+            conversationId: cmd.conversation_id,
+            piRequestId: cmd.pi_request_id,
+            outcome: "pending_reconcile",
+            reason: injectedFailure,
+          });
+          continue;
+        }
+        if (!Number.isFinite(cidNum)) {
+          markChatCommandPendingReconcile(govDb, {
+            commandId: cmd.command_id,
+            reason: "invalid_conversation_id",
+            now: nowFn(),
+          });
+          reconciledChatCommands.push({
+            commandId: cmd.command_id,
+            chatKey: cmd.chat_key,
+            conversationId: cmd.conversation_id,
+            piRequestId: cmd.pi_request_id,
+            outcome: "pending_reconcile",
+            reason: "invalid_conversation_id",
+          });
+          continue;
+        }
+        try {
+          const conv = await harness.conversation(cidNum, BACKGROUND_CONTEXT);
+          if (!conv) {
+            markChatCommandPendingReconcile(govDb, {
+              commandId: cmd.command_id,
+              reason: "conversation_missing_on_reconcile",
+              now: nowFn(),
+            });
+            reconciledChatCommands.push({
+              commandId: cmd.command_id,
+              chatKey: cmd.chat_key,
+              conversationId: cmd.conversation_id,
+              piRequestId: cmd.pi_request_id,
+              outcome: "pending_reconcile",
+              reason: "conversation_missing_on_reconcile",
+            });
+            continue;
+          }
+          const subRec = await conv.commit(
+            async (tx) => tx.submissionByRequest(cidNum, cmd.pi_request_id),
+            BACKGROUND_CONTEXT,
+          );
+          if (subRec) {
+            if (subRec.type !== "input" || subRec.conversationId !== cidNum) {
+              markChatCommandPendingReconcile(govDb, {
+                commandId: cmd.command_id,
+                reason: "pi_submission_lineage_conflict",
+                now: nowFn(),
+              });
+              reconciledChatCommands.push({
+                commandId: cmd.command_id,
+                chatKey: cmd.chat_key,
+                conversationId: cmd.conversation_id,
+                piRequestId: cmd.pi_request_id,
+                outcome: "pending_reconcile",
+                reason: "pi_submission_lineage_conflict",
+              });
+            } else {
+              recordChatCommandAdmitted(govDb, {
+                commandId: cmd.command_id,
+                submissionId: Number(subRec.id),
+                reconciled: true,
+                now: nowFn(),
+              });
+              reconciledChatCommands.push({
+                commandId: cmd.command_id,
+                chatKey: cmd.chat_key,
+                conversationId: cmd.conversation_id,
+                piRequestId: cmd.pi_request_id,
+                outcome: "admitted_backfilled",
+                submissionId: Number(subRec.id),
+              });
+            }
+          } else {
+            // Provably absent on verified same-lineage active epoch: verify permission is still valid.
+            const convScope = govDb
+              .prepare(
+                "SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+              )
+              .get(epochBox.current, cmd.conversation_id) as { scope_id: string; principal_id: string } | undefined;
+            const scope = convScope
+              ? (govDb.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(convScope.scope_id) as ScopeRow | undefined)
+              : undefined;
+            const permOk =
+              Boolean(convScope && scope) &&
+              convScope!.principal_id === cmd.principal_id &&
+              scope!.cancelled === 0 &&
+              isPrincipalAuthorizedForScope(scope!, cmd.principal_id);
+            if (!permOk) {
+              markChatCommandPendingReconcile(govDb, {
+                commandId: cmd.command_id,
+                reason: "permission_invalid_during_reconcile",
+                now: nowFn(),
+              });
+              reconciledChatCommands.push({
+                commandId: cmd.command_id,
+                chatKey: cmd.chat_key,
+                conversationId: cmd.conversation_id,
+                piRequestId: cmd.pi_request_id,
+                outcome: "pending_reconcile",
+                reason: "permission_invalid_during_reconcile",
+              });
+            } else {
+              reconciledChatCommands.push({
+                commandId: cmd.command_id,
+                chatKey: cmd.chat_key,
+                conversationId: cmd.conversation_id,
+                piRequestId: cmd.pi_request_id,
+                outcome: "kept_registered",
+                reason: "provably_unadmitted_safe_to_retry",
+              });
+            }
+          }
+        } catch (err) {
+          const reason = `pi_reconcile_read_error:${err instanceof Error ? err.message : String(err)}`;
+          markChatCommandPendingReconcile(govDb, {
+            commandId: cmd.command_id,
+            reason,
+            now: nowFn(),
+          });
+          reconciledChatCommands.push({
+            commandId: cmd.command_id,
+            chatKey: cmd.chat_key,
+            conversationId: cmd.conversation_id,
+            piRequestId: cmd.pi_request_id,
+            outcome: "pending_reconcile",
+            reason,
+          });
+        }
+      }
+
       // STEP 6: Release recovery scheduling and open intake
       const report: StartupReport = {
         health: "READY",
@@ -910,6 +1332,7 @@ export class AegisHostRuntime {
         chargedBoundReservations,
         pairedCheck,
         reconciledQuarantinedEffects,
+        reconciledChatCommands,
         selfCheckErrors: [],
         schedulingBeforeRelease: inspBeforeRelease.scheduling,
       };
@@ -928,6 +1351,8 @@ export class AegisHostRuntime {
         taskBudgetOwner,
         conversationBudgetOwner,
         knownTaskConversation,
+        workerTasksByParent,
+        changeListeners,
         now: nowFn,
       });
 
@@ -1052,9 +1477,218 @@ export class AegisHostRuntime {
     return row?.owner_task_id ?? null;
   }
 
+  async submitChatCommand(params: {
+    principalId: string;
+    runtimeEpoch: string;
+    conversationId: string;
+    chatKey: string;
+    content: string;
+  }): Promise<SubmitChatCommandResult> {
+    if (!this.isAcceptingCommands) {
+      return {
+        ok: false,
+        httpStatus: 503,
+        code: "host_not_ready",
+        message: `Host health is ${this.#health}`,
+      };
+    }
+    const activeEpoch = this.#epochBox.current;
+    if (params.runtimeEpoch !== activeEpoch) {
+      return {
+        ok: false,
+        httpStatus: 409,
+        code: "runtime_epoch_mismatch",
+        message: `Command targets runtimeEpoch ${params.runtimeEpoch}, active epoch is ${activeEpoch}`,
+        runtimeEpoch: activeEpoch,
+      };
+    }
+    const cid = Number(params.conversationId) as ConversationId;
+    if (!Number.isFinite(cid)) {
+      return { ok: false, httpStatus: 400, code: "invalid_conversation_id" };
+    }
+    if (!params.chatKey || params.chatKey.trim().length === 0) {
+      return { ok: false, httpStatus: 400, code: "missing_chat_key" };
+    }
+    if (!params.content || typeof params.content !== "string") {
+      return { ok: false, httpStatus: 400, code: "missing_content" };
+    }
+
+    const convScope = this.govDb
+      .prepare(
+        "SELECT scope_id, principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?",
+      )
+      .get(activeEpoch, params.conversationId) as { scope_id: string; principal_id: string } | undefined;
+    const scope = convScope
+      ? (this.govDb.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(convScope.scope_id) as ScopeRow | undefined)
+      : undefined;
+    if (
+      !convScope ||
+      convScope.principal_id !== params.principalId ||
+      !scope ||
+      scope.cancelled === 1 ||
+      !isPrincipalAuthorizedForScope(scope, params.principalId)
+    ) {
+      return { ok: false, httpStatus: 403, code: "forbidden" };
+    }
+
+    const bound = this.getConversationBudgetTaskId(params.conversationId, activeEpoch);
+    if (!bound) {
+      return { ok: false, httpStatus: 404, code: "unknown_budget_owner" };
+    }
+
+    const inflightKey = `${params.principalId}|${activeEpoch}|${params.conversationId}|${params.chatKey}`;
+    const reg = registerOrLookupChatCommand(this.govDb, {
+      principalId: params.principalId,
+      runtimeEpoch: activeEpoch,
+      conversationId: params.conversationId,
+      chatKey: params.chatKey,
+      content: params.content,
+      now: this.#now(),
+    });
+
+    if (reg.action === "conflict") {
+      return {
+        ok: false,
+        httpStatus: 409,
+        code: "chat_key_conflict",
+        message: "chatKey was already registered with different content",
+        commandId: reg.command.command_id,
+        chatKey: reg.command.chat_key,
+        piRequestId: reg.command.pi_request_id,
+        submissionId: reg.command.submission_id,
+        status: reg.command.status,
+        uiStatusLabel: chatCommandUiStatusLabel(reg.command.status),
+        conversationId: params.conversationId,
+        runtimeEpoch: activeEpoch,
+      };
+    }
+
+    if (reg.action === "already_admitted") {
+      return {
+        ok: true,
+        httpStatus: 200,
+        code: "idempotent_replay",
+        idempotentReplay: true,
+        commandId: reg.command.command_id,
+        chatKey: reg.command.chat_key,
+        piRequestId: reg.command.pi_request_id,
+        submissionId: reg.command.submission_id,
+        status: reg.command.status,
+        uiStatusLabel: chatCommandUiStatusLabel(reg.command.status),
+        conversationId: params.conversationId,
+        runtimeEpoch: activeEpoch,
+      };
+    }
+
+    if (reg.action === "pending_reconcile") {
+      return {
+        ok: true,
+        httpStatus: 202,
+        code: "pending_reconcile",
+        message: "受理待核对：无法确认 Pi 受理结果，已停止自动重复提交",
+        idempotentReplay: true,
+        commandId: reg.command.command_id,
+        chatKey: reg.command.chat_key,
+        piRequestId: reg.command.pi_request_id,
+        submissionId: null,
+        status: "PENDING_RECONCILE",
+        uiStatusLabel: chatCommandUiStatusLabel("PENDING_RECONCILE"),
+        conversationId: params.conversationId,
+        runtimeEpoch: activeEpoch,
+      };
+    }
+
+    // Serialize concurrent identical chatKey submissions in-process
+    const existingInflight = this.#inFlightChatAdmissions.get(inflightKey);
+    if (existingInflight) {
+      return await existingInflight;
+    }
+
+    const admitPromise = (async (): Promise<SubmitChatCommandResult> => {
+      const cmd = reg.command;
+      this.emitConversationChange({
+        conversationId: params.conversationId,
+        kind: "governance",
+        detail: { commandId: cmd.command_id, status: "REGISTERED" },
+      });
+
+      if (this.config.onAfterChatGovRegister) {
+        await this.config.onAfterChatGovRegister(cmd);
+      }
+
+      const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
+      if (!conv) {
+        return { ok: false, httpStatus: 404, code: "conversation_not_found" };
+      }
+
+      const sub = await conv.submit(
+        {
+          type: "input",
+          content: params.content,
+          requestId: cmd.pi_request_id,
+        },
+        BACKGROUND_CONTEXT,
+      );
+      const submissionId = Number(sub.id);
+
+      if (this.config.onAfterPiAdmitBeforeGovReceipt) {
+        await this.config.onAfterPiAdmitBeforeGovReceipt({
+          commandId: cmd.command_id,
+          piRequestId: cmd.pi_request_id,
+          submissionId,
+          conversationId: params.conversationId,
+        });
+      }
+
+      recordChatCommandAdmitted(this.govDb, {
+        commandId: cmd.command_id,
+        submissionId,
+        now: this.#now(),
+      });
+
+      this.emitConversationChange({
+        conversationId: params.conversationId,
+        kind: "governance",
+        detail: { commandId: cmd.command_id, status: "ADMITTED", submissionId },
+      });
+
+      if (this.config.onAfterChatGovReceiptBeforeHttp) {
+        await this.config.onAfterChatGovReceiptBeforeHttp({
+          commandId: cmd.command_id,
+          piRequestId: cmd.pi_request_id,
+          submissionId,
+          conversationId: params.conversationId,
+        });
+      }
+
+      return {
+        ok: true,
+        httpStatus: 200,
+        code: "admitted",
+        idempotentReplay: !reg.created,
+        commandId: cmd.command_id,
+        chatKey: cmd.chat_key,
+        piRequestId: cmd.pi_request_id,
+        submissionId,
+        status: "ADMITTED",
+        uiStatusLabel: chatCommandUiStatusLabel("ADMITTED"),
+        conversationId: params.conversationId,
+        runtimeEpoch: activeEpoch,
+      };
+    })();
+
+    this.#inFlightChatAdmissions.set(inflightKey, admitPromise);
+    try {
+      return await admitPromise;
+    } finally {
+      this.#inFlightChatAdmissions.delete(inflightKey);
+    }
+  }
+
   async submitChatInput(params: {
     conversationId: string;
     content: string;
+    requestId?: string;
   }): Promise<{ ok: true; submissionId: number } | { ok: false; code: string }> {
     const cid = Number(params.conversationId) as ConversationId;
     if (!Number.isFinite(cid)) return { ok: false, code: "invalid_conversation_id" };
@@ -1062,8 +1696,103 @@ export class AegisHostRuntime {
     if (!bound) return { ok: false, code: "unknown_budget_owner" };
     const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
     if (!conv) return { ok: false, code: "conversation_not_found" };
-    const sub = await conv.submit({ type: "input", content: params.content }, BACKGROUND_CONTEXT);
+    const sub = await conv.submit(
+      {
+        type: "input",
+        content: params.content,
+        ...(params.requestId ? { requestId: params.requestId } : {}),
+      },
+      BACKGROUND_CONTEXT,
+    );
     return { ok: true, submissionId: Number(sub.id) };
+  }
+
+  async attachConversationObserver(params: {
+    conversationId: string;
+    onUpdate: (kind: "pi_view" | "pi_task_graph", detail?: Record<string, unknown>) => void;
+    onEnd: (reason: string) => void;
+  }): Promise<{ detach: () => void } | null> {
+    const cid = Number(params.conversationId) as ConversationId;
+    if (!Number.isFinite(cid)) return null;
+    try {
+      const obs = await this.harness.observeConversation(
+        cid,
+        {
+          advance: (call) => {
+            if (call.kind === "value") {
+              params.onUpdate("pi_view", { entries: call.value.entries.length });
+            }
+          },
+          end: (end) => {
+            params.onEnd(end.kind);
+          },
+        },
+        BACKGROUND_CONTEXT,
+      );
+      const offChange = this.onConversationChange((ev) => {
+        if (ev.conversationId === params.conversationId) {
+          params.onUpdate(ev.kind === "pi_view" ? "pi_view" : "pi_task_graph", ev.detail);
+        }
+      });
+      return {
+        detach: () => {
+          offChange();
+          obs.detach();
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async readConversationLiveState(conversationId: string): Promise<ConversationLiveSummary> {
+    const messages = await this.readConversationMessages(conversationId);
+    const workerTasks = (this.#workerTasksByParent.get(conversationId) ?? []).map((w) => ({ ...w }));
+    const cid = Number(conversationId) as ConversationId;
+    if (!Number.isFinite(cid)) {
+      return { messages, livePartial: null, activeTools: [], workerTasks };
+    }
+    let livePartial: { text: string; attempt: number } | null = null;
+    const activeTools: Array<{ callId: string; name: string; status: string }> = [];
+    try {
+      const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
+      if (conv) {
+        const obs = await this.harness.observeConversation(
+          cid,
+          { advance: () => {}, end: () => {} },
+          BACKGROUND_CONTEXT,
+        );
+        try {
+          const liveDoc = obs.value.docs["pi.live"] as
+            | {
+                generation?: {
+                  attempt?: number;
+                  message?: { content?: Array<{ type?: string; text?: string }> };
+                };
+                tools?: Array<{ callId: string; name: string; status: string }>;
+              }
+            | undefined;
+          if (liveDoc?.generation?.message?.content) {
+            const text = liveDoc.generation.message.content
+              .map((c) => (c.type === "text" && typeof c.text === "string" ? c.text : ""))
+              .join("");
+            if (text.length > 0) {
+              livePartial = { text, attempt: liveDoc.generation.attempt ?? 1 };
+            }
+          }
+          if (Array.isArray(liveDoc?.tools)) {
+            for (const t of liveDoc.tools) {
+              activeTools.push({ callId: t.callId, name: t.name, status: t.status });
+            }
+          }
+        } finally {
+          obs.detach();
+        }
+      }
+    } catch {
+      // ignore if conversation not active
+    }
+    return { messages, livePartial, activeTools, workerTasks };
   }
 
   async triggerCompaction(params: {

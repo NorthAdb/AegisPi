@@ -438,7 +438,11 @@ export async function runW1A(opts?: { dataDir?: string; evidenceDir?: string }) 
         const resp = await fetch(`${web.baseUrl}/api/conversations/${convId}/chat`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie, origin: web.baseUrl },
-          body: JSON.stringify({ content: `Trigger ${cfg.entry} with short ${cfg.shortAccount} budget` }),
+          body: JSON.stringify({
+            content: `Trigger ${cfg.entry} with short ${cfg.shortAccount} budget`,
+            chatKey: `w1a-${cfg.caseId}`,
+            runtimeEpoch: host.runtimeEpoch,
+          }),
         });
         assert.equal(resp.status, 200);
         const body = (await resp.json()) as { submissionId: number };

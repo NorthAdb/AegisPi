@@ -184,6 +184,142 @@ CREATE TABLE IF NOT EXISTS budget_task_bindings (
   created_at INTEGER NOT NULL,
   PRIMARY KEY(runtime_epoch, binding_kind, binding_key)
 );
+
+CREATE TABLE IF NOT EXISTS chat_commands (
+  command_id TEXT PRIMARY KEY NOT NULL,
+  principal_id TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  conversation_id TEXT NOT NULL,
+  chat_key TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  content_preview TEXT NOT NULL,
+  pi_request_id TEXT NOT NULL UNIQUE,
+  submission_id INTEGER,
+  status TEXT NOT NULL CHECK(status IN ('REGISTERED','ADMITTED','PENDING_RECONCILE','FAILED')),
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(principal_id, runtime_epoch, conversation_id, chat_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_read_grants (
+  grant_id TEXT PRIMARY KEY NOT NULL,
+  principal_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+  source_type TEXT NOT NULL CHECK(source_type IN ('memory','imap','github_mcp','workspace_write')),
+  resource_id TEXT NOT NULL,
+  operations_json TEXT NOT NULL DEFAULT '[]',
+  constraints_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS model_disclosure_grants (
+  grant_id TEXT PRIMARY KEY NOT NULL,
+  principal_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  slot_name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS conversation_sources (
+  record_id TEXT PRIMARY KEY NOT NULL,
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  conversation_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  version_ref TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  parent_source_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_server_pins (
+  server_id TEXT PRIMARY KEY NOT NULL,
+  executable_path TEXT NOT NULL,
+  executable_sha256 TEXT NOT NULL,
+  read_only_mode INTEGER NOT NULL DEFAULT 1 CHECK(read_only_mode IN (0,1)),
+  approved_by TEXT NOT NULL,
+  approved_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_tool_pins (
+  server_id TEXT NOT NULL REFERENCES mcp_server_pins(server_id),
+  tool_name TEXT NOT NULL,
+  schema_sha256 TEXT NOT NULL,
+  canonical_def_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('APPROVED','QUARANTINED','REVOKED')),
+  reason TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(server_id, tool_name)
+);
+
+CREATE TABLE IF NOT EXISTS memory_notes (
+  note_id TEXT PRIMARY KEY NOT NULL,
+  principal_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+  domain TEXT NOT NULL,
+  tier TEXT NOT NULL CHECK(tier IN ('L0','L1','L2')),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+  content_digest TEXT NOT NULL,
+  expires_at INTEGER,
+  deleted_at INTEGER,
+  quarantined INTEGER NOT NULL DEFAULT 0 CHECK(quarantined IN (0,1)),
+  quarantine_reasons_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5(
+  note_id UNINDEXED,
+  title,
+  body
+);
+
+CREATE TABLE IF NOT EXISTS memory_refs (
+  from_note_id TEXT NOT NULL REFERENCES memory_notes(note_id),
+  to_note_id TEXT NOT NULL REFERENCES memory_notes(note_id),
+  relation TEXT NOT NULL DEFAULT 'references',
+  PRIMARY KEY(from_note_id, to_note_id)
+);
+
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+  note_id TEXT PRIMARY KEY NOT NULL,
+  deleted_at INTEGER NOT NULL,
+  reason TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS managed_file_imports (
+  import_id TEXT PRIMARY KEY NOT NULL,
+  logical_key TEXT NOT NULL UNIQUE,
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  conversation_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+  target_rel_path TEXT NOT NULL,
+  base_sha256 TEXT,
+  artifact_sha256 TEXT NOT NULL,
+  artifact_bytes INTEGER NOT NULL,
+  volume_name TEXT NOT NULL,
+  container_id TEXT,
+  state TEXT NOT NULL CHECK(state IN ('PREPARED','INSTALLED','CONFLICT_SAVED','REJECTED','PENDING_RECONCILE')),
+  conflict_rel_path TEXT,
+  install_count INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  parent_source_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 export function openGovernanceDb(dbPath: string): { db: DatabaseSync; pragmas: GovDbPragmas } {

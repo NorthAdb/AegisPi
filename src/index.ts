@@ -81,10 +81,14 @@ const syntheticActualMu = args["synthetic-actual-mu"] ? Number(args["synthetic-a
 const smtpTimeoutMs = args["smtp-timeout-ms"] ? Number(args["smtp-timeout-ms"]) : 60_000;
 const pauseOutbox = args["pause-outbox"] === "true";
 
-// Explicit test-only fault barriers for R5 real Windows Stop-Process -Force window verification
+// Explicit test-only fault barriers for R5/V04 real Windows Stop-Process -Force window verification
 const faultBeforeT2CommitFile = args["fault-before-t2-commit"];
 const faultAfterSignalBeforeAckFile = args["fault-after-signal-before-ack"];
 const faultAfterClaimBeforeSmtpFile = args["fault-after-claim-before-smtp"];
+const faultAfterChatGovRegisterFile = args["fault-after-chat-gov-register"];
+const faultAfterPiAdmitBeforeGovReceiptFile = args["fault-after-pi-admit-before-gov-receipt"];
+const faultAfterChatGovReceiptBeforeHttpFile = args["fault-after-chat-gov-receipt-before-http"];
+const faultChatReconcileReadFailure = args["fault-chat-reconcile-read-failure"];
 
 const vault = new HostCredentialVault();
 vault.registerSlot(
@@ -167,10 +171,70 @@ const host = await AegisHostRuntime.start({
             JSON.stringify({ pid: process.pid, effectId, at: new Date().toISOString() }) + "\n",
             "utf8",
           );
-          // Freeze synchronously right after READY->SUBMITTING commit and before SMTP socket open
           const shared = new Int32Array(new SharedArrayBuffer(4));
           Atomics.wait(shared, 0, 0, 60_000);
         },
+      }
+    : {}),
+  ...(faultAfterChatGovRegisterFile
+    ? {
+        onAfterChatGovRegister: (cmd) => {
+          writeFileSync(
+            faultAfterChatGovRegisterFile,
+            JSON.stringify({
+              pid: process.pid,
+              window: "after_chat_gov_register",
+              commandId: cmd.command_id,
+              piRequestId: cmd.pi_request_id,
+              chatKey: cmd.chat_key,
+              at: new Date().toISOString(),
+            }) + "\n",
+            "utf8",
+          );
+          const shared = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(shared, 0, 0, 60_000);
+        },
+      }
+    : {}),
+  ...(faultAfterPiAdmitBeforeGovReceiptFile
+    ? {
+        onAfterPiAdmitBeforeGovReceipt: (info) => {
+          writeFileSync(
+            faultAfterPiAdmitBeforeGovReceiptFile,
+            JSON.stringify({
+              pid: process.pid,
+              window: "after_pi_admit_before_gov_receipt",
+              ...info,
+              at: new Date().toISOString(),
+            }) + "\n",
+            "utf8",
+          );
+          const shared = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(shared, 0, 0, 60_000);
+        },
+      }
+    : {}),
+  ...(faultAfterChatGovReceiptBeforeHttpFile
+    ? {
+        onAfterChatGovReceiptBeforeHttp: (info) => {
+          writeFileSync(
+            faultAfterChatGovReceiptBeforeHttpFile,
+            JSON.stringify({
+              pid: process.pid,
+              window: "after_chat_gov_receipt_before_http",
+              ...info,
+              at: new Date().toISOString(),
+            }) + "\n",
+            "utf8",
+          );
+          const shared = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(shared, 0, 0, 60_000);
+        },
+      }
+    : {}),
+  ...(faultChatReconcileReadFailure
+    ? {
+        injectChatReconcileReadFailure: () => faultChatReconcileReadFailure,
       }
     : {}),
 });
@@ -220,6 +284,7 @@ process.stdout.write(
     runtimeEpoch: host.runtimeEpoch,
     recoveredSubmittingToUnknown: host.startupReport.recoveredSubmittingToUnknown,
     reconciledQuarantinedEffects: host.startupReport.reconciledQuarantinedEffects,
+    reconciledChatCommands: host.startupReport.reconciledChatCommands,
     chargedBoundReservations: host.startupReport.chargedBoundReservations,
     pairedCheckOk: host.startupReport.pairedCheck.ok,
   }) + "\n",

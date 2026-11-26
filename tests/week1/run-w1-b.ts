@@ -257,7 +257,11 @@ export async function runW1B(opts?: { dataDir?: string; evidenceDir?: string }) 
     const chatRes = await fetch(`${host1.baseUrl}/api/conversations/${conversationId}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie1, origin: host1.baseUrl },
-      body: JSON.stringify({ content: "Please send the synthetic W1-B email." }),
+      body: JSON.stringify({
+        content: "Please send the synthetic W1-B email.",
+        chatKey: `w1b-chat-${runId}`,
+        runtimeEpoch: host1.runtimeEpoch,
+      }),
     });
     assert.equal(chatRes.status, 200);
 

@@ -1154,7 +1154,11 @@ export async function testR1Attribution(rootDir: string): Promise<MatrixCaseResu
         const cr = await fetch(`${webD.baseUrl}/api/conversations/${created.conversationId}/chat`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie: loginD.cookie, origin: webD.baseUrl },
-          body: JSON.stringify({ content: `Seed message ${i} ` + "delta ".repeat(60) }),
+          body: JSON.stringify({
+            content: `Seed message ${i} ` + "delta ".repeat(60),
+            chatKey: `r1d-seed-${i}`,
+            runtimeEpoch: hostD.runtimeEpoch,
+          }),
         });
         const cb = (await cr.json()) as { submissionId: number };
         const sub = await hostD.harness.submission(cb.submissionId as never, BACKGROUND_CONTEXT);
@@ -1192,7 +1196,12 @@ export async function testR1Attribution(rootDir: string): Promise<MatrixCaseResu
       const chatRes = await fetch(`${webD.baseUrl}/api/conversations/${created.conversationId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: loginD.cookie, origin: webD.baseUrl },
-        body: JSON.stringify({ content: "Chat with spoofed budgetTaskId", budgetTaskId: "spoof-web-chat" }),
+        body: JSON.stringify({
+          content: "Chat with spoofed budgetTaskId",
+          budgetTaskId: "spoof-web-chat",
+          chatKey: "r1d-spoof-chat",
+          runtimeEpoch: hostD.runtimeEpoch,
+        }),
       });
       assert.equal(chatRes.status, 200);
       const chatBody = (await chatRes.json()) as { submissionId: number };
@@ -1336,7 +1345,7 @@ export async function testR3EpochAcl(rootDir: string): Promise<MatrixCaseResult>
       await fetch(`${w1.baseUrl}/api/conversations/${reusedConvId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: loginAlice1.cookie, origin: w1.baseUrl },
-        body: JSON.stringify({ content: "ALICE_PRIVATE_PROMPT_EP1" }),
+        body: JSON.stringify({ content: "ALICE_PRIVATE_PROMPT_EP1", chatKey: "r3-alice-ep1", runtimeEpoch: ep1 }),
       });
       // Wait for Alice's ep1 proposal to land in govDb
       for (let i = 0; i < 60; i++) {
@@ -1397,7 +1406,7 @@ export async function testR3EpochAcl(rootDir: string): Promise<MatrixCaseResult>
       const bobChat = await fetch(`${w2.baseUrl}/api/conversations/${bobConvId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: loginBob2.cookie, origin: w2.baseUrl },
-        body: JSON.stringify({ content: "BOB_CONFIDENTIAL_PROMPT_EP2" }),
+        body: JSON.stringify({ content: "BOB_CONFIDENTIAL_PROMPT_EP2", chatKey: "r3-bob-ep2", runtimeEpoch: ep2 }),
       });
       assert.equal(bobChat.status, 200);
       const { submissionId } = (await bobChat.json()) as { submissionId: number };
@@ -1414,7 +1423,11 @@ export async function testR3EpochAcl(rootDir: string): Promise<MatrixCaseResult>
       const aliceActiveChat = await fetch(`${w2.baseUrl}/api/conversations/${reusedConvId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: loginAlice2.cookie, origin: w2.baseUrl },
-        body: JSON.stringify({ content: "Alice hijacking Bob's reused ID" }),
+        body: JSON.stringify({
+          content: "Alice hijacking Bob's reused ID",
+          chatKey: "r3-alice-hijack",
+          runtimeEpoch: ep2,
+        }),
       });
       assert.equal(aliceActiveChat.status, 403);
 
@@ -1634,7 +1647,7 @@ export async function testR3LegacyUpgrade(rootDir: string): Promise<MatrixCaseRe
       await fetch(`${w1.baseUrl}/api/conversations/${reusedConvId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: loginAlice1.cookie, origin: w1.baseUrl },
-        body: JSON.stringify({ content: "ALICE_LEGACY_PROMPT_EP1" }),
+        body: JSON.stringify({ content: "ALICE_LEGACY_PROMPT_EP1", chatKey: "r3-legacy-alice", runtimeEpoch: ep1 }),
       });
       for (let i = 0; i < 60; i++) {
         const n = (
@@ -1864,7 +1877,7 @@ export async function testR3LegacyUpgrade(rootDir: string): Promise<MatrixCaseRe
       const bobChat = await fetch(`${w2.baseUrl}/api/conversations/${bobConvId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: loginBob2.cookie, origin: w2.baseUrl },
-        body: JSON.stringify({ content: "BOB_UPGRADED_EP2_PROMPT" }),
+        body: JSON.stringify({ content: "BOB_UPGRADED_EP2_PROMPT", chatKey: "r3-legacy-bob", runtimeEpoch: ep2 }),
       });
       assert.equal(bobChat.status, 200);
       const { submissionId } = (await bobChat.json()) as { submissionId: number };

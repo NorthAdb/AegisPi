@@ -10,10 +10,19 @@ import {
   type ToolExecutionResult,
 } from "@earendil-works/pi-durable";
 import {
+  readImapMessageReadOnly,
+  type ImapEndpointConfig,
+} from "../../capabilities/mail/imap-client.ts";
+import { recallMemory } from "../../capabilities/memory/store.ts";
+import {
   proposeOrGetApproval,
   readProposalGovernanceState,
 } from "../../governance/approvals.ts";
+import { sha256Hex } from "../../governance/canonical.ts";
+import type { HostCredentialVault } from "../../governance/credentials.ts";
+import { recordConversationSource } from "../../governance/policy.ts";
 import { markOutboxObservedByReentry } from "../../governance/signal-outbox.ts";
+import type { GitHubMcpBridge } from "../mcp-bridge.ts";
 import {
   submitApprovedEmailEffect,
   type EmailSubmissionPayload,
@@ -36,11 +45,40 @@ export const AegisApprovalSignal = defineSignal({
 
 export const AEGIS_POLICY_EXTENSION_NAME = "aegis-policy";
 
+export interface ManagedWorkspaceWriteHandler {
+  (params: {
+    runtimeEpoch: string;
+    conversationId: string;
+    principalId: string;
+    scopeId: string;
+    relPath: string;
+    content: string;
+    baseSha256?: string | null;
+    useDockerSandbox?: boolean;
+  }): Promise<{
+    ok: boolean;
+    code: string;
+    message: string;
+    importId?: string;
+    state?: string;
+    targetRelPath?: string;
+    artifactSha256?: string;
+    conflictPath?: string | null;
+    installCount?: number;
+  }>;
+}
+
 export interface AegisPolicyExtensionOptions {
   govDb: DatabaseSync;
+  vault?: HostCredentialVault;
   getRuntimeEpoch: () => string;
   resolveScopeId: (conversationId: string) => string;
+  resolveConversationAuth?: (conversationId: string) => { principalId: string; scopeId: string };
   smtpConfig: SmtpEndpointConfig;
+  imapEndpoint?: () => ImapEndpointConfig | null;
+  githubMcpBridge?: () => GitHubMcpBridge | null;
+  workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
+  onGovernanceMutated?: (conversationId: string, reason: string) => void;
   now?: () => number;
   approvalTtlMs?: number;
   /** Callback invoked when run_worker delegates to an isolated worker conversation/task. */
@@ -101,9 +139,23 @@ function normalizeEmailPayload(raw: Record<string, unknown>): {
   return { payload, target };
 }
 
+const ALLOWED_TIER0_OR_DELEGATE_TOOLS = new Set([
+  "run_worker",
+  "memory_recall",
+  "mail_read_latest",
+  "github_read_file",
+  "workspace_write_managed",
+]);
+
 export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions): Extension {
   const nowFn = options.now ?? (() => Date.now());
   const ttlMs = options.approvalTtlMs ?? 30 * 60 * 1000;
+  const resolveAuth = (conversationId: string): { principalId: string; scopeId: string } => {
+    if (options.resolveConversationAuth) {
+      return options.resolveConversationAuth(conversationId);
+    }
+    return { principalId: "owner", scopeId: options.resolveScopeId(conversationId) };
+  };
 
   const sendEmailTool = defineTool({
     name: "send_email",
@@ -171,6 +223,8 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         onBeforeClaim: options.onBeforeClaim,
       });
 
+      options.onGovernanceMutated?.(conversationId, "effect_updated");
+
       if (!res.ok) {
         return {
           isError: true,
@@ -223,7 +277,6 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         };
       }
       const typed = args as { prompt: string };
-      // Never accept budgetTaskId from untrusted model arguments; host binds worker budget authoritatively.
       const res = await options.runWorkerDelegation({
         parentConversationId: String(api.conversationId),
         parentTaskId: String(api.taskId),
@@ -241,18 +294,302 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
     },
   });
 
+  const memoryRecallTool = defineTool({
+    name: "memory_recall",
+    description: "Recall authorized memory notes (FTS5 + 2-hop reference expansion) scoped to the session principal.",
+    replay: "safe",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        domain: { type: "string" },
+        maxHops: { type: "number" },
+      },
+      required: ["query"],
+    },
+    async execute(args, api): Promise<ToolExecutionResult> {
+      const typed = args as { query: string; domain?: string; maxHops?: number };
+      const conversationId = String(api.conversationId);
+      const auth = resolveAuth(conversationId);
+      const now = nowFn();
+      const res = recallMemory(options.govDb, {
+        principalId: auth.principalId,
+        scopeId: auth.scopeId,
+        domain: typed.domain,
+        query: typed.query,
+        maxHops: typed.maxHops ?? 2,
+        now,
+      });
+      if (!res.ok) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: `memory_recall denied (${res.code}): ${res.reason ?? ""}` }],
+        };
+      }
+      for (const item of res.items) {
+        recordConversationSource(options.govDb, {
+          runtimeEpoch: options.getRuntimeEpoch(),
+          conversationId,
+          principalId: auth.principalId,
+          sourceType: "memory",
+          sourceId: `memory:${item.noteId}`,
+          versionRef: `v${item.version}`,
+          title: item.title,
+          contentDigest: item.contentDigest,
+          metadata: { domain: item.domain, tier: item.tier, hop: item.hop, parentNoteId: item.parentNoteId },
+          now,
+        });
+      }
+      options.onGovernanceMutated?.(conversationId, "memory_recalled");
+      return {
+        output: [{ type: "text", text: JSON.stringify({ items: res.items, filteredCounts: res.filteredCounts }) }],
+        details: { count: res.items.length, noteIds: res.items.map((i) => i.noteId) },
+      };
+    },
+  });
+
+  const mailReadLatestTool = defineTool({
+    name: "mail_read_latest",
+    description: "Read the latest matching email via read-only IMAP (EXAMINE + BODY.PEEK, preserving unread flags).",
+    replay: "safe",
+    parameters: {
+      type: "object",
+      properties: {
+        mailbox: { type: "string" },
+        uid: { type: "number" },
+        subjectContains: { type: "string" },
+      },
+    },
+    async execute(args, api): Promise<ToolExecutionResult> {
+      const typed = args as { mailbox?: string; uid?: number; subjectContains?: string };
+      const endpoint = options.imapEndpoint?.() ?? null;
+      if (!endpoint || !options.vault) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: "IMAP read connector is not configured on this host" }],
+        };
+      }
+      const conversationId = String(api.conversationId);
+      const auth = resolveAuth(conversationId);
+      const now = nowFn();
+      const effectiveEndpoint: ImapEndpointConfig = {
+        ...endpoint,
+        mailbox: typed.mailbox ?? endpoint.mailbox,
+      };
+      const res = await readImapMessageReadOnly({
+        govDb: options.govDb,
+        vault: options.vault,
+        endpoint: effectiveEndpoint,
+        principalId: auth.principalId,
+        scopeId: auth.scopeId,
+        uid: typed.uid,
+        subjectContains: typed.subjectContains,
+        now,
+      });
+      if (!res.ok || !res.message) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: `mail_read_latest failed (${res.code}): ${res.error ?? "no message"}` }],
+        };
+      }
+      recordConversationSource(options.govDb, {
+        runtimeEpoch: options.getRuntimeEpoch(),
+        conversationId,
+        principalId: auth.principalId,
+        sourceType: "imap",
+        sourceId: `imap:${effectiveEndpoint.mailbox}:uid:${res.message.uid}`,
+        versionRef: `uidvalidity=${res.uidValidity ?? 0};uid=${res.message.uid}`,
+        title: res.message.subject,
+        contentDigest: res.message.contentDigest,
+        metadata: {
+          mailbox: effectiveEndpoint.mailbox,
+          uidValidity: res.uidValidity ?? 0,
+          uid: res.message.uid,
+          date: res.message.date,
+          from: res.message.from,
+          flags: res.message.flags,
+          mode: res.mode,
+          tlsVerified: res.tlsVerified,
+        },
+        now,
+      });
+      options.onGovernanceMutated?.(conversationId, "mail_read");
+      return {
+        output: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              mailbox: effectiveEndpoint.mailbox,
+              uidValidity: res.uidValidity,
+              uid: res.message.uid,
+              subject: res.message.subject,
+              date: res.message.date,
+              from: res.message.from,
+              flags: res.message.flags,
+              body: res.message.body,
+            }),
+          },
+        ],
+        details: {
+          uid: res.message.uid,
+          uidValidity: res.uidValidity ?? 0,
+          subject: res.message.subject,
+          flags: res.message.flags,
+        },
+      };
+    },
+  });
+
+  const githubReadFileTool = defineTool({
+    name: "github_read_file",
+    description: "Read a file from an approved read-only GitHub repository via pinned GitHub MCP server.",
+    replay: "safe",
+    parameters: {
+      type: "object",
+      properties: {
+        repoId: { type: "string" },
+        ref: { type: "string" },
+        path: { type: "string" },
+      },
+      required: ["repoId", "ref", "path"],
+    },
+    async execute(args, api): Promise<ToolExecutionResult> {
+      const typed = args as { repoId: string; ref: string; path: string };
+      const bridge = options.githubMcpBridge?.() ?? null;
+      if (!bridge) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: "GitHub MCP bridge is not configured on this host" }],
+        };
+      }
+      const conversationId = String(api.conversationId);
+      const auth = resolveAuth(conversationId);
+      const now = nowFn();
+      const res = await bridge.callReadOnlyTool(
+        "get_file_contents",
+        {
+          repo: typed.repoId,
+          ref: typed.ref,
+          path: typed.path,
+        },
+        {
+          principalId: auth.principalId,
+          scopeId: auth.scopeId,
+          repoId: typed.repoId,
+          operation: "read_file",
+          ref: typed.ref,
+          path: typed.path,
+        },
+      );
+      if (!res.ok) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: `github_read_file denied/failed (${res.code}): ${res.reason ?? ""}` }],
+        };
+      }
+      const text = res.text ?? "";
+      const contentDigest = sha256Hex(text);
+      recordConversationSource(options.govDb, {
+        runtimeEpoch: options.getRuntimeEpoch(),
+        conversationId,
+        principalId: auth.principalId,
+        sourceType: "github_mcp",
+        sourceId: `github:${typed.repoId}:${typed.path}`,
+        versionRef: `${typed.ref}:${typed.path}`,
+        title: `${typed.repoId}/${typed.path}`,
+        contentDigest,
+        metadata: {
+          repoId: typed.repoId,
+          ref: typed.ref,
+          path: typed.path,
+          serverId: bridge.serverId,
+        },
+        now,
+      });
+      options.onGovernanceMutated?.(conversationId, "github_read");
+      return {
+        output: [{ type: "text", text }],
+        details: { repoId: typed.repoId, ref: typed.ref, path: typed.path, contentDigest },
+      };
+    },
+  });
+
+  const workspaceWriteManagedTool = defineTool({
+    name: "workspace_write_managed",
+    description: "Write a file into an authorized relative workspace path via isolated sandbox volume & host managed importer.",
+    replay: "unsafe",
+    parameters: {
+      type: "object",
+      properties: {
+        relPath: { type: "string" },
+        content: { type: "string" },
+        baseSha256: { type: "string" },
+        useDockerSandbox: { type: "boolean" },
+      },
+      required: ["relPath", "content"],
+    },
+    async execute(args, api): Promise<ToolExecutionResult> {
+      if (!options.workspaceWriteHandler) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: "Managed workspace importer is not configured on this host" }],
+        };
+      }
+      const typed = args as {
+        relPath: string;
+        content: string;
+        baseSha256?: string;
+        useDockerSandbox?: boolean;
+      };
+      const conversationId = String(api.conversationId);
+      const auth = resolveAuth(conversationId);
+      const res = await options.workspaceWriteHandler({
+        runtimeEpoch: options.getRuntimeEpoch(),
+        conversationId,
+        principalId: auth.principalId,
+        scopeId: auth.scopeId,
+        relPath: typed.relPath,
+        content: typed.content,
+        baseSha256: typed.baseSha256 ?? null,
+        useDockerSandbox: typed.useDockerSandbox ?? true,
+      });
+      options.onGovernanceMutated?.(conversationId, "workspace_file_imported");
+      if (!res.ok) {
+        return {
+          isError: true,
+          output: [{ type: "text", text: `workspace_write_managed failed (${res.code}): ${res.message}` }],
+          details: res as unknown as JsonObject,
+        };
+      }
+      return {
+        output: [
+          {
+            type: "text",
+            text: JSON.stringify(res),
+          },
+        ],
+        details: res as unknown as JsonObject,
+      };
+    },
+  });
+
   return defineExtension({
     name: AEGIS_POLICY_EXTENSION_NAME,
-    tools: [sendEmailTool, runWorkerTool],
+    tools: [
+      sendEmailTool,
+      runWorkerTool,
+      memoryRecallTool,
+      mailReadLatestTool,
+      githubReadFileTool,
+      workspaceWriteManagedTool,
+    ],
     hooks: [
       hook(ToolTask, {
         beforeTool: async (call, api) => {
-          // Tier 0 / internal delegation tool does not require Tier 2 mail approval
-          if (call.name === "run_worker") {
+          if (ALLOWED_TIER0_OR_DELEGATE_TOOLS.has(call.name)) {
             return undefined;
           }
 
-          // Tier 2 outbound tool (send_email) requires explicit host approval
           if (call.name !== "send_email") {
             return { block: `Default-deny policy: unapproved tool ${call.name}` };
           }
@@ -277,6 +614,7 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
             expiresAt: now + ttlMs,
             now,
           });
+          options.onGovernanceMutated?.(conversationId, "proposal_created");
 
           if (options.onBeforeToolAfterProposal) {
             await options.onBeforeToolAfterProposal({
@@ -289,7 +627,6 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
             });
           }
 
-          // Always re-read authoritative state from governance DB (never trust signal payload!)
           const govState = readProposalGovernanceState(options.govDb, {
             runtimeEpoch,
             conversationId,
@@ -309,16 +646,12 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
           }
 
           if (govState.state === "APPROVED") {
-            // Mark outbox observed in case decision arrived before park (E01)
             markOutboxObservedByReentry(options.govDb, govState.approvalId, now);
-
             if (govState.effectState !== "READY") {
               return {
                 block: `Effect ${govState.effectId ?? "unknown"} is ${govState.effectState ?? "missing"}; refusing re-execution`,
               };
             }
-
-            // Deliver the exact approved canonical draft arguments to execute()
             const approvedPayload = govState.parsedSnapshot["payload"] as JsonObject | undefined;
             if (!approvedPayload || typeof approvedPayload !== "object") {
               return { block: "Approved snapshot missing payload" };
@@ -326,7 +659,6 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
             return { arguments: approvedPayload };
           }
 
-          // REJECTED / EXPIRED / CANCELLED / SUPERSEDED
           markOutboxObservedByReentry(options.govDb, govState.approvalId, now);
           return {
             block: `Action ${govState.proposalId} not approved (state=${govState.state})`,

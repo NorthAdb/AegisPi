@@ -24,6 +24,7 @@
     "test:s1-s5": "node tests/week1/run-sdk-contracts.ts",
     "test:w1-a": "node tests/week1/run-w1-a.ts",
     "test:w1-b": "node tests/week1/run-w1-b.ts",
-    "test:week1": "node tests/week1/run-all.ts"
+    "test:week1": "node tests/week1/run-all.ts",
+    "test:week2": "node tests/week2/run-all.ts"
   }
 }

@@ -74,6 +74,30 @@ export interface ModelPriceSchedule {
 export class HostCredentialVault {
   readonly #secrets = new Map<string, string>();
   readonly #bindings = new Map<string, CredentialSlotBinding>();
+  readonly #connectorSecrets = new Map<string, { kind: "imap" | "github_mcp" | "smtp"; target: string; secret: string }>();
+
+  registerConnectorSlot(params: {
+    slotId: string;
+    kind: "imap" | "github_mcp" | "smtp";
+    target: string;
+    secretValue: string;
+  }): void {
+    if (!params.slotId || !params.secretValue) {
+      throw new Error("Connector credential slot requires slotId and non-empty secretValue");
+    }
+    this.#connectorSecrets.set(params.slotId, {
+      kind: params.kind,
+      target: params.target,
+      secret: params.secretValue,
+    });
+  }
+
+  resolveConnectorSecretInMemory(slotId: string, expectedKind?: "imap" | "github_mcp" | "smtp"): string | undefined {
+    const entry = this.#connectorSecrets.get(slotId);
+    if (!entry) return undefined;
+    if (expectedKind && entry.kind !== expectedKind) return undefined;
+    return entry.secret;
+  }
 
   registerSlot(binding: CredentialSlotBinding, secretValue: string): void {
     if (!binding.slotId || !binding.provider) {
@@ -148,6 +172,17 @@ export class HostCredentialVault {
 
   /** Returns all registered secret values strictly for test leak-scanning assertions. */
   registeredSecretMarkersForAudit(): string[] {
-    return [...this.#secrets.values()];
+    return [...this.#secrets.values(), ...[...this.#connectorSecrets.values()].map((c) => c.secret)];
+  }
+
+  registeredSlotMarkersForAudit(): Array<{ slotId: string; kind: string; marker: string }> {
+    const out: Array<{ slotId: string; kind: string; marker: string }> = [];
+    for (const [slotId, marker] of this.#secrets.entries()) {
+      out.push({ slotId, kind: "model", marker });
+    }
+    for (const [slotId, entry] of this.#connectorSecrets.entries()) {
+      out.push({ slotId, kind: entry.kind, marker: entry.secret });
+    }
+    return out;
   }
 }

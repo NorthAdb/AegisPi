@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -13,6 +14,8 @@ export interface ModelArrivalRecord {
   messageCount: number;
   hasAuthHeader: boolean;
   authHeaderDigestPrefix: string | null;
+  authHeaderSha256Prefix?: string | null;
+  markerHits?: Record<string, number>;
   lastUserPreview: string;
   scriptApplied: string;
   statusCode: number;
@@ -99,6 +102,7 @@ let defaultScript: ScriptedResponse = {
   usage: { prompt_tokens: 100, completion_tokens: 20 },
 };
 const scriptedQueue: ScriptedResponse[] = [];
+let watchMarkers: string[] = [];
 const heldBarriers = new Map<string, Array<() => void>>();
 const barrierArrivals = new Set<string>();
 const barrierWaiters = new Map<string, Array<() => void>>();
@@ -141,12 +145,22 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/__control/queue" && req.method === "POST") {
       const raw = await readBody(req);
-      const parsed = raw ? (JSON.parse(raw) as { scripts?: ScriptedResponse[]; clear?: boolean; defaultScript?: ScriptedResponse }) : {};
+      const parsed = raw
+        ? (JSON.parse(raw) as {
+            scripts?: ScriptedResponse[];
+            clear?: boolean;
+            defaultScript?: ScriptedResponse;
+            watchMarkers?: string[];
+          })
+        : {};
       if (parsed.clear) {
         scriptedQueue.length = 0;
       }
       if (parsed.defaultScript) {
         defaultScript = parsed.defaultScript;
+      }
+      if (Array.isArray(parsed.watchMarkers)) {
+        watchMarkers = parsed.watchMarkers.filter((m) => typeof m === "string" && m.length > 0);
       }
       if (Array.isArray(parsed.scripts)) {
         scriptedQueue.push(...parsed.scripts);
@@ -235,6 +249,14 @@ const server = http.createServer(async (req, res) => {
             : 200;
 
       const seq = records.length + 1;
+      const markerHits: Record<string, number> = {};
+      for (const m of watchMarkers) {
+        const count = raw.split(m).length - 1;
+        if (count > 0) markerHits[m] = count;
+      }
+      const bearerToken = authHeader.replace(/^Bearer\s+/i, "").trim();
+      const authHeaderSha256Prefix =
+        bearerToken.length > 0 ? createHash("sha256").update(bearerToken).digest("hex").slice(0, 16) : null;
       const rec: ModelArrivalRecord = {
         seq,
         receivedAt: new Date().toISOString(),
@@ -245,6 +267,8 @@ const server = http.createServer(async (req, res) => {
         messageCount: messages.length,
         hasAuthHeader: authHeader.length > 0,
         authHeaderDigestPrefix: authHeader.length > 0 ? `len:${authHeader.length}` : null,
+        authHeaderSha256Prefix,
+        markerHits,
         lastUserPreview: lastUserText,
         scriptApplied: script.kind,
         statusCode,
