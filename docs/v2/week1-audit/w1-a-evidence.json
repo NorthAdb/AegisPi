@@ -1,13 +1,13 @@
 {
   "suite": "W1-A",
-  "runId": "w1a_05c5566e",
+  "runId": "w1a_6e2e1d19",
   "status": "PASS",
   "environment": {
     "nodeVersion": "v22.23.5",
     "sqliteVersion": "3.54.1",
     "platform": "win32",
     "zone": "Asia/Hong_Kong",
-    "chargeDay": "2026-11-25"
+    "chargeDay": "2026-11-26"
   },
   "priceModel": {
     "upperMu": 100,
@@ -36,7 +36,7 @@
       },
       "dayAccountBefore": null,
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 5000000,
         "held_mu": 0,
@@ -45,20 +45,20 @@
       },
       "reservationsCreated": [
         {
-          "request_id": "mreq_312879c1e8604ce5adfc59a188cbfd4b",
-          "runtime_epoch": "ep_a51eafb275a846479e913156e8c0d12e",
+          "request_id": "mreq_96cad880c74e4204a309cfe5d19c5414",
+          "runtime_epoch": "ep_d20f1b3a04c246c69a068215f063fe52",
           "conversation_id": "8",
           "owner_task_id": "w1a-ctrl-router",
           "purpose": "router",
           "task_account": "acct:task:w1a-ctrl-router",
-          "day_account": "acct:day:Asia/Hong_Kong:2026-11-25",
-          "charge_day": "2026-11-25",
+          "day_account": "acct:day:Asia/Hong_Kong:2026-11-26",
+          "charge_day": "2026-11-26",
           "zone": "Asia/Hong_Kong",
-          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:49639\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"streamSimple\",\"modelId\":\"fake-router-1\",\"piTaskId\":16,\"piTaskName\":\"pi.generation\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
+          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:62334\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"streamSimple\",\"modelId\":\"fake-router-1\",\"piTaskId\":16,\"piTaskName\":\"pi.generation\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
           "upper_mu": 100,
           "actual_mu": 60,
-          "reserved_at": 1795620904635,
-          "settle_due_at": 1795621204635,
+          "reserved_at": 1795655079186,
+          "settle_due_at": 1795655379186,
           "state": "SETTLED"
         }
       ],
@@ -85,7 +85,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 5000000,
         "held_mu": 0,
@@ -93,7 +93,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 5000000,
         "held_mu": 0,
@@ -102,20 +102,20 @@
       },
       "reservationsCreated": [
         {
-          "request_id": "mreq_ee920bc7124d4d199777ef37710c3ee9",
-          "runtime_epoch": "ep_a51eafb275a846479e913156e8c0d12e",
+          "request_id": "mreq_ff66b07ae2b34ade928086dad470b5aa",
+          "runtime_epoch": "ep_d20f1b3a04c246c69a068215f063fe52",
           "conversation_id": "19",
           "owner_task_id": "w1a-ctrl-worker",
           "purpose": "worker",
           "task_account": "acct:task:w1a-ctrl-worker",
-          "day_account": "acct:day:Asia/Hong_Kong:2026-11-25",
-          "charge_day": "2026-11-25",
+          "day_account": "acct:day:Asia/Hong_Kong:2026-11-26",
+          "charge_day": "2026-11-26",
           "zone": "Asia/Hong_Kong",
-          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:49639\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"streamSimple\",\"modelId\":\"fake-worker-1\",\"piTaskId\":27,\"piTaskName\":\"pi.generation\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
+          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:62334\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"streamSimple\",\"modelId\":\"fake-worker-1\",\"piTaskId\":27,\"piTaskName\":\"pi.generation\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
           "upper_mu": 100,
           "actual_mu": 60,
-          "reserved_at": 1795620904635,
-          "settle_due_at": 1795621204635,
+          "reserved_at": 1795655079186,
+          "settle_due_at": 1795655379186,
           "state": "SETTLED"
         }
       ],
@@ -142,7 +142,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 5000000,
         "held_mu": 0,
@@ -150,7 +150,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 5000000,
         "held_mu": 0,
@@ -159,20 +159,20 @@
       },
       "reservationsCreated": [
         {
-          "request_id": "mreq_ff8e879d863b4d8ead81707fa175e4ef",
-          "runtime_epoch": "ep_a51eafb275a846479e913156e8c0d12e",
+          "request_id": "mreq_02fd28488e934efab31576c1fd89ea20",
+          "runtime_epoch": "ep_d20f1b3a04c246c69a068215f063fe52",
           "conversation_id": "8",
           "owner_task_id": "w1a-ctrl-compaction",
           "purpose": "compaction",
           "task_account": "acct:task:w1a-ctrl-compaction",
-          "day_account": "acct:day:Asia/Hong_Kong:2026-11-25",
-          "charge_day": "2026-11-25",
+          "day_account": "acct:day:Asia/Hong_Kong:2026-11-26",
+          "charge_day": "2026-11-26",
           "zone": "Asia/Hong_Kong",
-          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:49639\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"completeSimple\",\"modelId\":\"fake-router-1\",\"piTaskId\":34,\"piTaskName\":\"pi.compaction\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
+          "binding_json": "{\"baseUrl\":\"http://127.0.0.1:62334\",\"credentialSlotId\":\"slot:w1a\",\"entryMethod\":\"completeSimple\",\"modelId\":\"fake-router-1\",\"piTaskId\":34,\"piTaskName\":\"pi.compaction\",\"priceVersion\":\"synthetic-100-60\",\"provider\":\"fake-local\"}",
           "upper_mu": 100,
           "actual_mu": 60,
-          "reserved_at": 1795620904635,
-          "settle_due_at": 1795621204635,
+          "reserved_at": 1795655079186,
+          "settle_due_at": 1795655379186,
           "state": "SETTLED"
         }
       ],
@@ -206,7 +206,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 10240,
         "held_mu": 0,
@@ -214,7 +214,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 10240,
         "held_mu": 0,
@@ -225,8 +225,8 @@
       "view1Denials": [
         {
           "seq": 13,
-          "requestId": "mreq_f876b03f57e249e59183da7cb3e6ddc5",
-          "occurredAt": 1795620904635,
+          "requestId": "mreq_fd4b10ce1b0d401f97f3356bd6d104cd",
+          "occurredAt": 1795655079186,
           "code": "task_budget_exceeded",
           "message": "Insufficient task budget: need 100 microUSD, available 99 microUSD (acct:task:w1a-neg-router-task)",
           "ownerTaskId": "w1a-neg-router-task",
@@ -262,7 +262,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 339,
         "held_mu": 0,
@@ -270,7 +270,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 339,
         "held_mu": 0,
@@ -281,10 +281,10 @@
       "view1Denials": [
         {
           "seq": 16,
-          "requestId": "mreq_2048b8fccb0b4dfdad741ef731e62d80",
-          "occurredAt": 1795620904635,
+          "requestId": "mreq_cbe3b94ec2f8430b947ad46cee1e0aa6",
+          "occurredAt": 1795655079186,
           "code": "day_budget_exceeded",
-          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-25)",
+          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-26)",
           "ownerTaskId": "w1a-neg-router-day",
           "purpose": "router"
         }
@@ -318,7 +318,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 10240,
         "held_mu": 0,
@@ -326,7 +326,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 10240,
         "held_mu": 0,
@@ -337,8 +337,8 @@
       "view1Denials": [
         {
           "seq": 19,
-          "requestId": "mreq_254fa91f09c8480e9ca983bae36e2ceb",
-          "occurredAt": 1795620904635,
+          "requestId": "mreq_802885d1eda74f9684eb050a00c89528",
+          "occurredAt": 1795655079186,
           "code": "task_budget_exceeded",
           "message": "Insufficient task budget: need 100 microUSD, available 99 microUSD (acct:task:w1a-neg-worker-task)",
           "ownerTaskId": "w1a-neg-worker-task",
@@ -374,7 +374,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 339,
         "held_mu": 0,
@@ -382,7 +382,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 339,
         "held_mu": 0,
@@ -393,10 +393,10 @@
       "view1Denials": [
         {
           "seq": 21,
-          "requestId": "mreq_7b57e5ec55384f9993b7bbc1534acc6a",
-          "occurredAt": 1795620904635,
+          "requestId": "mreq_0f95ed28692f4b78ac536007435bf6f3",
+          "occurredAt": 1795655079186,
           "code": "day_budget_exceeded",
-          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-25)",
+          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-26)",
           "ownerTaskId": "w1a-neg-worker-day",
           "purpose": "worker"
         }
@@ -430,7 +430,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 10360,
         "held_mu": 0,
@@ -438,7 +438,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 10360,
         "held_mu": 0,
@@ -449,8 +449,8 @@
       "view1Denials": [
         {
           "seq": 29,
-          "requestId": "mreq_cd94954062174c3387e2cd974237ff95",
-          "occurredAt": 1795620904635,
+          "requestId": "mreq_caffecc24cca46faa92289477782e8e9",
+          "occurredAt": 1795655079186,
           "code": "task_budget_exceeded",
           "message": "Insufficient task budget: need 100 microUSD, available 99 microUSD (acct:task:w1a-neg-compaction-task)",
           "ownerTaskId": "w1a-neg-compaction-task",
@@ -486,7 +486,7 @@
         "frozen": 0
       },
       "dayAccountBefore": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 579,
         "held_mu": 0,
@@ -494,7 +494,7 @@
         "frozen": 0
       },
       "dayAccountAfter": {
-        "account_id": "acct:day:Asia/Hong_Kong:2026-11-25",
+        "account_id": "acct:day:Asia/Hong_Kong:2026-11-26",
         "kind": "DAY",
         "limit_mu": 579,
         "held_mu": 0,
@@ -505,10 +505,10 @@
       "view1Denials": [
         {
           "seq": 37,
-          "requestId": "mreq_69f18e93b0464569a6a6afc3fce5b856",
-          "occurredAt": 1795620904635,
+          "requestId": "mreq_0f09b4394ed0495baac9c2543b1392a8",
+          "occurredAt": 1795655079186,
           "code": "day_budget_exceeded",
-          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-25)",
+          "message": "Insufficient day budget: need 100 microUSD, available 99 microUSD (acct:day:Asia/Hong_Kong:2026-11-26)",
           "ownerTaskId": "w1a-neg-compaction-day",
           "purpose": "compaction"
         }

@@ -21,6 +21,7 @@ import {
   HostCredentialVault,
   Stage1EgressBlockedError,
 } from "../../src/governance/credentials.ts";
+import { openGovernanceDb } from "../../src/governance/db.ts";
 import {
   claimEffectForSubmission,
   recoverSubmittingEffectsToUnknown,
@@ -1489,6 +1490,507 @@ export async function testR3EpochAcl(rootDir: string): Promise<MatrixCaseResult>
           bobActiveSnapshotStatus: bobActiveRes.status,
           bobActiveProposalsCount: bobActive.proposals.length,
           bobHistoricalEp1Status: bobHistRes.status,
+        },
+      };
+    } finally {
+      await w2.close();
+      await h2.close();
+    }
+  } finally {
+    await fakeSmtp.stop();
+    await fakeModel.stop();
+  }
+}
+
+async function readFirstSseFrame(url: string, cookie: string): Promise<{ status: number; body: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5000);
+  try {
+    const res = await fetch(url, { headers: { cookie }, signal: ac.signal });
+    if (res.status !== 200 || !res.body) {
+      return { status: res.status, body: await res.text().catch(() => "") };
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let acc = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      acc += decoder.decode(value, { stream: true });
+      if (acc.includes("\n\n")) {
+        break;
+      }
+    }
+    ac.abort();
+    return { status: 200, body: acc };
+  } catch (err) {
+    if (ac.signal.aborted) {
+      throw new Error(`Timed out reading SSE frame from ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * R3-LEGACY-UPGRADE:
+ * Proves that opening a legacy Round-2 governance DB (where conversation_scopes had single-column PK
+ * on conversation_id and budget_denial audit rows lacked runtimeEpoch) via normal openGovernanceDb:
+ *  1. Migrates conversation_scopes in place to PRIMARY KEY(runtime_epoch, conversation_id) preserving all rows.
+ *  2. Backfills runtimeEpoch ONLY on provably uniquely attributable legacy budget_denial rows and leaves
+ *     unprovable rows untouched in internal audit_events.
+ *  3. Is strictly idempotent when reopened a second time (zero duplicate migration rows or mutations).
+ *  4. After trace replacement + epoch rotation reusing the exact same numeric conversation ID, both
+ *     (ep1, convId, alice) and (ep2, convId, bob) coexist, and both snapshots AND SSE streams strictly
+ *     enforce per-epoch isolation while excluding unprovable legacy denials.
+ */
+export async function testR3LegacyUpgrade(rootDir: string): Promise<MatrixCaseResult> {
+  const dir = path.join(rootDir, "r3-legacy-upgrade");
+  mkdirSync(dir, { recursive: true });
+  const fakeModel = await startFakeModelServer(path.join(dir, "fake-model"));
+  const fakeSmtp = await startFakeSmtpServer(path.join(dir, "fake-smtp"));
+  const dataDir = path.join(dir, "host-data");
+
+  try {
+    const vault = new HostCredentialVault();
+    vault.registerSlot(
+      {
+        slotId: "slot:r3leg",
+        provider: "fake-local",
+        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedModelIds: ["fake-router-1"],
+        priceVersion: "synthetic-100-60",
+      },
+      "SYNTHETIC_R3LEG_KEY",
+    );
+    const slots: ModelSlotConfig[] = [
+      {
+        slotName: "router",
+        provider: "fake-local",
+        modelId: "fake-router-1",
+        baseUrl: fakeModel.baseUrl,
+        credentialSlotId: "slot:r3leg",
+        contextWindow: 128_000,
+        maxTokens: 1024,
+        priceSchedule: {
+          priceVersion: "synthetic-100-60",
+          inputPerMTokMu: 300_000,
+          outputPerMTokMu: 1_200_000,
+          syntheticFixedUpperMu: 100,
+          syntheticFixedActualMu: 60,
+        },
+        outboundAuthorized: true,
+      },
+    ];
+    const tokens = { alice: "TOKEN_ALICE_R3LEG", bob: "TOKEN_BOB_R3LEG" };
+
+    // Phase 1: Generate a genuine governance DB in ep1 with Alice's conversation & proposal
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: "call_alice_legacy_ep1",
+            name: "send_email",
+            arguments: { to: ["alice@local.test"], subject: "Legacy EP1", body: "ALICE_LEGACY_EP1_BODY" },
+          },
+        },
+      ],
+    });
+
+    const h1 = await AegisHostRuntime.start({
+      dataDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+      pauseOutboxDelivery: true,
+    });
+    ensureScope(h1.govDb, {
+      scopeId: "scope:alice",
+      allowedPrincipals: ["alice"],
+      allowedTools: ["send_email"],
+      allowedTargets: ["*"],
+    });
+    ensureScope(h1.govDb, {
+      scopeId: "scope:bob",
+      allowedPrincipals: ["bob"],
+      allowedTools: ["send_email"],
+      allowedTargets: ["*"],
+    });
+    const ep1 = h1.runtimeEpoch;
+    const w1 = await startWebServer({ host: h1, port: 0, consoleTokens: tokens });
+    let reusedConvId = "";
+    try {
+      const loginAlice1 = await httpLogin(w1.baseUrl, tokens.alice);
+      const c1Res = await fetch(`${w1.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginAlice1.cookie, origin: w1.baseUrl },
+        body: JSON.stringify({ slotName: "router", scopeId: "scope:alice" }),
+      });
+      assert.equal(c1Res.status, 200);
+      reusedConvId = ((await c1Res.json()) as { conversationId: string }).conversationId;
+      await fetch(`${w1.baseUrl}/api/conversations/${reusedConvId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginAlice1.cookie, origin: w1.baseUrl },
+        body: JSON.stringify({ content: "ALICE_LEGACY_PROMPT_EP1" }),
+      });
+      for (let i = 0; i < 60; i++) {
+        const n = (
+          h1.govDb
+            .prepare("SELECT count(*) AS n FROM proposals WHERE runtime_epoch = ? AND conversation_id = ?")
+            .get(ep1, reusedConvId) as { n: number }
+        ).n;
+        if (n > 0) break;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+    } finally {
+      await w1.close();
+      await h1.close();
+    }
+
+    // Downgrade governance DB to the exact Round-2 legacy schema + legacy budget_denial rows lacking runtimeEpoch
+    const govDbPath = path.join(dataDir, "aegis-gov.sqlite");
+    const rawLegacy = new DatabaseSync(govDbPath);
+    let ep1CreatedAt = 0;
+    try {
+      rawLegacy.exec("PRAGMA foreign_keys = ON;");
+      const ep1Row = rawLegacy
+        .prepare("SELECT created_at FROM runtime_epochs WHERE runtime_epoch = ?")
+        .get(ep1) as { created_at: number };
+      ep1CreatedAt = ep1Row.created_at;
+
+      // Insert an earlier retired epoch ep0 so we can test an unprovable denial whose occurred_at falls in ep0
+      rawLegacy
+        .prepare(
+          `INSERT INTO runtime_epochs(runtime_epoch, trace_identity, status, created_at, retired_at, retire_reason)
+           VALUES ('ep0_legacy_retired', 'trace_ep0', 'RETIRED', ?, ?, 'prior_rotation')`,
+        )
+        .run(ep1CreatedAt - 5000, ep1CreatedAt - 1000);
+
+      // Rebuild conversation_scopes using the exact Round-2 single-column PK (conversation_id)
+      rawLegacy.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE conversation_scopes__legacy (
+          conversation_id TEXT PRIMARY KEY NOT NULL,
+          scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+          principal_id TEXT NOT NULL,
+          runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO conversation_scopes__legacy(conversation_id, scope_id, principal_id, runtime_epoch, created_at)
+        SELECT conversation_id, scope_id, principal_id, runtime_epoch, created_at
+          FROM conversation_scopes;
+        DROP TABLE conversation_scopes;
+        ALTER TABLE conversation_scopes__legacy RENAME TO conversation_scopes;
+        COMMIT;
+      `);
+
+      // Add a second historical conversation_scopes row to verify multi-row preservation
+      rawLegacy
+        .prepare(
+          `INSERT INTO conversation_scopes(conversation_id, scope_id, principal_id, runtime_epoch, created_at)
+           VALUES ('999', 'scope:alice', 'alice', ?, ?)`,
+        )
+        .run(ep1, ep1CreatedAt + 10);
+
+      // Insert 1 PROVABLE legacy budget_denial (no runtimeEpoch; unique scope ep1 + occurred_at strictly inside ep1)
+      rawLegacy
+        .prepare(
+          `INSERT INTO audit_events(entity_type, entity_id, event_key, event_type, occurred_at, details_json)
+           VALUES ('budget_denial', 'legacy_provable_req_1', 'denied', 'budget_denied', ?, ?)`,
+        )
+        .run(
+          ep1CreatedAt + 500,
+          JSON.stringify({
+            code: "task_budget_insufficient",
+            message: "LEGACY_PROVABLE_EP1_DENIAL",
+            conversationId: reusedConvId,
+            ownerTaskId: `host-task:${ep1}:conv:${reusedConvId}`,
+            purpose: "router",
+          }),
+        );
+
+      // Insert 1 UNPROVABLE legacy budget_denial (no runtimeEpoch; occurred_at in ep0 conflicts with conversation_scopes ep1)
+      rawLegacy
+        .prepare(
+          `INSERT INTO audit_events(entity_type, entity_id, event_key, event_type, occurred_at, details_json)
+           VALUES ('budget_denial', 'legacy_unprovable_req_1', 'denied', 'budget_denied', ?, ?)`,
+        )
+        .run(
+          ep1CreatedAt - 2000,
+          JSON.stringify({
+            code: "day_budget_insufficient",
+            message: "LEGACY_UNPROVABLE_AMBIGUOUS_DENIAL",
+            conversationId: reusedConvId,
+            ownerTaskId: "legacy_unknown_task",
+            purpose: "worker",
+          }),
+        );
+
+      // Verify pre-migration PK is genuinely legacy single-column (conversation_id)
+      const prePk = (
+        rawLegacy.prepare("PRAGMA table_info(conversation_scopes);").all() as Array<{ name: string; pk: number }>
+      )
+        .filter((c) => c.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((c) => c.name);
+      assert.deepEqual(prePk, ["conversation_id"], "Pre-migration DB must have legacy single-column PK");
+    } finally {
+      rawLegacy.close();
+    }
+
+    // Open #1 via normal openGovernanceDb: performs in-place PK migration & provable backfill
+    const opened1 = openGovernanceDb(govDbPath);
+    let pkAfterOpen1: string[] = [];
+    let scopeCountAfterOpen1 = 0;
+    let auditCountAfterOpen1 = 0;
+    let migrationEventsAfterOpen1 = 0;
+    try {
+      pkAfterOpen1 = (
+        opened1.db.prepare("PRAGMA table_info(conversation_scopes);").all() as Array<{ name: string; pk: number }>
+      )
+        .filter((c) => c.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((c) => c.name);
+      assert.deepEqual(pkAfterOpen1, ["runtime_epoch", "conversation_id"]);
+
+      scopeCountAfterOpen1 = (
+        opened1.db.prepare("SELECT count(*) AS n FROM conversation_scopes").get() as { n: number }
+      ).n;
+      assert.equal(scopeCountAfterOpen1, 2, "All legacy conversation_scopes rows must be preserved");
+
+      const provableRow = opened1.db
+        .prepare("SELECT details_json FROM audit_events WHERE entity_type = 'budget_denial' AND entity_id = 'legacy_provable_req_1'")
+        .get() as { details_json: string };
+      const provableParsed = JSON.parse(provableRow.details_json) as Record<string, unknown>;
+      assert.equal(provableParsed["runtimeEpoch"], ep1, "Provable legacy denial must be backfilled to ep1");
+      assert.equal(provableParsed["runtimeEpochBackfilled"], true);
+
+      const unprovableRow = opened1.db
+        .prepare("SELECT details_json FROM audit_events WHERE entity_type = 'budget_denial' AND entity_id = 'legacy_unprovable_req_1'")
+        .get() as { details_json: string };
+      const unprovableParsed = JSON.parse(unprovableRow.details_json) as Record<string, unknown>;
+      assert.equal(
+        unprovableParsed["runtimeEpoch"],
+        undefined,
+        "Unprovable legacy denial must remain untouched in internal audit_events",
+      );
+
+      auditCountAfterOpen1 = (opened1.db.prepare("SELECT count(*) AS n FROM audit_events").get() as { n: number }).n;
+      migrationEventsAfterOpen1 = (
+        opened1.db
+          .prepare("SELECT count(*) AS n FROM audit_events WHERE entity_type = 'schema_migration'")
+          .get() as { n: number }
+      ).n;
+      assert.equal(migrationEventsAfterOpen1, 2);
+    } finally {
+      opened1.db.close();
+    }
+
+    // Open #2 via normal openGovernanceDb: verify strict idempotency (zero duplicate migration writes)
+    const opened2 = openGovernanceDb(govDbPath);
+    let pkAfterOpen2: string[] = [];
+    let auditCountAfterOpen2 = 0;
+    let migrationEventsAfterOpen2 = 0;
+    try {
+      pkAfterOpen2 = (
+        opened2.db.prepare("PRAGMA table_info(conversation_scopes);").all() as Array<{ name: string; pk: number }>
+      )
+        .filter((c) => c.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((c) => c.name);
+      assert.deepEqual(pkAfterOpen2, ["runtime_epoch", "conversation_id"]);
+      auditCountAfterOpen2 = (opened2.db.prepare("SELECT count(*) AS n FROM audit_events").get() as { n: number }).n;
+      migrationEventsAfterOpen2 = (
+        opened2.db
+          .prepare("SELECT count(*) AS n FROM audit_events WHERE entity_type = 'schema_migration'")
+          .get() as { n: number }
+      ).n;
+      assert.equal(auditCountAfterOpen2, auditCountAfterOpen1, "Second open must not write extra audit events");
+      assert.equal(migrationEventsAfterOpen2, migrationEventsAfterOpen1);
+    } finally {
+      opened2.db.close();
+    }
+
+    // Phase 2: Replace pi-durable.sqlite, rotate epoch, and verify reused numeric conversation ID coexistence & isolation
+    rmSync(path.join(dataDir, "pi-durable.sqlite"), { force: true });
+    rmSync(path.join(dataDir, "pi-durable.sqlite-wal"), { force: true });
+    rmSync(path.join(dataDir, "pi-durable.sqlite-shm"), { force: true });
+
+    await fakeModel.queue({
+      clear: true,
+      scripts: [{ kind: "text", text: "BOB_UPGRADED_EP2_REPLY" }],
+    });
+
+    const h2 = await AegisHostRuntime.start({
+      dataDir,
+      vault,
+      modelSlots: slots,
+      smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "a@local.test" },
+    });
+    assert.equal(h2.health, "NEEDS_ATTENTION");
+    const rot = await h2.rotateEpochAfterMismatch("r3_legacy_upgrade_trace_replaced");
+    const ep2 = rot.newEpoch;
+
+    const w2 = await startWebServer({ host: h2, port: 0, consoleTokens: tokens });
+    try {
+      const loginAlice2 = await httpLogin(w2.baseUrl, tokens.alice);
+      const loginBob2 = await httpLogin(w2.baseUrl, tokens.bob);
+
+      const c2Res = await fetch(`${w2.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginBob2.cookie, origin: w2.baseUrl },
+        body: JSON.stringify({ slotName: "router", scopeId: "scope:bob" }),
+      });
+      assert.equal(c2Res.status, 200);
+      const bobConvId = ((await c2Res.json()) as { conversationId: string }).conversationId;
+      assert.equal(bobConvId, reusedConvId, "Upgraded DB must reuse numeric conversation ID in ep2");
+
+      // Verify BOTH (ep1, reusedConvId, alice) and (ep2, reusedConvId, bob) coexist in conversation_scopes!
+      const coexistRows = h2.govDb
+        .prepare(
+          "SELECT runtime_epoch, principal_id, scope_id FROM conversation_scopes WHERE conversation_id = ? ORDER BY created_at ASC",
+        )
+        .all(reusedConvId) as Array<{ runtime_epoch: string; principal_id: string; scope_id: string }>;
+      assert.equal(coexistRows.length, 2, "Both ep1 and ep2 conversation_scopes rows must coexist for reused ID");
+      assert.equal(coexistRows[0]!.runtime_epoch, ep1);
+      assert.equal(coexistRows[0]!.principal_id, "alice");
+      assert.equal(coexistRows[1]!.runtime_epoch, ep2);
+      assert.equal(coexistRows[1]!.principal_id, "bob");
+
+      // Bob runs a chat turn in ep2
+      const bobChat = await fetch(`${w2.baseUrl}/api/conversations/${bobConvId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: loginBob2.cookie, origin: w2.baseUrl },
+        body: JSON.stringify({ content: "BOB_UPGRADED_EP2_PROMPT" }),
+      });
+      assert.equal(bobChat.status, 200);
+      const { submissionId } = (await bobChat.json()) as { submissionId: number };
+      const bobSub = await h2.harness.submission(submissionId as never, BACKGROUND_CONTEXT);
+      await bobSub!.wait(BACKGROUND_CONTEXT);
+      await new Promise((r) => setTimeout(r, 40));
+
+      // Alice active-epoch snapshot & SSE -> 403
+      const aliceActiveSnap = await fetch(`${w2.baseUrl}/api/conversations/${reusedConvId}/snapshot`, {
+        headers: { cookie: loginAlice2.cookie },
+      });
+      assert.equal(aliceActiveSnap.status, 403);
+      const aliceActiveSse = await readFirstSseFrame(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/events`,
+        loginAlice2.cookie,
+      );
+      assert.equal(aliceActiveSse.status, 403);
+
+      // Alice historical ep1 snapshot -> 200, includes backfilled provable denial, EXCLUDES unprovable denial & Bob ep2!
+      const aliceHistSnapRes = await fetch(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/snapshot?epoch=${encodeURIComponent(ep1)}`,
+        { headers: { cookie: loginAlice2.cookie } },
+      );
+      assert.equal(aliceHistSnapRes.status, 200);
+      const aliceHistSnapText = await aliceHistSnapRes.text();
+      assert.equal(aliceHistSnapText.includes("LEGACY_PROVABLE_EP1_DENIAL"), true);
+      assert.equal(aliceHistSnapText.includes("LEGACY_UNPROVABLE_AMBIGUOUS_DENIAL"), false);
+      assert.equal(aliceHistSnapText.includes("BOB_UPGRADED_EP2"), false);
+      const aliceHistSnap = JSON.parse(aliceHistSnapText) as {
+        messages: unknown[];
+        proposals: Array<{ runtimeEpoch: string }>;
+        budgetDenials: Array<{ requestId: string }>;
+      };
+      assert.equal(aliceHistSnap.messages.length, 0);
+      assert.ok(aliceHistSnap.proposals.length >= 1 && aliceHistSnap.proposals.every((p) => p.runtimeEpoch === ep1));
+      assert.deepEqual(
+        aliceHistSnap.budgetDenials.map((d) => d.requestId),
+        ["legacy_provable_req_1"],
+      );
+
+      // Alice historical ep1 SSE -> 200, includes provable denial, EXCLUDES unprovable denial & Bob ep2!
+      const aliceHistSse = await readFirstSseFrame(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/events?epoch=${encodeURIComponent(ep1)}`,
+        loginAlice2.cookie,
+      );
+      assert.equal(aliceHistSse.status, 200);
+      assert.equal(aliceHistSse.body.includes("LEGACY_PROVABLE_EP1_DENIAL"), true);
+      assert.equal(aliceHistSse.body.includes("LEGACY_UNPROVABLE_AMBIGUOUS_DENIAL"), false);
+      assert.equal(aliceHistSse.body.includes("BOB_UPGRADED_EP2"), false);
+
+      // Bob active ep2 snapshot -> 200, ONLY ep2 data, ZERO legacy denials (neither provable ep1 nor unprovable)!
+      const bobActiveSnapRes = await fetch(`${w2.baseUrl}/api/conversations/${bobConvId}/snapshot`, {
+        headers: { cookie: loginBob2.cookie },
+      });
+      assert.equal(bobActiveSnapRes.status, 200);
+      const bobActiveSnapText = await bobActiveSnapRes.text();
+      assert.equal(bobActiveSnapText.includes("BOB_UPGRADED_EP2_REPLY"), true);
+      assert.equal(bobActiveSnapText.includes("LEGACY_PROVABLE_EP1_DENIAL"), false);
+      assert.equal(bobActiveSnapText.includes("LEGACY_UNPROVABLE_AMBIGUOUS_DENIAL"), false);
+      assert.equal(bobActiveSnapText.includes("ALICE_LEGACY_EP1"), false);
+      const bobActiveSnap = JSON.parse(bobActiveSnapText) as {
+        proposals: unknown[];
+        budgetDenials: unknown[];
+      };
+      assert.equal(bobActiveSnap.proposals.length, 0);
+      assert.equal(bobActiveSnap.budgetDenials.length, 0);
+
+      // Bob active ep2 SSE -> 200, EXCLUDES both legacy denials & Alice ep1!
+      const bobActiveSse = await readFirstSseFrame(
+        `${w2.baseUrl}/api/conversations/${bobConvId}/events`,
+        loginBob2.cookie,
+      );
+      assert.equal(bobActiveSse.status, 200);
+      assert.equal(bobActiveSse.body.includes("BOB_UPGRADED_EP2_REPLY"), true);
+      assert.equal(bobActiveSse.body.includes("LEGACY_PROVABLE_EP1_DENIAL"), false);
+      assert.equal(bobActiveSse.body.includes("LEGACY_UNPROVABLE_AMBIGUOUS_DENIAL"), false);
+      assert.equal(bobActiveSse.body.includes("ALICE_LEGACY_EP1"), false);
+
+      // Bob requesting Alice's historical ep1 -> 403 on both snapshot & SSE
+      const bobHistSnap = await fetch(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/snapshot?epoch=${encodeURIComponent(ep1)}`,
+        { headers: { cookie: loginBob2.cookie } },
+      );
+      assert.equal(bobHistSnap.status, 403);
+      const bobHistSse = await readFirstSseFrame(
+        `${w2.baseUrl}/api/conversations/${reusedConvId}/events?epoch=${encodeURIComponent(ep1)}`,
+        loginBob2.cookie,
+      );
+      assert.equal(bobHistSse.status, 403);
+
+      // Verify unprovable legacy denial is still intact in internal audit_events
+      const internalAuditStillHasUnprovable = (
+        h2.govDb
+          .prepare(
+            "SELECT count(*) AS n FROM audit_events WHERE entity_type = 'budget_denial' AND entity_id = 'legacy_unprovable_req_1'",
+          )
+          .get() as { n: number }
+      ).n;
+      assert.equal(internalAuditStillHasUnprovable, 1);
+
+      return {
+        id: "R3-LEGACY-UPGRADE",
+        group: "F",
+        status: "PASS",
+        summary:
+          "Verified idempotent in-place migration of legacy conversation_scopes PK to (runtime_epoch, conversation_id), provable backfill of legacy budget_denial rows, strict exclusion of unprovable legacy denials from snapshots and SSE, and dual-epoch coexistence across reused numeric conversation ID.",
+        evidence: {
+          ep1,
+          ep2,
+          reusedConversationId: reusedConvId,
+          pkBeforeMigration: ["conversation_id"],
+          pkAfterOpen1,
+          pkAfterOpen2,
+          legacyScopeRowsPreserved: scopeCountAfterOpen1,
+          auditCountAfterOpen1,
+          auditCountAfterOpen2,
+          migrationEventsAfterOpen1,
+          migrationEventsAfterOpen2,
+          coexistingScopesForReusedId: coexistRows.length,
+          aliceHistoricalDenialIds: aliceHistSnap.budgetDenials.map((d) => d.requestId),
+          bobActiveDenialsCount: bobActiveSnap.budgetDenials.length,
+          unprovableRetainedInInternalAudit: internalAuditStillHasUnprovable === 1,
+          aliceActiveSseStatus: aliceActiveSse.status,
+          aliceHistSseStatus: aliceHistSse.status,
+          bobActiveSseStatus: bobActiveSse.status,
+          bobHistSseStatus: bobHistSse.status,
         },
       };
     } finally {

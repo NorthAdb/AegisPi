@@ -49,7 +49,7 @@ Accepted（2026-11-25，香港时间；已按第 1 轮审计意见修订并由�
 | 表 / 字段 | 相对附录草案的变化 | 影响口径 |
 |---|---|---|
 | `paired_manifest`（新增表） | 单行表记录 `trace_identity`、全分页单调水位、只读 change counter 与已知 Pi 任务 ID | 恢复：支持含跨页历史的同代际回退检测（F03 / S5 / R3） |
-| `conversation_scopes`（新增表） | 以复合主键 `(runtime_epoch, conversation_id)` 绑定 `(scope_id, principal_id)`；快照、聊天、压缩与轨迹读取均按代际隔离，已退役代际仅返回历史治理审计且不读当前活跃轨迹库 | 权限/恢复：防止换代后复用数字会话 ID 沿用旧 ACL 或跨主体泄露新轨迹（G1 / R3 / E09） |
+| `conversation_scopes`（新增表） | 以复合主键 `(runtime_epoch, conversation_id)` 绑定 `(scope_id, principal_id)`；开库时对旧版单列主键 `(conversation_id)` 自动执行幂等原位迁移并保全历史行；快照、聊天、压缩与轨迹读取均按代际隔离，已退役代际仅返回历史治理审计且不读当前活跃轨迹库 | 权限/恢复：防止新旧治理库换代后复用数字会话 ID 沿用旧 ACL 或跨主体泄露新轨迹（G1 / R3 / E09） |
 | `budget_task_bindings`（新增表） | 持久化 `(runtime_epoch, binding_kind, binding_key) -> (conversation_id, owner_task_id, purpose)` | 账务：确保委派与重启后归属不丢失、不另开默认账户（R1 / S4） |
 | `approval_challenges`（新增表） | 宿主私有表，仅在 `PENDING` 期间保存明文 nonce 供已鉴权审批人经专用 `/api/approvals/:id/challenge` 读取，离开 `PENDING` 即删除 | 审批安全：明文 nonce 零暴露于 SSE / 快照 / URL / 日志（G3） |
 | `scopes` 新增列 | 增加 `allowed_principals_json`、`allowed_tools_json`、`allowed_targets_json` | 权限：T1 / T2 / T4 / 核对 / 撤销实时 ACL 复核（G1 / E08 / E09 / E10） |
@@ -57,11 +57,11 @@ Accepted（2026-11-25，香港时间；已按第 1 轮审计意见修订并由�
 | `effects` 新增列 | 增加 `reconciled_by`、`reconciled_at`、`reconcile_evidence` | 恢复/审计：记录 `UNKNOWN` 人工核对操作者、时间与依据 |
 | `budget_accounts` 新增列 | 增加 `frozen INTEGER NOT NULL DEFAULT 0` | 账务：对齐 v1 超额结清自动冻结账户约束 |
 | `signal_outbox` 新增列 | 增加 `attempts`、`updated_at` | 投递/恢复：记录投递重试次数与更新时间 |
-| `audit_events` 新增列 | 增加 `details_json` | 审计/视图①：持久化拒绝原因供原会话展示（W1-A / B01） |
+| `audit_events` 新增列 | 增加 `details_json`；开库时对缺失 `runtimeEpoch` 的旧版 `budget_denial` 仅在会话授权、代际时间窗与任务绑定三方唯一可证时幂等补齐，无法证明归属的旧事件保留于内部审计并严格排除出按代际授权的快照与 SSE | 审计/视图①：持久化拒绝原因供原会话展示，同时杜绝旧无代际记录跨代际混入新主体视图（W1-A / B01 / R3） |
 
 ## 证据链接
 
 - `tests/week1/run-sdk-contracts.ts`（S1–S5 实测，含产品账本并发分账 S4）
-- `tests/week1/audit-regressions.ts`（G1-AUTH、G2-EGRESS、G3-NONCE-SSE、R1-ATTRIBUTION 实测）
+- `tests/week1/audit-regressions.ts`（G1-AUTH、G2-EGRESS、G3-NONCE-SSE、R1-ATTRIBUTION、R3-EPOCH-ACL、R3-LEGACY-UPGRADE 实测）
 - `tests/week1/run-matrix.ts`（F01–F03、B02–B07、E01–E05、E07–E10 实测）
 - `docs/v2/week1-audit/`（全量脱敏 JSON 证据包与审计报告）

@@ -42,6 +42,7 @@ import {
   testG3NonceSse,
   testR1Attribution,
   testR3EpochAcl,
+  testR3LegacyUpgrade,
   waitForFile,
 } from "./audit-regressions.ts";
 
@@ -2748,6 +2749,7 @@ export async function runMatrix(opts?: { dataDir?: string; evidenceDir?: string 
     () => testG3NonceSse(rootDir),
     () => testR1Attribution(rootDir),
     () => testR3EpochAcl(rootDir),
+    () => testR3LegacyUpgrade(rootDir),
     () => testF01(rootDir),
     () => testF02(rootDir),
     () => testF03(rootDir),

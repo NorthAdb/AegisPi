@@ -845,7 +845,7 @@ export function listBudgetDenialsForConversation(
       const parsed = JSON.parse(r.details_json) as Record<string, unknown>;
       if (
         parsed["conversationId"] === conversationId &&
-        (!runtimeEpoch || parsed["runtimeEpoch"] === undefined || parsed["runtimeEpoch"] === runtimeEpoch)
+        (!runtimeEpoch || (typeof parsed["runtimeEpoch"] === "string" && parsed["runtimeEpoch"] === runtimeEpoch))
       ) {
         out.push({
           seq: r.seq,

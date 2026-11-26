@@ -1,6 +1,6 @@
 {
-  "runId": "week1_0ab39ee5",
-  "executedAt": "2026-11-25T15:36:00.318Z",
+  "runId": "week1_ef8d218c",
+  "executedAt": "2026-11-26T01:05:37.650Z",
   "environment": {
     "nodeExe": "node.exe",
     "nodeVersion": "v22.23.5",
@@ -8,7 +8,7 @@
     "platform": "win32",
     "arch": "x64"
   },
-  "dataDirLabel": "aegispi-v2-week1-r5-20261125-233448",
+  "dataDirLabel": "aegispi-v2-week1-r4-20261126-090341",
   "evidenceDirRelative": "docs/v2/week1-audit",
   "results": {
     "typecheck": {
@@ -25,15 +25,15 @@
     },
     "w1_b_and_e06": {
       "status": "PASS",
-      "effectId": "efx_54b45a8945bd492881bcfdaa274f3218",
+      "effectId": "efx_775b79ec01594222b1cd97e1dfe04f95",
       "smtpTotalReceived": 1,
       "finalEffectState": "UNKNOWN",
       "view1Label": "结果待核对"
     },
     "matrix": {
       "status": "PASS",
-      "passed": 24,
-      "total": 24,
+      "passed": 25,
+      "total": 25,
       "cases": [
         {
           "id": "GUARD-BOUNDARY",
@@ -64,6 +64,11 @@
           "id": "R3-EPOCH-ACL",
           "status": "PASS",
           "summary": "Verified epoch-scoped conversation_scopes across trace replacement with reused numeric conversation ID: old principal blocked (403) on new epoch and restricted to historical ep1 audit (messages=[]), while new principal sees only ep2 data and gets 403 on ep1."
+        },
+        {
+          "id": "R3-LEGACY-UPGRADE",
+          "status": "PASS",
+          "summary": "Verified idempotent in-place migration of legacy conversation_scopes PK to (runtime_epoch, conversation_id), provable backfill of legacy budget_denial rows, strict exclusion of unprovable legacy denials from snapshots and SSE, and dual-epoch coexistence across reused numeric conversation ID."
         },
         {
           "id": "F01",

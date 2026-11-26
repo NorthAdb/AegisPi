@@ -133,7 +133,7 @@
         "compactionTaskId": 23,
         "generationTaskId": 26,
         "compactionReservation": {
-          "requestId": "mreq_b9680404abe94998ba18d1d8ef7d70dd",
+          "requestId": "mreq_e846c6d8a3254ecba8fd95e33357d453",
           "taskAccount": "acct:task:budget-task-compaction-A",
           "purpose": "compaction",
           "state": "SETTLED",
@@ -141,7 +141,7 @@
           "finalChargedMu": 60
         },
         "generationReservation": {
-          "requestId": "mreq_0068b0ec85d846e2ade0e29c7af33b9e",
+          "requestId": "mreq_54643fd929e54feba6b4aea050b080e5",
           "taskAccount": "acct:task:budget-task-gen-B",
           "purpose": "router",
           "state": "SETTLED",
@@ -164,7 +164,7 @@
           "sqliteVersion": "3.54.1"
         },
         "traceJournalMode": "wal",
-        "holderPidKilled": 27196,
+        "holderPidKilled": 27736,
         "secondInstanceRejected": true,
         "reacquiredAfterForceKill": true,
         "rollbackMissingConversationId": 7
