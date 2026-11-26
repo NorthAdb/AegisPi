@@ -196,7 +196,11 @@ export interface SandboxTaskRunOptions {
   imageName?: string;
   /** W2-G2: Required immutable sha256:... image digest verified BEFORE docker run. */
   approvedImageId: string;
-  inputSnapshotDir: string;
+  inputSnapshotDir?: string;
+  /** W2-S3: Optional synchronous input preparation executed immediately BEFORE docker run spawn (after async image/volume checks) to eliminate revocation TOCTOU windows. */
+  prepareInputSnapshotDirSync?: () =>
+    | { ok: true; inputSnapshotDir: string; cleanup?: () => void }
+    | { ok: false; code: string; reason: string };
   /** JavaScript body executed via `node -e` inside the zero-network, zero-credential container. */
   nodeScript: string;
   volumeName?: string;
@@ -258,6 +262,9 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
   }
   const volumeName = opts.volumeName ?? `aegis-w2-vol-${randomUUID().slice(0, 10)}`;
   const containerName = `aegis-w2-task-${randomUUID().slice(0, 10)}`;
+  if (!opts.inputSnapshotDir) {
+    throw new Error("runTaskInDockerSandbox requires inputSnapshotDir");
+  }
   const absInput = path.resolve(opts.inputSnapshotDir);
   if (!existsSync(absInput)) {
     mkdirSync(absInput, { recursive: true });
@@ -738,14 +745,47 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
   }
   const volumeName = opts.volumeName ?? `aegis-w2-vol-${randomUUID().slice(0, 10)}`;
   const containerName = `aegis-w2-task-${randomUUID().slice(0, 10)}`;
-  const absInput = path.resolve(opts.inputSnapshotDir);
-  if (!existsSync(absInput)) {
-    mkdirSync(absInput, { recursive: true });
-  }
 
   const volCreate = await execDockerAsync(["volume", "create", volumeName], 10_000);
   if (volCreate.status !== 0) {
     throw new Error(`docker volume create ${volumeName} failed: ${volCreate.stderr}`);
+  }
+
+  // W2-S3: Perform synchronous final authorization + verified mount directory creation
+  // STRICTLY AFTER all async preflight awaits (image verify & volume create) and IMMEDIATELY
+  // BEFORE spawning `docker run` so no revocation can land between check and mount!
+  let preparedInput: { ok: true; inputSnapshotDir: string; cleanup?: () => void } | null = null;
+  if (opts.prepareInputSnapshotDirSync) {
+    const prep = opts.prepareInputSnapshotDirSync();
+    if (!prep.ok) {
+      await cleanupTaskVolumeAsync(volumeName);
+      return {
+        ok: false,
+        code: prep.code,
+        error: prep.reason,
+        volumeName,
+        containerId: "",
+        containerName: "",
+        imageName,
+        imageId: imgCheck.immutableImageId,
+        executorImageId: imgCheck.immutableImageId,
+        networkMode: "",
+        mounts: [],
+        envKeysInContainer: [],
+        exitCode: null,
+        stdout: "",
+        stderr: prep.reason,
+      };
+    }
+    preparedInput = prep;
+  } else if (!opts.inputSnapshotDir) {
+    await cleanupTaskVolumeAsync(volumeName);
+    throw new Error("runTaskInDockerSandboxAsync requires inputSnapshotDir or prepareInputSnapshotDirSync");
+  }
+
+  const absInput = path.resolve(preparedInput ? preparedInput.inputSnapshotDir : opts.inputSnapshotDir!);
+  if (!existsSync(absInput)) {
+    mkdirSync(absInput, { recursive: true });
   }
 
   const dockerArgs = [
@@ -778,16 +818,22 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
     opts.nodeScript,
   ];
 
-  const run = await execDockerAsync(dockerArgs, opts.timeoutMs ?? 25_000);
-  const insp = await execDockerAsync(
-    [
-      "inspect",
-      containerName,
-      "--format",
-      "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}|||{{.HostConfig.NetworkMode}}",
-    ],
-    10_000,
-  );
+  let run!: Awaited<ReturnType<typeof execDockerAsync>>;
+  let insp!: Awaited<ReturnType<typeof execDockerAsync>>;
+  try {
+    run = await execDockerAsync(dockerArgs, opts.timeoutMs ?? 25_000);
+    insp = await execDockerAsync(
+      [
+        "inspect",
+        containerName,
+        "--format",
+        "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}|||{{.HostConfig.NetworkMode}}",
+      ],
+      10_000,
+    );
+  } finally {
+    preparedInput?.cleanup?.();
+  }
 
   let containerId = "";
   let imageId: string | null = null;

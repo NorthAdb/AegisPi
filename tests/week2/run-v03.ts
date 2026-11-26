@@ -1612,6 +1612,265 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
       } finally {
         postSrDb.close();
       }
+
+      // W2-S3 Round 6: Delegated WORKER same-round crash-recovery + missing worker_execution_roots fail-closed!
+      const wrkDir = path.join(rootDir, "formal-host-v03-worker-sameround");
+      const wrkDataDir = path.join(wrkDir, "data");
+      const wrkWorkspace = path.join(wrkDir, "workspace");
+      mkdirSync(path.join(wrkWorkspace, "reports"), { recursive: true });
+      mkdirSync(wrkDataDir, { recursive: true });
+
+      const origWrkB = `ORIG_WORKER_B_V1_${runId}\n`;
+      const origWrkBSha = sha256Text(origWrkB);
+      const userOfflineWrkB = `USER_OFFLINE_EDIT_WORKER_B_${runId}\n`;
+      const userOfflineWrkBSha = sha256Text(userOfflineWrkB);
+      const modelOverwriteWrkB = `MODEL_WORKER_OVERWRITE_B_${runId}\n`;
+      const modelOverwriteWrkBSha = sha256Text(modelOverwriteWrkB);
+      writeFileSync(path.join(wrkWorkspace, "reports", "wrk-b.md"), origWrkB, "utf8");
+
+      {
+        const { db: wrkSeedDb } = openGovernanceDb(path.join(wrkDataDir, "aegis-gov.sqlite"));
+        ensureActiveEpochAndManifest(wrkSeedDb, now);
+        ensureScope(wrkSeedDb, {
+          scopeId: "scope:default",
+          allowedPrincipals: ["owner"],
+          allowedTools: ["run_worker", "workspace_write_managed"],
+          allowedTargets: ["*"],
+        });
+        grantSourceRead(wrkSeedDb, {
+          principalId: "owner",
+          scopeId: "scope:default",
+          sourceType: "workspace_write",
+          resourceId: "workspace",
+          operations: ["write"],
+          constraints: { allowedRelPaths: ["reports/wrk-a.md", "reports/wrk-b.md", "reports/wrk-missing-root.md"] },
+          now,
+        });
+        grantModelDisclosure(wrkSeedDb, {
+          principalId: "owner",
+          scopeId: "scope:default",
+          sourceType: "*",
+          sourceId: "*",
+          provider: "fake-local",
+          modelId: "*",
+          baseUrl: fakeModel.baseUrl,
+          slotName: "*",
+          now,
+        });
+        wrkSeedDb.close();
+      }
+
+      const wrkCfgPath = path.join(wrkDir, "connectors.json");
+      writeFileSync(
+        wrkCfgPath,
+        JSON.stringify(
+          {
+            workspace: {
+              workspaceDir: wrkWorkspace,
+              approvedImageId,
+              imageName: DEFAULT_SANDBOX_IMAGE,
+              trackedBaselineRelPaths: ["reports/wrk-a.md", "reports/wrk-b.md", "reports/wrk-missing-root.md"],
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      const wrkToken = `SYNTH_V03_WORKER_SR_${runId}`;
+      const wrkBarrierFile = path.join(wrkDir, "barrier-wrk-a.json");
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_wrk_deleg_${runId}`,
+              name: "run_worker",
+              arguments: { prompt: "Worker writes wrk-a then updates wrk-b" },
+            },
+          },
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_wrk_a_${runId}`,
+              name: "workspace_write_managed",
+              arguments: { relPath: "reports/wrk-a.md", content: `WORKER_A_${runId}\n` },
+            },
+          },
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_wrk_b_${runId}`,
+              name: "workspace_write_managed",
+              arguments: {
+                relPath: "reports/wrk-b.md",
+                content: modelOverwriteWrkB,
+                baseSha256: userOfflineWrkBSha,
+              },
+            },
+          },
+          { kind: "text", text: "Worker same-round finished." },
+          { kind: "text", text: "Router after worker finished." },
+        ],
+      });
+
+      const hostWrk1 = await spawnFormalHost({
+        dataDir: wrkDataDir,
+        modelBaseUrl: fakeModel.baseUrl,
+        smtpHost: fakeSmtp.host,
+        smtpPort: fakeSmtp.smtpPort,
+        consoleToken: wrkToken,
+        connectorsConfigPath: wrkCfgPath,
+        extraArgs: ["--fault-after-import-install-before-receipt", wrkBarrierFile],
+      });
+      const wrkCookie1 = await httpLogin(hostWrk1.baseUrl, wrkToken);
+      const wrkParentConv = (await (
+        await fetch(`${hostWrk1.baseUrl}/api/conversations`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: wrkCookie1, origin: hostWrk1.baseUrl },
+          body: JSON.stringify({ slotName: "router" }),
+        })
+      ).json()) as { conversationId: string; runtimeEpoch: string };
+
+      const wrkChatRes = await fetch(`${hostWrk1.baseUrl}/api/conversations/${wrkParentConv.conversationId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: wrkCookie1, origin: hostWrk1.baseUrl },
+        body: JSON.stringify({
+          content: "Delegate worker to write wrk-a and wrk-b",
+          chatKey: `v03-wrk-sr-${runId}`,
+          runtimeEpoch: wrkParentConv.runtimeEpoch,
+        }),
+      });
+      assert.equal(wrkChatRes.status, 200);
+      await waitForFile(wrkBarrierFile, 25_000);
+      forceKillWindowsPid(hostWrk1.pid);
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Edit wrk-b.md during downtime -> restarted Worker MUST keep Router's pre-crash frozen baseline!
+      writeFileSync(path.join(wrkWorkspace, "reports", "wrk-b.md"), userOfflineWrkB, "utf8");
+
+      const hostWrk2 = await spawnFormalHost({
+        dataDir: wrkDataDir,
+        modelBaseUrl: fakeModel.baseUrl,
+        smtpHost: fakeSmtp.host,
+        smtpPort: fakeSmtp.smtpPort,
+        consoleToken: wrkToken,
+        connectorsConfigPath: wrkCfgPath,
+      });
+      try {
+        const wrkCookie2 = await httpLogin(hostWrk2.baseUrl, wrkToken);
+        const wrkDeadline = Date.now() + 25_000;
+        let wrkImpB: { targetRelPath: string; state: string; baseSha256: string | null; conflictRelPath: string | null } | undefined;
+        let wrkParentDone = false;
+        while (Date.now() < wrkDeadline) {
+          const sp = (await (
+            await fetch(`${hostWrk2.baseUrl}/api/conversations/${wrkParentConv.conversationId}/snapshot`, {
+              headers: { cookie: wrkCookie2 },
+            })
+          ).json()) as {
+            fileImports: Array<{ targetRelPath: string; state: string; baseSha256: string | null; conflictRelPath: string | null }>;
+            messages?: Array<{ role: string; content: unknown }>;
+          };
+          wrkImpB = sp.fileImports.find((f) => f.targetRelPath === "reports/wrk-b.md");
+          wrkParentDone = Boolean(
+            sp.messages?.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("Router after worker finished")),
+          );
+          if (wrkImpB && wrkParentDone) break;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        assert.equal(wrkParentDone, true, "W2-S3: Same-worker resumed run must complete through Router");
+        assert.equal(wrkImpB?.state, "CONFLICT_SAVED", "W2-S3: Resumed Worker MUST reuse Router's frozen baseline -> CONFLICT_SAVED");
+        assert.equal(wrkImpB?.baseSha256, origWrkBSha, "W2-S3: Resumed Worker baseline must equal pre-crash origWrkBSha");
+        assert.ok(wrkImpB?.conflictRelPath);
+        assert.equal(
+          sha256FileIfExists(path.join(wrkWorkspace, "reports", "wrk-b.md")),
+          userOfflineWrkBSha,
+          "W2-S3: User downtime edit MUST NOT be overwritten by restarted Worker!",
+        );
+        assert.equal(sha256FileIfExists(path.join(wrkWorkspace, wrkImpB.conflictRelPath!)), modelOverwriteWrkBSha);
+      } finally {
+        await hostWrk2.stop();
+      }
+
+      // Verify ONLY ONE frozen snapshot row existed (Worker did NOT create a separate Worker-local snapshot!),
+      // AND verify fail-closed PENDING_RECONCILE if worker_execution_roots is missing on Worker resume!
+      let missingRootWorkerConvId = "";
+      {
+        const { db: chkDb } = openGovernanceDb(path.join(wrkDataDir, "aegis-gov.sqlite"));
+        const snapRows = chkDb
+          .prepare("SELECT snapshot_key FROM task_frozen_snapshots WHERE runtime_epoch = ?")
+          .all(wrkParentConv.runtimeEpoch) as Array<{ snapshot_key: string }>;
+        assert.equal(snapRows.length, 1, `W2-S3: Worker MUST reuse parent's single frozen snapshot, got ${JSON.stringify(snapRows)}`);
+        const rootRows = chkDb
+          .prepare("SELECT worker_conversation_id, parent_conversation_id FROM worker_execution_roots WHERE runtime_epoch = ?")
+          .all(wrkParentConv.runtimeEpoch) as Array<{ worker_conversation_id: string; parent_conversation_id: string }>;
+        assert.equal(rootRows.length, 1);
+        assert.equal(rootRows[0]!.parent_conversation_id, wrkParentConv.conversationId);
+        missingRootWorkerConvId = rootRows[0]!.worker_conversation_id;
+        // Now delete worker_execution_roots row and test follow-up delegated Worker fail-closed via host runtime!
+        chkDb.prepare("DELETE FROM worker_execution_roots WHERE worker_conversation_id = ?").run(missingRootWorkerConvId);
+        chkDb.close();
+      }
+      // Re-start hostWrk3 on wrkDataDir and send a simulated Worker-bound write check or second turn inside existing worker conv?
+      // Better: start hostWrk3, open parent conversation -> run new worker, wait? Deleting rootRows for missingRootWorkerConvId and resuming a chat directly on missingRootWorkerConvId is blocked by ACL? No: owner owns missingRootWorkerConvId scope! Let's run chat on missingRootWorkerConvId and verify parent Router snapshot shows PENDING_RECONCILE + 0 disk writes!
+      const missingTargetPath = path.join(wrkWorkspace, "reports", "wrk-missing-root.md");
+      writeFileSync(missingTargetPath, "UNTOUCHED_BEFORE_MISSING_ROOT\n", "utf8");
+      const missingTargetOrigSha = sha256FileIfExists(missingTargetPath);
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_wrk_missing_${runId}`,
+              name: "workspace_write_managed",
+              arguments: { relPath: "reports/wrk-missing-root.md", content: "MUST_NOT_INSTALL\n" },
+            },
+          },
+          { kind: "text", text: "Stopped on missing worker root." },
+        ],
+      });
+      const hostWrk3 = await spawnFormalHost({
+        dataDir: wrkDataDir,
+        modelBaseUrl: fakeModel.baseUrl,
+        smtpHost: fakeSmtp.host,
+        smtpPort: fakeSmtp.smtpPort,
+        consoleToken: wrkToken,
+        connectorsConfigPath: wrkCfgPath,
+      });
+      try {
+        const wrkCookie3 = await httpLogin(hostWrk3.baseUrl, wrkToken);
+        await fetch(`${hostWrk3.baseUrl}/api/conversations/${missingRootWorkerConvId}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: wrkCookie3, origin: hostWrk3.baseUrl },
+          body: JSON.stringify({
+            content: "Attempt write with missing worker execution root",
+            chatKey: `v03-wrk-missroot-${runId}`,
+            runtimeEpoch: wrkParentConv.runtimeEpoch,
+          }),
+        });
+        const missDeadline = Date.now() + 15_000;
+        let missImp: { targetRelPath: string; state: string; installCount: number; reason: string | null } | undefined;
+        while (Date.now() < missDeadline) {
+          const spParent = (await (
+            await fetch(`${hostWrk3.baseUrl}/api/conversations/${wrkParentConv.conversationId}/snapshot`, {
+              headers: { cookie: wrkCookie3 },
+            })
+          ).json()) as {
+            fileImports: Array<{ targetRelPath: string; state: string; installCount: number; reason: string | null }>;
+          };
+          missImp = spParent.fileImports.find((f) => f.targetRelPath === "reports/wrk-missing-root.md");
+          if (missImp) break;
+          await new Promise((r) => setTimeout(r, 80));
+        }
+        assert.equal(missImp?.state, "PENDING_RECONCILE", "W2-S3: Missing worker root MUST stop install & project PENDING_RECONCILE in parent conversation");
+        assert.equal(missImp?.installCount, 0);
+        assert.equal(sha256FileIfExists(missingTargetPath), missingTargetOrigSha, "Disk target MUST remain untouched");
+      } finally {
+        await hostWrk3.stop();
+      }
     } finally {
       await fakeSmtp.stop().catch(() => {});
       await fakeModel.stop().catch(() => {});
@@ -1695,6 +1954,8 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         sameRoundCrashRecoveryConflictPreserved: true,
         sameRoundPostCacheRevokedExcluded: true,
         missingFrozenSnapshotFailClosedVerified: true,
+        sameWorkerCrashRecoveryConflictPreserved: true,
+        sameWorkerMissingRootPendingReconcileVerified: true,
       },
     };
     const evidencePath = path.join(evidenceDir, "v03-evidence.json");

@@ -332,6 +332,15 @@ CREATE TABLE IF NOT EXISTS task_frozen_snapshots (
   authorized_paths_json TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS worker_execution_roots (
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  worker_conversation_id TEXT NOT NULL,
+  parent_conversation_id TEXT NOT NULL,
+  execution_root_task_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (runtime_epoch, worker_conversation_id)
+);
 `;
 
 export function openGovernanceDb(dbPath: string): { db: DatabaseSync; pragmas: GovDbPragmas } {
@@ -593,6 +602,18 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
       baselines_json TEXT NOT NULL,
       authorized_paths_json TEXT NOT NULL DEFAULT '[]',
       created_at INTEGER NOT NULL
+    );
+  `);
+
+  // Migration 5 (W2-S3): Persist delegated Worker -> parent execution_root_task_id binding across restarts
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_execution_roots (
+      runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+      worker_conversation_id TEXT NOT NULL,
+      parent_conversation_id TEXT NOT NULL,
+      execution_root_task_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (runtime_epoch, worker_conversation_id)
     );
   `);
 }

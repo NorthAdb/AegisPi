@@ -73,7 +73,12 @@ import {
 import { createAegisContextExtension } from "./extensions/aegis-context.ts";
 import type { ImapEndpointConfig } from "../capabilities/mail/imap-client.ts";
 import type { ManagedWorkspaceImporter } from "../capabilities/workspace/importer.ts";
-import { inheritConversationSources } from "../governance/policy.ts";
+import {
+  getWorkerExecutionRoot,
+  inheritConversationSources,
+  listWorkerExecutionRoots,
+  persistWorkerExecutionRoot,
+} from "../governance/policy.ts";
 import type { GitHubMcpBridge } from "./mcp-bridge.ts";
 import {
   createHostModelsEgress,
@@ -581,6 +586,33 @@ export class AegisHostRuntime {
       const resolveExecutionRootTaskId = async (conversationId: string, taskId: string): Promise<string> => {
         const mapped = workerExecutionRootByConv.get(conversationId);
         if (mapped) return mapped;
+        const activeEpoch = epochBox.current;
+        if (govDb) {
+          const persistedRoot = getWorkerExecutionRoot(govDb, activeEpoch, conversationId);
+          if (persistedRoot) {
+            workerExecutionRootByConv.set(conversationId, persistedRoot.execution_root_task_id);
+            parentByWorkerConv.set(conversationId, persistedRoot.parent_conversation_id);
+            return persistedRoot.execution_root_task_id;
+          }
+          const cidNum = Number(conversationId);
+          const convPurpose =
+            (Number.isFinite(cidNum) ? conversationBudgetOwner.get(cidNum)?.purpose : undefined) ??
+            getPersistedBudgetBinding(govDb, {
+              runtimeEpoch: activeEpoch,
+              bindingKind: "CONVERSATION",
+              bindingKey: conversationId,
+            })?.purpose ??
+            getPersistedBudgetBinding(govDb, {
+              runtimeEpoch: activeEpoch,
+              bindingKind: "PI_TASK",
+              bindingKey: taskId,
+            })?.purpose;
+          // W2-S3: A delegated worker conversation MUST resolve its durable parent execution root;
+          // NEVER silently fall back to a Worker-local snapshot key if lineage is missing!
+          if (convPurpose === "worker") {
+            return `__MISSING_WORKER_EXECUTION_ROOT__:${conversationId}`;
+          }
+        }
         const cid = Number(conversationId) as ConversationId;
         if (harnessRef && Number.isFinite(cid)) {
           try {
@@ -667,6 +699,11 @@ export class AegisHostRuntime {
             });
           }
         }
+      }
+      // W2-S3: Hydrate durable parent <-> worker execution root bindings BEFORE harness.resume()!
+      for (const wr of listWorkerExecutionRoots(govDb, epochBox.current)) {
+        workerExecutionRootByConv.set(wr.worker_conversation_id, wr.execution_root_task_id);
+        parentByWorkerConv.set(wr.worker_conversation_id, wr.parent_conversation_id);
       }
 
       const telemetry = new HostPhaseTelemetry();
@@ -885,6 +922,20 @@ export class AegisHostRuntime {
             workerTasksByParent.set(parentConversationId, list);
             parentByWorkerConv.set(String(workerConv.id), parentConversationId);
             const parentExecRoot = await resolveExecutionRootTaskId(parentConversationId, parentTaskId);
+            if (parentExecRoot.startsWith("__MISSING_WORKER_EXECUTION_ROOT__:")) {
+              return {
+                ok: false,
+                text: "",
+                error: `worker_execution_root_missing: cannot confirm execution root for parent conversation ${parentConversationId}`,
+              };
+            }
+            persistWorkerExecutionRoot(govDb!, {
+              runtimeEpoch: activeEpoch,
+              workerConversationId: String(workerConv.id),
+              parentConversationId,
+              executionRootTaskId: parentExecRoot,
+              now: nowFn(),
+            });
             workerExecutionRootByConv.set(String(workerConv.id), parentExecRoot);
             emitChange({
               conversationId: parentConversationId,

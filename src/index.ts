@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ImapEndpointConfig } from "./capabilities/mail/imap-client.ts";
@@ -194,6 +195,48 @@ vault.registerSlot(
   routerSecret,
 );
 
+// W2-S6: In-memory only secret marker scanner (NEVER writes raw env values or volume bytes to disk!)
+const collectInMemorySlotMarkers = (): Array<{ slotId: string; marker: string }> => {
+  const markers: Array<{ slotId: string; marker: string }> = vault
+    .registeredSlotMarkersForAudit()
+    .map((m) => ({ slotId: m.slotId, marker: m.marker }));
+  if (consoleToken && consoleToken.length > 0) {
+    markers.push({ slotId: "slot:web-console", marker: consoleToken });
+  }
+  if (consoleTokens) {
+    for (const tok of Object.values(consoleTokens)) {
+      if (tok && tok.length > 0 && !markers.some((m) => m.slotId === "slot:web-console" && m.marker === tok)) {
+        markers.push({ slotId: "slot:web-console", marker: tok });
+      }
+    }
+  }
+  return markers;
+};
+
+const scanBufferStrictlyInMemory = (
+  buf: Buffer,
+  excludeSlots: string[] = [],
+): { scannedBytes: number; forbiddenHitsBySlot: Record<string, number>; totalForbiddenHits: number } => {
+  const excluded = new Set(excludeSlots);
+  const hitsBySlot: Record<string, number> = {};
+  let total = 0;
+  for (const { slotId, marker } of collectInMemorySlotMarkers()) {
+    if (excluded.has(slotId) || !marker) continue;
+    const needle = Buffer.from(marker, "utf8");
+    let count = 0;
+    let idx = 0;
+    while (idx <= buf.length - needle.length) {
+      const found = buf.indexOf(needle, idx);
+      if (found === -1) break;
+      count++;
+      idx = found + Math.max(1, needle.length);
+    }
+    hitsBySlot[slotId] = (hitsBySlot[slotId] ?? 0) + count;
+    total += count;
+  }
+  return { scannedBytes: buf.length, forbiddenHitsBySlot: hitsBySlot, totalForbiddenHits: total };
+};
+
 // W2-G1 / W2-S1: Register trusted connector slots strictly bound to verified target descriptors in host memory!
 let configuredImapEndpoint: ImapEndpointConfig | null = null;
 if (connectorsCfg?.imap) {
@@ -229,11 +272,33 @@ if (connectorsCfg?.imap) {
       ...(s6ObserveDir
         ? {
             onObserveChildEnv: (info) => {
+              // W2-S6: Scan raw env entries strictly IN MEMORY; NEVER write raw env values to disk!
+              const entries = info.entries ?? [];
+              const scan = scanBufferStrictlyInMemory(Buffer.from(JSON.stringify(entries), "utf8"));
               const outFile = path.join(
                 s6ObserveDir,
                 `imap-child-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
               );
-              writeFileSync(outFile, JSON.stringify({ ...info, at: new Date().toISOString() }, null, 2), "utf8");
+              writeFileSync(
+                outFile,
+                JSON.stringify(
+                  {
+                    observedInMemoryOnly: true,
+                    rawValuesWrittenToDisk: false,
+                    envKeys: info.keys,
+                    envEntriesCount: entries.length,
+                    valueDigests: info.valueDigests,
+                    scannedBytes: scan.scannedBytes,
+                    passwordPresentInEnv: info.passwordPresentInEnv,
+                    forbiddenHitsBySlot: scan.forbiddenHitsBySlot,
+                    totalForbiddenHits: scan.totalForbiddenHits,
+                    at: new Date().toISOString(),
+                  },
+                  null,
+                  2,
+                ),
+                "utf8",
+              );
             },
           }
         : {}),
@@ -409,7 +474,28 @@ const host = await AegisHostRuntime.start({
             return { ok: false, code: "workspace_write_denied", message: preAuth.reason };
           }
           // W2-S3: Durable run-level frozen input snapshot & baseline persisted in governance SQLite,
-          // re-verifying every /input path against live source_read_grants before EACH container launch.
+          // failing closed into PENDING_RECONCILE if worker execution lineage or persisted snapshot cannot be verified.
+          if (wp.executionRootTaskId.startsWith("__MISSING_WORKER_EXECUTION_ROOT__:")) {
+            const reason = `worker_execution_root_missing: cannot confirm execution root for worker conversation ${wp.conversationId}`;
+            const pend = importer.recordPendingReconcileImport(currentHost.govDb, {
+              runtimeEpoch: wp.runtimeEpoch,
+              conversationId: wp.conversationId,
+              principalId: wp.principalId,
+              scopeId: wp.scopeId,
+              logicalKey: wp.logicalKey,
+              targetRelPath: cap.normalizedRelPath,
+              baseSha256: cap.baseSha256,
+              reason,
+            });
+            return {
+              ok: false,
+              code: "worker_execution_root_missing",
+              state: "PENDING_RECONCILE",
+              importId: pend.importId,
+              targetRelPath: cap.normalizedRelPath,
+              message: reason,
+            };
+          }
           const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
           const taskSnapKey = `${wp.runtimeEpoch}:${wp.executionRootTaskId}`;
           const frozenRes = importer.getOrCreateTaskFrozenSnapshot({
@@ -423,58 +509,210 @@ const host = await AegisHostRuntime.start({
             candidateRelPaths: [...(wc.trackedBaselineRelPaths ?? []), cap.normalizedRelPath],
           });
           if (!frozenRes.ok) {
+            const pend = importer.recordPendingReconcileImport(currentHost.govDb, {
+              runtimeEpoch: wp.runtimeEpoch,
+              conversationId: wp.conversationId,
+              principalId: wp.principalId,
+              scopeId: wp.scopeId,
+              logicalKey: wp.logicalKey,
+              targetRelPath: cap.normalizedRelPath,
+              baseSha256: cap.baseSha256,
+              reason: frozenRes.code,
+            });
             return {
               ok: false,
               code: frozenRes.code,
               state: "PENDING_RECONCILE",
+              importId: pend.importId,
+              targetRelPath: cap.normalizedRelPath,
               message: frozenRes.reason,
             };
           }
           const frozenSnap = frozenRes.snapshot;
           if (frozenSnap.fromDurableDb && !frozenSnap.hasBaseline(cap.normalizedRelPath) && cap.baseSha256 !== null) {
+            const reason = `Restored frozen snapshot ${frozenSnap.snapshotId} lacks frozen baseline for existing file '${cap.normalizedRelPath}'`;
+            const pend = importer.recordPendingReconcileImport(currentHost.govDb, {
+              runtimeEpoch: wp.runtimeEpoch,
+              conversationId: wp.conversationId,
+              principalId: wp.principalId,
+              scopeId: wp.scopeId,
+              logicalKey: wp.logicalKey,
+              targetRelPath: cap.normalizedRelPath,
+              baseSha256: cap.baseSha256,
+              reason: "frozen_snapshot_baseline_missing",
+            });
             return {
               ok: false,
               code: "frozen_snapshot_baseline_missing",
               state: "PENDING_RECONCILE",
-              message: `Restored frozen snapshot ${frozenSnap.snapshotId} lacks frozen baseline for existing file '${cap.normalizedRelPath}'`,
+              importId: pend.importId,
+              targetRelPath: cap.normalizedRelPath,
+              message: reason,
             };
           }
           const hostBaseSha256 = frozenSnap.getBaseline(cap.normalizedRelPath);
-          const verifiedMount = importer.prepareVerifiedMountInputDir({
-            snapshot: frozenSnap,
-            mountRootDir: taskSnapshotsRootDir,
-            govDb: currentHost.govDb,
-            principalId: wp.principalId,
-            scopeId: wp.scopeId,
+          let latestMountedRelPaths: string[] = [];
+          let latestExcludedRelPaths: string[] = [];
+
+          const sb = await runTaskInDockerSandboxAsync({
+            approvedImageId: wc.approvedImageId,
+            imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
+            // W2-S3: Re-verify ALL cached /input grants synchronously RIGHT BEFORE spawning `docker run`!
+            prepareInputSnapshotDirSync: () => {
+              const mountAuth = checkSourceReadAuthorized(currentHost.govDb, {
+                principalId: wp.principalId,
+                scopeId: wp.scopeId,
+                sourceType: "workspace_write",
+                resourceId: "workspace",
+                operation: "write",
+                path: cap.normalizedRelPath,
+              });
+              if (!mountAuth.ok) {
+                return { ok: false, code: "workspace_write_denied", reason: mountAuth.reason };
+              }
+              const verifiedMount = importer.prepareVerifiedMountInputDir({
+                snapshot: frozenSnap,
+                mountRootDir: taskSnapshotsRootDir,
+                govDb: currentHost.govDb,
+                principalId: wp.principalId,
+                scopeId: wp.scopeId,
+              });
+              latestMountedRelPaths = verifiedMount.mountedRelPaths;
+              latestExcludedRelPaths = verifiedMount.excludedRelPaths;
+              return {
+                ok: true,
+                inputSnapshotDir: verifiedMount.mountDir,
+                cleanup: verifiedMount.cleanup,
+              };
+            },
+            nodeScript: `
+              const fs = require("node:fs");
+              const path = require("node:path");
+              const rel = ${JSON.stringify(cap.normalizedRelPath)};
+              const full = path.join("/out", rel);
+              fs.mkdirSync(path.dirname(full), { recursive: true });
+              fs.writeFileSync(full, ${JSON.stringify(wp.content)}, "utf8");
+            `,
+            ...(s6ObserveDir
+              ? {
+                  onInspectObserved: (info) => {
+                    // W2-S6: Scan raw container env & CLI env strictly IN MEMORY; NEVER write raw values to disk!
+                    const containerScan = scanBufferStrictlyInMemory(
+                      Buffer.from(JSON.stringify(info.rawEnvInContainer), "utf8"),
+                    );
+                    const cliScan = scanBufferStrictlyInMemory(
+                      Buffer.from(JSON.stringify(info.cliEnvEntries), "utf8"),
+                    );
+                    const containerEnvValueDigests: Record<string, string> = {};
+                    const envKeysInContainer: string[] = [];
+                    for (const entry of info.rawEnvInContainer) {
+                      const eqIdx = entry.indexOf("=");
+                      const k = eqIdx >= 0 ? entry.slice(0, eqIdx) : entry;
+                      const v = eqIdx >= 0 ? entry.slice(eqIdx + 1) : "";
+                      if (k) {
+                        envKeysInContainer.push(k);
+                        containerEnvValueDigests[k] = createHash("sha256").update(v, "utf8").digest("hex").slice(0, 16);
+                      }
+                    }
+                    const outFile = path.join(
+                      s6ObserveDir,
+                      `docker-sandbox-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
+                    );
+                    writeFileSync(
+                      outFile,
+                      JSON.stringify(
+                        {
+                          observedInMemoryOnly: true,
+                          rawValuesWrittenToDisk: false,
+                          containerId: info.containerId,
+                          containerName: info.containerName,
+                          volumeName: info.volumeName,
+                          networkMode: info.networkMode,
+                          mounts: info.mounts.map((m) => ({ destination: m.destination, rw: m.rw })),
+                          envKeysInContainer,
+                          rawEnvEntriesCount: info.rawEnvInContainer.length,
+                          rawEnvScannedBytes: containerScan.scannedBytes,
+                          containerEnvValueDigests,
+                          containerEnvForbiddenHitsBySlot: containerScan.forbiddenHitsBySlot,
+                          cliEnvKeys: info.cliEnvEntries.map(([k]) => k),
+                          cliEnvEntriesCount: info.cliEnvEntries.length,
+                          cliEnvScannedBytes: cliScan.scannedBytes,
+                          cliEnvForbiddenHitsBySlot: cliScan.forbiddenHitsBySlot,
+                          mountedRelPaths: latestMountedRelPaths,
+                          excludedRelPaths: latestExcludedRelPaths,
+                          totalForbiddenHits: containerScan.totalForbiddenHits + cliScan.totalForbiddenHits,
+                          at: new Date().toISOString(),
+                        },
+                        null,
+                        2,
+                      ),
+                      "utf8",
+                    );
+                  },
+                }
+              : {}),
           });
+          if (!sb.ok) {
+            if (sb.containerName) await stopAndRemoveContainerAsync(sb.containerName);
+            if (sb.volumeName) await cleanupTaskVolumeAsync(sb.volumeName);
+            return {
+              ok: false,
+              code: sb.code ?? "sandbox_execution_failed",
+              message: sb.error ?? (sb.stderr || "Docker sandbox failed"),
+              executorImageId: sb.executorImageId,
+            };
+          }
 
           try {
-            const sb = await runTaskInDockerSandboxAsync({
+            // Collect related conversation IDs (e.g. parent + worker) for W2-S2 recursive source revocation checks
+            const relatedIds = new Set<string>([wp.conversationId]);
+            if (boundTask) {
+              const rows = currentHost.govDb
+                .prepare(
+                  "SELECT DISTINCT conversation_id FROM budget_task_bindings WHERE runtime_epoch = ? AND owner_task_id = ?",
+                )
+                .all(wp.runtimeEpoch, boundTask) as Array<{ conversation_id: string }>;
+              for (const r of rows) relatedIds.add(r.conversation_id);
+            }
+
+            const impRes = await importer.importFileFromTaskVolume({
+              govDb: currentHost.govDb,
+              runtimeEpoch: wp.runtimeEpoch,
+              conversationId: wp.conversationId,
+              relatedConversationIds: [...relatedIds],
+              principalId: wp.principalId,
+              scopeId: wp.scopeId,
+              logicalKey: wp.logicalKey,
+              volumeName: sb.volumeName,
               approvedImageId: wc.approvedImageId,
-              imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
-              inputSnapshotDir: verifiedMount.mountDir,
-              nodeScript: `
-                const fs = require("node:fs");
-                const path = require("node:path");
-                const rel = ${JSON.stringify(cap.normalizedRelPath)};
-                const full = path.join("/out", rel);
-                fs.mkdirSync(path.dirname(full), { recursive: true });
-                fs.writeFileSync(full, ${JSON.stringify(wp.content)}, "utf8");
-              `,
+              containerId: sb.containerId,
+              targetRelPath: cap.normalizedRelPath,
+              baseSha256: hostBaseSha256,
               ...(s6ObserveDir
                 ? {
-                    onInspectObserved: (info) => {
-                      const outFile = path.join(
-                        s6ObserveDir,
-                        `docker-sandbox-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
-                      );
+                    onExportedFilesObserved: (expInfo) => {
+                      // W2-S6: Scan pre-install exported volume bytes strictly IN MEMORY; NEVER write raw .bin bytes to disk!
+                      const rawConcat = Buffer.concat(expInfo.files.map((f) => f.bytes));
+                      const volScan = scanBufferStrictlyInMemory(rawConcat);
+                      const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
                       writeFileSync(
-                        outFile,
+                        path.join(s6ObserveDir, `volume-export-${stamp}.json`),
                         JSON.stringify(
                           {
-                            ...info,
-                            mountedRelPaths: verifiedMount.mountedRelPaths,
-                            excludedRelPaths: verifiedMount.excludedRelPaths,
+                            observedInMemoryOnly: true,
+                            rawBytesWrittenToDisk: false,
+                            volumeName: expInfo.volumeName,
+                            exporterImageId: expInfo.exporterImageId,
+                            readOnlyMountVerified: expInfo.readOnlyMountVerified,
+                            exportedFilesCount: expInfo.files.length,
+                            exportedTotalBytes: volScan.scannedBytes,
+                            files: expInfo.files.map((f) => ({
+                              relPath: f.relPath,
+                              sha256: f.sha256,
+                              sizeBytes: f.sizeBytes,
+                            })),
+                            forbiddenHitsBySlot: volScan.forbiddenHitsBySlot,
+                            totalForbiddenHits: volScan.totalForbiddenHits,
                             at: new Date().toISOString(),
                           },
                           null,
@@ -485,140 +723,68 @@ const host = await AegisHostRuntime.start({
                     },
                   }
                 : {}),
+              ...(faultAfterImportInstallBeforeReceiptFile
+                ? {
+                    onAfterAtomicInstallBeforeReceipt: (info) => {
+                      writeFileSync(
+                        faultAfterImportInstallBeforeReceiptFile,
+                        JSON.stringify({
+                          pid: process.pid,
+                          window: "after_import_install_before_receipt",
+                          logicalKey: wp.logicalKey,
+                          conversationId: wp.conversationId,
+                          targetRelPath: cap.normalizedRelPath,
+                          ...info,
+                          at: new Date().toISOString(),
+                        }) + "\n",
+                        "utf8",
+                      );
+                      const shared = new Int32Array(new SharedArrayBuffer(4));
+                      Atomics.wait(shared, 0, 0, 60_000);
+                    },
+                  }
+                : {}),
             });
-            if (!sb.ok) {
-              if (sb.containerName) await stopAndRemoveContainerAsync(sb.containerName);
-              if (sb.volumeName) await cleanupTaskVolumeAsync(sb.volumeName);
-              return {
-                ok: false,
-                code: sb.code ?? "sandbox_execution_failed",
-                message: sb.error ?? (sb.stderr || "Docker sandbox failed"),
-                executorImageId: sb.executorImageId,
-              };
-            }
-
-            try {
-              // Collect related conversation IDs (e.g. parent + worker) for W2-S2 recursive source revocation checks
-              const relatedIds = new Set<string>([wp.conversationId]);
-              if (boundTask) {
-                const rows = currentHost.govDb
-                  .prepare(
-                    "SELECT DISTINCT conversation_id FROM budget_task_bindings WHERE runtime_epoch = ? AND owner_task_id = ?",
-                  )
-                  .all(wp.runtimeEpoch, boundTask) as Array<{ conversation_id: string }>;
-                for (const r of rows) relatedIds.add(r.conversation_id);
-              }
-
-              const impRes = await importer.importFileFromTaskVolume({
-                govDb: currentHost.govDb,
-                runtimeEpoch: wp.runtimeEpoch,
-                conversationId: wp.conversationId,
-                relatedConversationIds: [...relatedIds],
-                principalId: wp.principalId,
-                scopeId: wp.scopeId,
-                logicalKey: wp.logicalKey,
-                volumeName: sb.volumeName,
-                approvedImageId: wc.approvedImageId,
+            writeAuditEvent(currentHost.govDb, {
+              entityType: "sandbox_run",
+              entityId: sb.containerName || sb.volumeName,
+              eventKey: `sandbox:${wp.logicalKey}:${impRes.importId}`,
+              eventType: "docker_sandbox_observed",
+              occurredAt: Date.now(),
+              details: {
                 containerId: sb.containerId,
-                targetRelPath: cap.normalizedRelPath,
-                baseSha256: hostBaseSha256,
-                ...(s6ObserveDir
-                  ? {
-                      onExportedFilesObserved: (expInfo) => {
-                        const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-                        const recordedFiles = expInfo.files.map((f, idx) => {
-                          const binName = `volume-export-${stamp}-${idx}.bin`;
-                          writeFileSync(path.join(s6ObserveDir, binName), f.bytes);
-                          return {
-                            relPath: f.relPath,
-                            sha256: f.sha256,
-                            sizeBytes: f.sizeBytes,
-                            bytesFile: binName,
-                          };
-                        });
-                        writeFileSync(
-                          path.join(s6ObserveDir, `volume-export-${stamp}.json`),
-                          JSON.stringify(
-                            {
-                              volumeName: expInfo.volumeName,
-                              exporterImageId: expInfo.exporterImageId,
-                              readOnlyMountVerified: expInfo.readOnlyMountVerified,
-                              files: recordedFiles,
-                              at: new Date().toISOString(),
-                            },
-                            null,
-                            2,
-                          ),
-                          "utf8",
-                        );
-                      },
-                    }
-                  : {}),
-                ...(faultAfterImportInstallBeforeReceiptFile
-                  ? {
-                      onAfterAtomicInstallBeforeReceipt: (info) => {
-                        writeFileSync(
-                          faultAfterImportInstallBeforeReceiptFile,
-                          JSON.stringify({
-                            pid: process.pid,
-                            window: "after_import_install_before_receipt",
-                            logicalKey: wp.logicalKey,
-                            conversationId: wp.conversationId,
-                            targetRelPath: cap.normalizedRelPath,
-                            ...info,
-                            at: new Date().toISOString(),
-                          }) + "\n",
-                          "utf8",
-                        );
-                        const shared = new Int32Array(new SharedArrayBuffer(4));
-                        Atomics.wait(shared, 0, 0, 60_000);
-                      },
-                    }
-                  : {}),
-              });
-              writeAuditEvent(currentHost.govDb, {
-                entityType: "sandbox_run",
-                entityId: sb.containerName || sb.volumeName,
-                eventKey: `sandbox:${wp.logicalKey}:${impRes.importId}`,
-                eventType: "docker_sandbox_observed",
-                occurredAt: Date.now(),
-                details: {
-                  containerId: sb.containerId,
-                  containerName: sb.containerName,
-                  volumeName: sb.volumeName,
-                  executorImageId: sb.executorImageId,
-                  exporterImageId: impRes.exporterImageId ?? null,
-                  networkMode: sb.networkMode,
-                  mounts: sb.mounts,
-                  envKeysInContainer: sb.envKeysInContainer,
-                  dockerCliEnvKeys: sb.dockerCliEnvKeys ?? [],
-                  inputAuthorizedFiles: verifiedMount.mountedRelPaths,
-                  excludedInputFiles: verifiedMount.excludedRelPaths,
-                  targetRelPath: cap.normalizedRelPath,
-                  importState: impRes.state,
-                  importCode: impRes.code,
-                  artifactSha256: impRes.artifactSha256,
-                },
-              });
-              return {
-                ok: impRes.ok,
-                code: impRes.code,
-                message: impRes.message,
-                importId: impRes.importId,
-                state: impRes.state,
-                targetRelPath: impRes.targetRelPath,
-                artifactSha256: impRes.artifactSha256 ?? undefined,
-                conflictPath: impRes.conflictRelPath,
-                installCount: impRes.installCount,
+                containerName: sb.containerName,
+                volumeName: sb.volumeName,
                 executorImageId: sb.executorImageId,
-                exporterImageId: impRes.exporterImageId,
-              };
-            } finally {
-              await stopAndRemoveContainerAsync(sb.containerName);
-              await cleanupTaskVolumeAsync(sb.volumeName);
-            }
+                exporterImageId: impRes.exporterImageId ?? null,
+                networkMode: sb.networkMode,
+                mounts: sb.mounts,
+                envKeysInContainer: sb.envKeysInContainer,
+                dockerCliEnvKeys: sb.dockerCliEnvKeys ?? [],
+                inputAuthorizedFiles: latestMountedRelPaths,
+                excludedInputFiles: latestExcludedRelPaths,
+                targetRelPath: cap.normalizedRelPath,
+                importState: impRes.state,
+                importCode: impRes.code,
+                artifactSha256: impRes.artifactSha256,
+              },
+            });
+            return {
+              ok: impRes.ok,
+              code: impRes.code,
+              message: impRes.message,
+              importId: impRes.importId,
+              state: impRes.state,
+              targetRelPath: impRes.targetRelPath,
+              artifactSha256: impRes.artifactSha256 ?? undefined,
+              conflictPath: impRes.conflictRelPath,
+              installCount: impRes.installCount,
+              executorImageId: sb.executorImageId,
+              exporterImageId: impRes.exporterImageId,
+            };
           } finally {
-            verifiedMount.cleanup();
+            await stopAndRemoveContainerAsync(sb.containerName);
+            await cleanupTaskVolumeAsync(sb.volumeName);
           }
         },
       }

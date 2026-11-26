@@ -71,24 +71,29 @@ const fixture: RepoFixture =
 const patVal = process.env["GITHUB_PERSONAL_ACCESS_TOKEN"] ?? "";
 const patSha256Prefix = patVal ? createHash("sha256").update(patVal).digest("hex").slice(0, 16) : null;
 const envValueDigests: Record<string, string> = {};
-const nonPatEnvEntries: Array<[string, string]> = [];
+let nonPatEnvCount = 0;
+let nonPatEnvScannedBytes = 0;
 for (const [k, v] of Object.entries(process.env).sort(([a], [b]) => a.localeCompare(b))) {
   if (typeof v !== "string") continue;
   envValueDigests[k] = createHash("sha256").update(v, "utf8").digest("hex").slice(0, 16);
   if (k !== "GITHUB_PERSONAL_ACCESS_TOKEN") {
-    nonPatEnvEntries.push([k, v]);
+    nonPatEnvCount++;
+    nonPatEnvScannedBytes += Buffer.byteLength(`${k}=${v}\n`, "utf8");
   }
 }
 
-// Record startup environment snapshot (keys + SHA-256 digests of all values + non-PAT env entries; NEVER raw PAT!)
+// W2-S6: Record ONLY sanitized keys, lengths & SHA-256 digests (NEVER raw env values to disk!)
 appendJsonl({
   kind: "startup",
   at: new Date().toISOString(),
   pid: process.pid,
+  observedInMemoryOnly: true,
+  rawValuesWrittenToDisk: false,
   readOnlyEnv: process.env["GITHUB_READ_ONLY"] ?? null,
   envKeysReceived: Object.keys(process.env).sort(),
   envValueDigests,
-  nonPatEnvEntries,
+  nonPatEnvCount,
+  nonPatEnvScannedBytes,
   hasPat: patVal.length > 0,
   patSha256Prefix,
   repoRefBefore: `${fixture.ref}@${fixture.commitSha}`,

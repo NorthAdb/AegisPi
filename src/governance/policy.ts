@@ -543,9 +543,67 @@ export function verifyAllConversationSourcesReadAuthorized(
   return { ok: true, checkedSources: checked };
 }
 
+export function persistWorkerExecutionRoot(
+  db: DatabaseSync,
+  params: {
+    runtimeEpoch: string;
+    workerConversationId: string;
+    parentConversationId: string;
+    executionRootTaskId: string;
+    now: number;
+  },
+): void {
+  withImmediateTx(db, () => {
+    db.prepare(
+      `INSERT OR IGNORE INTO worker_execution_roots(
+         runtime_epoch, worker_conversation_id, parent_conversation_id, execution_root_task_id, created_at
+       ) VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      params.runtimeEpoch,
+      params.workerConversationId,
+      params.parentConversationId,
+      params.executionRootTaskId,
+      params.now,
+    );
+  });
+}
+
+export function getWorkerExecutionRoot(
+  db: DatabaseSync,
+  runtimeEpoch: string,
+  workerConversationId: string,
+): { parent_conversation_id: string; execution_root_task_id: string } | undefined {
+  return db
+    .prepare(
+      `SELECT parent_conversation_id, execution_root_task_id
+         FROM worker_execution_roots
+        WHERE runtime_epoch = ? AND worker_conversation_id = ?`,
+    )
+    .get(runtimeEpoch, workerConversationId) as
+    | { parent_conversation_id: string; execution_root_task_id: string }
+    | undefined;
+}
+
+export function listWorkerExecutionRoots(
+  db: DatabaseSync,
+  runtimeEpoch: string,
+): Array<{ worker_conversation_id: string; parent_conversation_id: string; execution_root_task_id: string }> {
+  return db
+    .prepare(
+      `SELECT worker_conversation_id, parent_conversation_id, execution_root_task_id
+         FROM worker_execution_roots
+        WHERE runtime_epoch = ?`,
+    )
+    .all(runtimeEpoch) as Array<{
+    worker_conversation_id: string;
+    parent_conversation_id: string;
+    execution_root_task_id: string;
+  }>;
+}
+
 /**
- * W2-S2: Collects the conversation itself and any co-owned parent/worker conversations sharing
- * the same durable budget owner_task_id for the runtime epoch.
+ * W2-S2 / W2-S3: Collects the conversation itself and any co-owned parent/worker conversations sharing
+ * the same durable budget owner_task_id OR worker_execution_roots lineage for the runtime epoch.
  */
 export function findRelatedConversationIdsByOwnerTask(
   db: DatabaseSync,
@@ -570,6 +628,19 @@ export function findRelatedConversationIdsByOwnerTask(
     for (const r of peerRows) {
       if (r.conversation_id) related.add(r.conversation_id);
     }
+  }
+  const lineageRows = db
+    .prepare(
+      `SELECT worker_conversation_id, parent_conversation_id FROM worker_execution_roots
+        WHERE runtime_epoch = ? AND (worker_conversation_id = ? OR parent_conversation_id = ?)`,
+    )
+    .all(runtimeEpoch, conversationId, conversationId) as Array<{
+    worker_conversation_id: string;
+    parent_conversation_id: string;
+  }>;
+  for (const r of lineageRows) {
+    if (r.worker_conversation_id) related.add(r.worker_conversation_id);
+    if (r.parent_conversation_id) related.add(r.parent_conversation_id);
   }
   return [...related];
 }

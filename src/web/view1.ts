@@ -119,6 +119,7 @@ export function renderMinimalView1Html(): string {
       duplicateIgnoredCount: 0,
       eventSource: null,
       selectionGeneration: 0,
+      authSessionSeq: 0,
       dirtyByProposal: {},
       localDraftTextByProposal: {},
       editVersionByProposal: {},
@@ -196,8 +197,9 @@ export function renderMinimalView1Html(): string {
       'messages-panel'
     ];
 
-    function isCurrentView(reqConvId, reqEpoch, reqGen) {
+    function isCurrentView(reqConvId, reqEpoch, reqGen, reqAuthSeq) {
       return state.selectionGeneration === reqGen &&
+        (reqAuthSeq === undefined || state.authSessionSeq === reqAuthSeq) &&
         String(state.conversationId) === String(reqConvId) &&
         String(state.runtimeEpoch || '') === String(reqEpoch || '');
     }
@@ -277,10 +279,11 @@ export function renderMinimalView1Html(): string {
       }
     }
 
-    async function loadConversations(expectedGen) {
+    async function loadConversations(expectedGen, expectedAuthSeq) {
       const myGen = typeof expectedGen === 'number' ? expectedGen : state.selectionGeneration;
+      const myAuthSeq = typeof expectedAuthSeq === 'number' ? expectedAuthSeq : state.authSessionSeq;
       const r = await api('/api/conversations', { method: 'GET' });
-      if (myGen !== state.selectionGeneration) return;
+      if (myGen !== state.selectionGeneration || myAuthSeq !== state.authSessionSeq) return;
       if (r.status === 401) {
         closeSse();
         clearAllSessionViews();
@@ -314,8 +317,9 @@ export function renderMinimalView1Html(): string {
       }
     }
 
-    async function selectAndSubscribe(convId, epoch) {
+    async function selectAndSubscribe(convId, epoch, expectedAuthSeq) {
       const gen = ++state.selectionGeneration;
+      const myAuthSeq = typeof expectedAuthSeq === 'number' ? expectedAuthSeq : state.authSessionSeq;
       closeSse();
       clearAllSessionViews();
       state.conversationId = String(convId);
@@ -336,7 +340,7 @@ export function renderMinimalView1Html(): string {
       const q = state.runtimeEpoch ? ('?epoch=' + encodeURIComponent(state.runtimeEpoch)) : '';
       const r = await api('/api/conversations/' + encodeURIComponent(convId) + '/snapshot' + q, { method: 'GET' });
       // Drop late response if user switched conversations or logged out!
-      if (gen !== state.selectionGeneration) return;
+      if (gen !== state.selectionGeneration || myAuthSeq !== state.authSessionSeq) return;
       if (r.status === 401) {
         await loadConversations();
         return;
@@ -663,6 +667,7 @@ export function renderMinimalView1Html(): string {
             const reqEpoch = snap.runtimeEpoch;
             const reqGen = state.selectionGeneration;
             const reqPrincipal = state.principalId;
+            const reqAuthSeq = state.authSessionSeq;
             const reqEditVersion = state.editVersionByProposal[p.proposalId] || 0;
             const nextPayload = { ...payload, body: bodyBox.value };
             const res = await api('/api/proposals/' + encodeURIComponent(p.proposalId) + '/draft', {
@@ -673,8 +678,8 @@ export function renderMinimalView1Html(): string {
                 payload: nextPayload
               })
             });
-            // W2-S4: Ignore late Save receipt after logout or principal change
-            if (!state.principalId || state.principalId !== reqPrincipal) return;
+            // W2-S4: Bind receipt strictly to the originating authSessionSeq so same-principal re-login NEVER accepts stale receipts!
+            if (!state.principalId || state.authSessionSeq !== reqAuthSeq || state.principalId !== reqPrincipal) return;
             let msg;
             const latestEditVersion = state.editVersionByProposal[p.proposalId] || 0;
             const hasNewerLocalEdit = latestEditVersion !== reqEditVersion;
@@ -691,7 +696,7 @@ export function renderMinimalView1Html(): string {
               msg = '保存失败 (' + res.status + '): ' + (res.body.code || res.body.error || '');
             }
             state.proposalStatusById[p.proposalId] = msg;
-            if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
+            if (isCurrentView(reqConvId, reqEpoch, reqGen, reqAuthSeq)) {
               cardMsg.textContent = msg;
               if (res.ok) {
                 await selectAndSubscribe(reqConvId, reqEpoch);
@@ -704,18 +709,19 @@ export function renderMinimalView1Html(): string {
             const reqEpoch = snap.runtimeEpoch;
             const reqGen = state.selectionGeneration;
             const reqPrincipal = state.principalId;
+            const reqAuthSeq = state.authSessionSeq;
             const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
               method: 'POST',
               body: JSON.stringify({ conversationId: reqConvId })
             });
-            if (!state.principalId || state.principalId !== reqPrincipal) return;
+            if (!state.principalId || state.authSessionSeq !== reqAuthSeq || state.principalId !== reqPrincipal) return;
+            // W2-S4: Re-verify original view & active auth session BEFORE issuing the second /decide call!
+            if (!isCurrentView(reqConvId, reqEpoch, reqGen, reqAuthSeq)) return;
             if (!ch.ok || !ch.body || !ch.body.nonce) {
               const chErr = '获取挑战失败 (' + ch.status + '): ' + (ch.body.code || '');
               state.proposalStatusById[p.proposalId] = chErr;
-              if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
-                cardMsg.textContent = chErr;
-                await selectAndSubscribe(reqConvId, reqEpoch);
-              }
+              cardMsg.textContent = chErr;
+              await selectAndSubscribe(reqConvId, reqEpoch);
               return;
             }
             const dec = await api('/api/approvals/decide', {
@@ -730,10 +736,10 @@ export function renderMinimalView1Html(): string {
                 decisionKey: keyPrefix + p.approvalId + '-r' + p.revision
               })
             });
-            if (!state.principalId || state.principalId !== reqPrincipal) return;
+            if (!state.principalId || state.authSessionSeq !== reqAuthSeq || state.principalId !== reqPrincipal) return;
             const msg = dec.ok ? okLabel : ('决定被拒 (' + dec.status + '): ' + (dec.body.code || ''));
             state.proposalStatusById[p.proposalId] = msg;
-            if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
+            if (isCurrentView(reqConvId, reqEpoch, reqGen, reqAuthSeq)) {
               cardMsg.textContent = msg;
               await selectAndSubscribe(reqConvId, reqEpoch);
             }
@@ -777,8 +783,10 @@ export function renderMinimalView1Html(): string {
       const token = document.getElementById('token-input').value;
       const r = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ token }) });
       if (r.ok) {
+        const loginAuthSeq = ++state.authSessionSeq;
+        const loginGen = ++state.selectionGeneration;
         document.getElementById('login-status').textContent = '登录成功';
-        await loadConversations();
+        await loadConversations(loginGen, loginAuthSeq);
       } else {
         document.getElementById('login-status').textContent = '登录失败 (' + r.status + ')';
       }
@@ -786,9 +794,9 @@ export function renderMinimalView1Html(): string {
 
     document.getElementById('logout-btn').addEventListener('click', async () => {
       const outGen = ++state.selectionGeneration;
-      closeSse();
-      await api('/api/auth/logout', { method: 'POST', body: '{}' });
-      if (outGen !== state.selectionGeneration) return;
+      // W2-S4: Immediately invalidate prior authSessionSeq at the very start of logout so even
+      // same-principal fast re-login rejects all in-flight receipts from the logged-out session!
+      const outAuthSeq = ++state.authSessionSeq;
       state.principalId = null;
       state.conversationId = null;
       state.runtimeEpoch = null;
@@ -799,12 +807,17 @@ export function renderMinimalView1Html(): string {
       state.pendingChat = { key: null, content: null, convId: null, epoch: null };
       document.getElementById('chat-input').value = '';
       document.getElementById('chat-status').textContent = '';
+      closeSse();
       clearAllSessionViews();
-      await loadConversations();
+      await api('/api/auth/logout', { method: 'POST', body: '{}' });
+      if (outGen !== state.selectionGeneration || outAuthSeq !== state.authSessionSeq) return;
+      await loadConversations(outGen, outAuthSeq);
     });
 
     document.getElementById('new-conv-btn').addEventListener('click', async () => {
+      const reqAuthSeq = state.authSessionSeq;
       const r = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ slotName: 'router' }) });
+      if (!state.principalId || state.authSessionSeq !== reqAuthSeq) return;
       if (r.ok) {
         // W2-S4: Immediately close old SSE & clear old DOM cards BEFORE awaiting /api/conversations list!
         const newCid = String(r.body.conversationId);
@@ -821,7 +834,7 @@ export function renderMinimalView1Html(): string {
         state.pendingChat = restored;
         document.getElementById('chat-input').value = (restored.key && restored.content) ? restored.content : '';
         document.getElementById('chat-status').textContent = (state.chatStatusByConv && state.chatStatusByConv[newCid]) || '';
-        await loadConversations(switchGen);
+        await loadConversations(switchGen, reqAuthSeq);
       }
     });
 
@@ -842,6 +855,7 @@ export function renderMinimalView1Html(): string {
       const reqConvId = state.conversationId;
       const reqEpoch = state.runtimeEpoch || state.activeRuntimeEpoch;
       const reqPrincipal = state.principalId;
+      const reqAuthSeq = state.authSessionSeq;
       if (!content || !reqConvId || !reqEpoch || !reqPrincipal) return;
       // W2-S4: Preserve same chatKey across retry, double-click, switch, AND browser reload for identical (principalId, epoch, convId, content)!
       const stored = loadPendingChatFor(reqConvId, reqEpoch);
@@ -865,7 +879,7 @@ export function renderMinimalView1Html(): string {
           runtimeEpoch: reqEpoch
         })
       });
-      if (!state.principalId || state.principalId !== reqPrincipal) return;
+      if (!state.principalId || state.authSessionSeq !== reqAuthSeq || state.principalId !== reqPrincipal) return;
       // W2-S4: Late receipt MUST only update original (reqConvId, reqEpoch, reqChatKey) and NEVER clobber a newly switched conversation!
       if (!state.chatStatusByConv) state.chatStatusByConv = {};
       if (r.ok) {

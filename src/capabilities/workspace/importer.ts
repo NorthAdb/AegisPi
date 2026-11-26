@@ -1416,6 +1416,67 @@ export class ManagedWorkspaceImporter {
     });
   }
 
+  recordPendingReconcileImport(
+    govDb: DatabaseSync,
+    params: {
+      runtimeEpoch: string;
+      conversationId: string;
+      principalId: string;
+      scopeId: string;
+      logicalKey: string;
+      targetRelPath: string;
+      baseSha256: string | null;
+      reason: string;
+      now?: number;
+    },
+  ): { importId: string } {
+    const now = params.now ?? Date.now();
+    const importId = mintId("imp");
+    const check = validateAndResolveWorkspacePath(this.#workspaceRoot, params.targetRelPath);
+    const normalizedRelPath = check.ok ? check.normalizedRelPath : params.targetRelPath;
+    withImmediateTx(govDb, () => {
+      govDb
+        .prepare(
+          `INSERT INTO managed_file_imports(
+             import_id, logical_key, runtime_epoch, conversation_id, principal_id, scope_id,
+             target_rel_path, base_sha256, artifact_sha256, artifact_bytes, volume_name, container_id,
+             state, conflict_rel_path, install_count, reason, parent_source_ids_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, '', NULL, 'PENDING_RECONCILE', NULL, 0, ?, '[]', ?, ?)
+           ON CONFLICT(logical_key) DO UPDATE SET
+             state = 'PENDING_RECONCILE',
+             install_count = 0,
+             reason = excluded.reason,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          importId,
+          params.logicalKey,
+          params.runtimeEpoch,
+          params.conversationId,
+          params.principalId,
+          params.scopeId,
+          normalizedRelPath,
+          params.baseSha256,
+          params.reason,
+          now,
+          now,
+        );
+      writeAuditEvent(govDb, {
+        entityType: "file_import",
+        entityId: importId,
+        eventKey: `pending_reconcile:${params.logicalKey}:${now}`,
+        eventType: "file_import_pending_reconcile",
+        occurredAt: now,
+        details: {
+          logicalKey: params.logicalKey,
+          targetRelPath: normalizedRelPath,
+          reason: params.reason,
+        },
+      });
+    });
+    return { importId };
+  }
+
   #recordRejectedImport(
     govDb: DatabaseSync,
     params: {

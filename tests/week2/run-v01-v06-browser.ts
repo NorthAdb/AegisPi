@@ -1115,12 +1115,140 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
       assert.equal(r.dirtyCleared, true);
       assert.equal(r.statusCleared, true);
 
-      // Log back in so subsequent browser checks in S2 / V06 continue smoothly!
+      // Log back in so subsequent browser checks continue cleanly!
       await cdp.evalJs(`
         document.getElementById('token-input').value = ${JSON.stringify(consoleToken)};
         document.getElementById('login-btn').click();
       `);
       await cdp.waitFor<boolean>(`Boolean(window.__aegisView1State && window.__aegisView1State.principalId)`, 10_000);
+      return r;
+    })();
+
+    // 3d-3. W2-S4 Same-Principal Re-Login Clobber Check:
+    //   Old session starts delayed Save -> logs out -> logs BACK IN with SAME token (owner) -> types new unsaved draft
+    //   (bumping editVersion from 0 -> 1, matching old session's numeric editVersion) -> releases old Save receipt
+    //   & forces snapshot redraw -> new session's unsaved draft & dirty state MUST be preserved!
+    const samePrincipalReloginPreserved = await (async () => {
+      const prevCid = await cdp.evalJs<string>(`String(window.__aegisView1State.conversationId || '')`);
+      await cdp.evalJs(`document.getElementById('new-conv-btn').click();`);
+      const convA = await cdp.waitFor<string>(
+        `window.__aegisView1State.conversationId && String(window.__aegisView1State.conversationId) !== ${JSON.stringify(prevCid)} && window.__aegisView1State.snapshot && String(window.__aegisView1State.snapshot.conversationId) === String(window.__aegisView1State.conversationId) ? String(window.__aegisView1State.conversationId) : ''`,
+      );
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_s4_relogin_${runId}`,
+              name: "send_email",
+              arguments: {
+                to: [`s4-relogin@local.test`],
+                subject: `S4 SamePrincipal Relogin ${runId}`,
+                body: `Initial relogin body rev1`,
+              },
+            },
+          },
+          { kind: "text", text: "Queued relogin." },
+        ],
+      });
+      await cdp.evalJs(`
+        document.getElementById('chat-input').value = 'Create proposal for same-principal relogin test';
+        document.getElementById('chat-send-btn').click();
+      `);
+      const cardA = await cdp.waitFor<{ proposalId: string }>(
+        `(() => {
+          const p = window.__aegisView1State.snapshot?.proposals?.[0];
+          return p && p.approvalState === 'PENDING' ? { proposalId: p.proposalId } : null;
+        })()`,
+        12_000,
+      );
+
+      const newReloginDraft = `NEW_SESSION_UNSAVED_DRAFT_${runId}`;
+      const r = await cdp.evalJs<{
+        reloggedInSamePrincipal: boolean;
+        keptDirty: boolean;
+        keptDraftOnRedraw: boolean;
+        oldSaveRestored: boolean;
+        approveDisabled: boolean;
+      }>(`(async () => {
+        const s = window.__aegisView1State;
+        const origFetch = window.fetch.bind(window);
+        let releaseOldSave;
+        const gate = new Promise(res => { releaseOldSave = res; });
+        let interceptDraft = true;
+        window.fetch = async (url, opts) => {
+          const resp = await origFetch(url, opts);
+          if (interceptDraft && typeof url === 'string' && url.includes('/draft')) {
+            interceptDraft = false;
+            await gate;
+          }
+          return resp;
+        };
+        try {
+          const ta1 = document.querySelector('#approvals-list textarea');
+          ta1.value = 'OLD_SESSION_STALE_SAVED_BODY';
+          ta1.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#approvals-list [data-action="save-draft"]').click();
+          await new Promise(res => setTimeout(res, 80));
+
+          // Logout & immediately log BACK IN with SAME token!
+          document.getElementById('logout-btn').click();
+          for (let i = 0; i < 60; i++) {
+            if (!s.principalId && document.getElementById('login-panel').style.display !== 'none') break;
+            await new Promise(res => setTimeout(res, 25));
+          }
+          document.getElementById('token-input').value = ${JSON.stringify(consoleToken)};
+          document.getElementById('login-btn').click();
+          for (let i = 0; i < 60; i++) {
+            if (s.principalId && document.getElementById('conv-select').options.length > 0) break;
+            await new Promise(res => setTimeout(res, 25));
+          }
+
+          // Select convA explicitly after re-login
+          const sel = document.getElementById('conv-select');
+          for (const opt of sel.options) {
+            if (String(opt.value).startsWith(${JSON.stringify(convA)} + '|')) {
+              sel.value = opt.value;
+              break;
+            }
+          }
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          for (let i = 0; i < 60; i++) {
+            if (String(s.conversationId) === ${JSON.stringify(convA)} && document.querySelector('#approvals-list textarea')) break;
+            await new Promise(res => setTimeout(res, 25));
+          }
+          const reloggedInSamePrincipal = Boolean(s.principalId === 'owner' && String(s.conversationId) === ${JSON.stringify(convA)});
+
+          // Type new unsaved draft (editVersion goes 0 -> 1, matching numeric version from prior session!)
+          const ta2 = document.querySelector('#approvals-list textarea');
+          ta2.value = ${JSON.stringify(newReloginDraft)};
+          ta2.dispatchEvent(new Event('input', { bubbles: true }));
+
+          // Now release delayed old-session Save receipt + trigger explicit snapshot redraw!
+          releaseOldSave();
+          await new Promise(res => setTimeout(res, 300));
+          document.getElementById('refresh-btn').click();
+          await new Promise(res => setTimeout(res, 300));
+
+          const taFinal = document.querySelector('#approvals-list textarea');
+          const approveFinal = document.querySelector('#approvals-list [data-action="approve"]');
+          return {
+            reloggedInSamePrincipal,
+            keptDirty: Boolean(s.dirtyByProposal && s.dirtyByProposal[${JSON.stringify(cardA.proposalId)}]),
+            keptDraftOnRedraw: Boolean(taFinal && taFinal.value === ${JSON.stringify(newReloginDraft)}),
+            oldSaveRestored: Boolean(taFinal && taFinal.value === 'OLD_SESSION_STALE_SAVED_BODY'),
+            approveDisabled: Boolean(approveFinal && approveFinal.disabled),
+          };
+        } finally {
+          window.fetch = origFetch;
+        }
+      })()`);
+      assert.equal(r.reloggedInSamePrincipal, true);
+      assert.equal(r.keptDirty, true, "W2-S4: Old auth-session Save receipt MUST NOT clear dirty state after same-principal re-login");
+      assert.equal(r.keptDraftOnRedraw, true, "W2-S4: New session draft MUST survive old-session Save receipt + snapshot redraw");
+      assert.equal(r.oldSaveRestored, false);
+      assert.equal(r.approveDisabled, true);
       return r;
     })();
 
@@ -1720,6 +1848,7 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
         lateRejectReceiptNoSwitchOrReopen: lateRejectCheck,
         editVersionPreservedOnReturnToOriginalConv: editVersionReturnPreserved,
         lateSaveReceiptWithLogoutRemainsClean: lateSavePlusLogoutClean,
+        samePrincipalReloginPreservedNewDraft: samePrincipalReloginPreserved,
         sourceRevokeClearedLocalDraftAndDisabledControls: {
           redactedAttr: s2BrowserAfterRevoke.redactedAttr,
           textareaValueCleared: s2BrowserAfterRevoke.textareaValue === "",

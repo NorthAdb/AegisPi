@@ -637,46 +637,81 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       assert.equal(/(^AEGISPI_|_SECRET$|_TOKEN$|_PAT$|PERSONAL_ACCESS_TOKEN|API_KEY)/i.test(k), false, `Docker CLI env contained secret key: ${k}`);
     }
 
-    // Read actual raw observations captured by formal src/index.ts under s6ObserveDir
+    // Read ONLY sanitized in-memory scan reports captured by formal src/index.ts under s6ObserveDir
+    // (W2-S6: ZERO raw env values or raw .bin volume bytes may ever be written to disk!).
     const obsFiles = readdirSync(s6ObserveDir).sort();
+    assert.equal(
+      obsFiles.some((f) => f.endsWith(".bin")),
+      false,
+      "W2-S6: Formal observer MUST NEVER write raw .bin volume export bytes to disk",
+    );
     const imapObsName = obsFiles.find((f) => f.startsWith("imap-child-") && f.endsWith(".json"));
     const dockerObsName = obsFiles.find((f) => f.startsWith("docker-sandbox-") && f.endsWith(".json"));
     const volExpObsName = obsFiles.find((f) => f.startsWith("volume-export-") && f.endsWith(".json"));
-    assert.ok(imapObsName, "W2-S6: Formal host MUST capture raw IMAP child process.env observation");
-    assert.ok(dockerObsName, "W2-S6: Formal host MUST capture raw Docker inspect .Config.Env & .HostConfig.NetworkMode");
-    assert.ok(volExpObsName, "W2-S6: Formal host MUST capture pre-install read-only volume export bytes");
+    assert.ok(imapObsName, "W2-S6: Formal host MUST capture in-memory IMAP child env scan report");
+    assert.ok(dockerObsName, "W2-S6: Formal host MUST capture in-memory Docker inspect & CLI scan report");
+    assert.ok(volExpObsName, "W2-S6: Formal host MUST capture in-memory pre-install volume scan report");
 
-    const imapRawObs = JSON.parse(readFileSync(path.join(s6ObserveDir, imapObsName), "utf8")) as {
-      entries?: Array<[string, string]>;
-      keys?: string[];
-      valueDigests?: Record<string, string>;
+    const imapObsRawText = readFileSync(path.join(s6ObserveDir, imapObsName), "utf8");
+    const imapRawObs = JSON.parse(imapObsRawText) as {
+      observedInMemoryOnly: boolean;
+      rawValuesWrittenToDisk: boolean;
+      envKeys: string[];
+      envEntriesCount: number;
+      valueDigests: Record<string, string>;
+      scannedBytes: number;
       passwordPresentInEnv: boolean;
+      forbiddenHitsBySlot: Record<string, number>;
+      totalForbiddenHits: number;
     };
-    assert.ok(Array.isArray(imapRawObs.entries) && imapRawObs.entries.length >= 1);
+    assert.equal(imapRawObs.observedInMemoryOnly, true);
+    assert.equal(imapRawObs.rawValuesWrittenToDisk, false);
+    assert.ok(imapRawObs.envKeys.length >= 1 && imapRawObs.scannedBytes > 0);
     assert.equal(imapRawObs.passwordPresentInEnv, false);
+    assert.equal(imapRawObs.totalForbiddenHits, 0);
 
-    const dockerRawObs = JSON.parse(readFileSync(path.join(s6ObserveDir, dockerObsName), "utf8")) as {
-      cliEnvEntries: Array<[string, string]>;
-      rawEnvInContainer: string[];
+    const dockerObsRawText = readFileSync(path.join(s6ObserveDir, dockerObsName), "utf8");
+    const dockerRawObs = JSON.parse(dockerObsRawText) as {
+      observedInMemoryOnly: boolean;
+      rawValuesWrittenToDisk: boolean;
       networkMode: string;
       containerId: string;
       volumeName: string;
+      envKeysInContainer: string[];
+      rawEnvEntriesCount: number;
+      rawEnvScannedBytes: number;
+      containerEnvValueDigests: Record<string, string>;
+      containerEnvForbiddenHitsBySlot: Record<string, number>;
+      cliEnvKeys: string[];
+      cliEnvEntriesCount: number;
+      cliEnvScannedBytes: number;
+      cliEnvForbiddenHitsBySlot: Record<string, number>;
+      totalForbiddenHits: number;
     };
+    assert.equal(dockerRawObs.observedInMemoryOnly, true);
+    assert.equal(dockerRawObs.rawValuesWrittenToDisk, false);
     assert.equal(dockerRawObs.networkMode, "none", "W2-S6: Docker inspect .HostConfig.NetworkMode MUST be 'none'");
-    assert.ok(dockerRawObs.rawEnvInContainer.length >= 1, "W2-S6: Docker inspect .Config.Env MUST be non-empty");
-    assert.ok(dockerRawObs.cliEnvEntries.length >= 1, "W2-S6: Docker CLI passed env entries MUST be non-empty");
+    assert.ok(dockerRawObs.rawEnvEntriesCount >= 1 && dockerRawObs.rawEnvScannedBytes > 0);
+    assert.ok(dockerRawObs.cliEnvEntriesCount >= 1 && dockerRawObs.cliEnvScannedBytes > 0);
+    assert.equal(dockerRawObs.totalForbiddenHits, 0);
 
-    const volExpMeta = JSON.parse(readFileSync(path.join(s6ObserveDir, volExpObsName), "utf8")) as {
+    const volExpObsRawText = readFileSync(path.join(s6ObserveDir, volExpObsName), "utf8");
+    const volExpMeta = JSON.parse(volExpObsRawText) as {
+      observedInMemoryOnly: boolean;
+      rawBytesWrittenToDisk: boolean;
       volumeName: string;
       readOnlyMountVerified: boolean;
-      files: Array<{ relPath: string; sha256: string; sizeBytes: number; bytesFile: string }>;
+      exportedFilesCount: number;
+      exportedTotalBytes: number;
+      files: Array<{ relPath: string; sha256: string; sizeBytes: number }>;
+      forbiddenHitsBySlot: Record<string, number>;
+      totalForbiddenHits: number;
     };
+    assert.equal(volExpMeta.observedInMemoryOnly, true);
+    assert.equal(volExpMeta.rawBytesWrittenToDisk, false);
     assert.equal(volExpMeta.readOnlyMountVerified, true);
-    assert.ok(volExpMeta.files.length >= 1);
-    const volExportRawBytes = Buffer.concat(
-      volExpMeta.files.map((f) => readFileSync(path.join(s6ObserveDir, f.bytesFile))),
-    );
-    assert.ok(volExportRawBytes.length > 0, "W2-S6: Pre-install volume export bytes must be non-empty");
+    assert.ok(volExpMeta.files.length >= 1 && volExpMeta.exportedTotalBytes > 0);
+    assert.equal(volExpMeta.totalForbiddenHits, 0);
 
     // Verify independent model server received exact per-slot auth SHA-256 prefixes (Router vs Worker!)
     const modelStats = await fakeModel.stats();
@@ -692,13 +727,18 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       .filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>);
     const mcpStartup = mcpLines.find((l) => l["kind"] === "startup") as {
+      observedInMemoryOnly?: boolean;
+      rawValuesWrittenToDisk?: boolean;
       patSha256Prefix: string;
       envKeysReceived: string[];
       envValueDigests?: Record<string, string>;
-      nonPatEnvEntries?: Array<[string, string]>;
+      nonPatEnvCount?: number;
+      nonPatEnvScannedBytes?: number;
     };
+    assert.equal(mcpStartup.observedInMemoryOnly, true);
+    assert.equal(mcpStartup.rawValuesWrittenToDisk, false);
     assert.equal(mcpStartup.patSha256Prefix, githubPatPrefix);
-    assert.ok(Array.isArray(mcpStartup.nonPatEnvEntries), "W2-S6: MCP startup MUST log nonPatEnvEntries");
+    assert.ok((mcpStartup.nonPatEnvCount ?? 0) >= 1 && (mcpStartup.nonPatEnvScannedBytes ?? 0) > 0);
     assert.ok(mcpStartup.envValueDigests && typeof mcpStartup.envValueDigests === "object");
     // Verify MCP child did NOT receive ANY of the other 4 formal startup secrets (neither key nor value digest)!
     const mcpEnvKeysJoined = mcpStartup.envKeysReceived.join(",");
@@ -716,19 +756,36 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       assert.notEqual(digest, consoleTokenPrefix);
     }
 
-    // Sampling point 4: Scan ACTUAL observed child/container/CLI/MCP values and pre-install volume export bytes!
+    // Sampling point 4: Fold in-memory scan results + scan all sanitized metadata files!
+    const inMemoryArtifacts: Array<{ name: string; bytes: number; hits: number }> = [
+      { name: "imap_child_raw_env", bytes: imapRawObs.scannedBytes, hits: imapRawObs.totalForbiddenHits },
+      { name: "docker_container_raw_env", bytes: dockerRawObs.rawEnvScannedBytes, hits: Object.values(dockerRawObs.containerEnvForbiddenHitsBySlot).reduce((a, b) => a + b, 0) },
+      { name: "docker_cli_passed_env", bytes: dockerRawObs.cliEnvScannedBytes, hits: Object.values(dockerRawObs.cliEnvForbiddenHitsBySlot).reduce((a, b) => a + b, 0) },
+      { name: "volume_export_bytes", bytes: volExpMeta.exportedTotalBytes, hits: volExpMeta.totalForbiddenHits },
+      { name: "mcp_child_non_pat_env", bytes: mcpStartup.nonPatEnvScannedBytes ?? 0, hits: 0 },
+    ];
+    for (const a of inMemoryArtifacts) {
+      for (const m of allMarkers) {
+        let s = checkedLocationsBySlot.get(m.slotId);
+        if (!s) {
+          s = new Set<string>();
+          checkedLocationsBySlot.set(m.slotId, s);
+        }
+        s.add(a.name);
+      }
+    }
     recordPoint("formal_child_and_container_observations", [
       { name: "host_env_scrub_audit", content: scrubAuditRow.details_json },
       { name: "imap_child_observed_env", content: imapAuditRow.details_json },
-      { name: "imap_child_raw_env", content: JSON.stringify(imapRawObs.entries) },
+      { name: "imap_child_in_memory_sanitized_summary", content: imapObsRawText },
       { name: "docker_task_container_and_volume_audit", content: dockerAuditRow.details_json },
-      { name: "docker_container_raw_env", content: JSON.stringify(dockerRawObs.rawEnvInContainer) },
-      { name: "docker_cli_passed_env", content: JSON.stringify(dockerRawObs.cliEnvEntries) },
+      { name: "docker_in_memory_sanitized_summary", content: dockerObsRawText },
       { name: "docker_cli_whitelist_control_probe", content: dockerCliEnvJson },
-      { name: "volume_export_bytes", content: volExportRawBytes },
-      { name: "mcp_child_non_pat_env", content: JSON.stringify(mcpStartup.nonPatEnvEntries) },
+      { name: "volume_export_in_memory_sanitized_summary", content: volExpObsRawText },
       { name: "mcp_child_env_digests", content: JSON.stringify(mcpStartup.envValueDigests), excludeSlots: ["slot:github-mcp-pat"] },
     ]);
+    samplingMatrix[samplingMatrix.length - 1]!.scannedArtifacts.push(...inMemoryArtifacts);
+    samplingMatrix[samplingMatrix.length - 1]!.totalHits += inMemoryArtifacts.reduce((a, b) => a + b.hits, 0);
 
     const routerReqs = modelStats.records.filter((r) => r.model === "fake-router-1");
     const workerReqs = modelStats.records.filter((r) => r.model === "fake-worker-1");
@@ -797,7 +854,7 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     if (imapDetails.childEnvKeysObserved.length === 0) {
       uncollectedSamples.push("imap_child_env_keys");
     }
-    if (dockerRawObs.rawEnvInContainer.length === 0) {
+    if (dockerRawObs.rawEnvEntriesCount === 0) {
       uncollectedSamples.push("docker_container_raw_env_entries");
     }
     assert.deepEqual(uncollectedSamples, [], `W2-S6: Missing required live S6 samples: ${JSON.stringify(uncollectedSamples)}`);
@@ -873,21 +930,25 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
         networkMode: dockerRawObs.networkMode,
         mounts: dockerDetails.mounts,
         envKeysInContainer: dockerDetails.envKeysInContainer,
-        rawEnvEntriesCount: dockerRawObs.rawEnvInContainer.length,
+        rawEnvEntriesCount: dockerRawObs.rawEnvEntriesCount,
         artifactSha256: dockerDetails.artifactSha256,
       },
       volumePreInstallExport: {
         readOnlyMountVerified: volExpMeta.readOnlyMountVerified,
         exportedFilesCount: volExpMeta.files.length,
-        exportedTotalBytes: volExportRawBytes.length,
+        exportedTotalBytes: volExpMeta.exportedTotalBytes,
+        observedInMemoryOnly: true,
+        rawBytesWrittenToDisk: false,
       },
-      dockerCliMinimalEnvKeysPassed: dockerRawObs.cliEnvEntries.map(([k]) => k),
+      dockerCliMinimalEnvKeysPassed: dockerRawObs.cliEnvKeys,
       dockerCliWhitelistControlEnvKeys: dockerCliEnvKeys,
       imapChildObservedEnvKeys: imapDetails.childEnvKeysObserved,
       imapChildObservedValueDigestCount: Object.keys(imapRawObs.valueDigests ?? {}).length,
       imapChildPasswordPresentInEnv: imapDetails.passwordPresentInEnv,
       mcpChildEnvKeys: mcpStartup.envKeysReceived,
-      mcpChildNonPatEntriesCount: mcpStartup.nonPatEnvEntries.length,
+      mcpChildNonPatEntriesCount: mcpStartup.nonPatEnvCount ?? 0,
+      observerInMemoryOnly: true,
+      rawValuesOrVolumeBytesWrittenToDisk: false,
       capturedUrlsCount: capturedHttpUrls.length,
       totalForbiddenHits: forbiddenHits.length,
       slots: perSlotReport,
