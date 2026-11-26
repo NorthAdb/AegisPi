@@ -1,0 +1,166 @@
+{
+  "runId": "week1_5c7dc025",
+  "executedAt": "2026-11-26T10:14:37.690Z",
+  "environment": {
+    "nodeExe": "node.exe",
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "dataDirLabel": "w1-data",
+  "evidenceDirRelative": "<TEMP_ROOT>/w1-ev",
+  "results": {
+    "typecheck": {
+      "status": "PASS",
+      "exitCode": 0
+    },
+    "s1_s5": {
+      "status": "PASS",
+      "exitCode": 0
+    },
+    "w1_a_and_b01": {
+      "status": "PASS",
+      "cases": 9
+    },
+    "w1_b_and_e06": {
+      "status": "PASS",
+      "effectId": "efx_c6eb3b2d88b84b7682491078babb4807",
+      "smtpTotalReceived": 1,
+      "finalEffectState": "UNKNOWN",
+      "view1Label": "结果待核对"
+    },
+    "matrix": {
+      "status": "PASS",
+      "passed": 25,
+      "total": 25,
+      "cases": [
+        {
+          "id": "GUARD-BOUNDARY",
+          "status": "PASS",
+          "summary": "Verified only src/runtime/ imports @earendil-works/* and governance/ has zero upward dependencies."
+        },
+        {
+          "id": "G1-AUTH",
+          "status": "PASS",
+          "summary": "Formal entry refused startup without token; login ignored client principalId; unauthorized cross-principal challenge/decide/reconcile/revoke all returned 403 with 0 governance row mutations."
+        },
+        {
+          "id": "G2-EGRESS",
+          "status": "PASS",
+          "summary": "Non-loopback modelBaseUrl and smtpHost refused at startup, vault registration, and transport layers; Stage 1 guarded fetch (redirect=manual) blocked HTTP 307 redirect to off-loopback host with 0 disallowed fetch calls."
+        },
+        {
+          "id": "G3-NONCE-SSE",
+          "status": "PASS",
+          "summary": "Verified 0 plaintext nonce hits across SSE frames, conversation snapshots, and audit_events; dedicated POST /api/approvals/:id/challenge returns challenge strictly to authorized principal (403 for unauthorized)."
+        },
+        {
+          "id": "R1-ATTRIBUTION",
+          "status": "PASS",
+          "summary": "Verified real run_worker delegation inherits parent host task, persisted bindings survive restart, missing binding fails closed, and ordinary Web create/chat/compact routes ignore client budgetTaskId (0 sends, 0 spoofed accounts)."
+        },
+        {
+          "id": "R3-EPOCH-ACL",
+          "status": "PASS",
+          "summary": "Verified epoch-scoped conversation_scopes across trace replacement with reused numeric conversation ID: old principal blocked (403) on new epoch and restricted to historical ep1 audit (messages=[]), while new principal sees only ep2 data and gets 403 on ep1."
+        },
+        {
+          "id": "R3-LEGACY-UPGRADE",
+          "status": "PASS",
+          "summary": "Verified idempotent in-place migration of legacy conversation_scopes PK to (runtime_epoch, conversation_id), provable backfill of legacy budget_denial rows, strict exclusion of unprovable legacy denials from snapshots and SSE, and dual-epoch coexistence across reused numeric conversation ID."
+        },
+        {
+          "id": "F01",
+          "status": "PASS",
+          "summary": "Second host instance rejected with InstanceLockBusyError and 0 DB/service mutations; first instance stayed healthy."
+        },
+        {
+          "id": "F02",
+          "status": "PASS",
+          "summary": "Missing policy hook and missing Models wrapper both fail closed before scheduling release with 0 model/SMTP calls."
+        },
+        {
+          "id": "F03",
+          "status": "PASS",
+          "summary": "Detected same-epoch trace rollback (including >200-entry multi-page rollback with identical conversation/task IDs) and trace replacement before scheduling; rotated epoch updated Models and policy extension live to newEpoch, quarantined old READY effects, preserved old HELD reservations, and blocked forked conversation from claiming parent effect."
+        },
+        {
+          "id": "B02",
+          "status": "PASS",
+          "summary": "Concurrent DAY race and concurrent TASK race each admitted exactly 1 HELD reservation (+1 model request) with zero partial holds."
+        },
+        {
+          "id": "B03",
+          "status": "PASS",
+          "summary": "Explicit compaction triggered real completeSimple (+1 physical request) with independent request_id attributed to b03-compact-task."
+        },
+        {
+          "id": "B04",
+          "status": "PASS",
+          "summary": "Durable retry reserves a new requestId before retry (funded=2 sends, unfunded=1 send); maxRetries=0 blocks hidden provider retries."
+        },
+        {
+          "id": "B05",
+          "status": "PASS",
+          "summary": "Missing usage stayed HELD across early restart, then timed out to CHARGED_BOUND on original day across midnight via BOTH host runtime loop (res1) and host startup recovery (res2); trusted late bill via host API corrected res1 to 60 with duplicate delta=0 and new day untouched."
+        },
+        {
+          "id": "B06",
+          "status": "PASS",
+          "summary": "Unknown upper bound, unprovable non-fixed heuristic schedule, and slot/endpoint mismatch blocked with 0 reservations; provable pre-transport failure released both holds; 0 physical model sends across all 4."
+        },
+        {
+          "id": "B07",
+          "status": "PASS",
+          "summary": "Mid-transaction failure after first account update rolled back both accounts and reservation cleanly (0 sends); subsequent clean run succeeded (+1)."
+        },
+        {
+          "id": "E01",
+          "status": "PASS",
+          "summary": "Approval committed before Pi tool parked was observed immediately on re-entry; outbox reconciled to ACKED, claim=1, SMTP=1."
+        },
+        {
+          "id": "E02",
+          "status": "PASS",
+          "summary": "Real Windows Stop-Process -Force inside uncommitted T2 rolled back approval/effect/outbox cleanly (0 SMTP); Stop-Process -Force after T2 commit and before signal delivery recovered on restart and sent exactly 1 email."
+        },
+        {
+          "id": "E03",
+          "status": "PASS",
+          "summary": "Real Windows Stop-Process -Force after SDK signal and before outbox ACK reconciled cleanly on restart (ACKED, claim=1, SMTP=1); decisionKey replay=200 and conflict=409; duplicate signal memo verification ACKed matching duplicate and isolated conflicting/unverifiable duplicates with READY quarantined (0 SMTP)."
+        },
+        {
+          "id": "E04",
+          "status": "PASS",
+          "summary": "Tool terminated before claim caused recovery to quarantine READY -> QUARANTINED (未提交，待核对) with 0 claims and 0 SMTP."
+        },
+        {
+          "id": "E05",
+          "status": "PASS",
+          "summary": "Real Windows Stop-Process -Force after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0 (distinct from W1-B's remote-received SMTP=1)."
+        },
+        {
+          "id": "E07",
+          "status": "PASS",
+          "summary": "Editing draft after r1 approval quarantined r1 READY effect and rejected stale r1 approval (409); approving r2 delivered exact r2 bytes (SMTP=1)."
+        },
+        {
+          "id": "E08",
+          "status": "PASS",
+          "summary": "Both revoke-vs-claim serialization orders verified: revoke-first quarantined READY (SMTP=0); claim-first retained committed effect and completed honestly (SMTP=1)."
+        },
+        {
+          "id": "E09",
+          "status": "PASS",
+          "summary": "Verified REJECT (0 SMTP), EXPIRED (410, 0 SMTP), cross-conv/principal (403, 0 SMTP), and dual-tab race ([200, 409], SMTP=1)."
+        },
+        {
+          "id": "E10",
+          "status": "PASS",
+          "summary": "Tampered final args blocked (0 claims, 0 SMTP); concurrent READY claim admitted exactly 1; SUCCEEDED persisted as SUCCEEDED across restart (SMTP=1)."
+        }
+      ]
+    }
+  }
+}

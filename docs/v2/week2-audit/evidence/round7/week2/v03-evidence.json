@@ -1,0 +1,128 @@
+{
+  "suite": "V03",
+  "runId": "v03_86efe65f",
+  "status": "PASS",
+  "dockerEnvironment": {
+    "available": true,
+    "clientVersion": "29.9.2",
+    "serverVersion": "29.9.2",
+    "imageName": "node:22.23.5-bookworm-slim",
+    "imageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee"
+  },
+  "immutableDigestChecks": {
+    "approvedImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "executorImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "exporterImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "missingDigestRejectedCode": "unapproved_or_missing_image_digest",
+    "wrongDigestExecutorRejectedCode": "approved_image_digest_not_found",
+    "wrongDigestExporterRejectedCode": "approved_image_digest_not_found"
+  },
+  "normalImport": {
+    "targetRelPath": "reports/weekly.md",
+    "expectedSha256": "ddab0d86d5b35bb383d041ea68470557caa864b52e417d9a60320a04d38b82c0",
+    "actualSha256": "ddab0d86d5b35bb383d041ea68470557caa864b52e417d9a60320a04d38b82c0",
+    "installCount": 1,
+    "networkMode": "none",
+    "mounts": [
+      {
+        "source": "<TEMP_ROOT>\\w2-data\\v03\\input-snapshot",
+        "destination": "/input",
+        "rw": false
+      },
+      {
+        "source": "aegis-w2-vol-93280c57-6",
+        "destination": "/out",
+        "rw": true
+      }
+    ],
+    "allWritersExited": true
+  },
+  "conflictEdit": {
+    "state": "CONFLICT_SAVED",
+    "userVersionPreserved": true,
+    "conflictRelPath": "reports/weekly.conflict-9c88a4c48e.md",
+    "candidateSha256": "bc82256cdcc67cfc012b35482e64f82675f9a70965452fab153c27d9433273b1"
+  },
+  "conflictNewFile": {
+    "state": "CONFLICT_SAVED",
+    "conflictRelPath": "reports/new-note.conflict-09b467df78.md"
+  },
+  "rejections": {
+    "revokedParentSource": {
+      "code": "source_read_revoked",
+      "targetUnchanged": true,
+      "conflictFilesCreatedDelta": 0
+    },
+    "activeWriter": {
+      "code": "active_volume_writers",
+      "targetUnchanged": true
+    },
+    "symlink": {
+      "code": "symlink_rejected",
+      "targetUnchanged": true
+    },
+    "hardlink": {
+      "code": "hardlink_rejected",
+      "targetUnchanged": true
+    },
+    "quotaOverflow": {
+      "code": "file_size_quota_exceeded",
+      "targetUnchanged": true
+    },
+    "windowsAds": {
+      "code": "windows_ads_or_drive_rejected"
+    },
+    "traversal": {
+      "code": "path_traversal_or_empty_segment"
+    },
+    "windowsDevice": {
+      "code": "windows_device_name_rejected"
+    },
+    "revokedGrant": {
+      "code": "workspace_write_denied",
+      "targetUnchanged": true
+    }
+  },
+  "perTaskAndMidExportHardening": {
+    "overlappingSamePathTasksConflictSaved": true,
+    "overlappingConflictRelPath": "reports/overlap.conflict-789918cb35.md",
+    "containerInputOnlyAuthorizedPaths": [
+      "reports/overlap.md"
+    ],
+    "unauthorizedFilesExcludedFromInput": true,
+    "midExportSourceRevokedCode": "source_read_revoked",
+    "midExportSourceRevokedTargetAndConflictUnchanged": true,
+    "midExportWriteRevokedCode": "workspace_write_denied",
+    "sameHashNoopCode": "noop_unchanged",
+    "sameHashNoopInstallCount": 0,
+    "sameHashPreparedStartupReconcileOutcome": "pending_reconcile",
+    "sameHashPreparedStartupReconcileReason": "ambiguous_same_hash_without_install_proof"
+  },
+  "formalHostReceiptLossAndBaseline": {
+    "killedFormalHostPid": 32140,
+    "restartedFormalHostPid": 42736,
+    "logicalKey": "wimp:ep_a27cf170a1954bb1a7514a6cb473eb4e:8:19:tc_v03_crash_v03_86efe65f",
+    "artifactSha256": "e276c00866296acf5c5481abbc0f415b3a7c34d95abcfcd47238d33d42b3d9d3",
+    "reconciledOutcome": "reconciled_installed",
+    "installCount": 1,
+    "diskRewrittenOnRestart": false,
+    "workspaceFileSourceReconciledInSnapshot": true,
+    "modelSpoofedBaseSha256IgnoredConflictSaved": true,
+    "spoofConflictRelPath": "reports/spoof-check.conflict-4948011a18.md",
+    "sequentialSameConversationUpdatesInstalled": true,
+    "sequentialV1Sha256": "ad672a44ed796dd053a8d89258b04c7c43e6e037789a76c3cc449c82d0056d23",
+    "sequentialV2Sha256": "ca0c26620d22bfede003b4f8a79de0aebf826b87f8bee0a6e5f6e6f007ffb9e0",
+    "formalContainerAuthorizedInputs": [
+      "reports/crash-test.md",
+      "reports/spoof-check.md",
+      "reports/seq-update.md"
+    ],
+    "sameRoundCrashRecoveryConflictPreserved": true,
+    "sameRoundPostCacheRevokedExcluded": true,
+    "missingFrozenSnapshotFailClosedVerified": true,
+    "sameWorkerCrashRecoveryConflictPreserved": true,
+    "sameWorkerMissingRootPendingReconcileVerified": true,
+    "missingSnapshotPreservesInstalledReceipt": true,
+    "pendingReconcileReentryBlocked": true
+  }
+}

@@ -1,0 +1,578 @@
+{
+  "suite": "S6",
+  "runId": "s6_b7ef93fd",
+  "status": "PASS",
+  "formalEntrypointUsed": true,
+  "formalEntrypoint": "src/index.ts",
+  "hostStartupSecretEnvScrubbed": true,
+  "hostStartupRemainingSecretVars": [],
+  "scannerPositiveControl": {
+    "plantedMarkers": 2,
+    "detectedHits": 2,
+    "inMemorySubstringPlantedMarkers": 2,
+    "inMemorySubstringDetectedHits": 2,
+    "mcpChildSubstringPlantedMarkers": 2,
+    "mcpChildSubstringDetectedHits": 2,
+    "mcpChildSubstringHitsBySlot": {
+      "slot:model-router": 0,
+      "slot:model-worker": 1,
+      "slot:imap-readonly": 0,
+      "slot:github-mcp-pat": 1,
+      "slot:web-console": 0
+    }
+  },
+  "samplingPointMatrix": [
+    {
+      "point": "formal_router_worker_connectors_live",
+      "scannedArtifacts": [
+        {
+          "name": "aegis-gov.sqlite",
+          "bytes": 303104,
+          "hits": 0
+        },
+        {
+          "name": "aegis-gov.sqlite-wal",
+          "bytes": 457352,
+          "hits": 0
+        },
+        {
+          "name": "pi-durable.sqlite",
+          "bytes": 4096,
+          "hits": 0
+        },
+        {
+          "name": "pi-durable.sqlite-wal",
+          "bytes": 1940552,
+          "hits": 0
+        },
+        {
+          "name": "captured_urls",
+          "bytes": 126,
+          "hits": 0
+        },
+        {
+          "name": "formal_host_stdout_stderr",
+          "bytes": 686,
+          "hits": 0
+        },
+        {
+          "name": "fake_model_log",
+          "bytes": 2816,
+          "hits": 0
+        },
+        {
+          "name": "fake_imap_log",
+          "bytes": 700,
+          "hits": 0
+        },
+        {
+          "name": "fake_mcp_log",
+          "bytes": 1585,
+          "hits": 0
+        },
+        {
+          "name": "workspace_output_file",
+          "bytes": 34,
+          "hits": 0
+        }
+      ],
+      "totalHits": 0
+    },
+    {
+      "point": "formal_compaction_web_live",
+      "scannedArtifacts": [
+        {
+          "name": "aegis-gov.sqlite",
+          "bytes": 303104,
+          "hits": 0
+        },
+        {
+          "name": "aegis-gov.sqlite-wal",
+          "bytes": 510912,
+          "hits": 0
+        },
+        {
+          "name": "pi-durable.sqlite",
+          "bytes": 4096,
+          "hits": 0
+        },
+        {
+          "name": "pi-durable.sqlite-wal",
+          "bytes": 2117712,
+          "hits": 0
+        },
+        {
+          "name": "web_snapshot",
+          "bytes": 9568,
+          "hits": 0
+        },
+        {
+          "name": "web_sse_frame",
+          "bytes": 9589,
+          "hits": 0
+        },
+        {
+          "name": "captured_urls",
+          "bytes": 279,
+          "hits": 0
+        },
+        {
+          "name": "docker_cli_minimal_env",
+          "bytes": 2393,
+          "hits": 0
+        }
+      ],
+      "totalHits": 0
+    },
+    {
+      "point": "formal_post_restart_live",
+      "scannedArtifacts": [
+        {
+          "name": "aegis-gov.sqlite",
+          "bytes": 303104,
+          "hits": 0
+        },
+        {
+          "name": "aegis-gov.sqlite-wal",
+          "bytes": 519152,
+          "hits": 0
+        },
+        {
+          "name": "pi-durable.sqlite",
+          "bytes": 4096,
+          "hits": 0
+        },
+        {
+          "name": "pi-durable.sqlite-wal",
+          "bytes": 2117712,
+          "hits": 0
+        },
+        {
+          "name": "formal_host2_stdout_stderr",
+          "bytes": 686,
+          "hits": 0
+        },
+        {
+          "name": "fake_model_log",
+          "bytes": 3344,
+          "hits": 0
+        },
+        {
+          "name": "fake_imap_log",
+          "bytes": 700,
+          "hits": 0
+        },
+        {
+          "name": "fake_mcp_log",
+          "bytes": 2994,
+          "hits": 0
+        }
+      ],
+      "totalHits": 0
+    },
+    {
+      "point": "formal_child_and_container_observations",
+      "scannedArtifacts": [
+        {
+          "name": "host_env_scrub_audit",
+          "bytes": 260,
+          "hits": 0
+        },
+        {
+          "name": "imap_child_observed_env",
+          "bytes": 728,
+          "hits": 0
+        },
+        {
+          "name": "imap_child_in_memory_sanitized_summary",
+          "bytes": 1128,
+          "hits": 0
+        },
+        {
+          "name": "docker_task_container_and_volume_audit",
+          "bytes": 1040,
+          "hits": 0
+        },
+        {
+          "name": "docker_in_memory_sanitized_summary",
+          "bytes": 1472,
+          "hits": 0
+        },
+        {
+          "name": "docker_cli_whitelist_control_probe",
+          "bytes": 2393,
+          "hits": 0
+        },
+        {
+          "name": "volume_export_in_memory_sanitized_summary",
+          "bytes": 733,
+          "hits": 0
+        },
+        {
+          "name": "mcp_child_env_digests",
+          "bytes": 477,
+          "hits": 0
+        },
+        {
+          "name": "mcp_commitments_salted",
+          "bytes": 1034,
+          "hits": 0
+        },
+        {
+          "name": "imap_child_raw_env",
+          "bytes": 2348,
+          "hits": 0
+        },
+        {
+          "name": "docker_container_raw_env",
+          "bytes": 115,
+          "hits": 0
+        },
+        {
+          "name": "docker_cli_passed_env",
+          "bytes": 2333,
+          "hits": 0
+        },
+        {
+          "name": "volume_export_bytes",
+          "bytes": 34,
+          "hits": 0
+        },
+        {
+          "name": "mcp_child_non_pat_env",
+          "bytes": 2072,
+          "hits": 0
+        },
+        {
+          "name": "mcp_child_all_env_substring",
+          "bytes": 2136,
+          "hits": 0
+        }
+      ],
+      "totalHits": 0
+    }
+  ],
+  "uncollectedSamples": [],
+  "notDirectlyCapturedFromExternalOs": [
+    "docker.exe external OS GetEnvironmentStrings (verified via formal host dockerCliEnvEntries allowlist audit + whitelist control probe + docker inspect .Config.Env)"
+  ],
+  "dockerDigests": {
+    "approvedImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "executorImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "exporterImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee"
+  },
+  "dockerTaskContainer": {
+    "containerId": "35a1592416defe26c4a6e5153f63972d42df9427dec8c3a5f6844140ae876976",
+    "volumeName": "aegis-w2-vol-b31bbe45-f",
+    "networkMode": "none",
+    "mounts": [
+      {
+        "source": "<TEMP_ROOT>\\w2-data\\s6\\host-data\\sandbox-task-snapshots\\mnt_7e75c566-5d6",
+        "destination": "/input",
+        "rw": false
+      },
+      {
+        "source": "aegis-w2-vol-b31bbe45-f",
+        "destination": "/out",
+        "rw": true
+      }
+    ],
+    "envKeysInContainer": [
+      "PATH",
+      "NODE_VERSION",
+      "YARN_VERSION"
+    ],
+    "rawEnvEntriesCount": 3,
+    "artifactSha256": "e9d729cd7e187f698f0c96b01110dc9beeac37d725a89cc5ec1cfe5854fdf34b"
+  },
+  "volumePreInstallExport": {
+    "readOnlyMountVerified": true,
+    "exportedFilesCount": 1,
+    "exportedTotalBytes": 34,
+    "observedInMemoryOnly": true,
+    "rawBytesWrittenToDisk": false
+  },
+  "dockerCliMinimalEnvKeysPassed": [
+    "ComSpec",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PATH",
+    "PATHEXT",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "windir"
+  ],
+  "dockerCliWhitelistControlEnvKeys": [
+    "ComSpec",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOGONSERVER",
+    "PATH",
+    "PATHEXT",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "windir"
+  ],
+  "imapChildObservedEnvKeys": [
+    "COMSPEC",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOGONSERVER",
+    "PATH",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "WINDIR"
+  ],
+  "imapChildObservedValueDigestCount": 13,
+  "imapChildPasswordPresentInEnv": false,
+  "mcpChildEnvKeys": [
+    "COMSPEC",
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_READ_ONLY",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOGONSERVER",
+    "PATH",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+    "WINDIR"
+  ],
+  "mcpChildNonPatEntriesCount": 14,
+  "mcpChildSubstringScanPerformed": true,
+  "mcpChildAllEnvScannedBytes": 2136,
+  "mcpChildForbiddenHitsBySlot": {
+    "slot:model-router": 0,
+    "slot:model-worker": 0,
+    "slot:fake-local": 0,
+    "slot:imap-readonly": 0,
+    "slot:github-mcp-pat": 0,
+    "slot:web-console": 0
+  },
+  "observerInMemoryOnly": true,
+  "rawValuesOrVolumeBytesWrittenToDisk": false,
+  "capturedUrlsCount": 6,
+  "totalForbiddenHits": 0,
+  "slots": [
+    {
+      "slotId": "slot:model-router",
+      "markerDigestPrefix": "d63b731dea9cd4ef",
+      "allowedLocations": [
+        "host_memory_vault",
+        "loopback_fake_model_router_auth_header"
+      ],
+      "checkedLocations": [
+        "aegis-gov.sqlite",
+        "aegis-gov.sqlite-wal",
+        "captured_urls",
+        "docker_cli_minimal_env",
+        "docker_cli_passed_env",
+        "docker_cli_whitelist_control_probe",
+        "docker_container_raw_env",
+        "docker_in_memory_sanitized_summary",
+        "docker_task_container_and_volume_audit",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "fake_model_log",
+        "formal_host2_stdout_stderr",
+        "formal_host_stdout_stderr",
+        "host_env_scrub_audit",
+        "imap_child_in_memory_sanitized_summary",
+        "imap_child_observed_env",
+        "imap_child_raw_env",
+        "mcp_child_all_env_substring",
+        "mcp_child_env_digests",
+        "mcp_child_non_pat_env",
+        "mcp_commitments_salted",
+        "model_prompt_bodies",
+        "pi-durable.sqlite",
+        "pi-durable.sqlite-wal",
+        "volume_export_bytes",
+        "volume_export_in_memory_sanitized_summary",
+        "web_snapshot",
+        "web_sse_frame",
+        "workspace_output_file"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:model-worker",
+      "markerDigestPrefix": "5fd1c2605bf29af0",
+      "allowedLocations": [
+        "host_memory_vault",
+        "loopback_fake_model_worker_auth_header"
+      ],
+      "checkedLocations": [
+        "aegis-gov.sqlite",
+        "aegis-gov.sqlite-wal",
+        "captured_urls",
+        "docker_cli_minimal_env",
+        "docker_cli_passed_env",
+        "docker_cli_whitelist_control_probe",
+        "docker_container_raw_env",
+        "docker_in_memory_sanitized_summary",
+        "docker_task_container_and_volume_audit",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "fake_model_log",
+        "formal_host2_stdout_stderr",
+        "formal_host_stdout_stderr",
+        "host_env_scrub_audit",
+        "imap_child_in_memory_sanitized_summary",
+        "imap_child_observed_env",
+        "imap_child_raw_env",
+        "mcp_child_all_env_substring",
+        "mcp_child_env_digests",
+        "mcp_child_non_pat_env",
+        "mcp_commitments_salted",
+        "model_prompt_bodies",
+        "pi-durable.sqlite",
+        "pi-durable.sqlite-wal",
+        "volume_export_bytes",
+        "volume_export_in_memory_sanitized_summary",
+        "web_snapshot",
+        "web_sse_frame",
+        "workspace_output_file"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:imap-readonly",
+      "markerDigestPrefix": "2a7faa7a0a6baede",
+      "allowedLocations": [
+        "host_memory_vault",
+        "imap_child_stdin_only"
+      ],
+      "checkedLocations": [
+        "aegis-gov.sqlite",
+        "aegis-gov.sqlite-wal",
+        "captured_urls",
+        "docker_cli_minimal_env",
+        "docker_cli_passed_env",
+        "docker_cli_whitelist_control_probe",
+        "docker_container_raw_env",
+        "docker_in_memory_sanitized_summary",
+        "docker_task_container_and_volume_audit",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "fake_model_log",
+        "formal_host2_stdout_stderr",
+        "formal_host_stdout_stderr",
+        "host_env_scrub_audit",
+        "imap_child_in_memory_sanitized_summary",
+        "imap_child_observed_env",
+        "imap_child_raw_env",
+        "mcp_child_all_env_substring",
+        "mcp_child_env_digests",
+        "mcp_child_non_pat_env",
+        "mcp_commitments_salted",
+        "model_prompt_bodies",
+        "pi-durable.sqlite",
+        "pi-durable.sqlite-wal",
+        "volume_export_bytes",
+        "volume_export_in_memory_sanitized_summary",
+        "web_snapshot",
+        "web_sse_frame",
+        "workspace_output_file"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:github-mcp-pat",
+      "markerDigestPrefix": "6b74a09309300516",
+      "allowedLocations": [
+        "host_memory_vault",
+        "github_mcp_child_explicit_env"
+      ],
+      "checkedLocations": [
+        "aegis-gov.sqlite",
+        "aegis-gov.sqlite-wal",
+        "captured_urls",
+        "docker_cli_minimal_env",
+        "docker_cli_passed_env",
+        "docker_cli_whitelist_control_probe",
+        "docker_container_raw_env",
+        "docker_in_memory_sanitized_summary",
+        "docker_task_container_and_volume_audit",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "fake_model_log",
+        "formal_host2_stdout_stderr",
+        "formal_host_stdout_stderr",
+        "host_env_scrub_audit",
+        "imap_child_in_memory_sanitized_summary",
+        "imap_child_observed_env",
+        "imap_child_raw_env",
+        "mcp_child_all_env_substring",
+        "mcp_child_non_pat_env",
+        "mcp_commitments_salted",
+        "model_prompt_bodies",
+        "pi-durable.sqlite",
+        "pi-durable.sqlite-wal",
+        "volume_export_bytes",
+        "volume_export_in_memory_sanitized_summary",
+        "web_snapshot",
+        "web_sse_frame",
+        "workspace_output_file"
+      ],
+      "forbiddenHits": 0
+    },
+    {
+      "slotId": "slot:web-console",
+      "markerDigestPrefix": "939dd532059e506d",
+      "allowedLocations": [
+        "host_memory_auth_config"
+      ],
+      "checkedLocations": [
+        "aegis-gov.sqlite",
+        "aegis-gov.sqlite-wal",
+        "captured_urls",
+        "docker_cli_minimal_env",
+        "docker_cli_passed_env",
+        "docker_cli_whitelist_control_probe",
+        "docker_container_raw_env",
+        "docker_in_memory_sanitized_summary",
+        "docker_task_container_and_volume_audit",
+        "fake_imap_log",
+        "fake_mcp_log",
+        "fake_model_log",
+        "formal_host2_stdout_stderr",
+        "formal_host_stdout_stderr",
+        "host_env_scrub_audit",
+        "imap_child_in_memory_sanitized_summary",
+        "imap_child_observed_env",
+        "imap_child_raw_env",
+        "mcp_child_all_env_substring",
+        "mcp_child_env_digests",
+        "mcp_child_non_pat_env",
+        "mcp_commitments_salted",
+        "model_prompt_bodies",
+        "pi-durable.sqlite",
+        "pi-durable.sqlite-wal",
+        "volume_export_bytes",
+        "volume_export_in_memory_sanitized_summary",
+        "web_snapshot",
+        "web_sse_frame",
+        "workspace_output_file"
+      ],
+      "forbiddenHits": 0
+    }
+  ]
+}
