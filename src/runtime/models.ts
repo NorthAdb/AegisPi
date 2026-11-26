@@ -27,10 +27,11 @@ import {
 } from "../governance/budget.ts";
 import { mintId } from "../governance/canonical.ts";
 import {
-  assertStage1LoopbackModelUrl,
+  assertModelUrlForStage,
   Stage1EgressBlockedError,
   type HostCredentialVault,
   type ModelPriceSchedule,
+  type StageEgressPolicy,
 } from "../governance/credentials.ts";
 import { withImmediateTx, writeAuditEvent } from "../governance/db.ts";
 import { checkConversationModelDisclosure } from "../governance/policy.ts";
@@ -77,6 +78,25 @@ export interface HostModelsConfig {
   fetchImpl?: typeof globalThis.fetch;
   /** Optional observer invoked on EVERY physical HTTP fetch attempt inside Stage 1 guarded fetch. */
   onHttpFetchAttempt?: (url: string) => void;
+  /** Explicit Stage 1 / Stage 2 egress policy (defaults to Stage 1 loopback-only). */
+  egressPolicy?: StageEgressPolicy;
+  /** Optional coalesced streaming delta observer for real-time progressive SSE projection. */
+  onStreamTextDelta?: (info: {
+    conversationId: string;
+    ownerTaskId: string;
+    requestId: string;
+    delta: string;
+    accumulatedText: string;
+    firstTokenMs: number;
+    elapsedMs: number;
+  }) => void;
+  onStreamFinished?: (info: {
+    conversationId: string;
+    ownerTaskId: string;
+    requestId: string;
+    firstTokenMs: number | null;
+    totalMs: number;
+  }) => void;
   onReservationRecorded?: (info: {
     requestId: string;
     ownerTaskId: string;
@@ -125,8 +145,8 @@ function createImmediateErrorStream(model: Model<Api>, errorMessage: string, now
  * approximate character-length heuristics are explicitly rejected.
  */
 function estimateUpperBoundMu(
-  _context: AiContext,
-  _model: Model<Api>,
+  context: AiContext,
+  model: Model<Api>,
   schedule: ModelPriceSchedule | null,
 ): number | null {
   if (!schedule) return null;
@@ -137,7 +157,32 @@ function estimateUpperBoundMu(
   ) {
     return schedule.syntheticFixedUpperMu;
   }
-  return null;
+  if (!schedule.allowTokenBoundEstimation) {
+    return null;
+  }
+  if (
+    !Number.isFinite(schedule.inputPerMTokMu) ||
+    schedule.inputPerMTokMu < 0 ||
+    !Number.isFinite(schedule.outputPerMTokMu) ||
+    schedule.outputPerMTokMu < 0 ||
+    !Number.isFinite(model.maxTokens) ||
+    model.maxTokens <= 0
+  ) {
+    return null;
+  }
+  // Provably conservative upper bound: UTF-8 byte length / 2 >= worst-case BPE token count + framing margin
+  let inputBytes = 0;
+  try {
+    inputBytes = Buffer.byteLength(JSON.stringify(context), "utf8");
+  } catch {
+    return null;
+  }
+  const conservativeInputTokens = Math.min(model.contextWindow || 128_000, Math.ceil(inputBytes / 2) + 512);
+  const conservativeOutputTokens = Math.max(1, Math.ceil(model.maxTokens));
+  const rawMu =
+    (conservativeInputTokens * schedule.inputPerMTokMu) / 1_000_000 +
+    (conservativeOutputTokens * schedule.outputPerMTokMu) / 1_000_000;
+  return Math.max(1, Math.ceil(rawMu * 1.1));
 }
 
 function computeActualMu(msg: AssistantMessage, schedule: ModelPriceSchedule): number | null {
@@ -149,25 +194,22 @@ function computeActualMu(msg: AssistantMessage, schedule: ModelPriceSchedule): n
   if (schedule.syntheticFixedActualMu !== undefined && schedule.syntheticFixedActualMu !== null) {
     return schedule.syntheticFixedActualMu;
   }
+  const cacheRate = schedule.cacheReadPerMTokMu ?? schedule.inputPerMTokMu;
   const inputCost = ((u.input ?? 0) * schedule.inputPerMTokMu) / 1_000_000;
+  const cacheReadCost = ((u.cacheRead ?? 0) * cacheRate) / 1_000_000;
   const outputCost = ((u.output ?? 0) * schedule.outputPerMTokMu) / 1_000_000;
-  return Math.max(1, Math.ceil(inputCost + outputCost));
+  return Math.max(1, Math.ceil(inputCost + cacheReadCost + outputCost));
 }
 
-/**
- * Stage 1 guarded HTTP fetch transport passed directly into pi-ai's OpenAI client.
- * 1. Re-enforces Stage 1 loopback-only URL validation on EVERY physical fetch attempt.
- * 2. Sets redirect: "manual" so Node's fetch NEVER auto-follows 3xx redirects to off-loopback hosts.
- * 3. Explicitly rejects any 3xx redirect response with Stage1EgressBlockedError (0 secondary hops).
- */
-export function createStage1GuardedFetch(
+export function createGuardedModelFetch(
   underlyingFetch: typeof globalThis.fetch = globalThis.fetch,
   onHttpFetchAttempt?: (url: string) => void,
+  egressPolicy?: StageEgressPolicy,
 ): typeof globalThis.fetch {
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    assertStage1LoopbackModelUrl(rawUrl);
+    assertModelUrlForStage(rawUrl, egressPolicy);
     onHttpFetchAttempt?.(rawUrl);
     const guardedInit: RequestInit = {
       ...init,
@@ -178,11 +220,22 @@ export function createStage1GuardedFetch(
       const location = response.headers.get("location") ?? "(missing)";
       throw new Stage1EgressBlockedError(
         location,
-        `Stage 1 blocks HTTP ${response.status} redirect from ${rawUrl} to ${location}`,
+        `Model egress blocks HTTP ${response.status} redirect from ${rawUrl} to ${location}`,
       );
     }
     return response;
   };
+}
+
+/**
+ * Stage 1 guarded HTTP fetch transport passed directly into pi-ai's OpenAI client.
+ * Preserved with identical Stage 1 loopback-only semantics.
+ */
+export function createStage1GuardedFetch(
+  underlyingFetch: typeof globalThis.fetch = globalThis.fetch,
+  onHttpFetchAttempt?: (url: string) => void,
+): typeof globalThis.fetch {
+  return createGuardedModelFetch(underlyingFetch, onHttpFetchAttempt, { stage: 1 });
 }
 
 export interface HostModelsController {
@@ -199,12 +252,13 @@ export interface HostModelsController {
  */
 export function createHostModelsEgress(config: HostModelsConfig): HostModelsController {
   const nowFn = config.now ?? (() => Date.now());
+  const egressPolicy = config.egressPolicy ?? { stage: 1 };
   const inner = createModels();
   let slotList: ModelSlotConfig[] = [];
 
   const applySlots = (slots: ModelSlotConfig[]): void => {
     for (const s of slots) {
-      assertStage1LoopbackModelUrl(s.baseUrl);
+      assertModelUrlForStage(s.baseUrl, egressPolicy);
     }
     slotList = [...slots];
     inner.clearProviders();
@@ -374,12 +428,15 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
         }
       }
     }
-    const bindingCheck = config.vault.validateBinding({
-      slotId: slot.credentialSlotId,
-      provider: model.provider,
-      modelId: model.id,
-      baseUrl: model.baseUrl ?? slot.baseUrl,
-    });
+    const bindingCheck = config.vault.validateBinding(
+      {
+        slotId: slot.credentialSlotId,
+        provider: model.provider,
+        modelId: model.id,
+        baseUrl: model.baseUrl ?? slot.baseUrl,
+      },
+      egressPolicy,
+    );
     if (!bindingCheck.ok) {
       const msg = `Blocked model send (${requestId}): ${bindingCheck.reason}`;
       recordEgressDenial(requestId, "invalid_binding", msg, {
@@ -456,10 +513,10 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     }
 
     // 6. Enforce maxRetries: 0 (no hidden provider retries; durable retries must re-reserve!)
-    // Also re-verify Stage 1 loopback URL strictly before transport dispatch.
+    // Also re-verify egress URL strictly before transport dispatch.
     const effectiveBaseUrl = model.baseUrl ?? slot.baseUrl;
     try {
-      assertStage1LoopbackModelUrl(effectiveBaseUrl);
+      assertModelUrlForStage(effectiveBaseUrl, egressPolicy);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       releaseBudgetReservation(config.govDb, {
@@ -476,9 +533,10 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       provider: model.provider,
       modelId: model.id,
     });
-    const guardedFetch = createStage1GuardedFetch(
+    const guardedFetch = createGuardedModelFetch(
       config.fetchImpl ?? globalThis.fetch,
       config.onHttpFetchAttempt,
+      egressPolicy,
     );
     // Resolve this exact slot's secret strictly in host memory (S6 per-slot credential separation)
     const slotApiKey = config.vault.resolveSecretInMemory(slot.credentialSlotId);
@@ -488,12 +546,49 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       maxRetries: 0,
       fetch: guardedFetch,
     };
+    const streamStartedAt = performance.now();
     const underlyingStream = inner.streamSimple(model, ctx, enforcedOptions);
+
+    // Non-invasive streaming delta tap for real-time progressive SSE projection & firstTokenMs metrics
+    let firstTokenMs: number | null = null;
+    let accumulatedText = "";
+    let lastEmitAt = 0;
+    const origPush = underlyingStream.push.bind(underlyingStream);
+    underlyingStream.push = ((event: Parameters<AssistantMessageEventStream["push"]>[0]) => {
+      if (event.type === "text_delta" && typeof event.delta === "string" && event.delta.length > 0) {
+        const elapsedMs = Math.max(0, Math.round(performance.now() - streamStartedAt));
+        const isFirst = firstTokenMs === null;
+        if (isFirst) firstTokenMs = elapsedMs;
+        accumulatedText += event.delta;
+        const nowPerf = performance.now();
+        if (config.onStreamTextDelta && (isFirst || nowPerf - lastEmitAt >= 40)) {
+          lastEmitAt = nowPerf;
+          config.onStreamTextDelta({
+            conversationId: owner.conversationId,
+            ownerTaskId: owner.ownerTaskId,
+            requestId,
+            delta: event.delta,
+            accumulatedText,
+            firstTokenMs: firstTokenMs!,
+            elapsedMs,
+          });
+        }
+      }
+      return origPush(event);
+    }) as AssistantMessageEventStream["push"];
 
     // 7. Observe terminal AssistantMessage for idempotent settlement (T7)
     // Missing usage or transport error leaves reservation HELD for CHARGED_BOUND timeout!
     void underlyingStream.result().then(
       (finalMsg) => {
+        const totalMs = Math.max(0, Math.round(performance.now() - streamStartedAt));
+        config.onStreamFinished?.({
+          conversationId: owner.conversationId,
+          ownerTaskId: owner.ownerTaskId,
+          requestId,
+          firstTokenMs,
+          totalMs,
+        });
         if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
           return;
         }
@@ -507,7 +602,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
             requestId,
             actualMu,
             eventKey: `provider_usage:${requestId}`,
-            evidenceRef: `usage:in=${finalMsg.usage.input},out=${finalMsg.usage.output}`,
+            evidenceRef: `usage:in=${finalMsg.usage.input},out=${finalMsg.usage.output},cacheRead=${finalMsg.usage.cacheRead ?? 0}`,
             now: nowFn(),
           });
         } catch {

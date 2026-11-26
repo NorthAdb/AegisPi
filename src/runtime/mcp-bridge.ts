@@ -1,9 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import { McpClient, StdioTransport, type Tool as McpTool } from "@earendil-works/pi-mcp";
-import type { HostCredentialVault } from "../governance/credentials.ts";
+import type { HostCredentialVault, StageProfile } from "../governance/credentials.ts";
 import { writeAuditEvent } from "../governance/db.ts";
 import {
-  getMcpToolPin,
+  quarantineMissingMcpTools,
+  recordObservedDriftDefinition,
+  verifyLiveMcpToolPin,
   verifyMcpServerBinary,
   verifyOrQuarantineMcpTool,
 } from "../governance/mcp-pin.ts";
@@ -20,6 +22,8 @@ export interface GitHubMcpBridgeConfig {
   credentialSlotId: string;
   patEnvVarName?: string;
   extraNonSecretEnv?: Record<string, string>;
+  /** Stage profile (defaults to 1 = strictly read-only; Stage 2 allows write mode only when pin read_only_mode=0). */
+  stage?: StageProfile;
   govDb: DatabaseSync;
   vault: HostCredentialVault;
   now?: () => number;
@@ -61,14 +65,19 @@ function buildMinimalWindowsEnv(extra?: Record<string, string>): Record<string, 
 export class GitHubMcpBridge {
   readonly #config: GitHubMcpBridgeConfig;
   readonly #now: () => number;
+  readonly #stage: StageProfile;
   #client: McpClient | null = null;
   #transport: StdioTransport | null = null;
   #loadedTools = new Map<string, McpTool>();
   #verifiedSha256: string | null = null;
+  #readOnlyMode = true;
+  #admissionPaused = false;
+  #lastPauseReason: string | null = null;
 
   constructor(config: GitHubMcpBridgeConfig) {
     this.#config = config;
     this.#now = config.now ?? (() => Date.now());
+    this.#stage = config.stage ?? 1;
   }
 
   get serverId(): string {
@@ -83,11 +92,42 @@ export class GitHubMcpBridge {
     return [...this.#loadedTools.keys()];
   }
 
+  get isAdmissionPaused(): boolean {
+    return this.#admissionPaused;
+  }
+
+  get isConnected(): boolean {
+    return this.#client !== null;
+  }
+
+  get isReadOnlyMode(): boolean {
+    return this.#readOnlyMode;
+  }
+
+  getStatus(): {
+    serverId: string;
+    connected: boolean;
+    admissionPaused: boolean;
+    pauseReason: string | null;
+    readOnlyMode: boolean;
+    verifiedBinarySha256: string | null;
+    loadedTools: string[];
+  } {
+    return {
+      serverId: this.#config.serverId,
+      connected: this.#client !== null,
+      admissionPaused: this.#admissionPaused,
+      pauseReason: this.#lastPauseReason,
+      readOnlyMode: this.#readOnlyMode,
+      verifiedBinarySha256: this.#verifiedSha256,
+      loadedTools: [...this.#loadedTools.keys()],
+    };
+  }
+
   /**
-   * 1. Verifies pinned absolute path + SHA-256 BEFORE spawning child.
-   * 2. Resolves approved PAT strictly in host memory.
-   * 3. Launches StdioTransport with explicit inheritEnv: false and minimal Windows env.
-   * 4. Lists tools and verifies every tool definition's canonical SHA-256 fingerprint against mcp_tool_pins.
+   * C4: Pauses execution admission -> verifies binary absolute path & SHA-256 ->
+   * resolves host-memory PAT -> spawns StdioTransport (inheritEnv: false) ->
+   * verifies every tool in tools/list + quarantines missing/new/drifted tools -> resumes admission.
    */
   async connect(): Promise<{
     ok: boolean;
@@ -95,7 +135,12 @@ export class GitHubMcpBridge {
     reason?: string;
     approvedTools: string[];
     quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+    missingQuarantinedTools?: string[];
   }> {
+    this.#admissionPaused = true;
+    this.#lastPauseReason = "connecting_and_verifying_pins";
+    await this.close();
+
     const launchArgs = this.#config.args ?? [];
     const binCheck = verifyMcpServerBinary(this.#config.govDb, this.#config.serverId, {
       command: this.#config.command,
@@ -103,6 +148,7 @@ export class GitHubMcpBridge {
       pinnedArtifactPath: this.#config.pinnedArtifactPath,
     });
     if (!binCheck.ok) {
+      this.#lastPauseReason = binCheck.code;
       return {
         ok: false,
         code: binCheck.code,
@@ -111,7 +157,9 @@ export class GitHubMcpBridge {
         quarantinedTools: [],
       };
     }
-    if (binCheck.pin.read_only_mode !== 1) {
+    const isReadOnlyPin = binCheck.pin.read_only_mode === 1;
+    if (this.#stage === 1 && !isReadOnlyPin) {
+      this.#lastPauseReason = "mcp_not_read_only";
       return {
         ok: false,
         code: "mcp_not_read_only",
@@ -121,6 +169,7 @@ export class GitHubMcpBridge {
       };
     }
     this.#verifiedSha256 = binCheck.actualSha256;
+    this.#readOnlyMode = isReadOnlyPin;
 
     const patRes = this.#config.vault.resolveGithubMcpSecretForTarget(this.#config.credentialSlotId, {
       serverId: this.#config.serverId,
@@ -128,9 +177,10 @@ export class GitHubMcpBridge {
       args: binCheck.pinnedArgs,
       executablePath: binCheck.pin.executable_path,
       executableSha256: binCheck.actualSha256,
-      readOnlyMode: binCheck.pin.read_only_mode === 1,
+      readOnlyMode: isReadOnlyPin,
     });
     if (!patRes.ok) {
+      this.#lastPauseReason = patRes.code;
       return {
         ok: false,
         code: patRes.code,
@@ -145,7 +195,7 @@ export class GitHubMcpBridge {
     const env = buildMinimalWindowsEnv({
       ...(this.#config.extraNonSecretEnv ?? {}),
       [patEnvKey]: pat,
-      GITHUB_READ_ONLY: "1",
+      ...(isReadOnlyPin ? { GITHUB_READ_ONLY: "1" } : {}),
     });
 
     const transport = new StdioTransport({
@@ -166,37 +216,37 @@ export class GitHubMcpBridge {
     this.#transport = transport;
     this.#client = client;
 
-    const tools = await client.listTools();
-    const approvedTools: string[] = [];
-    const quarantinedTools: Array<{ name: string; code: string; reason: string }> = [];
-
-    for (const tool of tools) {
-      this.#loadedTools.set(tool.name, tool);
-      const pinCheck = verifyOrQuarantineMcpTool(this.#config.govDb, {
-        serverId: this.#config.serverId,
-        observedDef: {
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-        },
-        now: this.#now(),
-      });
-      if (pinCheck.ok) {
-        approvedTools.push(tool.name);
-      } else {
-        quarantinedTools.push({ name: tool.name, code: pinCheck.code, reason: pinCheck.reason });
-      }
-    }
-
-    return { ok: true, code: "connected", approvedTools, quarantinedTools };
+    const pinRes = await this.#reconcileLiveToolsList();
+    this.#admissionPaused = false;
+    this.#lastPauseReason = null;
+    return {
+      ok: true,
+      code: "connected",
+      approvedTools: pinRes.approvedTools,
+      quarantinedTools: pinRes.quarantinedTools,
+      missingQuarantinedTools: pinRes.missingQuarantinedTools,
+    };
   }
 
   /**
-   * Re-fetches tools/list from the live MCP server and checks for definition drift.
+   * C4: Full reconnect: pauses admission, closes existing child, re-verifies binary SHA-256,
+   * re-spawns child, re-verifies tools/list fingerprints, quarantines new/missing/changed tools.
    */
-  async recheckToolPins(): Promise<{
+  async reconnect(): Promise<{
+    ok: boolean;
+    code: string;
+    reason?: string;
     approvedTools: string[];
     quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+    missingQuarantinedTools?: string[];
+  }> {
+    return await this.connect();
+  }
+
+  async #reconcileLiveToolsList(): Promise<{
+    approvedTools: string[];
+    quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+    missingQuarantinedTools: string[];
   }> {
     if (!this.#client) {
       throw new Error("MCP bridge is not connected");
@@ -204,34 +254,133 @@ export class GitHubMcpBridge {
     const tools = await this.#client.listTools();
     const approvedTools: string[] = [];
     const quarantinedTools: Array<{ name: string; code: string; reason: string }> = [];
+    const observedNames: string[] = [];
+    const now = this.#now();
+
     for (const tool of tools) {
+      observedNames.push(tool.name);
       this.#loadedTools.set(tool.name, tool);
+      const observedDef = {
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      };
       const pinCheck = verifyOrQuarantineMcpTool(this.#config.govDb, {
         serverId: this.#config.serverId,
-        observedDef: {
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-        },
-        now: this.#now(),
+        observedDef,
+        now,
       });
-      if (pinCheck.ok) approvedTools.push(tool.name);
-      else quarantinedTools.push({ name: tool.name, code: pinCheck.code, reason: pinCheck.reason });
+      if (pinCheck.ok) {
+        approvedTools.push(tool.name);
+      } else {
+        if (pinCheck.code === "mcp_tool_definition_changed") {
+          recordObservedDriftDefinition(this.#config.govDb, {
+            serverId: this.#config.serverId,
+            observedDef,
+            now,
+          });
+        }
+        quarantinedTools.push({ name: tool.name, code: pinCheck.code, reason: pinCheck.reason });
+      }
     }
-    return { approvedTools, quarantinedTools };
+
+    const missingQuarantinedTools = quarantineMissingMcpTools(this.#config.govDb, {
+      serverId: this.#config.serverId,
+      observedToolNames: observedNames,
+      now,
+    });
+    for (const missingName of missingQuarantinedTools) {
+      quarantinedTools.push({
+        name: missingName,
+        code: "mcp_tool_missing",
+        reason: `MCP tool ${missingName} disappeared from tools/list and was quarantined`,
+      });
+    }
+
+    return { approvedTools, quarantinedTools, missingQuarantinedTools };
   }
 
   /**
-   * Executes a Stage-1 read-only MCP tool ONLY after verifying:
-   * 1. Tool is NOT a write operation (Stage 1 closes all GitHub writes).
-   * 2. Live tool pin in governance DB is APPROVED (not REVOKED or QUARANTINED).
-   * 3. Live source_read_grants authorizes (principalId, scopeId, "github_mcp", repoId, operation, ref, path).
+   * C4: Pauses admission, re-fetches tools/list from live MCP server, checks drift & missing tools,
+   * then resumes admission.
+   */
+  async recheckToolPins(): Promise<{
+    approvedTools: string[];
+    quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+    missingQuarantinedTools: string[];
+  }> {
+    this.#admissionPaused = true;
+    this.#lastPauseReason = "rechecking_tool_pins";
+    try {
+      const binCheck = verifyMcpServerBinary(this.#config.govDb, this.#config.serverId, {
+        command: this.#config.command,
+        args: this.#config.args ?? [],
+        pinnedArtifactPath: this.#config.pinnedArtifactPath,
+      });
+      if (!binCheck.ok) {
+        this.#lastPauseReason = binCheck.code;
+        await this.close();
+        throw new Error(`${binCheck.code}: ${binCheck.reason}`);
+      }
+      const res = await this.#reconcileLiveToolsList();
+      this.#admissionPaused = false;
+      this.#lastPauseReason = null;
+      return res;
+    } catch (err) {
+      this.#lastPauseReason = err instanceof Error ? err.message : String(err);
+      throw err;
+    }
+  }
+
+  async testConnectivity(): Promise<{
+    ok: boolean;
+    code: string;
+    message: string;
+    approvedTools: string[];
+    quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+  }> {
+    try {
+      if (!this.#client) {
+        const c = await this.connect();
+        return {
+          ok: c.ok,
+          code: c.code,
+          message: c.ok ? `Connected (${c.approvedTools.length} approved tools)` : (c.reason ?? c.code),
+          approvedTools: c.approvedTools,
+          quarantinedTools: c.quarantinedTools,
+        };
+      }
+      const r = await this.recheckToolPins();
+      return {
+        ok: true,
+        code: "ok",
+        message: `Connected (${r.approvedTools.length} approved, ${r.quarantinedTools.length} quarantined)`,
+        approvedTools: r.approvedTools,
+        quarantinedTools: r.quarantinedTools,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        code: "mcp_connectivity_failed",
+        message: err instanceof Error ? err.message : String(err),
+        approvedTools: [],
+        quarantinedTools: [],
+      };
+    }
+  }
+
+  /**
+   * Executes a read-only MCP tool ONLY after verifying:
+   * 1. Admission is NOT paused (C4 reconnect/pin check).
+   * 2. Tool is NOT a write operation.
+   * 3. Live tool pin in governance DB is APPROVED (not REVOKED or QUARANTINED) & matches optional expected fingerprint.
+   * 4. Live source_read_grants authorizes (principalId, scopeId, "github_mcp", repoId, operation, ref, path).
    * Any failure blocks strictly BEFORE sending JSON-RPC to the MCP server (0 calls on server!).
    */
   async callReadOnlyTool(
     toolName: string,
     args: Record<string, unknown>,
-    auth: McpToolCallAuthContext,
+    auth: McpToolCallAuthContext & { expectedSchemaSha256?: string },
   ): Promise<McpCallOutcome> {
     const now = this.#now();
     const deny = (code: string, reason: string): McpCallOutcome => {
@@ -254,20 +403,22 @@ export class GitHubMcpBridge {
       return { ok: false, code, reason };
     };
 
-    const lowerName = toolName.toLowerCase();
-    if (WRITE_TOOL_PREFIXES.some((p) => lowerName.startsWith(p))) {
-      return deny("stage1_github_write_disabled", `Stage 1 blocks write MCP tool: ${toolName}`);
+    if (this.#admissionPaused) {
+      return deny("mcp_admission_paused", `MCP execution admission paused (${this.#lastPauseReason ?? "rechecking"})`);
     }
 
-    const pin = getMcpToolPin(this.#config.govDb, this.#config.serverId, toolName);
-    if (!pin) {
-      return deny("mcp_tool_unapproved", `MCP tool ${toolName} has no approved pin`);
+    const lowerName = toolName.toLowerCase();
+    if (WRITE_TOOL_PREFIXES.some((p) => lowerName.startsWith(p))) {
+      return deny("stage1_github_write_disabled", `Read-only path blocks write MCP tool: ${toolName}`);
     }
-    if (pin.state === "REVOKED") {
-      return deny("mcp_tool_revoked", `MCP tool ${toolName} has been revoked`);
-    }
-    if (pin.state !== "APPROVED") {
-      return deny("mcp_tool_quarantined", `MCP tool ${toolName} is quarantined (${pin.reason ?? "pin_drift"})`);
+
+    const pinCheck = verifyLiveMcpToolPin(this.#config.govDb, {
+      serverId: this.#config.serverId,
+      toolName,
+      expectedSchemaSha256: auth.expectedSchemaSha256,
+    });
+    if (!pinCheck.ok) {
+      return deny(pinCheck.code, pinCheck.reason);
     }
 
     const grantCheck = checkSourceReadAuthorized(this.#config.govDb, {
@@ -287,6 +438,51 @@ export class GitHubMcpBridge {
       return deny("mcp_not_connected", "GitHub MCP bridge is not connected");
     }
 
+    const result = await this.#client.callTool(toolName, args);
+    const text = (result.content ?? [])
+      .map((blk) => (blk.type === "text" ? blk.text : JSON.stringify(blk)))
+      .join("\n");
+    if (result.isError) {
+      return { ok: false, code: "mcp_tool_error", reason: text, raw: result };
+    }
+    return { ok: true, code: "ok", text, raw: result };
+  }
+
+  /**
+   * Stage 2 controlled write execution. Invoked EXCLUSIVELY by the sole host submitter
+   * AFTER T4 CAS READY -> SUBMITTING commits. Re-checks admission pause, Stage 2 write mode,
+   * and live pin fingerprint BEFORE sending JSON-RPC.
+   */
+  async callWriteTool(
+    toolName: string,
+    args: Record<string, unknown>,
+    opts: { expectedSchemaSha256: string },
+  ): Promise<McpCallOutcome> {
+    if (this.#stage < 2 || this.#readOnlyMode) {
+      return {
+        ok: false,
+        code: "mcp_write_disabled",
+        reason: "GitHub MCP bridge is in read-only mode",
+      };
+    }
+    if (this.#admissionPaused) {
+      return {
+        ok: false,
+        code: "mcp_admission_paused",
+        reason: `MCP execution admission paused (${this.#lastPauseReason ?? "rechecking"})`,
+      };
+    }
+    const pinCheck = verifyLiveMcpToolPin(this.#config.govDb, {
+      serverId: this.#config.serverId,
+      toolName,
+      expectedSchemaSha256: opts.expectedSchemaSha256,
+    });
+    if (!pinCheck.ok) {
+      return { ok: false, code: pinCheck.code, reason: pinCheck.reason };
+    }
+    if (!this.#client) {
+      return { ok: false, code: "mcp_not_connected", reason: "GitHub MCP bridge is not connected" };
+    }
     const result = await this.#client.callTool(toolName, args);
     const text = (result.content ?? [])
       .map((blk) => (blk.type === "text" ? blk.text : JSON.stringify(blk)))

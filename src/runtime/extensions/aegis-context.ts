@@ -8,6 +8,7 @@ import {
   type Extension,
 } from "@earendil-works/pi-durable";
 import { freezeDomainL0Snapshot } from "../../capabilities/memory/store.ts";
+import { getOrLockConversationSkillSet } from "../../capabilities/skills/store.ts";
 import { writeAuditEvent } from "../../governance/db.ts";
 import {
   checkConversationModelDisclosure,
@@ -30,6 +31,7 @@ export interface AegisContextExtensionOptions {
     baseUrl: string;
     slotName: string;
   } | null;
+  skillsEnabled?: boolean;
   now?: () => number;
 }
 
@@ -64,9 +66,20 @@ export function createAegisContextExtension(options: AegisContextExtensionOption
     return snap.renderedText.length > 0 ? snap.renderedText : undefined;
   });
 
+  const skillsSection = section("aegis-skills", (input) => {
+    if (!options.skillsEnabled) return undefined;
+    const convId = String(input.conversationId);
+    const locked = getOrLockConversationSkillSet(options.govDb, {
+      runtimeEpoch: options.getRuntimeEpoch(),
+      conversationId: convId,
+      now: nowFn(),
+    });
+    return locked.renderedL1Index.length > 0 ? locked.renderedL1Index : undefined;
+  });
+
   return defineExtension({
     name: AEGIS_CONTEXT_EXTENSION_NAME,
-    sections: [l0Section],
+    sections: [l0Section, skillsSection],
     hooks: [
       hook(GenerationTask, {
         beforeRequest: async ({ messages }, api) => {

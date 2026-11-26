@@ -39,6 +39,9 @@ export interface ScriptedResponse {
   };
   delayMs?: number;
   holdBarrierKey?: string;
+  /** Optional progressive streaming chunks emitted sequentially with chunkDelayMs pauses. */
+  chunks?: string[];
+  chunkDelayMs?: number;
 }
 
 function parseArgs(argv: string[]): Record<string, string> {
@@ -397,14 +400,28 @@ const server = http.createServer(async (req, res) => {
           ...(usageObj ? { usage: usageObj } : {}),
         });
       } else {
-        const text = script.text ?? "Synthetic model response ok.";
-        writeSseEvent(res, {
-          id,
-          object: "chat.completion.chunk",
-          created,
-          model: modelName,
-          choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }],
-        });
+        const chunks = Array.isArray(script.chunks) && script.chunks.length > 0
+          ? script.chunks
+          : [script.text ?? "Synthetic model response ok."];
+        const delayBetween = script.chunkDelayMs ?? 0;
+        for (let i = 0; i < chunks.length; i++) {
+          writeSseEvent(res, {
+            id,
+            object: "chat.completion.chunk",
+            created,
+            model: modelName,
+            choices: [
+              {
+                index: 0,
+                delta: i === 0 ? { role: "assistant", content: chunks[i] } : { content: chunks[i] },
+                finish_reason: null,
+              },
+            ],
+          });
+          if (delayBetween > 0 && i < chunks.length - 1) {
+            await new Promise((r) => setTimeout(r, delayBetween));
+          }
+        }
         writeSseEvent(res, {
           id,
           object: "chat.completion.chunk",

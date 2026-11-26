@@ -24,6 +24,7 @@ interface ImapChildInput {
   mailbox: string;
   uid?: number;
   subjectContains?: string;
+  connectivityOnly?: boolean;
   timeoutMs?: number;
   includeEnvValuesForAudit?: boolean;
 }
@@ -315,6 +316,27 @@ async function main(): Promise<void> {
     }
     const uidValidityMatch = /UIDVALIDITY\s+(\d+)/i.exec(examineResp);
     const uidValidity = uidValidityMatch ? Number(uidValidityMatch[1]) : 0;
+
+    if (input.connectivityOnly) {
+      await wire.command("A9", "LOGOUT").catch(() => {});
+      wire.close();
+      writeResult(
+        {
+          ok: true,
+          code: "connectivity_ok",
+          mode: input.mode,
+          tlsVerified: true,
+          tlsPeerSubject: conn.peerSubject,
+          readOnlyExamine: true,
+          usedBodyPeek: true,
+          mailbox: input.mailbox,
+          uidValidity,
+          message: null,
+          ...buildObservedEnvMeta(Boolean(input.includeEnvValuesForAudit), input.password),
+        },
+        secrets,
+      );
+    }
 
     let targetUid = input.uid;
     if (!targetUid) {

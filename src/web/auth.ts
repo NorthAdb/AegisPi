@@ -4,7 +4,48 @@ import { digestSecret } from "../governance/canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "../governance/db.ts";
 
 export const SESSION_COOKIE_NAME = "aegispi_session";
+export const MOBILE_HTTPS_SESSION_COOKIE_NAME = "__Host-aegispi_session";
 export const MAX_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+export interface MobileHttpsConfig {
+  enabled: boolean;
+  /** Exact trusted HTTPS public origin, e.g. "https://aegis.tailnet.ts.net" or "https://aegis.example.com:8443". */
+  publicOrigin: string;
+}
+
+export function validateMobileHttpsConfig(cfg: MobileHttpsConfig | undefined): {
+  enabled: boolean;
+  origin: string | null;
+  host: string | null;
+} {
+  if (!cfg || !cfg.enabled) {
+    return { enabled: false, origin: null, host: null };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(cfg.publicOrigin);
+  } catch {
+    throw new Error(`Invalid mobile HTTPS publicOrigin: ${cfg.publicOrigin}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`Mobile HTTPS profile requires an https:// publicOrigin, got: ${cfg.publicOrigin}`);
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("Mobile HTTPS publicOrigin must not contain embedded credentials");
+  }
+  if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+    throw new Error(`Mobile HTTPS publicOrigin must be a bare origin without path/query/hash: ${cfg.publicOrigin}`);
+  }
+  return {
+    enabled: true,
+    origin: parsed.origin.toLowerCase(),
+    host: parsed.host.toLowerCase(),
+  };
+}
+
+export function sessionCookieNameFor(mobileHttpsEnabled: boolean): string {
+  return mobileHttpsEnabled ? MOBILE_HTTPS_SESSION_COOKIE_NAME : SESSION_COOKIE_NAME;
+}
 
 export interface AuthSession {
   tokenDigest: string;
@@ -131,10 +172,48 @@ export function isAllowedLoopbackOrigin(originHeader: string | undefined, port: 
   return normalized === `http://127.0.0.1:${port}` || normalized === `http://localhost:${port}`;
 }
 
-export function buildSessionCookie(rawToken: string, maxAgeSeconds: number): string {
+export function isAllowedHostForProfile(
+  hostHeader: string | undefined,
+  port: number,
+  mobileHttps: { enabled: boolean; host: string | null },
+): boolean {
+  if (!hostHeader) return false;
+  if (isAllowedLoopbackHost(hostHeader, port)) return true;
+  if (mobileHttps.enabled && mobileHttps.host) {
+    return hostHeader.toLowerCase().trim() === mobileHttps.host;
+  }
+  return false;
+}
+
+export function isAllowedOriginForProfile(
+  originHeader: string | undefined,
+  port: number,
+  mobileHttps: { enabled: boolean; origin: string | null },
+): boolean {
+  if (!originHeader || originHeader === "null") return false;
+  const normalized = originHeader.toLowerCase().trim();
+  if (isAllowedLoopbackOrigin(normalized, port)) return true;
+  if (mobileHttps.enabled && mobileHttps.origin) {
+    return normalized === mobileHttps.origin;
+  }
+  return false;
+}
+
+export function buildSessionCookie(
+  rawToken: string,
+  maxAgeSeconds: number,
+  opts?: { mobileHttps?: boolean },
+): string {
+  if (opts?.mobileHttps) {
+    // Strictly __Host- prefix + Secure + HttpOnly + SameSite=Strict + Path=/ and NO Domain attribute!
+    return `${MOBILE_HTTPS_SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+  }
   return `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
 }
 
-export function buildClearSessionCookie(): string {
+export function buildClearSessionCookie(opts?: { mobileHttps?: boolean }): string {
+  if (opts?.mobileHttps) {
+    return `${MOBILE_HTTPS_SESSION_COOKIE_NAME}=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
+  }
   return `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
 }

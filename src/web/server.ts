@@ -1,6 +1,30 @@
+import path from "node:path";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import {
+  deleteMemoryNoteWithTombstone,
+  freezeDomainL0Snapshot,
+  recallMemory,
+  type MemoryNoteRow,
+} from "../capabilities/memory/store.ts";
+import {
+  computeActiveSkillSetHash,
+  listSkillsIndex,
+  readSkillDisclosure,
+  revokeSkill,
+  setSkillActiveVersion,
+} from "../capabilities/skills/store.ts";
+import {
+  createRoutineWithGovernance,
+  formatUtcInTimezone,
+  listRoutines,
+  parseNaturalLanguageRoutine,
+  pauseRoutine,
+  resumeRoutine,
+  type RoutineScheduleSpec,
+  type RoutineSkipCondition,
+} from "../capabilities/timers/routines.ts";
 import {
   decideApproval,
   fetchAuthorizedApprovalChallenge,
@@ -11,7 +35,11 @@ import {
   type ProposalRow,
   type ScopeRow,
 } from "../governance/approvals.ts";
+import { sha256Hex } from "../governance/canonical.ts";
 import {
+  availableMu,
+  DEFAULT_TIME_ZONE,
+  formatChargeDay,
   listBudgetDenialsForConversation,
   type BudgetAccountRow,
   type BudgetReservationRow,
@@ -25,6 +53,12 @@ import {
   revokeOrCancelScope,
   type EffectRow,
 } from "../governance/effects.ts";
+import {
+  approveStoredMcpToolPin,
+  listMcpServerPins,
+  listMcpToolPins,
+  revokeMcpTool,
+} from "../governance/mcp-pin.ts";
 import { listManagedFileImportsForConversation } from "../capabilities/workspace/importer.ts";
 import {
   checkRecordedSourceReadStillAuthorized,
@@ -32,29 +66,83 @@ import {
   listConversationSources,
   revokeSourceReadGrant,
 } from "../governance/policy.ts";
+import {
+  createRememberedRule,
+  listRememberedRules,
+  revokeRememberedRule,
+} from "../governance/rules.ts";
 import type { AegisHostRuntime } from "../runtime/harness.ts";
 import {
   buildClearSessionCookie,
   buildSessionCookie,
   constantTimeTokenMatch,
   createWebSession,
-  isAllowedLoopbackHost,
-  isAllowedLoopbackOrigin,
+  isAllowedHostForProfile,
+  isAllowedOriginForProfile,
   LoginRateLimiter,
   MAX_SESSION_TTL_MS,
   parseCookieHeader,
   revokeWebSession,
-  SESSION_COOKIE_NAME,
+  sessionCookieNameFor,
+  validateMobileHttpsConfig,
   validateWebSession,
   type AuthSession,
+  type MobileHttpsConfig,
 } from "./auth.ts";
 import { ConversationProjectionHub } from "./projection.ts";
+import { readStaticDistFile, STAGE2_CONSOLE_CSP } from "./static.ts";
 import { renderMinimalView1Html } from "./view1.ts";
+
+export interface ConnectorReadOnlyStatus {
+  gmail: {
+    configured: boolean;
+    adapterKind: "host_adapter";
+    imapMode: string | null;
+    imapHost: string | null;
+    mailbox: string | null;
+    smtpConfigured: boolean;
+    smtpTlsMode: string | null;
+    smtpHost: string | null;
+    readScope: string;
+    writePolicy: string;
+  };
+  githubMcp: {
+    configured: boolean;
+    adapterKind: "mcp_stdio";
+    serverId: string | null;
+    connected: boolean;
+    admissionPaused: boolean;
+    readOnlyMode: boolean;
+    binarySha256Prefix: string | null;
+    writeAllowlistCount: number;
+    writeAllowlistSummary: Array<{
+      repoId: string;
+      operations: string[];
+      allowedRefs: string[];
+      allowedPaths: string[];
+      tier: 0 | 2;
+    }>;
+  };
+  models: Array<{
+    slotName: string;
+    provider: string;
+    modelId: string;
+    baseUrl: string;
+    priceVersion: string;
+    outboundAuthorized: boolean;
+  }>;
+}
 
 export interface WebServerConfig {
   host: AegisHostRuntime;
   bindHost?: string;
   port?: number;
+  /** UI profile: "stage1" serves minimal View 1 HTML; "stage2" serves built Vite+React+Tailwind web/dist. */
+  uiMode?: "stage1" | "stage2";
+  /** Directory containing built frontend assets (defaults to web/dist in stage2). */
+  webDistDir?: string;
+  /** Optional explicit Mobile HTTPS profile (__Host- Secure cookie + exact trusted HTTPS Origin). */
+  mobileHttps?: MobileHttpsConfig;
   /** Single principal console token (bound server-side to defaultPrincipalId). */
   consoleToken?: string;
   /** Host-bound map of principalId -> console secret token (G1: client cannot choose principalId). */
@@ -65,6 +153,25 @@ export interface WebServerConfig {
   maxSseClientQueue?: number;
   /** Explicit test-only seam for E02 real process kill before T2 commit. */
   injectBeforeT2Commit?: () => void;
+  /** Read-only connector status provider for View ② (NEVER returns secrets). */
+  getConnectorsStatus?: () => ConnectorReadOnlyStatus;
+  /** Connectivity test hooks for View ② (read-only probes, zero emails sent or repo writes). */
+  testGmailConnectivity?: (principalId: string) => Promise<{
+    imap: { ok: boolean; tlsVerified?: boolean; message: string };
+    smtp: { ok: boolean; tlsVerified?: boolean; message: string };
+  }>;
+  testGithubMcpConnectivity?: () => Promise<{
+    ok: boolean;
+    code: string;
+    message: string;
+    approvedTools: string[];
+    quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+  }>;
+  recheckMcpPins?: () => Promise<{
+    approvedTools: string[];
+    quarantinedTools: Array<{ name: string; code: string; reason: string }>;
+    missingQuarantinedTools: string[];
+  }>;
   /** Optional extra snapshot augmentor (wired by Week 2 capabilities: sources, file imports). */
   augmentSnapshot?: (params: {
     principalId: string;
@@ -97,9 +204,16 @@ export function uiStatusLabelFor(approvalState: string, effectState: string | nu
 
 export async function startWebServer(config: WebServerConfig): Promise<RunningWebServer> {
   const bindHost = config.bindHost ?? "127.0.0.1";
-  // Stage 1 hard guard: refuse non-loopback bind
+  const uiMode = config.uiMode ?? "stage1";
+  const webDistDir = path.resolve(config.webDistDir ?? "web/dist");
+  const mobileHttps = validateMobileHttpsConfig(config.mobileHttps);
+  const cookieName = sessionCookieNameFor(mobileHttps.enabled);
+
+  // Refuse non-loopback bind unless explicit validated mobile HTTPS profile is configured
   if (bindHost !== "127.0.0.1" && bindHost !== "::1" && bindHost !== "localhost") {
-    throw new Error(`Stage 1 refuses non-loopback Web bind address: ${bindHost}`);
+    if (!mobileHttps.enabled) {
+      throw new Error(`Refusing non-loopback Web bind address without validated mobile HTTPS profile: ${bindHost}`);
+    }
   }
 
   // G1: Build host-bound principal credentials map; refuse startup if no token configured!
@@ -423,6 +537,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       livePartial: safeLivePartial,
       activeTools: live.activeTools,
       workerTasks: safeWorkerTasks,
+      streamMetrics: isActiveEpoch ? config.host.getLastStreamMetrics(convIdStr) : null,
       ...extra,
     };
   }
@@ -467,13 +582,13 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   // Host & Origin guard middleware
   app.use("*", async (c, next) => {
     const hostHeader = c.req.header("host");
-    if (!isAllowedLoopbackHost(hostHeader, boundPort)) {
+    if (!isAllowedHostForProfile(hostHeader, boundPort, mobileHttps)) {
       return c.json({ error: "invalid_host" }, 403);
     }
     const method = c.req.method.toUpperCase();
     if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
       const origin = c.req.header("origin");
-      if (!isAllowedLoopbackOrigin(origin, boundPort)) {
+      if (!isAllowedOriginForProfile(origin, boundPort, mobileHttps)) {
         return c.json({ error: "invalid_origin" }, 403);
       }
     }
@@ -481,6 +596,15 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   });
 
   app.get("/", (c) => {
+    if (uiMode === "stage2") {
+      const idx = readStaticDistFile(webDistDir, "index.html");
+      if (idx.ok) {
+        c.header("content-security-policy", STAGE2_CONSOLE_CSP);
+        c.header("x-content-type-options", "nosniff");
+        return c.body(new Uint8Array(idx.body), 200, { "content-type": idx.contentType });
+      }
+      return c.text("Stage 2 frontend build (web/dist/index.html) not found. Run npm --prefix web run build.", 503);
+    }
     c.header(
       "content-security-policy",
       "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'self'",
@@ -488,9 +612,25 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     return c.html(renderMinimalView1Html());
   });
 
+  app.get("/assets/*", (c) => {
+    if (uiMode !== "stage2") {
+      return c.text("Not found", 404);
+    }
+    const assetRel = c.req.path.replace(/^\/+/, "");
+    const file = readStaticDistFile(webDistDir, assetRel);
+    if (!file.ok) {
+      return c.text("Asset not found", 404);
+    }
+    c.header("x-content-type-options", "nosniff");
+    c.header("cache-control", "public, max-age=31536000, immutable");
+    return c.body(new Uint8Array(file.body), 200, { "content-type": file.contentType });
+  });
+
   app.get("/api/health", (c) => {
     return c.json({
       health: config.host.health,
+      uiMode,
+      mobileHttpsEnabled: mobileHttps.enabled,
       acceptingCommands: config.host.isAcceptingCommands,
       runtimeEpoch: config.host.runtimeEpoch,
       recoveredSubmittingToUnknown: config.host.startupReport.recoveredSubmittingToUnknown,
@@ -527,7 +667,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       now,
       ttlMs: MAX_SESSION_TTL_MS,
     });
-    c.header("set-cookie", buildSessionCookie(session.rawToken, Math.floor(MAX_SESSION_TTL_MS / 1000)));
+    c.header(
+      "set-cookie",
+      buildSessionCookie(session.rawToken, Math.floor(MAX_SESSION_TTL_MS / 1000), {
+        mobileHttps: mobileHttps.enabled,
+      }),
+    );
     return c.json({ ok: true, principalId: matchedPrincipal, expiresAt: session.expiresAt });
   });
 
@@ -538,7 +683,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       return;
     }
     const cookies = parseCookieHeader(c.req.header("cookie"));
-    const session = validateWebSession(config.host.govDb, cookies[SESSION_COOKIE_NAME], nowFn());
+    const session = validateWebSession(config.host.govDb, cookies[cookieName], nowFn());
     if (!session) {
       return c.json({ error: "unauthorized" }, 401);
     }
@@ -546,11 +691,23 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     await next();
   });
 
+  app.get("/api/auth/me", (c) => {
+    const session = c.get("authSession");
+    return c.json({
+      ok: true,
+      principalId: session.principalId,
+      expiresAt: session.expiresAt,
+      activeRuntimeEpoch: config.host.runtimeEpoch,
+      uiMode,
+      mobileHttpsEnabled: mobileHttps.enabled,
+    });
+  });
+
   app.post("/api/auth/logout", (c) => {
     const session = c.get("authSession");
     revokeWebSession(config.host.govDb, session.tokenDigest, nowFn());
     projectionHub.closeStreamsForSession(session.tokenDigest);
-    c.header("set-cookie", buildClearSessionCookie());
+    c.header("set-cookie", buildClearSessionCookie({ mobileHttps: mobileHttps.enabled }));
     return c.json({ ok: true });
   });
 
@@ -948,6 +1105,765 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     });
     await projectionHub.notifyAllActive("source_read_revoked");
     return c.json({ ok: true, revoked, grantId });
+  });
+
+  // =========================================================================
+  // Stage 2 View ② / ③ / ④ Authenticated Governance & Capability Endpoints
+  // =========================================================================
+
+  app.get("/api/connectors/status", (c) => {
+    if (config.getConnectorsStatus) {
+      return c.json({ ok: true, status: config.getConnectorsStatus() });
+    }
+    const bridge =
+      typeof config.host.config.githubMcpBridge === "function"
+        ? config.host.config.githubMcpBridge()
+        : (config.host.config.githubMcpBridge ?? null);
+    const imap =
+      typeof config.host.config.imapEndpoint === "function"
+        ? config.host.config.imapEndpoint()
+        : (config.host.config.imapEndpoint ?? null);
+    const bridgeStatus = bridge?.getStatus() ?? null;
+    const allowlist = config.host.config.githubWriteAllowlist ?? [];
+    return c.json({
+      ok: true,
+      status: {
+        gmail: {
+          configured: Boolean(imap),
+          adapterKind: "host_adapter",
+          imapMode: imap?.mode ?? null,
+          imapHost: imap ? `${imap.host}:${imap.port}` : null,
+          mailbox: imap?.mailbox ?? null,
+          smtpConfigured: Boolean(config.host.config.smtpConfig.host),
+          smtpTlsMode: config.host.config.smtpConfig.tlsMode ?? "none",
+          smtpHost: `${config.host.config.smtpConfig.host}:${config.host.config.smtpConfig.port}`,
+          readScope: imap ? `只读 EXAMINE + BODY.PEEK (${imap.mailbox})` : "未配置",
+          writePolicy: "Tier 2 逐次审批 · 唯一提交器",
+        },
+        githubMcp: {
+          configured: Boolean(bridge),
+          adapterKind: "mcp_stdio",
+          serverId: bridgeStatus?.serverId ?? null,
+          connected: Boolean(bridgeStatus?.connected),
+          admissionPaused: Boolean(bridgeStatus?.admissionPaused),
+          readOnlyMode: bridgeStatus?.readOnlyMode ?? true,
+          binarySha256Prefix: bridgeStatus?.verifiedBinarySha256?.slice(0, 16) ?? null,
+          writeAllowlistCount: allowlist.length,
+          writeAllowlistSummary: allowlist.map((a) => ({
+            repoId: a.repoId,
+            operations: a.operations,
+            allowedRefs: a.allowedRefs,
+            allowedPaths: a.allowedPaths,
+            tier: a.tier,
+          })),
+        },
+        models: config.host.config.modelSlots.map((s) => ({
+          slotName: s.slotName,
+          provider: s.provider,
+          modelId: s.modelId,
+          baseUrl: s.baseUrl,
+          priceVersion: s.priceSchedule?.priceVersion ?? "none",
+          outboundAuthorized: s.outboundAuthorized,
+        })),
+      } satisfies ConnectorReadOnlyStatus,
+    });
+  });
+
+  app.post("/api/connectors/test", async (c) => {
+    const session = c.get("authSession");
+    const body = (await c.req.json().catch(() => ({}))) as { connector?: "gmail" | "github_mcp" | "all" };
+    const target = body.connector ?? "all";
+    const result: Record<string, unknown> = { ok: true, testedAt: nowFn() };
+    if (target === "gmail" || target === "all") {
+      if (config.testGmailConnectivity) {
+        result["gmail"] = await config.testGmailConnectivity(session.principalId);
+      } else {
+        result["gmail"] = {
+          imap: { ok: false, message: "IMAP connector not configured" },
+          smtp: { ok: false, message: "SMTP probe not configured" },
+        };
+      }
+    }
+    if (target === "github_mcp" || target === "all") {
+      if (config.testGithubMcpConnectivity) {
+        result["githubMcp"] = await config.testGithubMcpConnectivity();
+      } else {
+        const bridge =
+          typeof config.host.config.githubMcpBridge === "function"
+            ? config.host.config.githubMcpBridge()
+            : (config.host.config.githubMcpBridge ?? null);
+        result["githubMcp"] = bridge
+          ? await bridge.testConnectivity()
+          : { ok: false, code: "not_configured", message: "GitHub MCP bridge not configured", approvedTools: [], quarantinedTools: [] };
+      }
+    }
+    return c.json(result);
+  });
+
+  app.get("/api/mcp/pins", (c) => {
+    const servers = listMcpServerPins(config.host.govDb).map((s) => ({
+      serverId: s.server_id,
+      executablePath: path.basename(s.executable_path),
+      executableSha256Prefix: s.executable_sha256.slice(0, 16),
+      readOnlyMode: s.read_only_mode === 1,
+      approvedBy: s.approved_by,
+      approvedAt: s.approved_at,
+    }));
+    const tools = listMcpToolPins(config.host.govDb).map((t) => {
+      let description = "";
+      try {
+        const parsed = JSON.parse(t.canonical_def_json) as { description?: string };
+        description = parsed.description ?? "";
+      } catch {
+        description = "";
+      }
+      return {
+        serverId: t.server_id,
+        toolName: t.tool_name,
+        schemaSha256: t.schema_sha256,
+        description,
+        state: t.state,
+        reason: t.reason,
+        updatedAt: t.updated_at,
+      };
+    });
+    return c.json({ ok: true, servers, tools });
+  });
+
+  app.post("/api/mcp/pins/recheck", async (c) => {
+    try {
+      if (config.recheckMcpPins) {
+        const res = await config.recheckMcpPins();
+        return c.json({ ok: true, ...res });
+      }
+      const bridge =
+        typeof config.host.config.githubMcpBridge === "function"
+          ? config.host.config.githubMcpBridge()
+          : (config.host.config.githubMcpBridge ?? null);
+      if (!bridge) {
+        return c.json({ ok: false, error: "mcp_not_configured" }, 404);
+      }
+      const res = await bridge.recheckToolPins();
+      return c.json({ ok: true, ...res });
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 409);
+    }
+  });
+
+  app.post("/api/mcp/pins/:serverId/:toolName/approve", (c) => {
+    const session = c.get("authSession");
+    const serverId = c.req.param("serverId");
+    const toolName = c.req.param("toolName");
+    const res = approveStoredMcpToolPin(config.host.govDb, {
+      serverId,
+      toolName,
+      approvedBy: session.principalId,
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, 404);
+    }
+    return c.json({
+      ok: true,
+      pin: {
+        serverId: res.pin.server_id,
+        toolName: res.pin.tool_name,
+        schemaSha256: res.pin.schema_sha256,
+        state: res.pin.state,
+        updatedAt: res.pin.updated_at,
+      },
+    });
+  });
+
+  app.post("/api/mcp/pins/:serverId/:toolName/revoke", async (c) => {
+    const serverId = c.req.param("serverId");
+    const toolName = c.req.param("toolName");
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    const revoked = revokeMcpTool(config.host.govDb, {
+      serverId,
+      toolName,
+      reason: body.reason ?? "revoked_by_user_in_console",
+      now: nowFn(),
+    });
+    if (!revoked) {
+      return c.json({ ok: false, error: "mcp_tool_not_found" }, 404);
+    }
+    return c.json({ ok: true, serverId, toolName, state: "REVOKED" });
+  });
+
+  app.get("/api/skills", (c) => {
+    const skills = listSkillsIndex(config.host.govDb);
+    const activeSet = computeActiveSkillSetHash(config.host.govDb);
+    return c.json({
+      ok: true,
+      skillSetHash: activeSet.skillSetHash,
+      skills,
+    });
+  });
+
+  app.get("/api/skills/:skillId/body", (c) => {
+    const skillId = c.req.param("skillId");
+    const convId = c.req.query("conversationId");
+    const verRaw = c.req.query("version");
+    const res = readSkillDisclosure(config.host.govDb, {
+      skillId,
+      ...(convId ? { runtimeEpoch: config.host.runtimeEpoch, conversationId: convId } : {}),
+      ...(verRaw && /^\d+$/.test(verRaw) ? { requestedVersion: Number(verRaw) } : {}),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, res.code === "skill_not_found" ? 404 : 403);
+    }
+    return c.json(res);
+  });
+
+  app.post("/api/skills/:skillId/activate", async (c) => {
+    const session = c.get("authSession");
+    const skillId = c.req.param("skillId");
+    const body = (await c.req.json().catch(() => ({}))) as { version?: number };
+    if (typeof body.version !== "number" || !Number.isInteger(body.version) || body.version < 1) {
+      return c.json({ ok: false, error: "invalid_version" }, 400);
+    }
+    const res = setSkillActiveVersion(config.host.govDb, {
+      skillId,
+      version: body.version,
+      actorId: session.principalId,
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, 404);
+    }
+    return c.json({ ok: true, skill: res.skill });
+  });
+
+  app.post("/api/skills/:skillId/revoke", async (c) => {
+    const session = c.get("authSession");
+    const skillId = c.req.param("skillId");
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    const res = revokeSkill(config.host.govDb, {
+      skillId,
+      actorId: session.principalId,
+      reason: body.reason ?? "revoked_by_user",
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, 404);
+    }
+    return c.json({ ok: true, skill: res.skill });
+  });
+
+  app.get("/api/routines", (c) => {
+    const session = c.get("authSession");
+    const rows = listRoutines(config.host.govDb, session.principalId);
+    return c.json({
+      ok: true,
+      routines: rows.map((r) => ({
+        routineId: r.routine_id,
+        scopeId: r.scope_id,
+        name: r.name,
+        prompt: r.prompt,
+        timezone: r.timezone,
+        scheduleKind: r.schedule_kind,
+        scheduleSpec: JSON.parse(r.schedule_json),
+        skipCondition: r.skip_condition_json ? JSON.parse(r.skip_condition_json) : null,
+        enabled: r.enabled === 1,
+        nextRunUtcMs: r.next_run_utc_ms,
+        nextRunLocalText: r.next_run_utc_ms ? formatUtcInTimezone(r.next_run_utc_ms, r.timezone) : null,
+        lastRunUtcMs: r.last_run_utc_ms,
+        lastStatus: r.last_status,
+        lastResultSummary: r.last_result_summary,
+        triggers: r.triggers.map((t) => ({
+          triggerId: t.trigger_id,
+          scheduledInstantUtc: t.scheduled_instant_utc,
+          correlationKey: t.correlation_key,
+          conversationId: t.conversation_id,
+          state: t.state,
+          reason: t.reason,
+          updatedAt: t.updated_at,
+        })),
+      })),
+    });
+  });
+
+  app.post("/api/routines/preview", async (c) => {
+    const session = c.get("authSession");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      text?: string;
+      timezone?: string;
+      scopeId?: string;
+    };
+    if (!body.text || typeof body.text !== "string" || body.text.trim().length === 0) {
+      return c.json({ ok: false, error: "missing_routine_text" }, 400);
+    }
+    const scopeId = body.scopeId ?? config.host.config.defaultScopeId ?? "scope:default";
+    const preview = parseNaturalLanguageRoutine(config.host.govDb, {
+      text: body.text,
+      principalId: session.principalId,
+      scopeId,
+      timezone: body.timezone ?? config.host.config.zone ?? DEFAULT_TIME_ZONE,
+      now: nowFn(),
+    });
+    return c.json({ ok: true, preview });
+  });
+
+  app.post("/api/routines", async (c) => {
+    const session = c.get("authSession");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      name?: string;
+      prompt?: string;
+      timezone?: string;
+      scheduleSpec?: RoutineScheduleSpec;
+      skipCondition?: RoutineSkipCondition | null;
+      nextRunUtcMs?: number;
+      confirmed?: boolean;
+      rememberRule?: boolean;
+      scopeId?: string;
+    };
+    if (!body.name || !body.prompt || !body.scheduleSpec) {
+      return c.json({ ok: false, error: "invalid_routine_payload" }, 400);
+    }
+    const scopeId = body.scopeId ?? config.host.config.defaultScopeId ?? "scope:default";
+    const scopeRow = config.host.govDb
+      .prepare("SELECT * FROM scopes WHERE scope_id = ?")
+      .get(scopeId) as ScopeRow | undefined;
+    if (!scopeRow || !isPrincipalAuthorizedForScope(scopeRow, session.principalId)) {
+      return c.json({ ok: false, error: "forbidden_scope" }, 403);
+    }
+    const res = createRoutineWithGovernance(config.host.govDb, {
+      principalId: session.principalId,
+      scopeId,
+      name: body.name,
+      prompt: body.prompt,
+      timezone: body.timezone ?? config.host.config.zone ?? DEFAULT_TIME_ZONE,
+      scheduleSpec: body.scheduleSpec,
+      skipCondition: body.skipCondition ?? null,
+      nextRunUtcMs: body.nextRunUtcMs,
+      confirmed: body.confirmed,
+      rememberRule: body.rememberRule,
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, res.httpStatus);
+    }
+    return c.json({
+      ok: true,
+      routineId: res.routine.routine_id,
+      ruleUsedId: res.ruleUsedId,
+      ruleCreatedId: res.ruleCreatedId,
+      nextRunUtcMs: res.routine.next_run_utc_ms,
+      nextRunLocalText: res.routine.next_run_utc_ms
+        ? formatUtcInTimezone(res.routine.next_run_utc_ms, res.routine.timezone)
+        : null,
+    });
+  });
+
+  app.post("/api/routines/:id/pause", (c) => {
+    const session = c.get("authSession");
+    const routineId = c.req.param("id");
+    const res = pauseRoutine(config.host.govDb, {
+      routineId,
+      principalId: session.principalId,
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, res.httpStatus);
+    }
+    return c.json({ ok: true, routineId, enabled: false });
+  });
+
+  app.post("/api/routines/:id/resume", async (c) => {
+    const session = c.get("authSession");
+    const routineId = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { confirmed?: boolean };
+    const res = resumeRoutine(config.host.govDb, {
+      routineId,
+      principalId: session.principalId,
+      confirmed: body.confirmed,
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, res.httpStatus);
+    }
+    return c.json({
+      ok: true,
+      routineId,
+      enabled: true,
+      nextRunUtcMs: res.routine.next_run_utc_ms,
+      nextRunLocalText: res.routine.next_run_utc_ms
+        ? formatUtcInTimezone(res.routine.next_run_utc_ms, res.routine.timezone)
+        : null,
+    });
+  });
+
+  app.get("/api/approvals", (c) => {
+    const session = c.get("authSession");
+    const now = nowFn();
+    const activeEpoch = config.host.runtimeEpoch;
+    const rows = config.host.govDb
+      .prepare(
+        `SELECT p.*, cs.principal_id AS owner_principal
+           FROM proposals p
+           JOIN conversation_scopes cs
+             ON cs.runtime_epoch = p.runtime_epoch AND cs.conversation_id = p.conversation_id
+          WHERE p.runtime_epoch = ? AND cs.principal_id = ?
+          ORDER BY p.created_at DESC
+          LIMIT 100`,
+      )
+      .all(activeEpoch, session.principalId) as unknown as Array<ProposalRow & { owner_principal: string }>;
+
+    const items = rows.map((p) => {
+      const draft = config.host.govDb
+        .prepare("SELECT * FROM draft_revisions WHERE proposal_id = ? AND revision = ?")
+        .get(p.proposal_id, p.head_rev) as unknown as DraftRevisionRow;
+      const apr = config.host.govDb
+        .prepare("SELECT * FROM approvals WHERE proposal_id = ? AND revision = ?")
+        .get(p.proposal_id, p.head_rev) as unknown as ApprovalRow;
+      const effect = config.host.govDb
+        .prepare("SELECT * FROM effects WHERE approval_id = ?")
+        .get(apr.approval_id) as EffectRow | undefined;
+      const isExpiredNow = apr.state === "EXPIRED" || (apr.state === "PENDING" && now >= apr.expires_at);
+      const effectiveApprovalState = isExpiredNow && apr.state === "PENDING" ? "EXPIRED" : apr.state;
+      const hasChallenge =
+        effectiveApprovalState === "PENDING" &&
+        Boolean(
+          config.host.govDb
+            .prepare("SELECT 1 AS ok FROM approval_challenges WHERE approval_id = ?")
+            .get(apr.approval_id),
+        );
+      const autoIssuedTier0 = typeof apr.decision_key === "string" && apr.decision_key.startsWith("auto:tier0:");
+      const tier = autoIssuedTier0 ? 0 : p.tool_name === "send_email" || p.tool_name === "github_write_file" ? 2 : 1;
+      return {
+        proposalId: p.proposal_id,
+        runtimeEpoch: p.runtime_epoch,
+        conversationId: p.conversation_id,
+        toolName: p.tool_name,
+        target: p.target,
+        tier,
+        autoIssuedTier0,
+        revision: p.head_rev,
+        actionHash: draft.action_hash,
+        snapshot: JSON.parse(draft.canonical_snapshot) as Record<string, unknown>,
+        approvalId: apr.approval_id,
+        approvalState: effectiveApprovalState,
+        expiresAt: apr.expires_at,
+        expired: isExpiredNow,
+        hasChallenge,
+        effect: effect
+          ? {
+              effectId: effect.effect_id,
+              state: effect.state,
+              claimedAt: effect.claimed_at,
+              receiptRef: effect.receipt_ref,
+              reason: effect.reason,
+              reconciledBy: effect.reconciled_by,
+              reconcileEvidence: effect.reconcile_evidence,
+            }
+          : null,
+        uiStatusLabel: uiStatusLabelFor(effectiveApprovalState, effect?.state ?? null),
+        createdAt: p.created_at,
+      };
+    });
+    return c.json({ ok: true, runtimeEpoch: activeEpoch, serverNow: now, approvals: items });
+  });
+
+  app.get("/api/rules", (c) => {
+    const session = c.get("authSession");
+    const includeRevoked = c.req.query("includeRevoked") === "true";
+    const rows = listRememberedRules(config.host.govDb, {
+      principalId: session.principalId,
+      includeRevoked,
+    });
+    return c.json({
+      ok: true,
+      rules: rows.map((r) => ({
+        ruleId: r.rule_id,
+        scopeId: r.scope_id,
+        toolName: r.tool_name,
+        tier: r.tier,
+        targetPattern: r.target_pattern,
+        actionSummary: r.action_summary,
+        expiresAt: r.expires_at,
+        createdAt: r.created_at,
+        revokedAt: r.revoked_at,
+        revokeReason: r.revoke_reason,
+      })),
+    });
+  });
+
+  app.post("/api/rules", async (c) => {
+    const session = c.get("authSession");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      toolName?: string;
+      targetPattern?: string;
+      actionSummary?: string;
+      ttlDays?: number;
+      scopeId?: string;
+    };
+    if (!body.toolName || !body.targetPattern) {
+      return c.json({ ok: false, error: "missing_rule_fields" }, 400);
+    }
+    const ttlMs = Math.max(1, Math.min(90, body.ttlDays ?? 30)) * 24 * 60 * 60 * 1000;
+    const now = nowFn();
+    const res = createRememberedRule(config.host.govDb, {
+      principalId: session.principalId,
+      scopeId: body.scopeId ?? config.host.config.defaultScopeId ?? "scope:default",
+      toolName: body.toolName,
+      targetPattern: body.targetPattern,
+      actionSummary: body.actionSummary,
+      expiresAt: now + ttlMs,
+      now,
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, 400);
+    }
+    return c.json({ ok: true, rule: res.rule });
+  });
+
+  app.post("/api/rules/:id/revoke", async (c) => {
+    const session = c.get("authSession");
+    const ruleId = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    const res = revokeRememberedRule(config.host.govDb, {
+      ruleId,
+      principalId: session.principalId,
+      reason: body.reason ?? "revoked_by_user",
+      now: nowFn(),
+    });
+    if (!res.ok) {
+      return c.json({ ok: false, code: res.code, error: res.reason }, res.httpStatus);
+    }
+    return c.json({ ok: true, ruleId, revokedAt: res.rule.revoked_at });
+  });
+
+  app.get("/api/memory", (c) => {
+    const session = c.get("authSession");
+    const query = (c.req.query("q") ?? "").trim();
+    const domain = c.req.query("domain") ?? config.host.config.defaultMemoryDomain ?? "default";
+    const scopeId = c.req.query("scopeId") ?? config.host.config.defaultScopeId ?? "scope:default";
+    const now = nowFn();
+
+    const l0 = freezeDomainL0Snapshot(config.host.govDb, {
+      principalId: session.principalId,
+      scopeId,
+      domain,
+      now,
+    });
+
+    let notes: Array<{
+      noteId: string;
+      domain: string;
+      tier: string;
+      title: string;
+      body: string;
+      version: number;
+      contentDigest: string;
+      createdAt: number;
+    }> = [];
+
+    if (query.length > 0) {
+      const rec = recallMemory(config.host.govDb, {
+        principalId: session.principalId,
+        scopeId,
+        domain: c.req.query("domain") ? domain : undefined,
+        query,
+        maxHops: 2,
+        now,
+      });
+      if (rec.ok) {
+        notes = rec.items.map((item) => ({
+          noteId: item.noteId,
+          domain: item.domain,
+          tier: item.tier,
+          title: item.title,
+          body: item.body,
+          version: item.version,
+          contentDigest: item.contentDigest,
+          createdAt: now,
+        }));
+      }
+    } else {
+      const rawRows = config.host.govDb
+        .prepare(
+          `SELECT * FROM memory_notes
+            WHERE principal_id = ? AND scope_id = ? AND deleted_at IS NULL AND quarantined = 0
+              AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY created_at DESC
+            LIMIT 100`,
+        )
+        .all(session.principalId, scopeId, now) as unknown as MemoryNoteRow[];
+      notes = rawRows.map((n) => ({
+        noteId: n.note_id,
+        domain: n.domain,
+        tier: n.tier,
+        title: n.title,
+        body: n.body,
+        version: n.version,
+        contentDigest: n.content_digest,
+        createdAt: n.created_at,
+      }));
+    }
+
+    const tombstones = config.host.govDb
+      .prepare(
+        `SELECT t.note_id, t.deleted_at, t.reason, n.title, n.domain
+           FROM memory_tombstones t
+           LEFT JOIN memory_notes n ON n.note_id = t.note_id
+          WHERE n.principal_id = ? OR n.principal_id IS NULL
+          ORDER BY t.deleted_at DESC
+          LIMIT 50`,
+      )
+      .all(session.principalId) as Array<{
+      note_id: string;
+      deleted_at: number;
+      reason: string;
+      title: string | null;
+      domain: string | null;
+    }>;
+
+    return c.json({
+      ok: true,
+      l0Snapshot: {
+        domain: l0.domain,
+        noteCount: l0.notes.length,
+        renderedText: l0.renderedText,
+        snapshotDigest: sha256Hex(l0.renderedText),
+      },
+      notes,
+      tombstones: tombstones.map((t) => ({
+        noteId: t.note_id,
+        title: t.title ?? t.note_id,
+        domain: t.domain ?? "unknown",
+        deletedAt: t.deleted_at,
+        reason: t.reason,
+        ftsCleaned: !Boolean(
+          config.host.govDb.prepare("SELECT 1 AS ok FROM memory_notes_fts WHERE note_id = ?").get(t.note_id),
+        ),
+      })),
+    });
+  });
+
+  app.post("/api/memory/:noteId/forget", async (c) => {
+    const session = c.get("authSession");
+    const noteId = c.req.param("noteId");
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    const existing = config.host.govDb
+      .prepare("SELECT note_id, principal_id, deleted_at FROM memory_notes WHERE note_id = ?")
+      .get(noteId) as { note_id: string; principal_id: string; deleted_at: number | null } | undefined;
+    if (!existing) {
+      return c.json({ ok: false, error: "memory_note_not_found" }, 404);
+    }
+    if (existing.principal_id !== session.principalId) {
+      return c.json({ ok: false, error: "forbidden" }, 403);
+    }
+    const now = nowFn();
+    deleteMemoryNoteWithTombstone(config.host.govDb, {
+      noteId,
+      reason: body.reason ?? "user_forgotten_in_console",
+      now,
+    });
+    const tombstone = config.host.govDb
+      .prepare("SELECT * FROM memory_tombstones WHERE note_id = ?")
+      .get(noteId) as { note_id: string; deleted_at: number; reason: string } | undefined;
+    const ftsRemaining = config.host.govDb
+      .prepare("SELECT count(*) AS n FROM memory_notes_fts WHERE note_id = ?")
+      .get(noteId) as { n: number };
+    await projectionHub.notifyAllActive("memory_forgotten");
+    return c.json({
+      ok: true,
+      noteId,
+      tombstoneRecorded: Boolean(tombstone),
+      deletedAt: tombstone?.deleted_at ?? now,
+      ftsCleaned: ftsRemaining.n === 0,
+      receipt: `tombstone:${noteId}@${tombstone?.deleted_at ?? now}`,
+    });
+  });
+
+  app.get("/api/budget/summary", (c) => {
+    const zone = config.host.config.zone ?? DEFAULT_TIME_ZONE;
+    const today = formatChargeDay(nowFn(), zone);
+    const activeEpoch = config.host.runtimeEpoch;
+    const accounts = config.host.govDb
+      .prepare("SELECT * FROM budget_accounts ORDER BY kind ASC, account_id ASC")
+      .all() as unknown as BudgetAccountRow[];
+    const reservations = config.host.govDb
+      .prepare("SELECT * FROM budget_reservations WHERE runtime_epoch = ? ORDER BY reserved_at DESC LIMIT 100")
+      .all(activeEpoch) as unknown as BudgetReservationRow[];
+
+    const dayAccountId = `acct:day:${zone}:${today}`;
+    const dayAccount = accounts.find((a) => a.account_id === dayAccountId) ?? null;
+    const taskAccounts = accounts.filter((a) => a.kind === "TASK");
+
+    let settledMu = 0;
+    let chargedBoundMu = 0;
+    let chargedBoundCount = 0;
+    let heldMu = 0;
+    const byPurpose: Record<string, { count: number; chargedMu: number; heldMu: number; boundMu: number }> = {};
+
+    for (const r of reservations) {
+      const bucket = byPurpose[r.purpose] ?? { count: 0, chargedMu: 0, heldMu: 0, boundMu: 0 };
+      bucket.count++;
+      if (r.state === "SETTLED") {
+        settledMu += r.actual_mu ?? 0;
+        bucket.chargedMu += r.actual_mu ?? 0;
+      } else if (r.state === "CHARGED_BOUND") {
+        chargedBoundMu += r.actual_mu ?? r.upper_mu;
+        chargedBoundCount++;
+        bucket.boundMu += r.actual_mu ?? r.upper_mu;
+      } else if (r.state === "HELD") {
+        heldMu += r.upper_mu;
+        bucket.heldMu += r.upper_mu;
+      }
+      byPurpose[r.purpose] = bucket;
+    }
+
+    return c.json({
+      ok: true,
+      zone,
+      chargeDay: today,
+      runtimeEpoch: activeEpoch,
+      dayAccount: dayAccount
+        ? {
+            accountId: dayAccount.account_id,
+            limitMu: dayAccount.limit_mu,
+            heldMu: dayAccount.held_mu,
+            chargedMu: dayAccount.charged_mu,
+            availableMu: availableMu(dayAccount),
+            frozen: dayAccount.frozen === 1,
+          }
+        : {
+            accountId: dayAccountId,
+            limitMu: config.host.config.defaultDayLimitMu ?? 5_000_000,
+            heldMu: 0,
+            chargedMu: 0,
+            availableMu: config.host.config.defaultDayLimitMu ?? 5_000_000,
+            frozen: false,
+          },
+      taskAccounts: taskAccounts.map((a) => ({
+        accountId: a.account_id,
+        limitMu: a.limit_mu,
+        heldMu: a.held_mu,
+        chargedMu: a.charged_mu,
+        availableMu: availableMu(a),
+        frozen: a.frozen === 1,
+      })),
+      totals: {
+        settledMu,
+        chargedBoundMu,
+        chargedBoundCount,
+        heldMu,
+        byPurpose,
+      },
+      reservations: reservations.map((r) => ({
+        requestId: r.request_id,
+        conversationId: r.conversation_id,
+        ownerTaskId: r.owner_task_id,
+        purpose: r.purpose,
+        chargeDay: r.charge_day,
+        upperMu: r.upper_mu,
+        actualMu: r.actual_mu,
+        state: r.state,
+        reservedAt: r.reserved_at,
+      })),
+    });
   });
 
   // V05: Principal-, epoch-, and conversation-scoped SSE with cursor continuity & Last-Event-ID

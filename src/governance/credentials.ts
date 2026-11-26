@@ -53,6 +53,79 @@ export function assertStage1LoopbackSmtpHost(host: string, port: number): void {
   }
 }
 
+export type StageProfile = 1 | 2;
+
+export interface StageEgressPolicy {
+  stage: StageProfile;
+  allowedRemoteModelHosts?: string[];
+  allowedRemoteSmtpHosts?: string[];
+}
+
+export function assertModelUrlForStage(rawUrl: string, policy?: StageEgressPolicy): string {
+  const stage = policy?.stage ?? 1;
+  if (stage === 1) {
+    return assertStage1LoopbackModelUrl(rawUrl);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Stage1EgressBlockedError(rawUrl, `Stage 2 blocks malformed model base URL: ${rawUrl}`);
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Stage1EgressBlockedError(rawUrl, "Stage 2 blocks embedded credentials in model base URL");
+  }
+  if (isLoopbackHost(parsed.hostname)) {
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Stage1EgressBlockedError(rawUrl, `Stage 2 blocks non-HTTP(S) loopback model URL: ${parsed.protocol}`);
+    }
+    return rawUrl.replace(/\/+$/, "");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Stage1EgressBlockedError(rawUrl, `Stage 2 requires HTTPS for remote model endpoint: ${rawUrl}`);
+  }
+  const allowed = (policy?.allowedRemoteModelHosts ?? []).map((h) => h.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.includes(parsed.hostname.trim().toLowerCase())) {
+    throw new Stage1EgressBlockedError(
+      rawUrl,
+      `Stage 2 blocks non-allowlisted remote model host: ${parsed.hostname}`,
+    );
+  }
+  return rawUrl.replace(/\/+$/, "");
+}
+
+export function assertSmtpHostForStage(
+  host: string,
+  port: number,
+  policy?: StageEgressPolicy,
+  opts?: { tlsEnabled?: boolean },
+): void {
+  const stage = policy?.stage ?? 1;
+  if (stage === 1) {
+    assertStage1LoopbackSmtpHost(host, port);
+    return;
+  }
+  if (!host || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Stage1EgressBlockedError(`${host}:${port}`, `Stage 2 blocks invalid SMTP endpoint: ${host}:${String(port)}`);
+  }
+  if (isLoopbackHost(host)) {
+    return;
+  }
+  if (!opts?.tlsEnabled) {
+    throw new Stage1EgressBlockedError(
+      `${host}:${port}`,
+      `Stage 2 requires verified TLS for remote SMTP host: ${host}`,
+    );
+  }
+  const allowed = (policy?.allowedRemoteSmtpHosts ?? []).map((h) => h.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.includes(host.trim().toLowerCase())) {
+    throw new Stage1EgressBlockedError(
+      `${host}:${port}`,
+      `Stage 2 blocks non-allowlisted remote SMTP host: ${host}`,
+    );
+  }
+}
+
 export interface CredentialSlotBinding {
   slotId: string;
   provider: string;
@@ -63,12 +136,15 @@ export interface CredentialSlotBinding {
 
 export interface ModelPriceSchedule {
   priceVersion: string;
-  /** Per-1M token rates (for reference; Stage 1 requires provable syntheticFixedUpperMu). */
+  /** Per-1M token rates in integer microUSD (1 USD = 1_000_000 mu). */
   inputPerMTokMu: number;
   outputPerMTokMu: number;
+  cacheReadPerMTokMu?: number;
   /** Provable integer microUSD per-request upper bound required for T6 reservation in Stage 1. */
   syntheticFixedUpperMu?: number | null;
   syntheticFixedActualMu?: number | null;
+  /** Stage 2 real-provider mode: compute conservative integer microUSD upper bound from input + maxTokens. */
+  allowTokenBoundEstimation?: boolean;
 }
 
 export interface ImapCredentialBinding {
@@ -93,7 +169,11 @@ export interface GithubMcpCredentialBinding {
 export interface SmtpCredentialBinding {
   host: string;
   port?: number;
+  servername?: string;
+  username?: string;
   fromAddress?: string;
+  proxyHost?: string;
+  proxyPort?: number;
 }
 
 export type ConnectorCredentialBinding =
@@ -313,6 +393,87 @@ export class HostCredentialVault {
     return { ok: true, secret: entry.secret };
   }
 
+  resolveSmtpSecretForTarget(
+    slotId: string,
+    target: {
+      host: string;
+      port: number;
+      servername?: string;
+      username?: string;
+      fromAddress?: string;
+      proxy?: { host: string; port: number };
+    },
+  ): { ok: true; secret: string } | { ok: false; code: string; reason: string } {
+    const entry = this.#connectorSecrets.get(slotId);
+    if (!entry || entry.kind !== "smtp") {
+      return {
+        ok: false,
+        code: "missing_smtp_credential",
+        reason: `SMTP credential slot ${slotId} not loaded in host memory`,
+      };
+    }
+    const b = entry.smtpBinding;
+    if (!b) {
+      return {
+        ok: false,
+        code: "smtp_credential_unbound",
+        reason: `SMTP credential slot ${slotId} lacks required target binding`,
+      };
+    }
+    if (b.host.trim().toLowerCase() !== target.host.trim().toLowerCase()) {
+      return {
+        ok: false,
+        code: "smtp_credential_target_mismatch",
+        reason: `SMTP slot ${slotId} bound to host ${b.host}, not ${target.host}`,
+      };
+    }
+    if (b.port !== undefined && b.port !== target.port) {
+      return {
+        ok: false,
+        code: "smtp_credential_target_mismatch",
+        reason: `SMTP slot ${slotId} bound to port ${b.port}, not ${target.port}`,
+      };
+    }
+    if (b.servername && target.servername && b.servername.trim().toLowerCase() !== target.servername.trim().toLowerCase()) {
+      return {
+        ok: false,
+        code: "smtp_credential_tls_identity_mismatch",
+        reason: `SMTP slot ${slotId} bound to TLS servername ${b.servername}, not ${target.servername}`,
+      };
+    }
+    if (b.username && target.username && b.username !== target.username) {
+      return {
+        ok: false,
+        code: "smtp_credential_account_mismatch",
+        reason: `SMTP slot ${slotId} bound to account ${b.username}, not ${target.username}`,
+      };
+    }
+    if (b.fromAddress && target.fromAddress && b.fromAddress.toLowerCase() !== target.fromAddress.toLowerCase()) {
+      return {
+        ok: false,
+        code: "smtp_credential_from_mismatch",
+        reason: `SMTP slot ${slotId} bound to sender ${b.fromAddress}, not ${target.fromAddress}`,
+      };
+    }
+    if (b.proxyHost !== undefined) {
+      if (!target.proxy || b.proxyHost.toLowerCase() !== target.proxy.host.toLowerCase()) {
+        return {
+          ok: false,
+          code: "smtp_credential_proxy_mismatch",
+          reason: `SMTP slot ${slotId} proxy host mismatch`,
+        };
+      }
+      if (b.proxyPort !== undefined && b.proxyPort !== target.proxy.port) {
+        return {
+          ok: false,
+          code: "smtp_credential_proxy_mismatch",
+          reason: `SMTP slot ${slotId} proxy port mismatch`,
+        };
+      }
+    }
+    return { ok: true, secret: entry.secret };
+  }
+
   resolveConnectorSecretInMemory(slotId: string, expectedKind?: "imap" | "github_mcp" | "smtp"): string | undefined {
     const entry = this.#connectorSecrets.get(slotId);
     if (!entry) return undefined;
@@ -320,7 +481,7 @@ export class HostCredentialVault {
     return entry.secret;
   }
 
-  registerSlot(binding: CredentialSlotBinding, secretValue: string): void {
+  registerSlot(binding: CredentialSlotBinding, secretValue: string, egressPolicy?: StageEgressPolicy): void {
     if (!binding.slotId || !binding.provider) {
       throw new Error("Credential slot requires slotId and provider");
     }
@@ -328,9 +489,9 @@ export class HostCredentialVault {
       throw new Error(`Credential slot ${binding.slotId} requires non-empty secret`);
     }
     if (!Array.isArray(binding.allowedBaseUrls) || binding.allowedBaseUrls.length === 0) {
-      throw new Error(`Credential slot ${binding.slotId} requires at least one loopback base URL`);
+      throw new Error(`Credential slot ${binding.slotId} requires at least one allowed base URL`);
     }
-    const normalizedUrls = binding.allowedBaseUrls.map((u) => assertStage1LoopbackModelUrl(u));
+    const normalizedUrls = binding.allowedBaseUrls.map((u) => assertModelUrlForStage(u, egressPolicy));
     this.#bindings.set(binding.slotId, {
       ...binding,
       allowedBaseUrls: normalizedUrls,
@@ -343,15 +504,18 @@ export class HostCredentialVault {
     return this.#bindings.get(slotId);
   }
 
-  validateBinding(params: {
-    slotId: string;
-    provider: string;
-    modelId: string;
-    baseUrl: string;
-  }): { ok: true; binding: CredentialSlotBinding } | { ok: false; reason: string } {
+  validateBinding(
+    params: {
+      slotId: string;
+      provider: string;
+      modelId: string;
+      baseUrl: string;
+    },
+    egressPolicy?: StageEgressPolicy,
+  ): { ok: true; binding: CredentialSlotBinding } | { ok: false; reason: string } {
     let normalizedUrl: string;
     try {
-      normalizedUrl = assertStage1LoopbackModelUrl(params.baseUrl);
+      normalizedUrl = assertModelUrlForStage(params.baseUrl, egressPolicy);
     } catch (err) {
       return {
         ok: false,

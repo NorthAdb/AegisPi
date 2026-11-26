@@ -351,3 +351,159 @@ export function getMcpToolPin(
     .get(serverId, toolName) as McpToolPinRow | undefined;
   return row ?? null;
 }
+
+export function listMcpServerPins(db: DatabaseSync): McpServerPinRow[] {
+  return db
+    .prepare("SELECT * FROM mcp_server_pins ORDER BY server_id ASC")
+    .all() as unknown as McpServerPinRow[];
+}
+
+export function listMcpToolPins(db: DatabaseSync, serverId?: string): McpToolPinRow[] {
+  if (serverId) {
+    return db
+      .prepare("SELECT * FROM mcp_tool_pins WHERE server_id = ? ORDER BY tool_name ASC")
+      .all(serverId) as unknown as McpToolPinRow[];
+  }
+  return db
+    .prepare("SELECT * FROM mcp_tool_pins ORDER BY server_id ASC, tool_name ASC")
+    .all() as unknown as McpToolPinRow[];
+}
+
+/**
+ * C4: Quarantine any previously APPROVED tools that disappeared from tools/list on reconnect/refresh,
+ * and update observed canonical_def_json on quarantined drift so human approval can review the latest schema.
+ */
+export function quarantineMissingMcpTools(
+  db: DatabaseSync,
+  params: { serverId: string; observedToolNames: string[]; now: number },
+): string[] {
+  const observed = new Set(params.observedToolNames);
+  return withImmediateTx(db, () => {
+    const existing = db
+      .prepare("SELECT * FROM mcp_tool_pins WHERE server_id = ? AND state = 'APPROVED'")
+      .all(params.serverId) as unknown as McpToolPinRow[];
+    const quarantined: string[] = [];
+    for (const row of existing) {
+      if (!observed.has(row.tool_name)) {
+        db.prepare(
+          `UPDATE mcp_tool_pins
+              SET state = 'QUARANTINED',
+                  reason = 'missing_from_tools_list',
+                  updated_at = ?
+            WHERE server_id = ? AND tool_name = ?`,
+        ).run(params.now, params.serverId, row.tool_name);
+        writeAuditEvent(db, {
+          entityType: "mcp_tool",
+          entityId: `${params.serverId}:${row.tool_name}`,
+          eventKey: `quarantine_missing:${params.serverId}:${row.tool_name}:${params.now}`,
+          eventType: "mcp_tool_quarantined",
+          occurredAt: params.now,
+          details: { reason: "missing_from_tools_list", previousSha256: row.schema_sha256 },
+        });
+        quarantined.push(row.tool_name);
+      }
+    }
+    return quarantined;
+  });
+}
+
+/**
+ * C4: When verifyOrQuarantineMcpTool observes drift on an existing tool, also persist the latest
+ * observed definition so human review/approval can inspect and explicitly approve the new fingerprint.
+ */
+export function recordObservedDriftDefinition(
+  db: DatabaseSync,
+  params: { serverId: string; observedDef: McpToolDefinitionInput; now: number },
+): { canonicalDefJson: string; schemaSha256: string } {
+  const { canonicalDefJson, schemaSha256 } = computeMcpToolFingerprint(params.observedDef);
+  withImmediateTx(db, () => {
+    db.prepare(
+      `UPDATE mcp_tool_pins
+          SET canonical_def_json = ?,
+              updated_at = ?
+        WHERE server_id = ? AND tool_name = ? AND state = 'QUARANTINED'`,
+    ).run(canonicalDefJson, params.now, params.serverId, params.observedDef.name);
+  });
+  return { canonicalDefJson, schemaSha256 };
+}
+
+/**
+ * C4: Human approval of a quarantined/revoked MCP tool using its currently stored canonical_def_json.
+ * Computes the canonical SHA-256 fresh from canonical_def_json and transitions state -> APPROVED.
+ */
+export function approveStoredMcpToolPin(
+  db: DatabaseSync,
+  params: { serverId: string; toolName: string; approvedBy: string; now: number },
+): { ok: true; pin: McpToolPinRow } | { ok: false; code: string; reason: string } {
+  return withImmediateTx(db, () => {
+    const existing = db
+      .prepare("SELECT * FROM mcp_tool_pins WHERE server_id = ? AND tool_name = ?")
+      .get(params.serverId, params.toolName) as McpToolPinRow | undefined;
+    if (!existing) {
+      return {
+        ok: false,
+        code: "mcp_tool_not_found",
+        reason: `MCP tool ${params.serverId}:${params.toolName} not found`,
+      };
+    }
+    const parsed = JSON.parse(existing.canonical_def_json) as McpToolDefinitionInput;
+    const { canonicalDefJson, schemaSha256 } = computeMcpToolFingerprint(parsed);
+    db.prepare(
+      `UPDATE mcp_tool_pins
+          SET schema_sha256 = ?,
+              canonical_def_json = ?,
+              state = 'APPROVED',
+              reason = NULL,
+              updated_at = ?
+        WHERE server_id = ? AND tool_name = ?`,
+    ).run(schemaSha256, canonicalDefJson, params.now, params.serverId, params.toolName);
+    writeAuditEvent(db, {
+      entityType: "mcp_tool",
+      entityId: `${params.serverId}:${params.toolName}`,
+      eventKey: `approve_ui:${params.serverId}:${params.toolName}:${schemaSha256.slice(0, 12)}:${params.now}`,
+      eventType: "mcp_tool_approved",
+      occurredAt: params.now,
+      details: {
+        serverId: params.serverId,
+        toolName: params.toolName,
+        schemaSha256,
+        approvedBy: params.approvedBy,
+      },
+    });
+    const updated = db
+      .prepare("SELECT * FROM mcp_tool_pins WHERE server_id = ? AND tool_name = ?")
+      .get(params.serverId, params.toolName) as unknown as McpToolPinRow;
+    return { ok: true, pin: updated };
+  });
+}
+
+/**
+ * C4: Re-checks live tool pin admission AND optional expected schema fingerprint (for queued/pending calls).
+ */
+export function verifyLiveMcpToolPin(
+  db: DatabaseSync,
+  params: { serverId: string; toolName: string; expectedSchemaSha256?: string | null },
+): { ok: true; pin: McpToolPinRow } | { ok: false; code: string; reason: string } {
+  const pin = getMcpToolPin(db, params.serverId, params.toolName);
+  if (!pin) {
+    return { ok: false, code: "mcp_tool_unapproved", reason: `MCP tool ${params.toolName} has no approved pin` };
+  }
+  if (pin.state === "REVOKED") {
+    return { ok: false, code: "mcp_tool_revoked", reason: `MCP tool ${params.toolName} has been revoked` };
+  }
+  if (pin.state !== "APPROVED") {
+    return {
+      ok: false,
+      code: "mcp_tool_quarantined",
+      reason: `MCP tool ${params.toolName} is quarantined (${pin.reason ?? "pin_drift"})`,
+    };
+  }
+  if (params.expectedSchemaSha256 && pin.schema_sha256 !== params.expectedSchemaSha256) {
+    return {
+      ok: false,
+      code: "mcp_tool_fingerprint_changed",
+      reason: `MCP tool ${params.toolName} fingerprint changed since proposal (${params.expectedSchemaSha256.slice(0, 12)} -> ${pin.schema_sha256.slice(0, 12)}); re-proposal required`,
+    };
+  }
+  return { ok: true, pin };
+}

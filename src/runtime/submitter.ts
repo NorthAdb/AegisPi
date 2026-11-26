@@ -1,17 +1,33 @@
 import type { DatabaseSync } from "node:sqlite";
 import { sendSmtpMessage } from "../capabilities/mail/smtp-client.ts";
-import { assertStage1LoopbackSmtpHost } from "../governance/credentials.ts";
+import {
+  assertSmtpHostForStage,
+  type HostCredentialVault,
+  type StageEgressPolicy,
+} from "../governance/credentials.ts";
 import {
   claimEffectForSubmission,
   recordEffectResult,
   type EffectState,
 } from "../governance/effects.ts";
+import { verifyLiveMcpToolPin } from "../governance/mcp-pin.ts";
+import {
+  evaluateGithubWritePolicy,
+  type GithubWriteAllowlistEntry,
+} from "../governance/rules.ts";
+import type { GitHubMcpBridge } from "./mcp-bridge.ts";
 
 export interface SmtpEndpointConfig {
   host: string;
   port: number;
   fromAddress: string;
   timeoutMs?: number;
+  tlsMode?: "none" | "direct_tls" | "starttls";
+  servername?: string;
+  caPem?: string;
+  proxy?: { host: string; port: number };
+  username?: string;
+  credentialSlotId?: string;
 }
 
 export interface EmailSubmissionPayload {
@@ -34,6 +50,8 @@ export interface SubmitEmailEffectParams {
   finalTarget: string;
   finalPayload: EmailSubmissionPayload;
   smtpConfig: SmtpEndpointConfig;
+  egressPolicy?: StageEgressPolicy;
+  vault?: HostCredentialVault;
   now: () => number;
   precondition?: () => boolean;
   /** Test seam for E05: runs strictly AFTER READY->SUBMITTING commits and BEFORE SMTP connect. */
@@ -61,9 +79,12 @@ export interface SubmitEmailEffectResult {
 export async function submitApprovedEmailEffect(
   params: SubmitEmailEffectParams,
 ): Promise<SubmitEmailEffectResult> {
-  // Stage 1 hard egress guard BEFORE claiming or connecting
+  const tlsMode = params.smtpConfig.tlsMode ?? "none";
+  // Hard egress guard BEFORE claiming or connecting
   try {
-    assertStage1LoopbackSmtpHost(params.smtpConfig.host, params.smtpConfig.port);
+    assertSmtpHostForStage(params.smtpConfig.host, params.smtpConfig.port, params.egressPolicy, {
+      tlsEnabled: tlsMode === "direct_tls" || tlsMode === "starttls",
+    });
   } catch (err) {
     return {
       ok: false,
@@ -73,6 +94,39 @@ export async function submitApprovedEmailEffect(
       code: "stage1_egress_blocked",
       message: err instanceof Error ? err.message : String(err),
     };
+  }
+
+  let smtpAuth: { username: string; password: string } | undefined;
+  if (params.smtpConfig.credentialSlotId && params.smtpConfig.username) {
+    if (!params.vault) {
+      return {
+        ok: false,
+        claimed: false,
+        effectId: params.effectId,
+        effectState: "REFUSED",
+        code: "missing_smtp_vault",
+        message: "SMTP credential slot configured without host vault",
+      };
+    }
+    const sec = params.vault.resolveSmtpSecretForTarget(params.smtpConfig.credentialSlotId, {
+      host: params.smtpConfig.host,
+      port: params.smtpConfig.port,
+      servername: params.smtpConfig.servername,
+      username: params.smtpConfig.username,
+      fromAddress: params.smtpConfig.fromAddress,
+      proxy: params.smtpConfig.proxy,
+    });
+    if (!sec.ok) {
+      return {
+        ok: false,
+        claimed: false,
+        effectId: params.effectId,
+        effectState: "REFUSED",
+        code: sec.code,
+        message: sec.reason,
+      };
+    }
+    smtpAuth = { username: params.smtpConfig.username, password: sec.secret };
   }
 
   if (params.onBeforeClaim) {
@@ -132,6 +186,12 @@ export async function submitApprovedEmailEffect(
       "X-AegisPi-Action-Hash": claim.actionHash ?? "",
     },
     timeoutMs: params.smtpConfig.timeoutMs ?? 15_000,
+    egressPolicy: params.egressPolicy,
+    tlsMode,
+    servername: params.smtpConfig.servername,
+    caPem: params.smtpConfig.caPem,
+    proxy: params.smtpConfig.proxy,
+    auth: smtpAuth,
   });
 
   // T5: Record outcome
@@ -184,4 +244,198 @@ export async function submitApprovedEmailEffect(
     code: "unknown",
     message: `Delivery outcome unknown (${smtpRes.reason ?? "no receipt"}); manual reconciliation required`,
   };
+}
+
+export interface GithubWriteSubmissionPayload {
+  repoId: string;
+  operation: string;
+  ref: string;
+  path: string;
+  content: string;
+  message: string;
+  mcpServerId: string;
+  mcpToolName: string;
+  mcpSchemaSha256: string;
+}
+
+/**
+ * Sole host outbound submitter for Stage 2 controlled GitHub writes.
+ * Re-verifies host positive allowlist AND C4 live MCP tool pin fingerprint BEFORE T4 CAS READY->SUBMITTING.
+ * Never auto-retries on UNKNOWN.
+ */
+export async function submitApprovedGithubWriteEffect(params: {
+  govDb: DatabaseSync;
+  runtimeEpoch: string;
+  effectId: string;
+  conversationId: string;
+  toolTaskId: string;
+  callId: string;
+  toolName: string;
+  finalTarget: string;
+  finalPayload: GithubWriteSubmissionPayload;
+  allowlist: GithubWriteAllowlistEntry[];
+  bridge: GitHubMcpBridge | null;
+  now: () => number;
+  onBeforeClaim?: (effectId: string) => void | Promise<void>;
+  onAfterClaimBeforeTransport?: (effectId: string) => void | Promise<void>;
+}): Promise<SubmitEmailEffectResult> {
+  if (!params.bridge || !params.bridge.isConnected) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: "mcp_not_connected",
+      message: "GitHub MCP bridge is not connected",
+    };
+  }
+  if (params.bridge.isAdmissionPaused) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: "mcp_admission_paused",
+      message: "GitHub MCP bridge admission is paused during pin verification",
+    };
+  }
+
+  const policyDecision = evaluateGithubWritePolicy({
+    repoId: params.finalPayload.repoId,
+    operation: params.finalPayload.operation,
+    ref: params.finalPayload.ref,
+    path: params.finalPayload.path,
+    allowlist: params.allowlist,
+  });
+  if (!policyDecision.allowed) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: policyDecision.code,
+      message: policyDecision.reason,
+    };
+  }
+
+  const pinPreCheck = verifyLiveMcpToolPin(params.govDb, {
+    serverId: params.finalPayload.mcpServerId,
+    toolName: params.finalPayload.mcpToolName,
+    expectedSchemaSha256: params.finalPayload.mcpSchemaSha256,
+  });
+  if (!pinPreCheck.ok) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: "REFUSED",
+      code: pinPreCheck.code,
+      message: pinPreCheck.reason,
+    };
+  }
+
+  if (params.onBeforeClaim) {
+    await params.onBeforeClaim(params.effectId);
+  }
+
+  const claim = claimEffectForSubmission(params.govDb, {
+    effectId: params.effectId,
+    runtimeEpoch: params.runtimeEpoch,
+    conversationId: params.conversationId,
+    toolTaskId: params.toolTaskId,
+    callId: params.callId,
+    toolName: params.toolName,
+    finalTarget: params.finalTarget,
+    finalPayload: params.finalPayload as unknown as Record<string, unknown>,
+    now: params.now(),
+    precondition: () => {
+      if (!params.bridge || params.bridge.isAdmissionPaused) return false;
+      const livePin = verifyLiveMcpToolPin(params.govDb, {
+        serverId: params.finalPayload.mcpServerId,
+        toolName: params.finalPayload.mcpToolName,
+        expectedSchemaSha256: params.finalPayload.mcpSchemaSha256,
+      });
+      return livePin.ok;
+    },
+  });
+
+  if (!claim.claimed) {
+    return {
+      ok: false,
+      claimed: false,
+      effectId: params.effectId,
+      effectState: claim.state ?? "REFUSED",
+      code: claim.code,
+      message: claim.message,
+    };
+  }
+
+  if (params.onAfterClaimBeforeTransport) {
+    await params.onAfterClaimBeforeTransport(params.effectId);
+  }
+
+  try {
+    const mcpRes = await params.bridge.callWriteTool(
+      params.finalPayload.mcpToolName,
+      {
+        repo: params.finalPayload.repoId,
+        ref: params.finalPayload.ref,
+        branch: params.finalPayload.ref.replace(/^refs\/heads\//, ""),
+        path: params.finalPayload.path,
+        content: params.finalPayload.content,
+        message: params.finalPayload.message,
+      },
+      { expectedSchemaSha256: params.finalPayload.mcpSchemaSha256 },
+    );
+
+    if (mcpRes.ok) {
+      const receiptRef = mcpRes.text?.slice(0, 200) ?? "github_mcp_ok";
+      const rec = recordEffectResult(params.govDb, {
+        effectId: params.effectId,
+        outcome: "SUCCEEDED",
+        receiptRef,
+        now: params.now(),
+      });
+      return {
+        ok: true,
+        claimed: true,
+        effectId: params.effectId,
+        effectState: rec.state,
+        code: "succeeded",
+        message: `GitHub write committed (${mcpRes.text?.slice(0, 120) ?? "ok"})`,
+        receiptRef,
+      };
+    }
+
+    const rec = recordEffectResult(params.govDb, {
+      effectId: params.effectId,
+      outcome: "FAILED",
+      reason: `${mcpRes.code}: ${mcpRes.reason ?? "mcp_write_failed"}`,
+      now: params.now(),
+    });
+    return {
+      ok: false,
+      claimed: true,
+      effectId: params.effectId,
+      effectState: rec.state,
+      code: mcpRes.code,
+      message: mcpRes.reason ?? "GitHub MCP write failed",
+    };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const rec = recordEffectResult(params.govDb, {
+      effectId: params.effectId,
+      outcome: "UNKNOWN",
+      reason: `github_mcp_transport_uncertain: ${reason}`,
+      now: params.now(),
+    });
+    return {
+      ok: false,
+      claimed: true,
+      effectId: params.effectId,
+      effectState: rec.state,
+      code: "unknown",
+      message: `GitHub write outcome unknown (${reason}); manual reconciliation required`,
+    };
+  }
 }

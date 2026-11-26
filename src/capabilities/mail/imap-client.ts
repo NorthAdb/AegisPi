@@ -75,6 +75,7 @@ export async function readImapMessageReadOnly(params: {
   scopeId: string;
   uid?: number;
   subjectContains?: string;
+  connectivityOnly?: boolean;
   now?: number;
 }): Promise<ImapReadResult> {
   const now = params.now ?? Date.now();
@@ -198,6 +199,7 @@ export async function readImapMessageReadOnly(params: {
     mailbox: params.endpoint.mailbox,
     ...(params.uid !== undefined ? { uid: params.uid } : {}),
     ...(params.subjectContains ? { subjectContains: params.subjectContains } : {}),
+    ...(params.connectivityOnly ? { connectivityOnly: true } : {}),
     ...(params.endpoint.onObserveChildEnv ? { includeEnvValuesForAudit: true } : {}),
     timeoutMs: params.endpoint.timeoutMs ?? 15_000,
   });

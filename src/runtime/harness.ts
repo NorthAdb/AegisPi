@@ -40,10 +40,14 @@ import {
 } from "../governance/budget.ts";
 import { canonicalJson } from "../governance/canonical.ts";
 import {
-  assertStage1LoopbackModelUrl,
-  assertStage1LoopbackSmtpHost,
+  assertModelUrlForStage,
+  assertSmtpHostForStage,
   type HostCredentialVault,
+  type StageEgressPolicy,
 } from "../governance/credentials.ts";
+import type { GithubWriteAllowlistEntry } from "../governance/rules.ts";
+import { ensureDefaultStage2Skills } from "../capabilities/skills/store.ts";
+import { RoutinePoller } from "../capabilities/timers/routines.ts";
 import { openGovernanceDb, type GovDbPragmas } from "../governance/db.ts";
 import {
   quarantineReadyEffect,
@@ -96,6 +100,22 @@ export interface AegisHostConfig {
   vault: HostCredentialVault;
   modelSlots: ModelSlotConfig[];
   smtpConfig: SmtpEndpointConfig;
+  egressPolicy?: StageEgressPolicy;
+  strictPlainTextEmail?: boolean;
+  githubWriteAllowlist?: GithubWriteAllowlistEntry[];
+  skillsEnabled?: boolean;
+  routinesEnabled?: boolean;
+  routinePollIntervalMs?: number;
+  skillScriptRunner?: (params: {
+    skillId: string;
+    scriptId: string;
+    scriptSha256: string;
+    sourceCode: string;
+    inputJson: string;
+    conversationId: string;
+    principalId: string;
+    scopeId: string;
+  }) => Promise<{ ok: boolean; code: string; output: string; error?: string }>;
   defaultPrincipalId?: string;
   defaultScopeId?: string;
   defaultMemoryDomain?: string;
@@ -342,6 +362,9 @@ export class AegisHostRuntime {
   readonly #defaultPrincipalId: string;
   readonly #defaultScopeId: string;
   readonly #now: () => number;
+  readonly #liveStreamOverlay: Map<string, { text: string; attempt: number; firstTokenMs: number; updatedAt: number }>;
+  readonly #lastStreamMetrics: Map<string, { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }>;
+  #routinePoller: RoutinePoller | null = null;
 
   private constructor(params: {
     config: AegisHostConfig;
@@ -370,6 +393,8 @@ export class AegisHostRuntime {
       }>
     >;
     changeListeners: Set<(ev: ConversationLiveChange) => void>;
+    liveStreamOverlay: Map<string, { text: string; attempt: number; firstTokenMs: number; updatedAt: number }>;
+    lastStreamMetrics: Map<string, { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }>;
     now: () => number;
   }) {
     this.config = params.config;
@@ -389,6 +414,8 @@ export class AegisHostRuntime {
     this.#knownTaskConversation = params.knownTaskConversation;
     this.#workerTasksByParent = params.workerTasksByParent;
     this.#changeListeners = params.changeListeners;
+    this.#liveStreamOverlay = params.liveStreamOverlay;
+    this.#lastStreamMetrics = params.lastStreamMetrics;
     this.#defaultPrincipalId = params.config.defaultPrincipalId ?? "owner";
     this.#defaultScopeId = params.config.defaultScopeId ?? "scope:default";
     this.#now = params.now;
@@ -396,6 +423,19 @@ export class AegisHostRuntime {
     if (this.#health === "READY") {
       this.#startMaintenanceLoop();
     }
+  }
+
+  get routinePoller(): RoutinePoller | null {
+    return this.#routinePoller;
+  }
+
+  getLastStreamMetrics(conversationId: string): {
+    firstTokenMs: number | null;
+    totalMs: number;
+    requestId: string;
+    completedAt: number;
+  } | null {
+    return this.#lastStreamMetrics.get(conversationId) ?? null;
   }
 
   onConversationChange(listener: (ev: ConversationLiveChange) => void): () => void {
@@ -516,10 +556,14 @@ export class AegisHostRuntime {
    * 6-Step Startup & Recovery Sequence (Taskbook 1 Section 2).
    */
   static async start(config: AegisHostConfig): Promise<AegisHostRuntime> {
-    // Stage 1 hard egress boundary check BEFORE opening any writable DB or lock
-    assertStage1LoopbackSmtpHost(config.smtpConfig.host, config.smtpConfig.port);
+    const egressPolicy: StageEgressPolicy = config.egressPolicy ?? { stage: 1 };
+    const smtpTlsEnabled = config.smtpConfig.tlsMode === "direct_tls" || config.smtpConfig.tlsMode === "starttls";
+    // Hard egress boundary check BEFORE opening any writable DB or lock
+    assertSmtpHostForStage(config.smtpConfig.host, config.smtpConfig.port, egressPolicy, {
+      tlsEnabled: smtpTlsEnabled,
+    });
     for (const s of config.modelSlots) {
-      assertStage1LoopbackModelUrl(s.baseUrl);
+      assertModelUrlForStage(s.baseUrl, egressPolicy);
     }
 
     const nowFn = config.now ?? (() => Date.now());
@@ -540,12 +584,30 @@ export class AegisHostRuntime {
       govDb = opened.db;
       const defaultPrincipalId = config.defaultPrincipalId ?? "owner";
       const defaultScopeId = config.defaultScopeId ?? "scope:default";
+      const defaultAllowedTools =
+        egressPolicy.stage === 2
+          ? [
+              "send_email",
+              "run_worker",
+              "memory_recall",
+              "mail_read_latest",
+              "github_read_file",
+              "github_write_file",
+              "workspace_write_managed",
+              "skill_read_body",
+              "skill_run_script",
+              "routine_create",
+            ]
+          : ["send_email", "run_worker"];
       ensureScope(govDb, {
         scopeId: defaultScopeId,
         allowedPrincipals: [defaultPrincipalId],
-        allowedTools: ["send_email", "run_worker"],
+        allowedTools: defaultAllowedTools,
         allowedTargets: config.allowedEmailTargets ?? ["*"],
       });
+      if (config.skillsEnabled) {
+        ensureDefaultStage2Skills(govDb, nowFn());
+      }
 
       const { epoch, manifest } = ensureActiveEpochAndManifest(govDb, nowFn());
       // Shared mutable epoch box so Models, policy extension, and runtime always observe epoch rotation immediately!
@@ -780,12 +842,22 @@ export class AegisHostRuntime {
       };
       const resolveScopeId = (conversationId: string): string => resolveScopeRow(conversationId).scopeId;
 
+      const liveStreamOverlay = new Map<
+        string,
+        { text: string; attempt: number; firstTokenMs: number; updatedAt: number }
+      >();
+      const lastStreamMetrics = new Map<
+        string,
+        { firstTokenMs: number | null; totalMs: number; requestId: string; completedAt: number }
+      >();
+
       const modelsController = createHostModelsEgress({
         govDb,
         getRuntimeEpoch: () => epochBox.current,
         vault: config.vault,
         telemetry,
         slots: config.modelSlots,
+        egressPolicy,
         resolveBudgetOwner,
         resolveConversationAuth: (conversationId) => resolveScopeRow(conversationId),
         now: nowFn,
@@ -799,6 +871,33 @@ export class AegisHostRuntime {
         fetchImpl: config.fetchImpl,
         onHttpFetchAttempt: config.onHttpFetchAttempt,
         onReservationRecorded: config.onReservationRecorded,
+        onStreamTextDelta: (info) => {
+          liveStreamOverlay.set(info.conversationId, {
+            text: info.accumulatedText,
+            attempt: 1,
+            firstTokenMs: info.firstTokenMs,
+            updatedAt: nowFn(),
+          });
+          emitChange({
+            conversationId: info.conversationId,
+            kind: "pi_view",
+            detail: { streaming: true, firstTokenMs: info.firstTokenMs, chars: info.accumulatedText.length },
+          });
+        },
+        onStreamFinished: (info) => {
+          liveStreamOverlay.delete(info.conversationId);
+          lastStreamMetrics.set(info.conversationId, {
+            firstTokenMs: info.firstTokenMs,
+            totalMs: info.totalMs,
+            requestId: info.requestId,
+            completedAt: nowFn(),
+          });
+          emitChange({
+            conversationId: info.conversationId,
+            kind: "pi_view",
+            detail: { streaming: false, firstTokenMs: info.firstTokenMs, totalMs: info.totalMs },
+          });
+        },
       });
 
       const workerSlot = config.modelSlots.find((s) => s.slotName === "worker") ?? config.modelSlots[0];
@@ -813,6 +912,10 @@ export class AegisHostRuntime {
           resolveScopeId,
           resolveConversationAuth: (conversationId) => resolveScopeRow(conversationId),
           smtpConfig: config.smtpConfig,
+          egressPolicy,
+          strictPlainTextEmail: config.strictPlainTextEmail,
+          githubWriteAllowlist: config.githubWriteAllowlist,
+          skillScriptRunner: config.skillScriptRunner,
           imapEndpoint: () =>
             typeof config.imapEndpoint === "function"
               ? config.imapEndpoint()
@@ -1009,6 +1112,7 @@ export class AegisHostRuntime {
               slotName: slot.slotName,
             };
           },
+          skillsEnabled: config.skillsEnabled,
           now: nowFn,
         });
         contextExtRef = contextExt;
@@ -1139,6 +1243,8 @@ export class AegisHostRuntime {
           knownTaskConversation,
           workerTasksByParent,
           changeListeners,
+          liveStreamOverlay,
+          lastStreamMetrics,
           now: nowFn,
         });
       }
@@ -1224,6 +1330,8 @@ export class AegisHostRuntime {
           knownTaskConversation,
           workerTasksByParent,
           changeListeners,
+          liveStreamOverlay,
+          lastStreamMetrics,
           now: nowFn,
         });
       }
@@ -1477,8 +1585,56 @@ export class AegisHostRuntime {
         knownTaskConversation,
         workerTasksByParent,
         changeListeners,
+        liveStreamOverlay,
+        lastStreamMetrics,
         now: nowFn,
       });
+
+      if (config.routinesEnabled) {
+        const poller = new RoutinePoller({
+          govDb,
+          now: nowFn,
+          intervalMs: config.routinePollIntervalMs ?? 30_000,
+          admitTrigger: async ({ routine, trigger }) => {
+            const conv = await host.createManagedConversation({
+              principalId: routine.principal_id,
+              scopeId: routine.scope_id,
+              slotName: "router",
+            });
+            const res = await host.submitChatCommand({
+              principalId: routine.principal_id,
+              runtimeEpoch: host.runtimeEpoch,
+              conversationId: String(conv.id),
+              chatKey: trigger.correlation_key,
+              content: `[例程触发 · ${routine.name}] ${routine.prompt}`,
+            });
+            if (res.ok && res.status === "ADMITTED") {
+              return {
+                outcome: "ADMITTED",
+                conversationId: String(conv.id),
+                piRequestId: res.piRequestId,
+                submissionId: res.submissionId ?? null,
+              };
+            }
+            if (res.status === "PENDING_RECONCILE") {
+              return {
+                outcome: "PENDING_RECONCILE",
+                conversationId: String(conv.id),
+                piRequestId: res.piRequestId,
+                reason: res.message ?? res.code,
+              };
+            }
+            return {
+              outcome: "FAILED",
+              conversationId: String(conv.id),
+              piRequestId: res.piRequestId,
+              reason: res.message ?? res.code,
+            };
+          },
+        });
+        poller.reconcileTriggersWithChatCommands(epochBox.current);
+        host.#routinePoller = poller;
+      }
 
       // W2-S1: Allow caller (e.g. formal entrypoint) to bind hostRef and connect MCP/connector dependencies
       // STRICTLY BEFORE harness.resume() releases any suspended/recovered Pi tasks!
@@ -1490,6 +1646,9 @@ export class AegisHostRuntime {
       harness.resume();
       if (!config.pauseOutboxDelivery) {
         await host.deliverPendingOutbox();
+      }
+      if (host.#routinePoller) {
+        host.#routinePoller.start();
       }
 
       return host;
@@ -1922,6 +2081,10 @@ export class AegisHostRuntime {
     } catch {
       // ignore if conversation not active
     }
+    const overlay = this.#liveStreamOverlay.get(conversationId);
+    if (overlay && overlay.text.length > 0 && (!livePartial || overlay.text.length >= livePartial.text.length)) {
+      livePartial = { text: overlay.text, attempt: overlay.attempt };
+    }
     return { messages, livePartial, activeTools, workerTasks };
   }
 
@@ -2232,6 +2395,9 @@ export class AegisHostRuntime {
     this.#closed = true;
     this.#health = "STOPPED";
     this.#outboxDeliveryEnabled = false;
+    if (this.#routinePoller) {
+      this.#routinePoller.stop();
+    }
     if (this.#maintenanceTimer) {
       clearInterval(this.#maintenanceTimer);
       this.#maintenanceTimer = null;

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { ImapEndpointConfig } from "./capabilities/mail/imap-client.ts";
+import {
+  readImapMessageReadOnly,
+  type ImapEndpointConfig,
+} from "./capabilities/mail/imap-client.ts";
+import { testSmtpConnectivity } from "./capabilities/mail/smtp-client.ts";
 import {
   cleanupTaskVolumeAsync,
   DEFAULT_SANDBOX_IMAGE,
@@ -10,9 +14,12 @@ import {
 } from "./capabilities/workspace/docker-sandbox.ts";
 import { ManagedWorkspaceImporter } from "./capabilities/workspace/importer.ts";
 import {
-  assertStage1LoopbackModelUrl,
-  assertStage1LoopbackSmtpHost,
+  assertModelUrlForStage,
+  assertSmtpHostForStage,
   HostCredentialVault,
+  type ModelPriceSchedule,
+  type StageEgressPolicy,
+  type StageProfile,
 } from "./governance/credentials.ts";
 import { writeAuditEvent } from "./governance/db.ts";
 import {
@@ -20,9 +27,11 @@ import {
   scanBufferInMemory,
 } from "./governance/leak-scanner.ts";
 import { checkSourceReadAuthorized } from "./governance/policy.ts";
+import type { GithubWriteAllowlistEntry } from "./governance/rules.ts";
 import { AegisHostRuntime } from "./runtime/harness.ts";
 import { GitHubMcpBridge } from "./runtime/mcp-bridge.ts";
 import type { ModelSlotConfig } from "./runtime/models.ts";
+import type { SmtpEndpointConfig } from "./runtime/submitter.ts";
 import { startWebServer } from "./web/server.ts";
 
 function parseArgs(argv: string[]): Record<string, string> {
@@ -44,6 +53,12 @@ function parseArgs(argv: string[]): Record<string, string> {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const stageRaw = args["stage"] ?? process.env["AEGISPI_STAGE"] ?? "1";
+const stage: StageProfile = stageRaw === "2" ? 2 : 1;
+const uiMode: "stage1" | "stage2" =
+  args["ui-mode"] === "stage2" ? "stage2" : args["ui-mode"] === "stage1" ? "stage1" : stage === 2 ? "stage2" : "stage1";
+const webDistDir = args["web-dist"] ?? process.env["AEGISPI_WEB_DIST"] ?? path.resolve("web/dist");
+const mobileHttpsOrigin = args["mobile-https-origin"] ?? process.env["AEGISPI_MOBILE_HTTPS_ORIGIN"];
 const dataDir = path.resolve(args["data-dir"] ?? process.env["AEGISPI_DATA_DIR"] ?? "data");
 const port = Number(args["port"] ?? process.env["AEGISPI_PORT"] ?? "4310");
 const bindHost = args["bind-host"] ?? "127.0.0.1";
@@ -81,15 +96,6 @@ if (
   process.exit(1);
 }
 
-// G2: Stage 1 hard egress boundary — refuse non-loopback model or SMTP endpoints BEFORE opening DB or Web!
-try {
-  assertStage1LoopbackModelUrl(modelBaseUrl);
-  assertStage1LoopbackSmtpHost(smtpHost, smtpPort);
-} catch (err) {
-  process.stderr.write(`Refusing startup: ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
-}
-
 const taskLimitMu = Number(args["task-limit-mu"] ?? "800000");
 const dayLimitMu = Number(args["day-limit-mu"] ?? "5000000");
 const syntheticUpperMu = args["synthetic-upper-mu"] ? Number(args["synthetic-upper-mu"]) : 100;
@@ -115,6 +121,34 @@ if (s6ObserveDir) {
 
 interface TrustedConnectorsConfig {
   defaultMemoryDomain?: string;
+  skillsEnabled?: boolean;
+  routinesEnabled?: boolean;
+  routinePollIntervalMs?: number;
+  strictPlainTextEmail?: boolean;
+  modelProfile?: {
+    provider: string;
+    routerModelId: string;
+    workerModelId: string;
+    baseUrl: string;
+    allowedRemoteHosts?: string[];
+    apiKeyEnvVar?: string;
+    contextWindow?: number;
+    maxTokens?: number;
+    priceSchedule?: ModelPriceSchedule;
+  };
+  smtp?: {
+    host: string;
+    port: number;
+    fromAddress: string;
+    tlsMode?: "none" | "direct_tls" | "starttls";
+    servername?: string;
+    caCertPath?: string;
+    proxy?: { host: string; port: number };
+    username?: string;
+    credentialSlotId?: string;
+    secretEnvVar?: string;
+    allowedRemoteHosts?: string[];
+  };
   imap?: {
     mode: "direct" | "connect_tunnel";
     host: string;
@@ -134,6 +168,8 @@ interface TrustedConnectorsConfig {
     args: string[];
     pinnedArtifactPath: string;
     pinnedArtifactSha256: string;
+    readOnlyMode?: boolean;
+    writeAllowlist?: GithubWriteAllowlistEntry[];
     credentialSlotId?: string;
     secretEnvVar?: string;
   };
@@ -157,46 +193,87 @@ if (connectorsConfigPath) {
   }
 }
 
+const egressPolicy: StageEgressPolicy = {
+  stage,
+  allowedRemoteModelHosts: stage === 2 ? (connectorsCfg?.modelProfile?.allowedRemoteHosts ?? []) : [],
+  allowedRemoteSmtpHosts: stage === 2 ? (connectorsCfg?.smtp?.allowedRemoteHosts ?? []) : [],
+};
+const effectiveModelBaseUrl =
+  stage === 2 && connectorsCfg?.modelProfile?.baseUrl ? connectorsCfg.modelProfile.baseUrl : modelBaseUrl;
+const effectiveSmtpHost = stage === 2 && connectorsCfg?.smtp?.host ? connectorsCfg.smtp.host : smtpHost;
+const effectiveSmtpPort = stage === 2 && connectorsCfg?.smtp?.port ? connectorsCfg.smtp.port : smtpPort;
+const effectiveSmtpTlsMode = stage === 2 ? (connectorsCfg?.smtp?.tlsMode ?? "none") : "none";
+
+// G2: Hard egress boundary — refuse disallowed model or SMTP endpoints BEFORE opening DB or Web!
+try {
+  assertModelUrlForStage(effectiveModelBaseUrl, egressPolicy);
+  assertSmtpHostForStage(effectiveSmtpHost, effectiveSmtpPort, egressPolicy, {
+    tlsEnabled: effectiveSmtpTlsMode === "direct_tls" || effectiveSmtpTlsMode === "starttls",
+  });
+} catch (err) {
+  process.stderr.write(`Refusing startup: ${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
+}
+
 const vault = new HostCredentialVault();
+const modelProvider = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.provider : "fake-local";
+const routerModelId = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.routerModelId : "fake-router-1";
+const workerModelId = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.workerModelId : "fake-worker-1";
+const customModelApiKeyVar = stage === 2 ? connectorsCfg?.modelProfile?.apiKeyEnvVar : undefined;
 const routerSecret =
+  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
   process.env["AEGISPI_MODEL_ROUTER_KEY"] ??
   process.env["AEGISPI_FAKE_MODEL_KEY"] ??
   "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2";
 const workerSecret =
+  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
   process.env["AEGISPI_MODEL_WORKER_KEY"] ??
   process.env["AEGISPI_FAKE_MODEL_KEY"] ??
   routerSecret;
+const effectivePriceSchedule: ModelPriceSchedule =
+  stage === 2 && connectorsCfg?.modelProfile?.priceSchedule
+    ? connectorsCfg.modelProfile.priceSchedule
+    : {
+        priceVersion: "synthetic-v1",
+        inputPerMTokMu: 300_000,
+        outputPerMTokMu: 1_200_000,
+        syntheticFixedUpperMu: syntheticUpperMu,
+        syntheticFixedActualMu: syntheticActualMu,
+      };
 
 vault.registerSlot(
   {
     slotId: "slot:model-router",
-    provider: "fake-local",
-    allowedBaseUrls: [modelBaseUrl],
-    allowedModelIds: ["fake-router-1"],
-    priceVersion: "synthetic-v1",
+    provider: modelProvider,
+    allowedBaseUrls: [effectiveModelBaseUrl],
+    allowedModelIds: [routerModelId],
+    priceVersion: effectivePriceSchedule.priceVersion,
   },
   routerSecret,
+  egressPolicy,
 );
 vault.registerSlot(
   {
     slotId: "slot:model-worker",
-    provider: "fake-local",
-    allowedBaseUrls: [modelBaseUrl],
-    allowedModelIds: ["fake-worker-1"],
-    priceVersion: "synthetic-v1",
+    provider: modelProvider,
+    allowedBaseUrls: [effectiveModelBaseUrl],
+    allowedModelIds: [workerModelId],
+    priceVersion: effectivePriceSchedule.priceVersion,
   },
   workerSecret,
+  egressPolicy,
 );
 // Keep legacy slot alias for Week 1 compatibility
 vault.registerSlot(
   {
     slotId: "slot:fake-local",
-    provider: "fake-local",
-    allowedBaseUrls: [modelBaseUrl],
-    allowedModelIds: ["fake-router-1", "fake-worker-1"],
-    priceVersion: "synthetic-v1",
+    provider: modelProvider,
+    allowedBaseUrls: [effectiveModelBaseUrl],
+    allowedModelIds: [routerModelId, workerModelId],
+    priceVersion: effectivePriceSchedule.priceVersion,
   },
   routerSecret,
+  egressPolicy,
 );
 
 // W2-S6: In-memory only secret marker scanner (NEVER writes raw env values or volume bytes to disk!)
@@ -297,6 +374,7 @@ if (connectorsCfg?.githubMcp) {
   const slotId = mc.credentialSlotId ?? "slot:github-mcp-pat";
   const secretEnvVar = mc.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT";
   const mcpPat = process.env[secretEnvVar];
+  const allowWritePin = stage === 2 && mc.readOnlyMode === false;
   if (mcpPat && mcpPat.length > 0) {
     vault.registerConnectorSlot({
       slotId,
@@ -309,14 +387,51 @@ if (connectorsCfg?.githubMcp) {
         args: mc.args,
         executablePath: mc.pinnedArtifactPath,
         executableSha256: mc.pinnedArtifactSha256,
-        readOnlyRequired: true,
+        readOnlyRequired: !allowWritePin,
       },
     });
   }
 }
 
+const configuredSmtpConfig: SmtpEndpointConfig = {
+  host: effectiveSmtpHost,
+  port: effectiveSmtpPort,
+  fromAddress: stage === 2 && connectorsCfg?.smtp?.fromAddress ? connectorsCfg.smtp.fromAddress : "aegis-synthetic@local.test",
+  timeoutMs: smtpTimeoutMs,
+  tlsMode: effectiveSmtpTlsMode,
+  ...(stage === 2 && connectorsCfg?.smtp?.servername ? { servername: connectorsCfg.smtp.servername } : {}),
+  ...(stage === 2 && connectorsCfg?.smtp?.caCertPath && existsSync(connectorsCfg.smtp.caCertPath)
+    ? { caPem: readFileSync(connectorsCfg.smtp.caCertPath, "utf8") }
+    : {}),
+  ...(stage === 2 && connectorsCfg?.smtp?.proxy ? { proxy: connectorsCfg.smtp.proxy } : {}),
+  ...(stage === 2 && connectorsCfg?.smtp?.username ? { username: connectorsCfg.smtp.username } : {}),
+};
+
+if (stage === 2 && connectorsCfg?.smtp?.secretEnvVar) {
+  const sc = connectorsCfg.smtp;
+  const slotId = sc.credentialSlotId ?? "slot:smtp-auth";
+  const smtpSecret = process.env[sc.secretEnvVar!];
+  if (smtpSecret && smtpSecret.length > 0) {
+    vault.registerConnectorSlot({
+      slotId,
+      kind: "smtp",
+      target: `${sc.host}:${sc.port}`,
+      secretValue: smtpSecret,
+      smtpBinding: {
+        host: sc.host,
+        port: sc.port,
+        servername: sc.servername,
+        username: sc.username,
+        fromAddress: sc.fromAddress,
+        ...(sc.proxy ? { proxyHost: sc.proxy.host, proxyPort: sc.proxy.port } : {}),
+      },
+    });
+    configuredSmtpConfig.credentialSlotId = slotId;
+  }
+}
+
 // W2-S6: Publish cryptographic salted SHA-256 commitments (ZERO raw secrets) before MCP subprocess launch
-// so fake/test MCP child can substring-scan its live `process.env` in RAM across all 5 slots!
+// so fake/test MCP child can substring-scan its live `process.env` in RAM across all slots!
 if (s6ObserveDir) {
   const commitments = createSaltedMarkerCommitments(collectInMemorySlotMarkers());
   writeFileSync(path.join(s6ObserveDir, "mcp-commitments.json"), JSON.stringify(commitments, null, 2), "utf8");
@@ -330,6 +445,10 @@ const scrubbedSecretEnvVars = new Set<string>([
   "AEGISPI_MODEL_ROUTER_KEY",
   "AEGISPI_MODEL_WORKER_KEY",
   "AEGISPI_FAKE_MODEL_KEY",
+  "DEEPSEEK_API_KEY",
+  "AEGISPI_SMTP_SECRET",
+  ...(customModelApiKeyVar ? [customModelApiKeyVar] : []),
+  ...(connectorsCfg?.smtp?.secretEnvVar ? [connectorsCfg.smtp.secretEnvVar] : []),
   connectorsCfg?.imap?.secretEnvVar ?? "AEGISPI_IMAP_SECRET",
   connectorsCfg?.githubMcp?.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT",
 ]);
@@ -337,35 +456,27 @@ for (const key of scrubbedSecretEnvVars) {
   delete process.env[key];
 }
 
-const priceSchedule = {
-  priceVersion: "synthetic-v1",
-  inputPerMTokMu: 300_000,
-  outputPerMTokMu: 1_200_000,
-  syntheticFixedUpperMu: syntheticUpperMu,
-  syntheticFixedActualMu: syntheticActualMu,
-};
-
 const modelSlots: ModelSlotConfig[] = [
   {
     slotName: "router",
-    provider: "fake-local",
-    modelId: "fake-router-1",
-    baseUrl: modelBaseUrl,
+    provider: modelProvider,
+    modelId: routerModelId,
+    baseUrl: effectiveModelBaseUrl,
     credentialSlotId: "slot:model-router",
-    contextWindow: 128_000,
-    maxTokens: 1024,
-    priceSchedule,
+    contextWindow: connectorsCfg?.modelProfile?.contextWindow ?? 128_000,
+    maxTokens: connectorsCfg?.modelProfile?.maxTokens ?? 1024,
+    priceSchedule: effectivePriceSchedule,
     outboundAuthorized: true,
   },
   {
     slotName: "worker",
-    provider: "fake-local",
-    modelId: "fake-worker-1",
-    baseUrl: modelBaseUrl,
+    provider: modelProvider,
+    modelId: workerModelId,
+    baseUrl: effectiveModelBaseUrl,
     credentialSlotId: "slot:model-worker",
-    contextWindow: 128_000,
-    maxTokens: 1024,
-    priceSchedule,
+    contextWindow: connectorsCfg?.modelProfile?.contextWindow ?? 128_000,
+    maxTokens: connectorsCfg?.modelProfile?.maxTokens ?? 1024,
+    priceSchedule: effectivePriceSchedule,
     outboundAuthorized: true,
   },
 ];
@@ -387,12 +498,34 @@ const host = await AegisHostRuntime.start({
   dataDir,
   vault,
   modelSlots,
-  smtpConfig: {
-    host: smtpHost,
-    port: smtpPort,
-    fromAddress: "aegis-synthetic@local.test",
-    timeoutMs: smtpTimeoutMs,
-  },
+  smtpConfig: configuredSmtpConfig,
+  egressPolicy,
+  strictPlainTextEmail: stage === 2 ? (connectorsCfg?.strictPlainTextEmail ?? true) : false,
+  githubWriteAllowlist: stage === 2 ? (connectorsCfg?.githubMcp?.writeAllowlist ?? []) : [],
+  skillsEnabled: stage === 2 ? (connectorsCfg?.skillsEnabled ?? true) : false,
+  routinesEnabled: stage === 2 ? (connectorsCfg?.routinesEnabled ?? true) : false,
+  routinePollIntervalMs: connectorsCfg?.routinePollIntervalMs ?? 30_000,
+  ...(stage === 2 && connectorsCfg?.workspace
+    ? {
+        skillScriptRunner: async (sp) => {
+          const wc = connectorsCfg!.workspace!;
+          const sb = await runTaskInDockerSandboxAsync({
+            approvedImageId: wc.approvedImageId,
+            imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
+            nodeScript: `process.env.AEGIS_SKILL_INPUT_JSON = ${JSON.stringify(sp.inputJson)};\n${sp.sourceCode}`,
+          });
+          try {
+            if (!sb.ok) {
+              return { ok: false, code: sb.code ?? "skill_sandbox_failed", output: sb.stdout, error: sb.error ?? sb.stderr };
+            }
+            return { ok: true, code: "ok", output: sb.stdout.trim() || "skill_script_ok" };
+          } finally {
+            if (sb.containerName) await stopAndRemoveContainerAsync(sb.containerName);
+            if (sb.volumeName) await cleanupTaskVolumeAsync(sb.volumeName);
+          }
+        },
+      }
+    : {}),
   defaultPrincipalId,
   defaultMemoryDomain: connectorsCfg?.defaultMemoryDomain ?? "default",
   defaultTaskLimitMu: taskLimitMu,
@@ -428,6 +561,7 @@ const host = await AegisHostRuntime.start({
         args: mc.args,
         pinnedArtifactPath: mc.pinnedArtifactPath,
         credentialSlotId: mc.credentialSlotId ?? "slot:github-mcp-pat",
+        stage,
         govDb: readyHost.govDb,
         vault,
       });
@@ -936,9 +1070,41 @@ const web = await startWebServer({
   host,
   bindHost,
   port,
+  uiMode,
+  webDistDir,
+  ...(mobileHttpsOrigin ? { mobileHttps: { enabled: true, publicOrigin: mobileHttpsOrigin } } : {}),
   consoleToken,
   consoleTokens,
   defaultPrincipalId,
+  testGmailConnectivity: async (principalId) => {
+    const imapRes = configuredImapEndpoint
+      ? await readImapMessageReadOnly({
+          govDb: host.govDb,
+          vault,
+          endpoint: configuredImapEndpoint,
+          principalId,
+          scopeId: "scope:default",
+          connectivityOnly: true,
+        })
+      : { ok: false, tlsVerified: false, error: "IMAP not configured" };
+    const smtpRes = await testSmtpConnectivity({
+      host: configuredSmtpConfig.host,
+      port: configuredSmtpConfig.port,
+      egressPolicy,
+      tlsMode: configuredSmtpConfig.tlsMode,
+      servername: configuredSmtpConfig.servername,
+      caPem: configuredSmtpConfig.caPem,
+      proxy: configuredSmtpConfig.proxy,
+    });
+    return {
+      imap: {
+        ok: imapRes.ok,
+        tlsVerified: imapRes.tlsVerified,
+        message: imapRes.ok ? `IMAP 只读连通 (${configuredImapEndpoint?.mailbox})` : (imapRes.error ?? "IMAP failed"),
+      },
+      smtp: smtpRes,
+    };
+  },
   ...(faultBeforeT2CommitFile
     ? {
         injectBeforeT2Commit: () => {

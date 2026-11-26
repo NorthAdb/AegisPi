@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, closeSync } from "node:fs";
+import { appendFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, closeSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import tls from "node:tls";
+import { generateSelfSignedTlsCert } from "./tls-cert.ts";
 
 export interface SmtpReceiptRecord {
   seq: number;
@@ -59,9 +61,23 @@ const dataDir = args["data-dir"] ? path.resolve(args["data-dir"]) : path.resolve
 const smtpPort = Number(args["smtp-port"] ?? "0");
 const controlPort = Number(args["control-port"] ?? "0");
 const host = args["host"] ?? "127.0.0.1";
+const tlsCn = args["tls-cn"];
+const authUser = args["auth-user"];
+const authPass = args["auth-pass"];
 
 mkdirSync(dataDir, { recursive: true });
 const logPath = path.join(dataDir, "smtp-received.jsonl");
+
+let tlsCertPem: string | null = null;
+let tlsKeyPem: string | null = null;
+let certPath: string | null = null;
+if (tlsCn) {
+  const gen = generateSelfSignedTlsCert({ commonName: tlsCn, dnsNames: [tlsCn], ipv4Addresses: ["127.0.0.1"] });
+  tlsCertPem = gen.certPem;
+  tlsKeyPem = gen.keyPem;
+  certPath = path.join(dataDir, "smtp-server-cert.pem");
+  writeFileSync(certPath, tlsCertPem, "utf8");
+}
 
 let records: SmtpReceiptRecord[] = readJsonl<SmtpReceiptRecord>(logPath);
 let mode: SmtpMode = (args["mode"] as SmtpMode | undefined) ?? "normal";
@@ -83,13 +99,14 @@ function notifyArrival(rec: SmtpReceiptRecord): void {
   }
 }
 
-const smtpServer = net.createServer((socket) => {
+const handleSocket = (socket: net.Socket): void => {
   socket.setEncoding("utf8");
   let buffer = "";
   let inData = false;
   let mailFrom = "";
   let rcptTo: string[] = [];
   let dataLines: string[] = [];
+  let authed = !authUser;
 
   const sendLine = (line: string): void => {
     if (!socket.destroyed && socket.writable) {
@@ -157,8 +174,25 @@ const smtpServer = net.createServer((socket) => {
     const upper = line.toUpperCase();
     if (upper.startsWith("EHLO") || upper.startsWith("HELO")) {
       sendLine("250-aegispi-fake-smtp.local");
+      if (authUser) sendLine("250-AUTH PLAIN");
       sendLine("250 SIZE 10485760");
+    } else if (upper.startsWith("AUTH PLAIN ")) {
+      const b64 = line.slice(11).trim();
+      const decoded = Buffer.from(b64, "base64").toString("utf8");
+      const parts = decoded.split("\u0000");
+      const u = parts[1] ?? "";
+      const p = parts[2] ?? "";
+      if (authUser && u === authUser && p === (authPass ?? "")) {
+        authed = true;
+        sendLine("235 2.7.0 Authentication successful");
+      } else {
+        sendLine("535 5.7.8 Authentication credentials invalid");
+      }
     } else if (upper.startsWith("MAIL FROM:")) {
+      if (!authed) {
+        sendLine("530 5.7.0 Authentication required");
+        return;
+      }
       mailFrom = line.slice(10).trim();
       rcptTo = [];
       sendLine("250 2.1.0 Sender OK");
@@ -199,7 +233,11 @@ const smtpServer = net.createServer((socket) => {
   socket.on("error", () => {
     // Expected when host is force-killed with Stop-Process -Force mid-hold.
   });
-});
+};
+
+const smtpServer = tlsCertPem && tlsKeyPem
+  ? tls.createServer({ cert: tlsCertPem, key: tlsKeyPem }, handleSocket)
+  : net.createServer(handleSocket);
 
 function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -318,6 +356,8 @@ const readyPayload = {
   smtpPort: smtpAddr.port,
   controlPort: ctrlAddr.port,
   mode,
+  tls: Boolean(tlsCertPem),
+  certPath,
   dataDir,
   logPath,
   initialTotalReceived: records.length,

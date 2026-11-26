@@ -341,6 +341,87 @@ CREATE TABLE IF NOT EXISTS worker_execution_roots (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (runtime_epoch, worker_conversation_id)
 );
+
+CREATE TABLE IF NOT EXISTS approval_rules (
+  rule_id TEXT PRIMARY KEY NOT NULL,
+  principal_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+  tool_name TEXT NOT NULL,
+  tier INTEGER NOT NULL CHECK(tier IN (1)),
+  target_pattern TEXT NOT NULL,
+  action_summary TEXT NOT NULL DEFAULT '',
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  revoke_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS skills (
+  skill_id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  active_version INTEGER NOT NULL CHECK(active_version > 0),
+  state TEXT NOT NULL CHECK(state IN ('ACTIVE','REVOKED')),
+  revoked_at INTEGER,
+  revoke_reason TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+  skill_id TEXT NOT NULL REFERENCES skills(skill_id),
+  version INTEGER NOT NULL CHECK(version > 0),
+  summary TEXT NOT NULL,
+  body TEXT NOT NULL,
+  body_sha256 TEXT NOT NULL,
+  scripts_json TEXT NOT NULL DEFAULT '[]',
+  reviewed_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(skill_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_skill_locks (
+  runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+  conversation_id TEXT NOT NULL,
+  skill_set_hash TEXT NOT NULL,
+  locked_skills_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(runtime_epoch, conversation_id)
+);
+
+CREATE TABLE IF NOT EXISTS routines (
+  routine_id TEXT PRIMARY KEY NOT NULL,
+  principal_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('once','daily','weekly')),
+  schedule_json TEXT NOT NULL,
+  skip_condition_json TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+  next_run_utc_ms INTEGER,
+  last_run_utc_ms INTEGER,
+  last_status TEXT,
+  last_result_summary TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS routine_triggers (
+  trigger_id TEXT PRIMARY KEY NOT NULL,
+  routine_id TEXT NOT NULL REFERENCES routines(routine_id),
+  scheduled_instant_utc INTEGER NOT NULL,
+  correlation_key TEXT NOT NULL UNIQUE,
+  conversation_id TEXT,
+  pi_request_id TEXT,
+  submission_id INTEGER,
+  state TEXT NOT NULL CHECK(state IN ('REGISTERED','ADMITTED','SUCCEEDED','FAILED','SKIPPED','PENDING_RECONCILE')),
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(routine_id, scheduled_instant_utc)
+);
 `;
 
 export function openGovernanceDb(dbPath: string): { db: DatabaseSync; pragmas: GovDbPragmas } {
@@ -614,6 +695,85 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
       execution_root_task_id TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       PRIMARY KEY (runtime_epoch, worker_conversation_id)
+    );
+  `);
+
+  // Migration 6 (Stage 2): Forward-only tables for Tier 1 remembered rules, 3-level Skills, and idempotent Routines
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_rules (
+      rule_id TEXT PRIMARY KEY NOT NULL,
+      principal_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+      tool_name TEXT NOT NULL,
+      tier INTEGER NOT NULL CHECK(tier IN (1)),
+      target_pattern TEXT NOT NULL,
+      action_summary TEXT NOT NULL DEFAULT '',
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      revoke_reason TEXT
+    );
+    CREATE TABLE IF NOT EXISTS skills (
+      skill_id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      active_version INTEGER NOT NULL CHECK(active_version > 0),
+      state TEXT NOT NULL CHECK(state IN ('ACTIVE','REVOKED')),
+      revoked_at INTEGER,
+      revoke_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS skill_versions (
+      skill_id TEXT NOT NULL REFERENCES skills(skill_id),
+      version INTEGER NOT NULL CHECK(version > 0),
+      summary TEXT NOT NULL,
+      body TEXT NOT NULL,
+      body_sha256 TEXT NOT NULL,
+      scripts_json TEXT NOT NULL DEFAULT '[]',
+      reviewed_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(skill_id, version)
+    );
+    CREATE TABLE IF NOT EXISTS conversation_skill_locks (
+      runtime_epoch TEXT NOT NULL REFERENCES runtime_epochs(runtime_epoch),
+      conversation_id TEXT NOT NULL,
+      skill_set_hash TEXT NOT NULL,
+      locked_skills_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(runtime_epoch, conversation_id)
+    );
+    CREATE TABLE IF NOT EXISTS routines (
+      routine_id TEXT PRIMARY KEY NOT NULL,
+      principal_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      timezone TEXT NOT NULL,
+      schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('once','daily','weekly')),
+      schedule_json TEXT NOT NULL,
+      skip_condition_json TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      next_run_utc_ms INTEGER,
+      last_run_utc_ms INTEGER,
+      last_status TEXT,
+      last_result_summary TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS routine_triggers (
+      trigger_id TEXT PRIMARY KEY NOT NULL,
+      routine_id TEXT NOT NULL REFERENCES routines(routine_id),
+      scheduled_instant_utc INTEGER NOT NULL,
+      correlation_key TEXT NOT NULL UNIQUE,
+      conversation_id TEXT,
+      pi_request_id TEXT,
+      submission_id INTEGER,
+      state TEXT NOT NULL CHECK(state IN ('REGISTERED','ADMITTED','SUCCEEDED','FAILED','SKIPPED','PENDING_RECONCILE')),
+      reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(routine_id, scheduled_instant_utc)
     );
   `);
 }
