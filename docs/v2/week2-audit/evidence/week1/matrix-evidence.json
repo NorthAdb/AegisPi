@@ -51,7 +51,7 @@
       "status": "PASS",
       "summary": "Verified 0 plaintext nonce hits across SSE frames, conversation snapshots, and audit_events; dedicated POST /api/approvals/:id/challenge returns challenge strictly to authorized principal (403 for unauthorized).",
       "evidence": {
-        "sseFrameCapturedBytes": 1418,
+        "sseFrameCapturedBytes": 1441,
         "sseNonceHits": 0,
         "snapshotNonceHits": 0,
         "auditNonceHits": 0,
@@ -66,11 +66,11 @@
       "summary": "Verified real run_worker delegation inherits parent host task, persisted bindings survive restart, missing binding fails closed, and ordinary Web create/chat/compact routes ignore client budgetTaskId (0 sends, 0 spoofed accounts).",
       "evidence": {
         "delegationDenyPhysicalDelta": 1,
-        "delegationFundedWorkerRequestId": "mreq_e9bb27f4ba7649049579b788c78535e0",
+        "delegationFundedWorkerRequestId": "mreq_353ac61cd19b47079cffd4348ac1a5c0",
         "delegationTaskFinalChargedMu": 240,
         "restartContinuationPhysicalDelta": 0,
         "unboundFailClosedPhysicalDelta": 0,
-        "webHostAssignedTaskId": "host-task:ep_5ecd5c64e16148e096762ea36a9bea7d:conv:8",
+        "webHostAssignedTaskId": "host-task:ep_aa9ff9fe56d443b09c81e589ab780596:conv:8",
         "webSpoofCompactPhysicalDelta": 0,
         "webSpoofChatPhysicalDelta": 0
       }
@@ -81,8 +81,8 @@
       "status": "PASS",
       "summary": "Verified epoch-scoped conversation_scopes across trace replacement with reused numeric conversation ID: old principal blocked (403) on new epoch and restricted to historical ep1 audit (messages=[]), while new principal sees only ep2 data and gets 403 on ep1.",
       "evidence": {
-        "ep1": "ep_c660157fbf1643fdac055fc3490c09e8",
-        "ep2": "ep_a7b311a82c914bd79f2d2c3ea8116548",
+        "ep1": "ep_71ff83c165d04b73970c419b4141a04e",
+        "ep2": "ep_39578f29f6a640cfa1a8cc452102c06b",
         "reusedConversationId": "8",
         "aliceActiveSnapshotStatus": 403,
         "aliceActiveChatStatus": 403,
@@ -100,8 +100,8 @@
       "status": "PASS",
       "summary": "Verified idempotent in-place migration of legacy conversation_scopes PK to (runtime_epoch, conversation_id), provable backfill of legacy budget_denial rows, strict exclusion of unprovable legacy denials from snapshots and SSE, and dual-epoch coexistence across reused numeric conversation ID.",
       "evidence": {
-        "ep1": "ep_739014d705e04b94acf3f7c5d95cf87a",
-        "ep2": "ep_bd84b4207023497ba59b2ccc6cf8fa01",
+        "ep1": "ep_790c13ded2104e808220a68daa77e2e7",
+        "ep2": "ep_0e14c58610a84543a1906a925f9abe74",
         "reusedConversationId": "8",
         "pkBeforeMigration": [
           "conversation_id"
@@ -137,7 +137,7 @@
       "status": "PASS",
       "summary": "Second host instance rejected with InstanceLockBusyError and 0 DB/service mutations; first instance stayed healthy.",
       "evidence": {
-        "host1Pid": 45988,
+        "host1Pid": 14040,
         "host2ExitCode": 1,
         "modelDelta": 0,
         "smtpDelta": 0
@@ -165,16 +165,16 @@
       "status": "PASS",
       "summary": "Detected same-epoch trace rollback (including >200-entry multi-page rollback with identical conversation/task IDs) and trace replacement before scheduling; rotated epoch updated Models and policy extension live to newEpoch, quarantined old READY effects, preserved old HELD reservations, and blocked forked conversation from claiming parent effect.",
       "evidence": {
-        "initialEpoch": "ep_73c40286892842dd90371ed3233ee2a1",
-        "newEpoch": "ep_20577f887d87403c8bacbc9443e3bd25",
+        "initialEpoch": "ep_23b91ef4261b45209c405299950503c5",
+        "newEpoch": "ep_fe68cf2f07c449b2a5eec848261e0974",
         "rollbackCode": "trace_rollback_missing_conversations",
         "replaceCode": "trace_replaced_or_anchor_mismatch",
         "multiPageRollbackCode": "trace_rollback_watermark_regressed",
-        "postRotationProposalEpoch": "ep_20577f887d87403c8bacbc9443e3bd25",
-        "postRotationReservationEpoch": "ep_20577f887d87403c8bacbc9443e3bd25",
+        "postRotationProposalEpoch": "ep_fe68cf2f07c449b2a5eec848261e0974",
+        "postRotationReservationEpoch": "ep_fe68cf2f07c449b2a5eec848261e0974",
         "forkClaimCode": "call_identity_mismatch",
         "quarantinedReadyEffectIds": [
-          "efx_df0b80c821e0477d99395082cd2b94bd"
+          "efx_f39f7c8604404effaff148d492db29e0"
         ],
         "preservedHeldCount": 1
       }
@@ -203,7 +203,7 @@
       "status": "PASS",
       "summary": "Explicit compaction triggered real completeSimple (+1 physical request) with independent request_id attributed to b03-compact-task.",
       "evidence": {
-        "compactionRequestId": "mreq_f791f335eb224c5787ad58db242263f8",
+        "compactionRequestId": "mreq_9dec9fec963b4ea19048ce4fea52a6a9",
         "compactionModelDelta": 1,
         "generationReservationsCount": 2
       }
@@ -217,18 +217,18 @@
         "fundedPhysicalRequests": 2,
         "fundedReservationIds": [
           {
-            "id": "mreq_69f8c061bc134671ab510e3ae5a7d31b",
+            "id": "mreq_f12d629e400b4633a91c5c4e7f979910",
             "state": "HELD"
           },
           {
-            "id": "mreq_7e5d49c6978f4d6c9464002eb448657c",
+            "id": "mreq_caa15167c1ff40588dd8b8ce64d35185",
             "state": "SETTLED"
           }
         ],
         "unfundedPhysicalRequests": 1,
         "unfundedReservationIds": [
           {
-            "id": "mreq_6d1530661f6b42a7b91a55f88ccd1e96",
+            "id": "mreq_ba1dbba758ae4ba6bbe50bc4704e5586",
             "state": "HELD"
           }
         ]
@@ -240,8 +240,8 @@
       "status": "PASS",
       "summary": "Missing usage stayed HELD across early restart, then timed out to CHARGED_BOUND on original day across midnight via BOTH host runtime loop (res1) and host startup recovery (res2); trusted late bill via host API corrected res1 to 60 with duplicate delta=0 and new day untouched.",
       "evidence": {
-        "runtimeLoopSettledRequestId": "mreq_c97e50ef2c1944ef8d3ce764220bb8e1",
-        "startupRecoverySettledRequestId": "mreq_3ac0485fe6874fdf91c151175f7538ee",
+        "runtimeLoopSettledRequestId": "mreq_7926de03ede34025b17a38728e06308d",
+        "startupRecoverySettledRequestId": "mreq_4a6675baf26c40ddb1bec3016eece5ca",
         "originalDay": "2026-11-25",
         "newDay": "2026-11-26",
         "day1Final": {
@@ -306,7 +306,7 @@
       "status": "PASS",
       "summary": "Approval committed before Pi tool parked was observed immediately on re-entry; outbox reconciled to ACKED, claim=1, SMTP=1.",
       "evidence": {
-        "effectId": "efx_5bd1427b07c842ada9ec6002e02a933e",
+        "effectId": "efx_bc7b311d32724318a05adf68fc6ceda7",
         "effectState": "SUCCEEDED",
         "claims": 1,
         "smtpReceived": 1,
@@ -319,13 +319,13 @@
       "status": "PASS",
       "summary": "Real Windows Stop-Process -Force inside uncommitted T2 rolled back approval/effect/outbox cleanly (0 SMTP); Stop-Process -Force after T2 commit and before signal delivery recovered on restart and sent exactly 1 email.",
       "evidence": {
-        "preT2KilledPid": 9484,
+        "preT2KilledPid": 41180,
         "preT2KillExitCode": 4294967295,
         "rollbackApprovalState": "PENDING",
-        "postT2KilledPid": 34060,
+        "postT2KilledPid": 50688,
         "postT2KillExitCode": 4294967295,
-        "recoveredHostPid": 25044,
-        "effectId": "efx_95b52aadef0a41e992379f20a294903f",
+        "recoveredHostPid": 27300,
+        "effectId": "efx_3f90e20c52ae49d19e1d73b8126499a2",
         "finalEffectState": "SUCCEEDED",
         "claims": 1,
         "smtpTotalReceived": 1
@@ -337,14 +337,14 @@
       "status": "PASS",
       "summary": "Real Windows Stop-Process -Force after SDK signal and before outbox ACK reconciled cleanly on restart (ACKED, claim=1, SMTP=1); decisionKey replay=200 and conflict=409; duplicate signal memo verification ACKed matching duplicate and isolated conflicting/unverifiable duplicates with READY quarantined (0 SMTP).",
       "evidence": {
-        "killedPidBeforeAck": 19700,
+        "killedPidBeforeAck": 30920,
         "killExitCode": 4294967295,
-        "recoveredHostPid": 7484,
-        "effectId": "efx_74ce472a60604390935e54664eaf837d",
+        "recoveredHostPid": 23372,
+        "effectId": "efx_ea5c8bdb8a644caf8149b4e3bbde6773",
         "outboxPreKillState": "PENDING",
         "outboxFinal": {
-          "approval_id": "apr_12f481c804814766897398797eb168f9",
-          "signal_key": "sig:ep_868462c8e6d34ce49f48b1afedb76b3a:prp_1dbcf5647c8a41c08ca1a285fc305777:r1",
+          "approval_id": "apr_ac270e7f4627431cb2a15805c705a5cb",
+          "signal_key": "sig:ep_de4b680937874ef688e6aa2a0b141999:prp_901f33fe5ab949019d5ee3a98b575c04:r1",
           "state": "ACKED",
           "sdk_result": "duplicate",
           "reason": "sdk_duplicate_same_value"
@@ -378,7 +378,7 @@
       "status": "PASS",
       "summary": "Tool terminated before claim caused recovery to quarantine READY -> QUARANTINED (未提交，待核对) with 0 claims and 0 SMTP.",
       "evidence": {
-        "effectId": "efx_6097afcc4d8641c2978a7fe9cba057fe",
+        "effectId": "efx_b43c92d97d494e0b9b26b9c2266f09e1",
         "effectState": "QUARANTINED",
         "uiLabel": "未提交，待核对",
         "claims": 0,
@@ -391,10 +391,10 @@
       "status": "PASS",
       "summary": "Real Windows Stop-Process -Force after READY->SUBMITTING commit and before SMTP transport recovered to UNKNOWN (结果待核对) with claim=1 and SMTP=0 (distinct from W1-B's remote-received SMTP=1).",
       "evidence": {
-        "killedPid": 17348,
+        "killedPid": 44416,
         "killExitCode": 4294967295,
-        "recoveredHostPid": 43472,
-        "effectId": "efx_f657ac1194f345fca4cd7406eb6f6abb",
+        "recoveredHostPid": 20400,
+        "effectId": "efx_529f1ab64eb04c3e95e2f940ae4f5f6b",
         "preKillEffectState": "SUBMITTING",
         "finalEffectState": "UNKNOWN",
         "claims": 1,
@@ -422,7 +422,7 @@
       "evidence": {
         "revokeFirstSmtp": 0,
         "claimFirstRetainedEffects": [
-          "efx_c225397c45394903a5247b1c4bf4bf7e"
+          "efx_760ad548b3384c7c961277c24471783b"
         ],
         "totalSmtpAcrossBoth": 1
       }

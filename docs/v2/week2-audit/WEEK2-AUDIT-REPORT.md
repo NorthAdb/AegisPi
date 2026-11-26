@@ -1,17 +1,20 @@
 # AegisPi v2 任务书 1 阶段一第 2 周交付审计报告
 
-- **文档版本**：Week 2 审计交接第 1 轮提审（2026-11-26，香港时间；供外部审计人独立复跑、源码审查、签收与多轮整改交流）
+- **文档版本**：Week 2 审计交接第 2 轮提审（2026-11-26，香港时间；保留 §1–§10 第 1 轮提审与独立审计原文，§11 追加第 1 轮全部 9 项缺陷及 §10.4 工程项整改回执与第 2 轮签收栏）
 - **目标仓库与分支**：`aegis-pi` / 分支 `v2`
 - **基线与前置签收**：
   - v1 零信任基线：`3a88b6895991d328e8e27fd1072a29846e7a9adf`（tag `v1-zero-trust-baseline`）
   - 第 1 周签收候选：`69ce7b9ac818d5f80551a8cfcc18add84a1607f8`（独立验收交接提交 `47a4dd41e663b61b5daf76918dd2b0a48771954d`）
-- **第 2 周冻结代码候选 SHA（第 1 轮提审）**：`ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb`（脱敏证据与本交接报告随后续仅文档提交入库，不改动任何 `src/` 或 `tests/` 实现）
-- **同候选全量实测运行标识**：
-  - 第 2 周全量套件：`runId = week2_203150f4`（执行时间 `2026-11-26T02:36:34.805Z`，退出码 `0`）
-  - 第 1 周回归与 W1-A / W1-B 复签：`runId = week1_0c6fd47a`（执行时间 `2026-11-26T02:34:06.170Z`，退出码 `0`）
-- **审计范围**：阶段一第 2 周（《任务书 1》第一节 D6–D10、第五节 S6、第六节 V01–V06、第七节回归复签）：聊天提交幂等与恢复协议（V04）、快照/SSE 游标投影协议（V05）、Router/Worker 委派、记忆 L0 与 FTS 召回、只读 IMAP（直连 TLS + HTTP CONNECT 隧道内层验真）、GitHub MCP 只读钉扎、来源读取与模型披露分离门控（V02）、无网零凭据 Docker 沙箱与受管文件导入（V03）、视图① 完整交互与实机浏览器验收（V01/V05/V06）、全流程凭据零泄漏扫描（S6），以及在同一冻结候选上复签 `W1-A`、`W1-B`、`S1–S5` 与第 1 周 25 项矩阵。
+- **第 2 周冻结代码候选链**：
+  - 第 1 轮提审候选（已退回整改，见 §10）：`ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb`（第 1 轮独立审计记录落于 `2a21134c9a1d5776caba0c75c1c126fcdac3a066`）
+  - **第 2 轮冻结代码候选 SHA（本次提审）**：**`efba0eda53a21cf5f935846377f8ab03ff42eb69`**（28 files changed, +4662 / -1164；本次脱敏证据与 §11 整改回执随后续仅文档提交入库，不改动任何 `src/` 或 `tests/` 实现）
+- **第 2 轮同候选（`efba0ed`）全量实测运行标识**：
+  - 第 2 周全量套件：`runId = week2_57fd5f62`（执行时间 `2026-11-26T03:46:51.176Z`，退出码 `0`）
+  - 第 1 周回归与 W1-A / W1-B 复签：`runId = week1_61255801`（执行时间 `2026-11-26T03:43:40.515Z`，退出码 `0`）
+  - （历史第 1 轮提审 `ea9b59c` 运行记录 `week2_203150f4` / `week1_0c6fd47a` 保留于 §1–§9 原文）
+- **审计范围**：阶段一第 2 周（《任务书 1》第一节 D6–D10、第五节 S6、第六节 V01–V06、第七节回归复签）以及 §10 第 1 轮独立审计提出的全部 9 项缺陷（`W2-G1`、`W2-G2`、`W2-S1`–`W2-S7`）与 §10.4 夹具/浏览器/CLI/汇总项整改验证。
 
-> **审计传递与交流说明**：本文件是第 2 周提审与复审的唯一主交接文档。外部审计人可直接按 §3 在新临时目录复跑、按 §5 导航至核心源码审查、并将第 1 轮复跑记录、源码审查发现、复验条件与签收结论直接填写在 **§10（第 1 轮审计人独立复跑与审查签收栏）** 后回传。若需整改，实施方将在后续章节（§11 起）逐项给出整改回执与新冻结候选 SHA。
+> **审计传递与交流说明**：本文件是第 2 周提审与复审的唯一主交接文档。§1–§10 完整保留第 1 轮提审记录与审计结论；**§11** 给出针对 §10 全部发现的逐项整改映射、新冻结候选 `efba0eda53a21cf5f935846377f8ab03ff42eb69` 上的实测命令/退出码/`runId`/脱敏证据，并在 **§11.3** 预留第 2 轮审计人复跑与签收栏。
 
 ---
 
@@ -364,3 +367,95 @@ $browserData = Join-Path $env:TEMP 'agw2-fadcc51d-browser2'
 ```
 
 第一周、第二周全量使用独立数据目录并行运行。复跑证据在 `week1/evidence/`、`week2/evidence/` 和 `legacy-schema-check.json`，原始错误在上述日志。首次浏览器单项重试的 CLI 忽略目录参数，随后清理 profile 时出现 `EBUSY`。第二次直接调用导出函数传入短临时路径，仍在 CDP 就绪前退出。请在下一候选修正 §3.4 的单项入口参数和浏览器退出后的清理，并确保汇总能记录未完成子项。浏览器环境故障的原因尚未确定。
+
+---
+
+## 11. 第 1 轮审计整改回执与第 2 轮复审签收栏（冻结候选 `efba0ed`）
+
+- **第 2 轮冻结代码候选提交（全号）**：`efba0eda53a21cf5f935846377f8ab03ff42eb69`
+- **提交信息**：`fix(v2): remediate Week 2 Round 1 audit findings (W2-G1, W2-G2, W2-S1..S7, browser harness)`
+- **相对第 1 轮候选 `ea9b59c` 的代码变更范围**：28 个文件（`+4662 / -1164`），`package.json` 与 `package-lock.json`（SHA-256 `795485bdfbf93215f07ba67e2185bc513cca3f39879cebff6830b79d0cd8d291`）零变动，锁定工具链与单向四层依赖保持不变。
+- **同候选全量验证结果（均在 `HEAD = efba0eda53a21cf5f935846377f8ab03ff42eb69` 上以锁定 Node 与全新临时目录完成）**：
+  - `tsc --noEmit`：退出码 `0`
+  - `tests/week1/run-all.ts`：退出码 `0`，`runId = week1_61255801`（`S1–S5` 5/5、`W1-A` 9/9、`W1-B` PASS、矩阵 25/25）
+  - `tests/week2/run-all.ts`：退出码 `0`，`runId = week2_57fd5f62`（`typecheck`、`layerBoundary`、`V04_V05`、`V02`、`V03`、`S6`、`V01_V05_V06_BROWSER` 全部 PASS）
+  - 脱敏证据目录：[evidence/week1/](evidence/week1/) 与 [evidence/week2/](evidence/week2/)（已替换为 `efba0ed` 本次实测产物，本机用户路径与合成密钥泄漏均校验为 `0`）。
+
+### 11.1 针对 §10 全部 9 项缺陷与 §10.4 的逐项整改映射表
+
+| 审计编号 | 级别 | 整改核心措施与源码位置 | 冻结候选 `efba0ed` 实测结果与脱敏证据 |
+|---|---|---|---|
+| **W2-G1** | P1 | **连接器凭据目标绑定与固定 MCP 启动参数校验。** 在凭据库新增 `ImapCredentialBinding` / `GithubMcpCredentialBinding` 与目标校验解析器 `resolveImapSecretForTarget` / `resolveGithubMcpSecretForTarget`；`aegis-gov.sqlite` Migration 3 为 `mcp_server_pins` 幂等补齐 `command` / `args_json`；`mcp-pin.ts` 同时钉扎并校验可执行工件 SHA-256 与固定 `command` / `args`；`imap-client.ts` 在拉起子进程前核对授权允许的 `host` / `servername` / `username` 与凭据槽目标绑定；`mcp-bridge.ts` 在启动 `StdioTransport` 前核对钉扎工件、参数与只读标志绑定。[credentials.ts](../../../src/governance/credentials.ts) · [db.ts](../../../src/governance/db.ts) · [mcp-pin.ts](../../../src/governance/mcp-pin.ts) · [imap-client.ts](../../../src/capabilities/mail/imap-client.ts) · [mcp-bridge.ts](../../../src/runtime/mcp-bridge.ts) | `V02`（`runId = v02_2eb0985a`）：错 SNI 返 `imap_grant_tls_identity_mismatch`、错账号返 `imap_grant_account_mismatch`、错目标槽返 `imap_credential_target_mismatch`，`imapMismatchLoginsDelta = 0`；错 MCP 启动参数返 `mcp_args_mismatch`，`mcpMismatchSpawnsDelta = 0`；`pinnedCommandAndArgsVerified = true`；`totalToolCallsOnServer = 1`、`totalWriteCallsOnServer = 0`。证据：[v02-evidence.json](evidence/week2/v02-evidence.json) |
+| **W2-G2** | P2 | **执行器与只读导出器启动前核对不可变镜像摘要并直接按 digest 启动。** 新增 `verifyApprovedSandboxImageDigest` / `verifyApprovedSandboxImageDigestAsync` 及异步非阻塞执行/导出通道（`runTaskInDockerSandboxAsync`、`verifyAllVolumeWritersExitedAsync`、`exportRegularFilesFromVolumeReadOnlyAsync`）；执行器与导出器均强制要求 `approvedImageId`（`sha256:<64-hex>`），在 `docker run` 之前检验本地镜像存在且匹配，并以不可变镜像 ID 直接启动，分别落盘 `executorImageId` 与 `exporterImageId`。同时修复同步 `spawnSync("docker", ...)` 长时间阻塞事件循环触发 HTTP keep-alive `ECONNRESET` 的隐患。[docker-sandbox.ts](../../../src/capabilities/workspace/docker-sandbox.ts) · [importer.ts](../../../src/capabilities/workspace/importer.ts) | `V03`（`runId = v03_00298889`）与 `S6`（`runId = s6_c5a55850`）：`approvedImageId = executorImageId = exporterImageId = sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee`；缺失摘要启动前拒返 `unapproved_or_missing_image_digest`，错摘要在执行器与导出器均启动前拒返 `approved_image_digest_not_found`。证据：[v03-evidence.json](evidence/week2/v03-evidence.json) · [s6-evidence.json](evidence/week2/s6-evidence.json) |
+| **W2-S1** | P1 | **正式入口 `src/index.ts` 接通完整纵切能力且未配置时保持 fail-closed。** `src/index.ts` 新增 `--connectors-config` / `AEGISPI_CONNECTORS_CONFIG`、`--approval-ttl-ms` 与故障注入开关 `--fault-after-import-install-before-receipt`，从受信本地配置加载连接器定义、仅从宿主环境加载密钥进入目标绑定凭据库，真实接入 `ImapReadOnlyClient`、`GitHubMcpBridge`（钉扎校验）与 `ManagedWorkspaceImporter`（异步 Docker 沙箱）；未配置连接器时保持拒绝。浏览器验收套件 `run-v01-v06-browser.ts` 改为启动独立正式子进程 `src/index.ts` 完成未配置 fail-closed 验证与完整 V01 演示，不再自组装假 handler 或预设写入报告。[index.ts](../../../src/index.ts) · [run-v01-v06-browser.ts](../../../tests/week2/run-v01-v06-browser.ts) | `V01_V05_V06_BROWSER`（`runId = v01v06_4fc0ba05`）：`formalEntrypoint = "src/index.ts"`、`formalEntrypointUsed = true`、`unconfiguredHostFailClosedVerified = true`；通过实机 Edge 在 `http://127.0.0.1:60796` 完成演示句，`selectedEmailUid = 102`，`repoCommitSha = a1b2c3d4e5f60718293a4b5c6d7e8f9012345678`，两处时间差异核对一致，`firstToolProgressMs = 197`、`completionMs = 13821`，`reports/weekly.md` 字节 SHA-256 精确匹配 `31d1598f4b8470cfa54994d6a8e52b0b31f39762dad5b63608bda58837108c1c`，刷新后来源（`memory`/`imap`/`github_mcp`/`workspace_file`）与 7 步 Router/Worker 预算均可见。证据：[v01-v06-browser-evidence.json](evidence/week2/v01-v06-browser-evidence.json) |
+| **W2-S2** | P1 | **来源读取实时撤权贯穿记忆遍历、L0 构造、模型门控、受管导入、快照与 SSE 逐帧流。** (1) `memory/store.ts` 在 hop 0 及每一跳引用遍历逐节点调用 `checkSourceReadAuthorized`；(2) `aegis-context.ts` 移除跨运行静态 `frozenL0ByConv` 缓存，每次构造前实时复核域授权；(3) `policy.ts` 新增 `checkRecordedSourceReadStillAuthorized`、`verifyAllConversationSourcesReadAuthorized` 与 `getSourceReadRevocationWatermark`，在 `checkConversationModelDisclosure` 内递归复核全部直接与父来源实时读取授权（覆盖 Router、委派 Worker、Compaction 与 durable retry）；(4) `importer.ts` 在原子安装与写冲突候选前均复核父/会话来源实时读取授权；(5) `server.ts` 与 `projection.ts` 在 `/snapshot` 中过滤并脱敏已撤权来源，在已打开 SSE 流逐帧检查 `source_read_grants` 撤销水位，命中撤权立即发 `resync (source_read_revoked)` 并收束旧流。[store.ts](../../../src/capabilities/memory/store.ts) · [aegis-context.ts](../../../src/runtime/extensions/aegis-context.ts) · [policy.ts](../../../src/governance/policy.ts) · [importer.ts](../../../src/capabilities/workspace/importer.ts) · [server.ts](../../../src/web/server.ts) · [projection.ts](../../../src/web/projection.ts) | `V02`（`v02_2eb0985a`）：`unauthorizedDomainRefHits = 0`；保留模型披露规则、单独撤销来源读取后，`durableRetryExtraSendsAfterRevoke = 0`、`routerWorkerCompactionSendsDelta = 0`、`l0AndTaintedMarkerHitsDelta = 0`；保留读取授权、单独撤销披露后 `disclosureRevokedWhileReadActiveSendsDelta = 0`。`V03`（`v03_00298889`）：撤销父来源后导入拒返 `source_read_revoked`，`targetUnchanged = true`、`conflictFilesCreatedDelta = 0`。`V04_V05`（`v04v05_c965b9dc`）：`sourceRevokeOldStreamResyncReason = "source_read_revoked"`、`sourceRevokeOldStreamBusinessFrames = 0`、`sourceRevokeRefetchedSnapshotRedacted = true`。证据：[v02-evidence.json](evidence/week2/v02-evidence.json) · [v03-evidence.json](evidence/week2/v03-evidence.json) · [v04-v05-evidence.json](evidence/week2/v04-v05-evidence.json) |
+| **W2-S3** | P1 | **基准版本改由宿主权威采集，导入回执与来源原子落盘并接入正式启动恢复 Step 5c。** 从 `workspace_write_managed` 模型工具入参中移除 `baseSha256`；宿主在任务快照阶段通过 `ManagedWorkspaceImporter.captureHostBaseline` 记录权威基准并按任务维护，`src/index.ts` 与 `importer.ts` 严格忽略模型声明；`importer.ts` 将 `INSTALLED` 回执与 `conversation_sources (workspace_file)` 溯源写入同一 `BEGIN IMMEDIATE` 事务；新增启动恢复入口 `ManagedWorkspaceImporter.reconcilePendingImportsOnStartup` 并接入 `harness.ts` Step 5c（调度释放之前），在强杀重启后按权威目标哈希核对 `PREPARED` 记录并补齐 `INSTALLED` 回执与 `workspace_file` 来源，不二次写盘。[aegis-policy.ts](../../../src/runtime/extensions/aegis-policy.ts) · [importer.ts](../../../src/capabilities/workspace/importer.ts) · [harness.ts](../../../src/runtime/harness.ts) · [index.ts](../../../src/index.ts) · [run-v03.ts](../../../tests/week2/run-v03.ts) | `V03`（`runId = v03_00298889`）：启动正式 `src/index.ts` 挂载 `--fault-after-import-install-before-receipt`，安装落盘后用 `Stop-Process -Force` 强杀 PID `39896`，重启正式宿主 PID `31736` 由 Step 5c 核对同一逻辑键 `wimp:ep_7717dae9cc624c128b3d560f151c4a8e:8:19:tc_v03_crash_v03_00298889`，`reconciledOutcome = "reconciled_installed"`、`installCount = 1`、`diskRewrittenOnRestart = false`、`workspaceFileSourceReconciledInSnapshot = true`；模型试图伪造基准版本时被忽略并保留两版（`modelSpoofedBaseSha256IgnoredConflictSaved = true`，`spoofConflictRelPath = "reports/spoof-check.conflict-4dc6b87cee.md"`）。证据：[v03-evidence.json](evidence/week2/v03-evidence.json) |
+| **W2-S4** | P2 | **浏览器跨刷新保留原聊天提交键，统一所有带序号帧连续性校验，并串行化投影并发刷新。** (1) `view1.ts` 将待提交 `{ key, content }` 按 `(principalId, runtimeEpoch, conversationId)` 持久化到 `sessionStorage`，切会话与刷新后自动恢复原键重试；(2) `view1.ts` 将 `snapshot` / `delta` / `partial` 统一收敛至 `acceptSequencedFrame`，移除 `state.lastSeq > 0` 跳过逻辑，首帧断档与 `partial` 重复/断档均精确去重或触发 `resync`；(3) `projection.ts` 对 `#refreshProjection` 实施 `refreshInFlight` + `pendingRefresh` + `refreshGeneration` 严格串行化，防止后完成的旧异步快照覆盖新状态。[view1.ts](../../../src/web/view1.ts) · [projection.ts](../../../src/web/projection.ts) | `V04_V05`（`v04v05_c965b9dc`）：`projectionConcurrentStaleReadSerialized = true`。`V01_V05_V06_BROWSER`（`v01v06_4fc0ba05`）：`persistedChatKeyAcrossReload = "ui-chat-1795664791640-017144a9"`、`retryAdmittedWithSameChatKey = true`、`duplicateDeltaIgnored = 1`、`duplicatePartialIgnored = 1`、`partialGapTriggeredResync = true`、`firstFrameGapTriggeredResync = true`、`stalePartialOverwrittenBySnapshot = true`、`realDisconnectReconnectCursorMatched = true`。证据：[v04-v05-evidence.json](evidence/week2/v04-v05-evidence.json) · [v01-v06-browser-evidence.json](evidence/week2/v01-v06-browser-evidence.json) |
+| **W2-S5** | P2 | **IMAP 按主题筛选无命中时不扩大读取范围。** 删除 `imap-child.ts` 中筛选结果为 0 时回落全邮箱的逻辑，直接返回 `{ ok: true, code: "no_matching_message", found: false, message: null }` 且不执行任何正文 `FETCH`；`fake-imap-server.ts` 独立记录 `bodyTextFetchedUids`。[imap-child.ts](../../../src/capabilities/mail/imap-child.ts) · [fake-imap-server.ts](../../../tests/fakes/fake-imap-server.ts) | `V02`（`v02_2eb0985a`）：合成邮箱含较新无关邮件 UID `103`；有命中时 `filterHitSelectedUid = 102`、`filterHitUnrelatedUid103Fetched = false`；无命中时 `filterMissCode = "no_matching_message"`、`filterMissBodyFetchDelta = 0`、`totalSelectCommands = 0`、`totalNonPeekFetches = 0`。证据：[v02-evidence.json](evidence/week2/v02-evidence.json) |
+| **W2-S6** | P2 | **S6 运行期分时点采集完整矩阵；V06 浏览器 `UNKNOWN` 改为直连真实 W1-B 强杀恢复库。** (1) `run-s6.ts` 在宿主运行期间分 5 个活跃时点（含 `router_and_worker_live`、`compaction_web_live`、`imap_mcp_and_unrelated_child_live`、`docker_sandbox_live`、`post_restart_live`）实时扫描 `aegis-gov.sqlite-wal`、`pi-durable.sqlite-wal`、捕获 URL、宿主运行日志、假服务日志与无关子进程环境，按时点记录字节数与命中数，未采样项显式落盘 `uncollectedSamples`；(2) `run-v01-v06-browser.ts` 删除所有直接 SQL 改写 `UNKNOWN` 的逻辑，改为直接执行真实 `runW1B`（实机 `Stop-Process -Force` 强杀扣应答假 SMTP -> 真实重启恢复），再启动正式 `src/index.ts` 挂载恢复后的 `host-data` 数据库，并在 Edge 刷新前后核对同一 `effectId`。[run-s6.ts](../../../tests/week2/run-s6.ts) · [run-v01-v06-browser.ts](../../../tests/week2/run-v01-v06-browser.ts) | `S6`（`s6_c5a55850`）：阳性对照 `2/2`；运行期 WAL 实采非零（`aegis-gov.sqlite-wal` 832272 / 877592 B、`pi-durable.sqlite-wal` 1017672 / 1194832 B），`capturedUrlsCount = 9`、`unrelatedChildEnvKeysCount = 83`、`uncollectedSamples = []`、5 个槽位 `totalForbiddenHits = 0`。`V01_V05_V06_BROWSER`（`v01v06_4fc0ba05`）：直连真实 `runW1B`（`w1bRunId = w1b_a7a10f7b`，强杀 PID `39960`，`effectId = efx_671c924828da4812aa4210f55570079a`，`approvalCount = 1`、`claimCount = 1`、`smtpTotalReceived = 1`），Edge 刷新后仍显 `"结果待核对"`。证据：[s6-evidence.json](evidence/week2/s6-evidence.json) · [v01-v06-browser-evidence.json](evidence/week2/v01-v06-browser-evidence.json) |
+| **W2-S7** | P2 | **打开状态审批卡的本地草稿防覆盖与无刷新自动过期禁批。** `view1.ts` 按提案 ID 保留未保存本地草稿 `localDraftTextByProposal`，无关 SSE 重绘时不覆盖用户输入；新增基于服务端时钟偏移（`serverNow`）的 200ms 本地定时器 `enforceLocalProposalExpirations`，卡片保持打开并跨过 `expiresAt` 时无需手动刷新即可自动禁用批准按钮并标记“已过期”；`server.ts` 保存草稿修订时沿用宿主配置的 `approvalTtlMs`。[view1.ts](../../../src/web/view1.ts) · [server.ts](../../../src/web/server.ts) | `V01_V05_V06_BROWSER`（`v01v06_4fc0ba05`）：`unsavedEditDisabledApprove = true`、`unsavedDraftPreservedAcrossUnrelatedSse = true`、`savedNewRevision = 2`、`staleRevisionOldTabStatus = 409`、`openCardAutoExpiredWithoutReload = true`、`expiredOldTabStatus = 410`、`expiredSmtpSentDelta = 0`。证据：[v01-v06-browser-evidence.json](evidence/week2/v01-v06-browser-evidence.json) |
+| **§10.4 工程项** | 工程可靠性 | **统一单项入口 CLI 参数、加固 Edge CDP 启动与退出清理、保证全量异常时仍落盘汇总。** 新增 `tests/week2/cli-helpers.ts`：`parseWeek2CliArgs` 统一解析 `--data-dir` / `--evidence-dir` / `--keep-data` 并接入全部 5 个单项 `run-*.ts` 入口；`launchReliableHeadlessBrowser` 使用短临时 `os.tmpdir()` profile 目录与显式空闲端口，轮询 `/json/list` 与 `DevToolsActivePort` 并支持 `--headless=new` 失败自动回落 `--headless`，退出时先优雅关闭再 `taskkill /T /F` 并用 `rmDirWithRetry` 避免 Windows `EBUSY`；`run-all.ts` 在 `finally` 中始终写出 `week2-summary.json`，完整记录每个子项的 `PASS` / `FAIL` / `NOT_RUN`。[cli-helpers.ts](../../../tests/week2/cli-helpers.ts) · [run-all.ts](../../../tests/week2/run-all.ts) | 在 `efba0ed` 上全量运行 `tests/week2/run-all.ts` 退出码 `0`，实机 Edge CDP 一次启动通过、无 `EBUSY` 残留、`week2-summary.json` 完整落盘。证据：[week2-summary.json](evidence/week2/week2-summary.json) |
+
+### 11.2 第 2 轮冻结候选 `efba0ed` 全量实测命令、退出码、`runId` 与脱敏证据
+
+以下命令均在 `git rev-parse HEAD = efba0eda53a21cf5f935846377f8ab03ff42eb69`、工作区干净、锁定工具链 `D:\AegisPi\tools\node-v22.23.5\node.exe`（`v22.23.5`，SQLite `3.54.1`，npm `10.9.9`，Docker `29.9.2/29.9.2`，`msedge.exe`）与全新临时目录下执行：
+
+```powershell
+$node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+$w1 = Join-Path $env:TEMP 'aegis-w2r2-w1-733c4571'
+$w2 = Join-Path $env:TEMP 'aegis-w2r2-w2-733c4571'
+& $node ./node_modules/typescript/bin/tsc --noEmit
+& $node tests/week1/run-all.ts --data-dir (Join-Path $w1 'data') --evidence-dir (Join-Path $w1 'evidence')
+& $node tests/week2/run-all.ts --data-dir (Join-Path $w2 'data') --evidence-dir (Join-Path $w2 'evidence')
+```
+
+| 验证项 | 退出码 | `runId` | 关键实得摘要 | 结果 | 脱敏证据 |
+|---|---|---|---|---|---|
+| `tsc --noEmit` | `0` | `week2_57fd5f62` | 纯 TypeScript 可擦除类型检查通过；单向分层与单点导入 `violations = []` | **PASS** | [week2-summary.json](evidence/week2/week2-summary.json) |
+| **第 1 周全量复签** | `0` | `week1_61255801` | `S1–S5` 5/5 PASS；矩阵 25/25 PASS（含 `R3-LEGACY-UPGRADE`）；`W1-A`（`w1a_b7bbd9e1`）3 足额对照各 `+1`、6 不足负例各 `0`；`W1-B`（`w1b_f807b927`）强杀 PID `33088` -> 重启 PID `42368` / `27520`，`effectId = efx_17db48eb65b746bbb311e3036cddb151`，独立假 SMTP `totalReceived = 1`、`claimCount = 1`、`approvalCount = 1`、原会话刷新后显“结果待核对”、`secretLeaksCount = 0` | **PASS** | [week1-summary.json](evidence/week1/week1-summary.json) · [w1-a-evidence.json](evidence/week1/w1-a-evidence.json) · [w1-b-evidence.json](evidence/week1/w1-b-evidence.json) · [s1-s5-evidence.json](evidence/week1/s1-s5-evidence.json) · [matrix-evidence.json](evidence/week1/matrix-evidence.json) |
+| **S6** | `0` | `s6_c5a55850` | 阳性对照 `2/2`；5 个运行期/重启采样点（含实时 WAL 字节）、9 条捕获 URL、宿主日志与 83 键无关子进程环境全覆，`uncollectedSamples = []`，5 个槽位 `totalForbiddenHits = 0` | **PASS** | [s6-evidence.json](evidence/week2/s6-evidence.json) |
+| **V04 / V05** | `0` | `v04v05_c965b9dc` | 窗 2 强杀重试唯一提交 `submissionId = 15`（`piRequestId = chatreq:4610d37be4cc20f7111d6d2ce95d7588`），同键异文与错代际返 409；快照后/订阅前批准不漏事件；来源撤权触发 `source_read_revoked` 且旧流 0 业务帧；投影并发旧读串行化通过 | **PASS** | [v04-v05-evidence.json](evidence/week2/v04-v05-evidence.json) |
+| **V02（本地替身）** | `0` | `v02_2eb0985a` | 凭据目标绑定与 MCP 参数不匹配时登录/启动增量 `0`；记忆跨域引用命中 `0`；IMAP 无命中 `no_matching_message` 且无关正文读取增量 `0`、`totalSelectCommands = 0`、`totalNonPeekFetches = 0`；MCP `totalWriteCallsOnServer = 0`；单独撤销读取后 Router/Worker/Compaction/durable 重试发送增量均为 `0` | **PASS（替身）** | [v02-evidence.json](evidence/week2/v02-evidence.json) |
+| **V03** | `0` | `v03_00298889` | 实机 Docker `29.9.2` 执行器与导出器均以不可变镜像 ID `sha256:e9f565d3...` 启动；缺/错摘要启动前拒绝；正常导入 SHA-256 精确一致；撤权父来源拒返 `source_read_revoked`；正式宿主回执前强杀（PID `39896` -> 重启 PID `31736`）由 Step 5c 恢复，`installCount = 1`、`diskRewrittenOnRestart = false`、`workspaceFileSourceReconciledInSnapshot = true`；模型伪造基准版本触发冲突保护保留两版 | **PASS** | [v03-evidence.json](evidence/week2/v03-evidence.json) |
+| **V01 / V05 / V06（实机 Edge）** | `0` | `v01v06_4fc0ba05` | 正式入口 `src/index.ts` 启动独立宿主完成 V01 演示（`http://127.0.0.1:60796`、`selectedEmailUid = 102`、`repoCommitSha = a1b2c3d4...`、`reports/weekly.md` SHA-256 `31d1598f...`）及未配置 fail-closed；跨刷新保留原聊天键重试、首帧/partial 缺号与真实断线重连通过；本地草稿防 SSE 覆盖、打开卡片跨期无刷新自动禁批；直连真实 `runW1B`（`w1b_a7a10f7b`）强杀恢复库刷新仍显“结果待核对” | **PASS（替身 + 实机浏览器）** | [v01-v06-browser-evidence.json](evidence/week2/v01-v06-browser-evidence.json) |
+
+> **替身与真实只读 / 历史基线分列声明**：
+> - 真实 Gmail 只读 IMAP、真实 GitHub MCP 只读（缺本机人工授权、`GITHUB_PAT` 与 `github-mcp-server.exe`）及 V01 细粒度逐 token `firstTokenMs` 仍明确标为 **待验证**；阶段一真实模型计费、真实邮件发送与真实 GitHub 写入保持关闭。
+> - v1 历史零信任基线（`3a88b6895991d328e8e27fd1072a29846e7a9adf`，`327/327`、`selfuse 31/31`）仅作历史参考，与本次 v2 实测分开列示。
+
+### 11.3 第 2 轮审计人独立复跑与源码审查签收栏
+
+> 本节留白，供外部审计人基于冻结代码候选 `efba0eda53a21cf5f935846377f8ab03ff42eb69` 填写第 2 轮独立复跑与源码复审结论。
+
+#### 11.3.1 独立复跑核对表（第 2 轮）
+
+| 核对项 | 审计人复跑结果（通过 / 未通过 / 待验证） | 备注 / 复跑 `runId` / 退出码 |
+|---|---|---|
+| 核对候选 `efba0eda53a21cf5f935846377f8ab03ff42eb69` 与仅文档差异 | | |
+| 依赖锁定、类型检查 `tsc --noEmit`、分层守卫 | | |
+| 第 2 周全量 `tests/week2/run-all.ts`（含实机 Edge CDP 与汇总落盘） | | |
+| 单项入口 CLI 参数（`--data-dir` / `--evidence-dir`）与退出清理 | | |
+| 同候选第 1 周全量 `tests/week1/run-all.ts`（`S1–S5`、`W1-A`、`W1-B`、25 项矩阵） | | |
+| 旧治理库副本连续开库升级校验（含 Migration 3 `mcp_server_pins`） | | |
+
+#### 11.3.2 §10 缺陷逐项关闭复核表（第 2 轮）
+
+| 审计编号 | 级别 | 复核结论（关闭 / 未关闭） | 审计人复核说明 |
+|---|---|---|---|
+| `W2-G1` | P1 | | |
+| `W2-G2` | P2 | | |
+| `W2-S1` | P1 | | |
+| `W2-S2` | P1 | | |
+| `W2-S3` | P1 | | |
+| `W2-S4` | P2 | | |
+| `W2-S5` | P2 | | |
+| `W2-S6` | P2 | | |
+| `W2-S7` | P2 | | |
+| `§10.4`（CLI / Edge CDP / 清理 / 汇总） | 工程项 | | |
+
+#### 11.3.3 第 2 轮最终签收结论
+
+- **第 2 轮签收结论**：[ ] 同意阶段一第 2 周签收（本地替身 + 实机 Docker + 实机浏览器范围，真实只读子项保留“待验证”） / [ ] 退回继续整改
+- **审计人 / 日期**：
+- **补充意见或新发现（如有）**：
+

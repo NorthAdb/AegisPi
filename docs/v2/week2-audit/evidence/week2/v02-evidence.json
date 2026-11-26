@@ -1,14 +1,23 @@
 {
   "suite": "V02",
-  "runId": "v02_e07a4c6e",
+  "runId": "v02_2eb0985a",
   "status": "PASS",
   "environmentMode": "substitute_local_fakes",
   "realConnectorsStatus": "待验证（缺少本次实机账号授权、GITHUB_PAT 与 github-mcp-server.exe）",
+  "credentialTargetBindingChecks": {
+    "imapBadSniRejectedCode": "imap_grant_tls_identity_mismatch",
+    "imapBadAccountRejectedCode": "imap_grant_account_mismatch",
+    "imapBadTargetSlotRejectedCode": "imap_credential_target_mismatch",
+    "imapMismatchLoginsDelta": 0,
+    "mcpBadArgsRejectedCode": "mcp_args_mismatch",
+    "mcpMismatchSpawnsDelta": 0
+  },
   "memory": {
     "recalledNoteIds": [
       "mem-l0-helios",
       "mem-l1-detail"
     ],
+    "unauthorizedDomainRefHits": 0,
     "otherPrincipalPrivateHits": 0,
     "tombstonedRefHits": 0,
     "injectedNoteQuarantined": true,
@@ -20,12 +29,16 @@
   "imap": {
     "uid": 102,
     "uidValidity": 20261126,
+    "filterHitSelectedUid": 102,
+    "filterHitUnrelatedUid103Fetched": false,
+    "filterMissCode": "no_matching_message",
+    "filterMissBodyFetchDelta": 0,
     "flagsBefore": [],
     "flagsAfterDirect": [],
     "flagsAfterConnect": [],
     "totalSelectCommands": 0,
-    "totalExamineCommands": 2,
-    "totalBodyPeekFetches": 2,
+    "totalExamineCommands": 3,
+    "totalBodyPeekFetches": 4,
     "totalNonPeekFetches": 0,
     "connectProxyTunnels": 2,
     "wrongCertRejectedBeforeLogin": true,
@@ -35,6 +48,7 @@
   "githubMcp": {
     "serverId": "github-readonly",
     "pinnedArtifactSha256": "280b8fd47db464961cb7e76bf6d1c372e8e8d4ff286535d97e47f05cd20fa490",
+    "pinnedCommandAndArgsVerified": true,
     "inheritEnvFalseVerified": true,
     "unrelatedHostEnvLeaked": false,
     "positiveReadOk": true,
@@ -46,11 +60,15 @@
     "tamperedToolQuarantinedBeforeRpc": true,
     "revokedToolBlockedBeforeRpc": true
   },
-  "modelDisclosure": {
+  "modelDisclosureAndSourceRevocation": {
     "markerLabel": "RESTRICTED_DISCLOSURE_MARKER",
     "deniedBeforeGrantPhysicalSends": 0,
-    "positiveControlMarkerHitsOnFakeModel": 1,
-    "revokedWindowPhysicalSendsDelta": 0,
-    "revokedWindowMarkerHitsDelta": 0
+    "positiveControlMarkerHitsOnFakeModel": 2,
+    "sourceReadRevokedWhileDisclosureActive": {
+      "durableRetryExtraSendsAfterRevoke": 0,
+      "routerWorkerCompactionSendsDelta": 0,
+      "l0AndTaintedMarkerHitsDelta": 0
+    },
+    "disclosureRevokedWhileReadActiveSendsDelta": 0
   }
 }
