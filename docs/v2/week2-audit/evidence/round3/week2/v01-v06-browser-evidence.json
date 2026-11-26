@@ -1,0 +1,97 @@
+{
+  "suite": "V01_V05_V06_BROWSER",
+  "runId": "v01v06_555dbbe5",
+  "status": "PASS",
+  "environment": {
+    "os": "win32 10.0.26300 (x64)",
+    "cpus": 6,
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "dockerVersion": "29.9.2/29.9.2",
+    "approvedImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "browserExe": "msedge.exe",
+    "formalEntrypoint": "src/index.ts",
+    "webBaseUrl": "http://127.0.0.1:54595",
+    "networkCondition": "loopback_127.0.0.1_substitute_fakes",
+    "modelSlots": [
+      "fake-local/fake-router-1 (router)",
+      "fake-local/fake-worker-1 (worker)"
+    ]
+  },
+  "v01": {
+    "formalEntrypointUsed": true,
+    "unconfiguredHostFailClosedVerified": true,
+    "formalStartupPendingResumeReadyVerified": true,
+    "formalStartupResumedFileSha256": "883ccc83e26e65798f23e1da3e6d2a0956e0165457f8002784c2a139f775ed6d",
+    "demoPrompt": "按我记忆里的项目名，读最新一封周报和仓库 README，把两边时间不一致的地方写到 reports/weekly.md。",
+    "conversationId": "8",
+    "selectedEmailUid": 102,
+    "repoCommitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "dateDiscrepanciesVerified": [
+      "发布截止日期: 2026-12-10 vs 2026-12-03",
+      "安全评审时间: 2026-12-05 vs 2026-12-01"
+    ],
+    "timings": {
+      "firstTokenMs": "待验证（本地替身按整段 SSE 块返回，未细分首 token 流）",
+      "firstToolProgressMs": 185,
+      "completionMs": 15231
+    },
+    "sourcesVisibleAfterRefresh": [
+      "memory",
+      "imap",
+      "github_mcp",
+      "workspace_file"
+    ],
+    "budgetSlotsVisible": [
+      "router",
+      "router",
+      "worker",
+      "worker",
+      "worker",
+      "worker",
+      "router"
+    ],
+    "reportPath": "reports/weekly.md",
+    "expectedSha256": "31d1598f4b8470cfa54994d6a8e52b0b31f39762dad5b63608bda58837108c1c",
+    "actualSha256": "31d1598f4b8470cfa54994d6a8e52b0b31f39762dad5b63608bda58837108c1c",
+    "tombstonedAndInjectedExcludedFromUi": true,
+    "xssPlainTextVerified": true
+  },
+  "v04V05Browser": {
+    "persistedChatKeyAcrossReload": "ui-chat-1795669198665-62548f30",
+    "retryAdmittedWithSameChatKey": true,
+    "lateReceiptCrossSessionPreservedNewInput": true,
+    "lateReceiptClearedOriginalPendingKeyOnly": true,
+    "lateReceiptSingleLogicalSubmission": true,
+    "duplicateDeltaIgnored": 1,
+    "duplicatePartialIgnored": 1,
+    "partialGapTriggeredResync": true,
+    "firstFrameGapTriggeredResync": true,
+    "stalePartialOverwrittenBySnapshot": true,
+    "realDisconnectReconnectCursorMatched": true,
+    "oldSessionCardsAfterSwitch": 0,
+    "logoutClosedStreamAndReturned401": true
+  },
+  "v06Browser": {
+    "unsavedEditDisabledApprove": true,
+    "unsavedDraftPreservedAcrossUnrelatedSse": true,
+    "savedNewRevision": 2,
+    "staleRevisionOldTabStatus": 409,
+    "openCardAutoExpiredWithoutReload": true,
+    "expiredOldTabStatus": 410,
+    "expiredSmtpSentDelta": 0,
+    "w1bRealRecoveryBrowserCheck": {
+      "w1bRunId": "w1b_55794765",
+      "killedHostPid": 50708,
+      "conversationId": "8",
+      "effectId": "efx_ddffdbd441984790bee814ebda146ab1",
+      "approvalCount": 1,
+      "claimCount": 1,
+      "smtpTotalReceived": 1,
+      "persistedAfterReloadLabel": "结果待核对"
+    },
+    "badOriginStatus": 403,
+    "missingOriginStatus": 403,
+    "unauthStatus": 401
+  }
+}

@@ -1,8 +1,7 @@
 {
-  "runId": "week2_57fd5f62",
-  "commitSha": "efba0eda53a21cf5f935846377f8ab03ff42eb69",
-  "status": "PASS",
-  "executedAt": "2026-11-26T03:46:51.176Z",
+  "runId": "week2_203150f4",
+  "commitSha": "ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb",
+  "executedAt": "2026-11-26T02:36:34.805Z",
   "environment": {
     "nodeExe": "node.exe",
     "nodeVersion": "v22.23.5",
@@ -19,28 +18,28 @@
       "status": "PASS",
       "violations": []
     },
+    "s6": {
+      "status": "PASS",
+      "runId": "s6_317c0d82",
+      "totalForbiddenHits": 0
+    },
     "v04_v05": {
       "status": "PASS",
-      "runId": "v04v05_c965b9dc"
+      "runId": "v04v05_43885a5b"
     },
     "v02": {
       "status": "PASS",
-      "runId": "v02_2eb0985a",
+      "runId": "v02_e07a4c6e",
       "environmentMode": "substitute_local_fakes",
       "realConnectorsStatus": "待验证（缺少本次实机账号授权、GITHUB_PAT 与 github-mcp-server.exe）"
     },
     "v03": {
       "status": "PASS",
-      "runId": "v03_00298889"
-    },
-    "s6": {
-      "status": "PASS",
-      "runId": "s6_c5a55850",
-      "totalForbiddenHits": 0
+      "runId": "v03_6ecb96be"
     },
     "v01_v05_v06_browser": {
       "status": "PASS",
-      "runId": "v01v06_4fc0ba05"
+      "runId": "v01v06_667b26b0"
     }
   }
 }

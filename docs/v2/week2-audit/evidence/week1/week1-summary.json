@@ -1,6 +1,6 @@
 {
-  "runId": "week1_61255801",
-  "executedAt": "2026-11-26T03:43:40.515Z",
+  "runId": "week1_0c6fd47a",
+  "executedAt": "2026-11-26T02:34:06.170Z",
   "environment": {
     "nodeExe": "node.exe",
     "nodeVersion": "v22.23.5",
@@ -9,7 +9,7 @@
     "arch": "x64"
   },
   "dataDirLabel": "data",
-  "evidenceDirRelative": "<TEMP>/aegis-w2r2-w1-733c4571/evidence",
+  "evidenceDirRelative": "<TEMP>/aegis-w2-w1-a941f120-5c6f-4dd6-9256-c0c0085198df/evidence",
   "results": {
     "typecheck": {
       "status": "PASS",
@@ -25,7 +25,7 @@
     },
     "w1_b_and_e06": {
       "status": "PASS",
-      "effectId": "efx_17db48eb65b746bbb311e3036cddb151",
+      "effectId": "efx_a188d34a18874f61bc76ba52cd3817b3",
       "smtpTotalReceived": 1,
       "finalEffectState": "UNKNOWN",
       "view1Label": "结果待核对"
