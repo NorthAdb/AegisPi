@@ -108,6 +108,7 @@ export function renderMinimalView1Html(): string {
 
   <script>
     const state = {
+      principalId: null,
       conversationId: null,
       runtimeEpoch: null,
       activeRuntimeEpoch: null,
@@ -119,11 +120,51 @@ export function renderMinimalView1Html(): string {
       eventSource: null,
       selectionGeneration: 0,
       dirtyByProposal: {},
-      pendingChat: { key: null, content: null, convId: null },
+      localDraftTextByProposal: {},
+      serverClockOffsetMs: 0,
+      pendingChat: { key: null, content: null, convId: null, epoch: null },
       sseFramesReceived: 0,
       livePartialText: null
     };
     window.__aegisView1State = state;
+
+    function pendingChatStorageKey(principalId, epoch, convId) {
+      return 'aegispi:pendingChat:' + String(principalId || '') + ':' + String(epoch || '') + ':' + String(convId || '');
+    }
+
+    function loadPendingChatFor(convId, epoch) {
+      if (!state.principalId || !epoch || !convId) {
+        return { key: null, content: null, convId: null, epoch: null };
+      }
+      try {
+        const raw = window.sessionStorage.getItem(pendingChatStorageKey(state.principalId, epoch, convId));
+        if (!raw) return { key: null, content: null, convId: null, epoch: null };
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.key === 'string' && typeof parsed.content === 'string') {
+          return { key: parsed.key, content: parsed.content, convId: String(convId), epoch: String(epoch) };
+        }
+      } catch {}
+      return { key: null, content: null, convId: null, epoch: null };
+    }
+
+    function savePendingChatFor(convId, epoch, key, content) {
+      state.pendingChat = { key, content, convId: String(convId), epoch: String(epoch) };
+      if (!state.principalId || !epoch || !convId) return;
+      try {
+        window.sessionStorage.setItem(
+          pendingChatStorageKey(state.principalId, epoch, convId),
+          JSON.stringify({ key, content })
+        );
+      } catch {}
+    }
+
+    function clearPendingChatFor(convId, epoch) {
+      state.pendingChat = { key: null, content: null, convId: null, epoch: null };
+      if (!state.principalId || !epoch || !convId) return;
+      try {
+        window.sessionStorage.removeItem(pendingChatStorageKey(state.principalId, epoch, convId));
+      } catch {}
+    }
 
     const AUTH_PANELS = [
       'workspace-panel',
@@ -223,6 +264,7 @@ export function renderMinimalView1Html(): string {
       }
       document.getElementById('login-panel').style.display = 'none';
       AUTH_PANELS.forEach(id => { document.getElementById(id).style.display = 'block'; });
+      state.principalId = r.body.principalId || state.principalId;
       state.activeRuntimeEpoch = r.body.activeRuntimeEpoch || state.activeRuntimeEpoch;
       const sel = document.getElementById('conv-select');
       clearEl(sel);
@@ -255,6 +297,16 @@ export function renderMinimalView1Html(): string {
       state.streamInstanceId = null;
       state.lastSeq = 0;
 
+      // W2-S4: Restore persisted pending chatKey & draft for (principalId, runtimeEpoch, conversationId) across switch/reload!
+      const restored = loadPendingChatFor(state.conversationId, state.runtimeEpoch);
+      state.pendingChat = restored;
+      const chatInputEl = document.getElementById('chat-input');
+      if (restored.key && restored.content) {
+        chatInputEl.value = restored.content;
+      } else {
+        chatInputEl.value = '';
+      }
+
       const q = state.runtimeEpoch ? ('?epoch=' + encodeURIComponent(state.runtimeEpoch)) : '';
       const r = await api('/api/conversations/' + encodeURIComponent(convId) + '/snapshot' + q, { method: 'GET' });
       // Drop late response if user switched conversations or logged out!
@@ -264,6 +316,9 @@ export function renderMinimalView1Html(): string {
         return;
       }
       if (!r.ok) return;
+      if (typeof r.body.serverNow === 'number') {
+        state.serverClockOffsetMs = r.body.serverNow - Date.now();
+      }
       applyAuthoritativeSnapshot(r.body, gen);
       openSse(convId, r.body.runtimeEpoch, r.body.cursor, gen);
     }
@@ -271,6 +326,9 @@ export function renderMinimalView1Html(): string {
     function applyAuthoritativeSnapshot(snap, gen) {
       if (gen !== state.selectionGeneration) return;
       if (String(snap.conversationId) !== String(state.conversationId)) return;
+      if (typeof snap.serverNow === 'number') {
+        state.serverClockOffsetMs = snap.serverNow - Date.now();
+      }
       state.snapshot = snap;
       state.runtimeEpoch = snap.runtimeEpoch;
       state.streamInstanceId = snap.streamInstanceId || state.streamInstanceId;
@@ -303,29 +361,37 @@ export function renderMinimalView1Html(): string {
       state.eventSource = es;
       updateSseStatus('已订阅');
 
-      const handleDataFrame = (ev) => {
-        if (gen !== state.selectionGeneration) { es.close(); return; }
+      // W2-S4: Unified sequence continuity guard for ALL sequenced frames (snapshot, delta, partial) including first-frame gap!
+      const acceptSequencedFrame = (ev) => {
+        if (gen !== state.selectionGeneration) { es.close(); return false; }
         state.sseFramesReceived++;
         const parsedId = parseCursor(ev.lastEventId);
         if (parsedId) {
           if (state.streamInstanceId && parsedId.streamInstanceId !== state.streamInstanceId) {
             state.resyncCount++;
+            es.close();
             void selectAndSubscribe(convId, epoch);
-            return;
+            return false;
           }
           if (parsedId.seq <= state.lastSeq) {
             state.duplicateIgnoredCount++;
             updateSseStatus('已忽略重复帧');
-            return;
+            return false;
           }
-          if (state.lastSeq > 0 && parsedId.seq > state.lastSeq + 1) {
+          if (parsedId.seq > state.lastSeq + 1) {
             state.resyncCount++;
+            es.close();
             updateSseStatus('检测到断号，重取快照');
             void selectAndSubscribe(convId, epoch);
-            return;
+            return false;
           }
           state.lastSeq = parsedId.seq;
         }
+        return true;
+      };
+
+      const handleDataFrame = (ev) => {
+        if (!acceptSequencedFrame(ev)) return;
         try {
           const parsed = JSON.parse(ev.data);
           const snap = parsed.snapshot ? parsed.snapshot : parsed;
@@ -338,8 +404,7 @@ export function renderMinimalView1Html(): string {
       es.addEventListener('snapshot', handleDataFrame);
       es.addEventListener('delta', handleDataFrame);
       es.addEventListener('partial', (ev) => {
-        if (gen !== state.selectionGeneration) { es.close(); return; }
-        state.sseFramesReceived++;
+        if (!acceptSequencedFrame(ev)) return;
         try {
           const parsed = JSON.parse(ev.data);
           const txt = parsed.text || (parsed.detail && parsed.detail.text) || '';
@@ -487,18 +552,26 @@ export function renderMinimalView1Html(): string {
         aList.appendChild(textEl('div', '无待审批或外发记录', 'muted'));
       } else {
         for (const p of snap.proposals) {
+          const estNow = Date.now() + state.serverClockOffsetMs;
+          const locallyExpired = p.approvalState === 'PENDING' && typeof p.expiresAt === 'number' && estNow >= p.expiresAt;
+          const effectiveState = locallyExpired ? 'EXPIRED' : p.approvalState;
+          const effectiveLabel = locallyExpired ? '已过期' : p.uiStatusLabel;
+
           const card = document.createElement('div');
           card.className = 'item';
           card.setAttribute('data-proposal-id', p.proposalId);
           card.setAttribute('data-approval-id', p.approvalId);
-          card.setAttribute('data-approval-state', p.approvalState);
+          card.setAttribute('data-approval-state', effectiveState);
+          card.setAttribute('data-expires-at', typeof p.expiresAt === 'number' ? String(p.expiresAt) : '');
           card.setAttribute('data-effect-id', p.effect ? p.effect.effectId : '');
           card.setAttribute('data-effect-state', p.effect ? p.effect.state : '');
 
           const top = document.createElement('div');
           top.className = 'row';
           top.appendChild(textEl('strong', p.toolName + ' -> ' + p.target));
-          top.appendChild(textEl('span', p.uiStatusLabel, badgeClass(p.uiStatusLabel)));
+          const statusBadge = textEl('span', effectiveLabel, badgeClass(effectiveLabel));
+          statusBadge.setAttribute('data-role', 'status-badge');
+          top.appendChild(statusBadge);
           top.appendChild(textEl('span', 'rev=' + p.revision + ' hash=' + p.actionHash.slice(0, 12), 'muted'));
           card.appendChild(top);
 
@@ -506,13 +579,22 @@ export function renderMinimalView1Html(): string {
             card.appendChild(textEl('div', 'effectId=' + p.effect.effectId + ' | state=' + p.effect.state + (p.effect.receiptRef ? ' | receipt=' + p.effect.receiptRef : '') + (p.effect.reason ? ' | reason=' + p.effect.reason : ''), 'muted'));
           }
 
-          const isPendingActive = p.approvalState === 'PENDING' && !p.expired;
+          const isPendingActive = effectiveState === 'PENDING' && !p.expired && !locallyExpired;
+          if (!isPendingActive) {
+            delete state.dirtyByProposal[p.proposalId];
+            delete state.localDraftTextByProposal[p.proposalId];
+          }
           const payload = (p.snapshot && p.snapshot.payload) ? p.snapshot.payload : {};
           const bodyBox = document.createElement('textarea');
           bodyBox.rows = 3;
           bodyBox.style.width = '100%';
           bodyBox.style.marginTop = '6px';
-          bodyBox.value = String(payload.body || '');
+          // W2-S7: Preserve unsaved local draft text across SSE re-renders while dirty!
+          if (isPendingActive && state.dirtyByProposal[p.proposalId] && typeof state.localDraftTextByProposal[p.proposalId] === 'string') {
+            bodyBox.value = state.localDraftTextByProposal[p.proposalId];
+          } else {
+            bodyBox.value = String(payload.body || '');
+          }
           bodyBox.disabled = !isPendingActive;
           card.appendChild(bodyBox);
 
@@ -538,6 +620,7 @@ export function renderMinimalView1Html(): string {
 
           bodyBox.addEventListener('input', () => {
             state.dirtyByProposal[p.proposalId] = true;
+            state.localDraftTextByProposal[p.proposalId] = bodyBox.value;
             approveBtn.disabled = true;
           });
 
@@ -553,6 +636,7 @@ export function renderMinimalView1Html(): string {
             });
             if (res.ok) {
               state.dirtyByProposal[p.proposalId] = false;
+              delete state.localDraftTextByProposal[p.proposalId];
               cardMsg.textContent = '已保存新版本 rev=' + (res.body.revision ? res.body.revision.revision : '');
               await selectAndSubscribe(snap.conversationId, snap.runtimeEpoch);
             } else {
@@ -654,8 +738,10 @@ export function renderMinimalView1Html(): string {
     document.getElementById('logout-btn').addEventListener('click', async () => {
       closeSse();
       await api('/api/auth/logout', { method: 'POST', body: '{}' });
+      state.principalId = null;
       state.conversationId = null;
       state.runtimeEpoch = null;
+      state.pendingChat = { key: null, content: null, convId: null, epoch: null };
       clearAllSessionViews();
       await loadConversations();
     });
@@ -675,7 +761,7 @@ export function renderMinimalView1Html(): string {
 
     document.getElementById('conv-select').addEventListener('change', async (e) => {
       const [cid, ep] = String(e.target.value).split('|');
-      state.pendingChat = { key: null, content: null, convId: null };
+      // W2-S4: Do NOT destroy persisted pending chatKey in sessionStorage on conversation switch!
       await selectAndSubscribe(cid, ep);
     });
 
@@ -683,18 +769,20 @@ export function renderMinimalView1Html(): string {
       const inputEl = document.getElementById('chat-input');
       const statusEl = document.getElementById('chat-status');
       const content = inputEl.value.trim();
-      if (!content || !state.conversationId) return;
-      // Preserve same chatKey on retry / double-click for identical (convId, content)
-      if (
+      const targetEpoch = state.runtimeEpoch || state.activeRuntimeEpoch;
+      if (!content || !state.conversationId || !targetEpoch) return;
+      // W2-S4: Preserve same chatKey across retry, double-click, switch, AND browser reload for identical (principalId, epoch, convId, content)!
+      const stored = loadPendingChatFor(state.conversationId, targetEpoch);
+      if (stored.key && stored.content === content) {
+        state.pendingChat = stored;
+      } else if (
         !state.pendingChat.key ||
         state.pendingChat.content !== content ||
-        state.pendingChat.convId !== state.conversationId
+        state.pendingChat.convId !== state.conversationId ||
+        state.pendingChat.epoch !== targetEpoch
       ) {
-        state.pendingChat = {
-          key: 'ui-chat-' + Date.now() + '-' + Math.random().toString(16).slice(2, 10),
-          content,
-          convId: state.conversationId
-        };
+        const freshKey = 'ui-chat-' + Date.now() + '-' + Math.random().toString(16).slice(2, 10);
+        savePendingChatFor(state.conversationId, targetEpoch, freshKey, content);
       }
       const chatKey = state.pendingChat.key;
       const r = await api('/api/conversations/' + encodeURIComponent(state.conversationId) + '/chat', {
@@ -702,19 +790,45 @@ export function renderMinimalView1Html(): string {
         body: JSON.stringify({
           content,
           chatKey,
-          runtimeEpoch: state.runtimeEpoch || state.activeRuntimeEpoch
+          runtimeEpoch: targetEpoch
         })
       });
       if (r.ok) {
         statusEl.textContent = (r.body.uiStatusLabel || '已受理') + ' | chatKey=' + chatKey + ' | submissionId=' + (r.body.submissionId ?? '-');
         if (r.body.status === 'ADMITTED') {
           inputEl.value = '';
-          state.pendingChat = { key: null, content: null, convId: null };
+          clearPendingChatFor(state.conversationId, targetEpoch);
         }
       } else {
         statusEl.textContent = '提交失败 (' + r.status + '): ' + (r.body.code || r.body.error || '');
       }
     });
+
+    // W2-S7: Live local expiry guard — disables Approve on open cards as soon as expiresAt passes WITHOUT manual reload!
+    function enforceLocalProposalExpirations() {
+      const estNow = Date.now() + state.serverClockOffsetMs;
+      const cards = document.querySelectorAll('#approvals-list [data-approval-state="PENDING"]');
+      for (const card of cards) {
+        const expRaw = card.getAttribute('data-expires-at');
+        const exp = expRaw ? Number(expRaw) : NaN;
+        if (Number.isFinite(exp) && estNow >= exp) {
+          card.setAttribute('data-approval-state', 'EXPIRED');
+          const badge = card.querySelector('[data-role="status-badge"]');
+          if (badge) {
+            badge.textContent = '已过期';
+            badge.className = 'badge err';
+          }
+          const pid = card.getAttribute('data-proposal-id');
+          if (pid) {
+            delete state.dirtyByProposal[pid];
+            delete state.localDraftTextByProposal[pid];
+          }
+          const controls = card.querySelectorAll('button, textarea');
+          for (const el of controls) el.disabled = true;
+        }
+      }
+    }
+    setInterval(enforceLocalProposalExpirations, 200);
 
     loadHealth().then(loadConversations);
   </script>

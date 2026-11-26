@@ -9,6 +9,8 @@ export interface McpServerPinRow {
   server_id: string;
   executable_path: string;
   executable_sha256: string;
+  command: string;
+  args_json: string;
   read_only_mode: number;
   approved_by: string;
   approved_at: number;
@@ -56,6 +58,8 @@ export function pinMcpServerBinary(
     serverId: string;
     executablePath: string;
     executableSha256: string;
+    command?: string;
+    args?: string[];
     readOnlyMode?: boolean;
     approvedBy: string;
     now: number;
@@ -64,13 +68,27 @@ export function pinMcpServerBinary(
   if (!path.isAbsolute(params.executablePath)) {
     throw new Error(`MCP server executable path must be absolute: ${params.executablePath}`);
   }
+  const command = params.command ?? params.executablePath;
+  if (!path.isAbsolute(command)) {
+    throw new Error(`MCP server launch command must be absolute: ${command}`);
+  }
+  const args = params.args ? [...params.args] : [];
+  if (command !== params.executablePath && !args.includes(params.executablePath)) {
+    throw new Error(
+      `MCP server launch args must include pinned artifact ${params.executablePath} when launching via wrapper ${command}`,
+    );
+  }
   return withImmediateTx(db, () => {
     db.prepare(
-      `INSERT INTO mcp_server_pins(server_id, executable_path, executable_sha256, read_only_mode, approved_by, approved_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO mcp_server_pins(
+         server_id, executable_path, executable_sha256, command, args_json, read_only_mode, approved_by, approved_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(server_id) DO UPDATE SET
          executable_path = excluded.executable_path,
          executable_sha256 = excluded.executable_sha256,
+         command = excluded.command,
+         args_json = excluded.args_json,
          read_only_mode = excluded.read_only_mode,
          approved_by = excluded.approved_by,
          approved_at = excluded.approved_at`,
@@ -78,6 +96,8 @@ export function pinMcpServerBinary(
       params.serverId,
       params.executablePath,
       params.executableSha256.toLowerCase(),
+      command,
+      JSON.stringify(args),
       params.readOnlyMode === false ? 0 : 1,
       params.approvedBy,
       params.now,
@@ -91,6 +111,8 @@ export function pinMcpServerBinary(
       details: {
         executablePath: params.executablePath,
         executableSha256: params.executableSha256.toLowerCase(),
+        command,
+        args,
         readOnlyMode: params.readOnlyMode !== false,
         approvedBy: params.approvedBy,
       },
@@ -104,7 +126,12 @@ export function pinMcpServerBinary(
 export function verifyMcpServerBinary(
   db: DatabaseSync,
   serverId: string,
-): { ok: true; pin: McpServerPinRow; actualSha256: string } | { ok: false; code: string; reason: string } {
+  launch?: {
+    command: string;
+    args: string[];
+    pinnedArtifactPath?: string;
+  },
+): { ok: true; pin: McpServerPinRow; actualSha256: string; pinnedCommand: string; pinnedArgs: string[] } | { ok: false; code: string; reason: string } {
   const pin = db
     .prepare("SELECT * FROM mcp_server_pins WHERE server_id = ?")
     .get(serverId) as McpServerPinRow | undefined;
@@ -125,7 +152,51 @@ export function verifyMcpServerBinary(
       reason: `MCP binary SHA-256 mismatch for ${serverId}: expected ${pin.executable_sha256}, actual ${actualSha256}`,
     };
   }
-  return { ok: true, pin, actualSha256 };
+  const pinnedCommand = pin.command && pin.command.length > 0 ? pin.command : pin.executable_path;
+  let pinnedArgs: string[] = [];
+  try {
+    const parsed = JSON.parse(pin.args_json || "[]") as unknown;
+    if (!Array.isArray(parsed) || !parsed.every((a) => typeof a === "string")) {
+      return { ok: false, code: "mcp_pin_args_invalid", reason: `Invalid pinned args_json for ${serverId}` };
+    }
+    pinnedArgs = parsed;
+  } catch {
+    return { ok: false, code: "mcp_pin_args_invalid", reason: `Malformed pinned args_json for ${serverId}` };
+  }
+  if (!path.isAbsolute(pinnedCommand) || !existsSync(pinnedCommand)) {
+    return {
+      ok: false,
+      code: "mcp_command_missing",
+      reason: `Pinned MCP command does not exist or is not absolute: ${pinnedCommand}`,
+    };
+  }
+  if (launch) {
+    if (launch.pinnedArtifactPath && launch.pinnedArtifactPath !== pin.executable_path) {
+      return {
+        ok: false,
+        code: "mcp_binary_path_mismatch",
+        reason: `Configured artifact ${launch.pinnedArtifactPath} does not match pinned path ${pin.executable_path}`,
+      };
+    }
+    if (launch.command !== pinnedCommand) {
+      return {
+        ok: false,
+        code: "mcp_command_mismatch",
+        reason: `Launch command ${launch.command} does not match pinned command ${pinnedCommand}`,
+      };
+    }
+    if (
+      launch.args.length !== pinnedArgs.length ||
+      launch.args.some((arg, i) => arg !== pinnedArgs[i])
+    ) {
+      return {
+        ok: false,
+        code: "mcp_args_mismatch",
+        reason: `Launch args do not match pinned args for ${serverId}`,
+      };
+    }
+  }
+  return { ok: true, pin, actualSha256, pinnedCommand, pinnedArgs };
 }
 
 export function approveMcpToolDefinition(

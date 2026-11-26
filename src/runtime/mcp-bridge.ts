@@ -96,21 +96,17 @@ export class GitHubMcpBridge {
     approvedTools: string[];
     quarantinedTools: Array<{ name: string; code: string; reason: string }>;
   }> {
-    const binCheck = verifyMcpServerBinary(this.#config.govDb, this.#config.serverId);
+    const launchArgs = this.#config.args ?? [];
+    const binCheck = verifyMcpServerBinary(this.#config.govDb, this.#config.serverId, {
+      command: this.#config.command,
+      args: launchArgs,
+      pinnedArtifactPath: this.#config.pinnedArtifactPath,
+    });
     if (!binCheck.ok) {
       return {
         ok: false,
         code: binCheck.code,
         reason: binCheck.reason,
-        approvedTools: [],
-        quarantinedTools: [],
-      };
-    }
-    if (this.#config.pinnedArtifactPath && binCheck.pin.executable_path !== this.#config.pinnedArtifactPath) {
-      return {
-        ok: false,
-        code: "mcp_binary_path_mismatch",
-        reason: `Configured path ${this.#config.pinnedArtifactPath} does not match pinned path ${binCheck.pin.executable_path}`,
         approvedTools: [],
         quarantinedTools: [],
       };
@@ -126,16 +122,24 @@ export class GitHubMcpBridge {
     }
     this.#verifiedSha256 = binCheck.actualSha256;
 
-    const pat = this.#config.vault.resolveConnectorSecretInMemory(this.#config.credentialSlotId, "github_mcp");
-    if (!pat) {
+    const patRes = this.#config.vault.resolveGithubMcpSecretForTarget(this.#config.credentialSlotId, {
+      serverId: this.#config.serverId,
+      command: binCheck.pinnedCommand,
+      args: binCheck.pinnedArgs,
+      executablePath: binCheck.pin.executable_path,
+      executableSha256: binCheck.actualSha256,
+      readOnlyMode: binCheck.pin.read_only_mode === 1,
+    });
+    if (!patRes.ok) {
       return {
         ok: false,
-        code: "missing_mcp_credential",
-        reason: `GitHub MCP credential slot ${this.#config.credentialSlotId} not found in host memory`,
+        code: patRes.code,
+        reason: patRes.reason,
         approvedTools: [],
         quarantinedTools: [],
       };
     }
+    const pat = patRes.secret;
 
     const patEnvKey = this.#config.patEnvVarName ?? "GITHUB_PERSONAL_ACCESS_TOKEN";
     const env = buildMinimalWindowsEnv({
@@ -145,8 +149,8 @@ export class GitHubMcpBridge {
     });
 
     const transport = new StdioTransport({
-      command: this.#config.command,
-      args: this.#config.args ?? [],
+      command: binCheck.pinnedCommand,
+      args: binCheck.pinnedArgs,
       inheritEnv: false,
       env,
       stderr: "pipe",

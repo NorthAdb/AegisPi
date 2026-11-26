@@ -64,6 +64,8 @@ interface ConversationProjection<TSnapshot extends Record<string, unknown>> {
   piAttach: ProjectionSourceAttach | null;
   invalidated: boolean;
   rebuilding: Promise<void> | null;
+  pendingRefresh: { reason: string; detail?: Record<string, unknown>; forcedEventKind?: "delta" | "partial" } | null;
+  refreshGeneration: number;
   lastRefreshAt: number;
 }
 
@@ -198,6 +200,8 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
         piAttach,
         invalidated: sourceEndedEarly,
         rebuilding: null,
+        pendingRefresh: null,
+        refreshGeneration: 0,
         lastRefreshAt: this.#now(),
       };
 
@@ -298,60 +302,102 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
     forcedEventKind?: "delta" | "partial",
   ): Promise<void> {
     if (proj.invalidated) return;
-    const fresh = await this.#options.buildSnapshot({
-      principalId: proj.principalId,
-      runtimeEpoch: proj.runtimeEpoch,
-      conversationId: proj.conversationId,
-    });
-    if (!fresh) {
-      this.#invalidateProjection(proj, "acl_revoked_or_removed");
-      return;
-    }
-
-    const freshDigest = canonicalJson(fresh);
-    if (freshDigest === proj.latestSnapshotDigest && !forcedEventKind) {
-      return;
-    }
-
-    const nextSeq = proj.seq + 1;
-    const cursor = formatCursor(proj.streamInstanceId, nextSeq);
-    const stampedSnap = {
-      ...fresh,
-      streamInstanceId: proj.streamInstanceId,
-      seq: nextSeq,
-      cursor,
-      snapshotVersion: nextSeq,
-    } as TSnapshot;
-
-    const ev: ProjectionEvent = {
-      seq: nextSeq,
-      streamInstanceId: proj.streamInstanceId,
-      event: forcedEventKind ?? "delta",
-      cursor,
-      occurredAt: this.#now(),
-      payload: {
+    // W2-S4: Strictly serialize refreshes per conversation!
+    // If a refresh is already in flight, coalesce into pendingRefresh and await the full drain
+    // so an older async buildSnapshot() can NEVER publish a higher seq after a newer read!
+    if (proj.rebuilding) {
+      proj.pendingRefresh = {
         reason,
-        ...(detail ? { detail } : {}),
-        snapshot: stampedSnap,
-      },
+        detail,
+        forcedEventKind: forcedEventKind ?? proj.pendingRefresh?.forcedEventKind,
+      };
+      await proj.rebuilding;
+      return;
+    }
+
+    const runLoop = async (): Promise<void> => {
+      let curReason = reason;
+      let curDetail = detail;
+      let curForced = forcedEventKind;
+
+      for (;;) {
+        if (proj.invalidated) return;
+        const myGen = ++proj.refreshGeneration;
+        const fresh = await this.#options.buildSnapshot({
+          principalId: proj.principalId,
+          runtimeEpoch: proj.runtimeEpoch,
+          conversationId: proj.conversationId,
+        });
+        if (proj.invalidated) return;
+        // If another newer generation somehow advanced, discard stale result
+        if (myGen !== proj.refreshGeneration) {
+          if (!proj.pendingRefresh) return;
+        } else if (!fresh) {
+          this.#invalidateProjection(proj, "acl_revoked_or_removed");
+          return;
+        } else {
+          const freshDigest = canonicalJson(fresh);
+          if (freshDigest !== proj.latestSnapshotDigest || curForced) {
+            const nextSeq = proj.seq + 1;
+            const cursor = formatCursor(proj.streamInstanceId, nextSeq);
+            const stampedSnap = {
+              ...fresh,
+              streamInstanceId: proj.streamInstanceId,
+              seq: nextSeq,
+              cursor,
+              snapshotVersion: nextSeq,
+            } as TSnapshot;
+
+            const ev: ProjectionEvent = {
+              seq: nextSeq,
+              streamInstanceId: proj.streamInstanceId,
+              event: curForced ?? "delta",
+              cursor,
+              occurredAt: this.#now(),
+              payload: {
+                reason: curReason,
+                ...(curDetail ? { detail: curDetail } : {}),
+                snapshot: stampedSnap,
+              },
+            };
+
+            proj.seq = nextSeq;
+            proj.latestSnapshot = stampedSnap;
+            proj.latestSnapshotDigest = freshDigest;
+            proj.lastRefreshAt = this.#now();
+            proj.events.push(ev);
+            if (proj.events.length > this.#maxHistory) {
+              proj.events.splice(0, proj.events.length - this.#maxHistory);
+            }
+
+            const serialized = JSON.stringify(ev.payload);
+            for (const sub of [...proj.subscribers]) {
+              this.#enqueueFrame(proj, sub, {
+                event: ev.event,
+                id: ev.cursor,
+                data: serialized,
+              });
+            }
+          }
+        }
+
+        const next = proj.pendingRefresh;
+        if (!next) break;
+        proj.pendingRefresh = null;
+        curReason = next.reason;
+        curDetail = next.detail;
+        curForced = next.forcedEventKind;
+      }
     };
 
-    proj.seq = nextSeq;
-    proj.latestSnapshot = stampedSnap;
-    proj.latestSnapshotDigest = freshDigest;
-    proj.lastRefreshAt = this.#now();
-    proj.events.push(ev);
-    if (proj.events.length > this.#maxHistory) {
-      proj.events.splice(0, proj.events.length - this.#maxHistory);
-    }
-
-    const serialized = JSON.stringify(ev.payload);
-    for (const sub of [...proj.subscribers]) {
-      this.#enqueueFrame(proj, sub, {
-        event: ev.event,
-        id: ev.cursor,
-        data: serialized,
-      });
+    const p = runLoop();
+    proj.rebuilding = p;
+    try {
+      await p;
+    } finally {
+      if (proj.rebuilding === p) {
+        proj.rebuilding = null;
+      }
     }
   }
 
@@ -543,6 +589,17 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
       if (proj.runtimeEpoch === runtimeEpoch) {
         this.#invalidateProjection(proj, reason);
       }
+    }
+  }
+
+  invalidateConversation(
+    params: { principalId: string; runtimeEpoch: string; conversationId: string },
+    reason = "source_read_revoked",
+  ): void {
+    const key = this.#keyOf(params.principalId, params.runtimeEpoch, params.conversationId);
+    const proj = this.#projections.get(key);
+    if (proj) {
+      this.#invalidateProjection(proj, reason);
     }
   }
 

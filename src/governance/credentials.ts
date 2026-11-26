@@ -71,16 +71,58 @@ export interface ModelPriceSchedule {
   syntheticFixedActualMu?: number | null;
 }
 
+export interface ImapCredentialBinding {
+  host: string;
+  port?: number;
+  servername: string;
+  username: string;
+  allowedMailboxes?: string[];
+  proxyHost?: string;
+  proxyPort?: number;
+}
+
+export interface GithubMcpCredentialBinding {
+  serverId: string;
+  command: string;
+  args: string[];
+  executablePath: string;
+  executableSha256: string;
+  readOnlyRequired?: boolean;
+}
+
+export interface SmtpCredentialBinding {
+  host: string;
+  port?: number;
+  fromAddress?: string;
+}
+
+export type ConnectorCredentialBinding =
+  | { kind: "imap"; binding: ImapCredentialBinding }
+  | { kind: "github_mcp"; binding: GithubMcpCredentialBinding }
+  | { kind: "smtp"; binding: SmtpCredentialBinding };
+
+interface StoredConnectorSecret {
+  kind: "imap" | "github_mcp" | "smtp";
+  target: string;
+  secret: string;
+  imapBinding?: ImapCredentialBinding;
+  githubMcpBinding?: GithubMcpCredentialBinding;
+  smtpBinding?: SmtpCredentialBinding;
+}
+
 export class HostCredentialVault {
   readonly #secrets = new Map<string, string>();
   readonly #bindings = new Map<string, CredentialSlotBinding>();
-  readonly #connectorSecrets = new Map<string, { kind: "imap" | "github_mcp" | "smtp"; target: string; secret: string }>();
+  readonly #connectorSecrets = new Map<string, StoredConnectorSecret>();
 
   registerConnectorSlot(params: {
     slotId: string;
     kind: "imap" | "github_mcp" | "smtp";
     target: string;
     secretValue: string;
+    imapBinding?: ImapCredentialBinding;
+    githubMcpBinding?: GithubMcpCredentialBinding;
+    smtpBinding?: SmtpCredentialBinding;
   }): void {
     if (!params.slotId || !params.secretValue) {
       throw new Error("Connector credential slot requires slotId and non-empty secretValue");
@@ -89,7 +131,186 @@ export class HostCredentialVault {
       kind: params.kind,
       target: params.target,
       secret: params.secretValue,
+      ...(params.imapBinding
+        ? {
+            imapBinding: {
+              ...params.imapBinding,
+              allowedMailboxes: params.imapBinding.allowedMailboxes
+                ? [...params.imapBinding.allowedMailboxes]
+                : undefined,
+            },
+          }
+        : {}),
+      ...(params.githubMcpBinding
+        ? {
+            githubMcpBinding: {
+              ...params.githubMcpBinding,
+              args: [...params.githubMcpBinding.args],
+              executableSha256: params.githubMcpBinding.executableSha256.toLowerCase(),
+              readOnlyRequired: params.githubMcpBinding.readOnlyRequired ?? true,
+            },
+          }
+        : {}),
+      ...(params.smtpBinding ? { smtpBinding: { ...params.smtpBinding } } : {}),
     });
+  }
+
+  resolveImapSecretForTarget(
+    slotId: string,
+    target: {
+      host: string;
+      port: number;
+      servername: string;
+      username: string;
+      mailbox: string;
+      proxy?: { host: string; port: number };
+    },
+  ): { ok: true; secret: string } | { ok: false; code: string; reason: string } {
+    const entry = this.#connectorSecrets.get(slotId);
+    if (!entry || entry.kind !== "imap") {
+      return {
+        ok: false,
+        code: "missing_imap_credential",
+        reason: `IMAP credential slot ${slotId} not loaded in host memory`,
+      };
+    }
+    const b = entry.imapBinding;
+    if (!b) {
+      return {
+        ok: false,
+        code: "imap_credential_unbound",
+        reason: `IMAP credential slot ${slotId} lacks required target/TLS/account binding`,
+      };
+    }
+    if (b.host.trim().toLowerCase() !== target.host.trim().toLowerCase()) {
+      return {
+        ok: false,
+        code: "imap_credential_target_mismatch",
+        reason: `IMAP slot ${slotId} bound to host ${b.host}, not ${target.host}`,
+      };
+    }
+    if (b.port !== undefined && b.port !== target.port) {
+      return {
+        ok: false,
+        code: "imap_credential_target_mismatch",
+        reason: `IMAP slot ${slotId} bound to port ${b.port}, not ${target.port}`,
+      };
+    }
+    if (b.servername.trim().toLowerCase() !== target.servername.trim().toLowerCase()) {
+      return {
+        ok: false,
+        code: "imap_credential_tls_identity_mismatch",
+        reason: `IMAP slot ${slotId} bound to TLS servername ${b.servername}, not ${target.servername}`,
+      };
+    }
+    if (b.username !== target.username) {
+      return {
+        ok: false,
+        code: "imap_credential_account_mismatch",
+        reason: `IMAP slot ${slotId} bound to account ${b.username}, not ${target.username}`,
+      };
+    }
+    if (b.allowedMailboxes && b.allowedMailboxes.length > 0) {
+      if (!b.allowedMailboxes.includes(target.mailbox) && !b.allowedMailboxes.includes("*")) {
+        return {
+          ok: false,
+          code: "imap_credential_mailbox_mismatch",
+          reason: `IMAP slot ${slotId} does not allow mailbox ${target.mailbox}`,
+        };
+      }
+    }
+    if (b.proxyHost !== undefined) {
+      if (!target.proxy || b.proxyHost.toLowerCase() !== target.proxy.host.toLowerCase()) {
+        return {
+          ok: false,
+          code: "imap_credential_proxy_mismatch",
+          reason: `IMAP slot ${slotId} proxy host mismatch`,
+        };
+      }
+      if (b.proxyPort !== undefined && b.proxyPort !== target.proxy.port) {
+        return {
+          ok: false,
+          code: "imap_credential_proxy_mismatch",
+          reason: `IMAP slot ${slotId} proxy port mismatch`,
+        };
+      }
+    }
+    return { ok: true, secret: entry.secret };
+  }
+
+  resolveGithubMcpSecretForTarget(
+    slotId: string,
+    target: {
+      serverId: string;
+      command: string;
+      args: string[];
+      executablePath: string;
+      executableSha256: string;
+      readOnlyMode: boolean;
+    },
+  ): { ok: true; secret: string } | { ok: false; code: string; reason: string } {
+    const entry = this.#connectorSecrets.get(slotId);
+    if (!entry || entry.kind !== "github_mcp") {
+      return {
+        ok: false,
+        code: "missing_mcp_credential",
+        reason: `GitHub MCP credential slot ${slotId} not found in host memory`,
+      };
+    }
+    const b = entry.githubMcpBinding;
+    if (!b) {
+      return {
+        ok: false,
+        code: "mcp_credential_unbound",
+        reason: `GitHub MCP credential slot ${slotId} lacks required artifact/launch binding`,
+      };
+    }
+    if (b.serverId !== target.serverId) {
+      return {
+        ok: false,
+        code: "mcp_credential_server_mismatch",
+        reason: `GitHub MCP slot ${slotId} bound to server ${b.serverId}, not ${target.serverId}`,
+      };
+    }
+    if (b.readOnlyRequired !== false && !target.readOnlyMode) {
+      return {
+        ok: false,
+        code: "mcp_not_read_only",
+        reason: `GitHub MCP slot ${slotId} requires readOnlyMode=true`,
+      };
+    }
+    if (b.executablePath !== target.executablePath) {
+      return {
+        ok: false,
+        code: "mcp_credential_artifact_mismatch",
+        reason: `GitHub MCP slot ${slotId} bound to artifact ${b.executablePath}, not ${target.executablePath}`,
+      };
+    }
+    if (b.executableSha256.toLowerCase() !== target.executableSha256.toLowerCase()) {
+      return {
+        ok: false,
+        code: "mcp_credential_sha256_mismatch",
+        reason: `GitHub MCP slot ${slotId} artifact SHA-256 mismatch`,
+      };
+    }
+    if (b.command !== target.command) {
+      return {
+        ok: false,
+        code: "mcp_credential_command_mismatch",
+        reason: `GitHub MCP slot ${slotId} bound to command ${b.command}, not ${target.command}`,
+      };
+    }
+    if (
+      b.args.length !== target.args.length ||
+      b.args.some((arg, i) => arg !== target.args[i])
+    ) {
+      return {
+        ok: false,
+        code: "mcp_credential_args_mismatch",
+        reason: `GitHub MCP slot ${slotId} launch args do not match pinned binding`,
+      };
+    }
+    return { ok: true, secret: entry.secret };
   }
 
   resolveConnectorSecretInMemory(slotId: string, expectedKind?: "imap" | "github_mcp" | "smtp"): string | undefined {

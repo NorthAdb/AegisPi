@@ -425,6 +425,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 await new Promise<void>((resolve) => server.listen(port, host, () => resolve()));
 const addr = server.address() as AddressInfo;
 process.stdout.write(

@@ -26,7 +26,11 @@ import {
   type EffectRow,
 } from "../governance/effects.ts";
 import { listManagedFileImportsForConversation } from "../capabilities/workspace/importer.ts";
-import { listConversationSources } from "../governance/policy.ts";
+import {
+  checkRecordedSourceReadStillAuthorized,
+  getSourceReadRevocationWatermark,
+  listConversationSources,
+} from "../governance/policy.ts";
 import type { AegisHostRuntime } from "../runtime/harness.ts";
 import {
   buildClearSessionCookie,
@@ -292,7 +296,25 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       ? await config.host.readConversationLiveState(convIdStr)
       : { messages: [], livePartial: null, activeTools: [], workerTasks: [] };
 
-    const sources = listConversationSources(config.host.govDb, targetEpoch, convIdStr).map((s) => ({
+    // W2-S2: Re-verify live source_read_grants for every recorded source (and recursive parents)
+    // before projecting into snapshots or SSE frames! Redact messages & livePartial if any attached source was revoked.
+    const rawSources = listConversationSources(config.host.govDb, targetEpoch, convIdStr);
+    const authorizedSources: typeof rawSources = [];
+    let revokedSourceCount = 0;
+    for (const s of rawSources) {
+      const stillOk = checkRecordedSourceReadStillAuthorized(config.host.govDb, {
+        principalId,
+        scopeId: convScope.scope_id,
+        source: s,
+      });
+      if (stillOk.ok) {
+        authorizedSources.push(s);
+      } else {
+        revokedSourceCount++;
+      }
+    }
+
+    const sources = authorizedSources.map((s) => ({
       recordId: s.record_id,
       sourceType: s.source_type,
       sourceId: s.source_id,
@@ -303,6 +325,23 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       parentSourceIds: JSON.parse(s.parent_source_ids_json) as string[],
       createdAt: s.created_at,
     }));
+
+    const safeMessages =
+      revokedSourceCount > 0
+        ? live.messages.map((m) =>
+            m.role === "user"
+              ? m
+              : {
+                  ...m,
+                  content: "[restricted_content_redacted_after_source_revocation]",
+                },
+          )
+        : live.messages;
+    const safeLivePartial = revokedSourceCount > 0 ? null : live.livePartial;
+    const safeWorkerTasks =
+      revokedSourceCount > 0
+        ? live.workerTasks.map((w) => ({ ...w, summary: "[redacted_after_source_revocation]" }))
+        : live.workerTasks;
 
     const fileImports = listManagedFileImportsForConversation(
       config.host.govDb,
@@ -338,14 +377,15 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       proposals,
       chatCommands,
       sources,
+      revokedSourceCount,
       fileImports,
       budgetAccounts: accounts,
       budgetReservations: reservations,
       budgetDenials,
-      messages: live.messages,
-      livePartial: live.livePartial,
+      messages: safeMessages,
+      livePartial: safeLivePartial,
       activeTools: live.activeTools,
-      workerTasks: live.workerTasks,
+      workerTasks: safeWorkerTasks,
       ...extra,
     };
   }
@@ -412,6 +452,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       recoveredSubmittingToUnknown: config.host.startupReport.recoveredSubmittingToUnknown,
       reconciledQuarantinedEffects: config.host.startupReport.reconciledQuarantinedEffects,
       reconciledChatCommands: config.host.startupReport.reconciledChatCommands,
+      reconciledFileImports: config.host.startupReport.reconciledFileImports,
       chargedBoundReservations: config.host.startupReport.chargedBoundReservations,
       selfCheckErrors: config.host.startupReport.selfCheckErrors,
       pairedCheckOk: config.host.startupReport.pairedCheck.ok,
@@ -487,6 +528,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       created_at: number;
     }>;
     return c.json({
+      principalId: session.principalId,
       activeRuntimeEpoch: activeEpoch,
       conversations: rows.map((r) => ({
         conversationId: r.conversation_id,
@@ -680,7 +722,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       expectedHeadRev: body.expectedHeadRev,
       target: body.target,
       payload: body.payload,
-      expiresAt: nowFn() + 30 * 60 * 1000,
+      expiresAt: nowFn() + (config.host.config.approvalTtlMs ?? 30 * 60 * 1000),
       now: nowFn(),
     });
     if (res.ok) {
@@ -878,6 +920,15 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     }
 
     const { subscriber, unsubscribe } = subRes;
+    const convScopeRow = config.host.govDb
+      .prepare("SELECT scope_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+      .get(targetEpoch, convIdStr) as { scope_id: string } | undefined;
+    const streamScopeId = convScopeRow?.scope_id ?? "scope:default";
+    const initialSourceRevokeWatermark = getSourceReadRevocationWatermark(
+      config.host.govDb,
+      session.principalId,
+      streamScopeId,
+    );
 
     const isSessionAndAclStillValid = (): boolean => {
       const stillValid = config.host.govDb
@@ -889,6 +940,15 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       return verifyConversationAccess(targetEpoch, convIdStr, session.principalId);
     };
 
+    const hasSourceBeenRevokedSinceOpen = (): boolean => {
+      const curWatermark = getSourceReadRevocationWatermark(
+        config.host.govDb,
+        session.principalId,
+        streamScopeId,
+      );
+      return curWatermark !== initialSourceRevokeWatermark;
+    };
+
     return streamSSE(c, async (stream) => {
       stream.onAbort(() => {
         unsubscribe();
@@ -898,9 +958,34 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
           if (!isSessionAndAclStillValid()) {
             break;
           }
+          if (hasSourceBeenRevokedSinceOpen()) {
+            // W2-S2: Immediately terminate old stream with 0 restricted business frames and invalidate cached projection!
+            subscriber.queue.length = 0;
+            projectionHub.invalidateConversation(
+              { principalId: session.principalId, runtimeEpoch: targetEpoch, conversationId: convIdStr },
+              "source_read_revoked",
+            );
+            await stream.writeSSE({
+              event: "resync",
+              data: JSON.stringify({ reason: "source_read_revoked" }),
+            });
+            return;
+          }
           while (subscriber.queue.length > 0) {
             if (!isSessionAndAclStillValid()) {
               subscriber.queue.length = 0;
+              return;
+            }
+            if (hasSourceBeenRevokedSinceOpen()) {
+              subscriber.queue.length = 0;
+              projectionHub.invalidateConversation(
+                { principalId: session.principalId, runtimeEpoch: targetEpoch, conversationId: convIdStr },
+                "source_read_revoked",
+              );
+              await stream.writeSSE({
+                event: "resync",
+                data: JSON.stringify({ reason: "source_read_revoked" }),
+              });
               return;
             }
             const frame = subscriber.queue.shift()!;
@@ -949,6 +1034,10 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     };
     srv.once("error", onErr);
   });
+  if ("keepAliveTimeout" in server) {
+    (server as { keepAliveTimeout: number; headersTimeout: number }).keepAliveTimeout = 65_000;
+    (server as { keepAliveTimeout: number; headersTimeout: number }).headersTimeout = 66_000;
+  }
 
   return {
     server,

@@ -342,7 +342,29 @@ async function main(): Promise<void> {
       const filtered = input.subjectContains
         ? candidates.filter((c) => c.subject.toLowerCase().includes(input.subjectContains!.toLowerCase()))
         : candidates;
-      targetUid = (filtered.length > 0 ? filtered : candidates).sort((a, b) => b.uid - a.uid)[0]!.uid;
+      if (filtered.length === 0) {
+        // W2-S5: NEVER widen read scope to unrelated emails when filter has zero matches!
+        await wire.command("A9", "LOGOUT").catch(() => {});
+        wire.close();
+        writeResult(
+          {
+            ok: true,
+            code: "no_matching_message",
+            found: false,
+            mode: input.mode,
+            tlsVerified: true,
+            tlsPeerSubject: conn.peerSubject,
+            readOnlyExamine: true,
+            usedBodyPeek: true,
+            mailbox: input.mailbox,
+            uidValidity,
+            message: null,
+            childEnvKeysObserved: Object.keys(process.env).sort(),
+          },
+          secrets,
+        );
+      }
+      targetUid = filtered.sort((a, b) => b.uid - a.uid)[0]!.uid;
     }
 
     // Strictly BODY.PEEK[HEADER] and BODY.PEEK[TEXT] so \Seen flag is NEVER modified!

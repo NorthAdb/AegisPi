@@ -391,6 +391,17 @@ export function recallMemory(
   let frontier: Array<{ note: MemoryNoteRow; hop: number; parentId: string | null }> = [];
   for (const r of seedRows) {
     if (!isNoteAccessible(db, r, params)) continue;
+    const seedDomainAuth = checkSourceReadAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      sourceType: "memory",
+      resourceId: `memory:${r.domain}`,
+      operation: "read",
+    });
+    if (!seedDomainAuth.ok) {
+      filteredCounts.principalOrScopeExcluded++;
+      continue;
+    }
     visited.add(r.note_id);
     frontier.push({ note: r, hop: 0, parentId: null });
     items.push({
@@ -406,7 +417,7 @@ export function recallMemory(
     });
   }
 
-  // Hop-by-hop reference expansion with strict per-hop ACL/expiry/tombstone/scanner filter
+  // Hop-by-hop reference expansion with strict per-hop principal/scope/domain-grant/expiry/tombstone/scanner filter (W2-S2)
   for (let hop = 1; hop <= maxHops && frontier.length > 0; hop++) {
     const nextFrontier: Array<{ note: MemoryNoteRow; hop: number; parentId: string | null }> = [];
     for (const cur of frontier) {
@@ -423,6 +434,17 @@ export function recallMemory(
           continue;
         }
         if (target.principal_id !== params.principalId || target.scope_id !== params.scopeId) {
+          filteredCounts.principalOrScopeExcluded++;
+          continue;
+        }
+        const hopDomainAuth = checkSourceReadAuthorized(db, {
+          principalId: params.principalId,
+          scopeId: params.scopeId,
+          sourceType: "memory",
+          resourceId: `memory:${target.domain}`,
+          operation: "read",
+        });
+        if (!hopDomainAuth.ok) {
           filteredCounts.principalOrScopeExcluded++;
           continue;
         }

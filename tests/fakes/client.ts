@@ -283,9 +283,22 @@ export interface FakeImapHandle {
     totalSelect: number;
     totalBodyPeekFetch: number;
     totalNonPeekFetch: number;
+    bodyTextFetchedUids: number[];
     messages: Array<{ uid: number; subject: string; date: string; flags: string[] }>;
     eventsCount: number;
   }>;
+  setMessages: (
+    messages: Array<{
+      uid: number;
+      from: string;
+      to: string;
+      subject: string;
+      date: string;
+      messageId: string;
+      body: string;
+      flags: string[];
+    }>,
+  ) => Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -336,6 +349,14 @@ export async function startFakeImapServer(
     stats: async () => {
       const res = await fetch(`${ctrlBase}/__control/stats`);
       return (await res.json()) as Awaited<ReturnType<FakeImapHandle["stats"]>>;
+    },
+    setMessages: async (messages) => {
+      const res = await fetch(`${ctrlBase}/__control/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages }),
+      });
+      if (!res.ok) throw new Error(`fake-imap setMessages failed: ${res.status}`);
     },
     stop: async () => {
       if (child.exitCode !== null) return;

@@ -51,9 +51,9 @@ export interface ManagedWorkspaceWriteHandler {
     conversationId: string;
     principalId: string;
     scopeId: string;
+    logicalKey: string;
     relPath: string;
     content: string;
-    baseSha256?: string | null;
     useDockerSandbox?: boolean;
   }): Promise<{
     ok: boolean;
@@ -65,6 +65,8 @@ export interface ManagedWorkspaceWriteHandler {
     artifactSha256?: string;
     conflictPath?: string | null;
     installCount?: number;
+    executorImageId?: string | null;
+    exporterImageId?: string | null;
   }>;
 }
 
@@ -523,7 +525,6 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
       properties: {
         relPath: { type: "string" },
         content: { type: "string" },
-        baseSha256: { type: "string" },
         useDockerSandbox: { type: "boolean" },
       },
       required: ["relPath", "content"],
@@ -535,22 +536,24 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
           output: [{ type: "text", text: "Managed workspace importer is not configured on this host" }],
         };
       }
+      // W2-S3: Deliberately IGNORE any model-supplied baseSha256! Host resolves baseline strictly from task snapshot.
       const typed = args as {
         relPath: string;
         content: string;
-        baseSha256?: string;
         useDockerSandbox?: boolean;
       };
       const conversationId = String(api.conversationId);
       const auth = resolveAuth(conversationId);
+      const runtimeEpoch = options.getRuntimeEpoch();
+      const logicalKey = `wimp:${runtimeEpoch}:${conversationId}:${String(api.taskId)}:${api.callId}`;
       const res = await options.workspaceWriteHandler({
-        runtimeEpoch: options.getRuntimeEpoch(),
+        runtimeEpoch,
         conversationId,
         principalId: auth.principalId,
         scopeId: auth.scopeId,
+        logicalKey,
         relPath: typed.relPath,
         content: typed.content,
-        baseSha256: typed.baseSha256 ?? null,
         useDockerSandbox: typed.useDockerSandbox ?? true,
       });
       options.onGovernanceMutated?.(conversationId, "workspace_file_imported");

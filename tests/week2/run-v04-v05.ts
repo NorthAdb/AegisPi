@@ -7,10 +7,13 @@ import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ensureScope } from "../../src/governance/approvals.ts";
 import { HostCredentialVault } from "../../src/governance/credentials.ts";
+import { grantSourceRead, recordConversationSource, revokeSourceReadGrant } from "../../src/governance/policy.ts";
 import { AegisHostRuntime } from "../../src/runtime/harness.ts";
 import type { ModelSlotConfig } from "../../src/runtime/models.ts";
+import { ConversationProjectionHub } from "../../src/web/projection.ts";
 import { startWebServer } from "../../src/web/server.ts";
 import { LOCKED_NODE_EXE, startFakeModelServer, startFakeSmtpServer } from "../fakes/client.ts";
+import { parseWeek2CliArgs, rmDirWithRetry } from "./cli-helpers.ts";
 
 interface HostProc {
   pid: number;
@@ -837,10 +840,135 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
       v05PostLogoutFrames = logoutSseRes.frames.length;
       assert.equal(v05PostLogoutFrames, 0, "V05: logged-out SSE stream must receive 0 business frames");
       assert.equal(logoutSseRes.endedNormally, true, "V05: logged-out SSE stream must close immediately");
+
+      // W2-S2: Live source read revocation closes old SSE stream with 0 restricted business frames
+      // and refetched snapshot excludes restricted source & redacts restricted messages!
+      const ownerCookieSrc = await httpLogin(web5.baseUrl, tokens.owner);
+      const srcConv = (await (
+        await fetch(`${web5.baseUrl}/api/conversations`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: ownerCookieSrc, origin: web5.baseUrl },
+          body: JSON.stringify({ slotName: "router" }),
+        })
+      ).json()) as { conversationId: string; runtimeEpoch: string };
+      const restrictedMarker = `SSE_REVOKED_SOURCE_SECRET_${runId}`;
+      const memGrant = grantSourceRead(host5.govDb, {
+        principalId: "owner",
+        scopeId: "scope:default",
+        sourceType: "memory",
+        resourceId: "memory:projects",
+        operations: ["read"],
+        now: Date.now(),
+      });
+      recordConversationSource(host5.govDb, {
+        runtimeEpoch: host5.runtimeEpoch,
+        conversationId: srcConv.conversationId,
+        principalId: "owner",
+        sourceType: "memory",
+        sourceId: "memory:sse-note-1",
+        versionRef: "v1",
+        title: `Restricted Note ${restrictedMarker}`,
+        contentDigest: "a".repeat(64),
+        metadata: { domain: "projects", tier: "L1" },
+        now: Date.now(),
+      });
+      const snapBeforeSrcRev = (await (
+        await fetch(`${web5.baseUrl}/api/conversations/${srcConv.conversationId}/snapshot`, {
+          headers: { cookie: ownerCookieSrc },
+        })
+      ).json()) as { cursor: string; sources: Array<{ title: string }> };
+      assert.equal(snapBeforeSrcRev.sources.length, 1);
+
+      const srcRevSsePromise = collectSseFrames(
+        `${web5.baseUrl}/api/conversations/${srcConv.conversationId}/events?cursor=${encodeURIComponent(snapBeforeSrcRev.cursor)}`,
+        { cookie: ownerCookieSrc, maxFrames: 2, timeoutMs: 2500 },
+      );
+      await new Promise((r) => setTimeout(r, 80));
+      revokeSourceReadGrant(host5.govDb, {
+        grantId: memGrant.grant_id,
+        reason: "v05_live_source_revoke",
+        now: Date.now(),
+      });
+      await web5.projectionHub.notifyConversationChanged({
+        runtimeEpoch: host5.runtimeEpoch,
+        conversationId: srcConv.conversationId,
+        reason: "post_source_revoke_mutation",
+        eventKind: "delta",
+      });
+      const srcRevSse = await srcRevSsePromise;
+      const nonResyncAfterSrcRev = srcRevSse.frames.filter((f) => f.event !== "resync");
+      assert.equal(nonResyncAfterSrcRev.length, 0, "W2-S2: Old SSE stream MUST deliver 0 business frames after source revocation");
+      assert.equal(srcRevSse.frames[0]?.event, "resync");
+      assert.equal(
+        (JSON.parse(srcRevSse.frames[0]!.data) as { reason: string }).reason,
+        "source_read_revoked",
+      );
+      const snapAfterSrcRevRaw = await (
+        await fetch(`${web5.baseUrl}/api/conversations/${srcConv.conversationId}/snapshot`, {
+          headers: { cookie: ownerCookieSrc },
+        })
+      ).text();
+      assert.equal(
+        snapAfterSrcRevRaw.includes(restrictedMarker),
+        false,
+        "W2-S2: Refetched snapshot MUST contain zero restricted source content after revocation",
+      );
     } finally {
       await web5.close();
       await host5.close();
     }
+
+    // W2-S4: Deterministic serialization test for ConversationProjectionHub concurrent async buildSnapshot race!
+    // Slow read #1 (started while state=v1) completes AFTER trigger #2 (state=v2): final state MUST be v2 (stale v1 NEVER overwrites v2!).
+    let mockVersion = "v1";
+    let blockNextBuild = false;
+    let releaseRead1!: () => void;
+    const read1Gate = new Promise<void>((resolve) => {
+      releaseRead1 = resolve;
+    });
+    const raceHub = new ConversationProjectionHub<{ version: string; conversationId: string }>({
+      buildSnapshot: async ({ conversationId }) => {
+        const captured = mockVersion;
+        if (blockNextBuild) {
+          blockNextBuild = false;
+          await read1Gate;
+        }
+        return { version: captured, conversationId };
+      },
+    });
+    const initEnv = await raceHub.getSnapshotAndCursor({
+      principalId: "owner",
+      runtimeEpoch: "ep_race",
+      conversationId: "99",
+    });
+    assert.ok(initEnv);
+    // Start refresh #1 (blocks inside buildSnapshot with stale v1)
+    blockNextBuild = true;
+    const p1 = raceHub.notifyConversationChanged({
+      runtimeEpoch: "ep_race",
+      conversationId: "99",
+      reason: "slow_read_v1",
+      eventKind: "delta",
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    // State advances to v2 and refresh #2 is requested while refresh #1 is still in flight
+    mockVersion = "v2";
+    const p2 = raceHub.notifyConversationChanged({
+      runtimeEpoch: "ep_race",
+      conversationId: "99",
+      reason: "newer_read_v2",
+      eventKind: "delta",
+    });
+    // Release slow read #1 -> serialized loop MUST re-read and converge final snapshot to v2!
+    releaseRead1();
+    await Promise.all([p1, p2]);
+    const finalRaceEnv = await raceHub.getSnapshotAndCursor({
+      principalId: "owner",
+      runtimeEpoch: "ep_race",
+      conversationId: "99",
+    });
+    assert.equal(finalRaceEnv?.snapshot.version, "v2", "W2-S4: Stale earlier read MUST NOT overwrite newer v2 state");
+    raceHub.closeAll();
 
     // Same-epoch restart: new streamInstanceId -> old cursor MUST trigger resync!
     const host5b = await AegisHostRuntime.start({
@@ -890,6 +1018,10 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         slowClientResyncReason: v05SlowClientResyncReason,
         sameEpochRestartResyncReason: v05RestartResyncReason,
         postLogoutBusinessFrames: v05PostLogoutFrames,
+        sourceRevokeOldStreamResyncReason: "source_read_revoked",
+        sourceRevokeOldStreamBusinessFrames: 0,
+        sourceRevokeRefetchedSnapshotRedacted: true,
+        projectionConcurrentStaleReadSerialized: true,
         crossPrincipalForbidden403: true,
       },
     };
@@ -900,12 +1032,13 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
     await fakeSmtp.stop().catch(() => {});
     await fakeModel.stop().catch(() => {});
     if (!opts?.dataDir) {
-      rmSync(rootDir, { recursive: true, force: true });
+      await rmDirWithRetry(rootDir);
     }
   }
 }
 
 if (import.meta.url === new URL(`file:///${process.argv[1]!.replace(/\\/g, "/")}`).href) {
-  const { report, evidencePath } = await runV04V05();
+  const cli = parseWeek2CliArgs(process.argv.slice(2));
+  const { report, evidencePath } = await runV04V05({ dataDir: cli.dataDir, evidenceDir: cli.evidenceDir });
   console.log(JSON.stringify({ ...report, evidencePath }, null, 2));
 }

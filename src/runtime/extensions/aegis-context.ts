@@ -35,17 +35,11 @@ export interface AegisContextExtensionOptions {
 
 export function createAegisContextExtension(options: AegisContextExtensionOptions): Extension {
   const nowFn = options.now ?? (() => Date.now());
-  // Per-conversation run-frozen L0 cache (frozen once per conversation run so prefix stays stable!)
-  const frozenL0ByConv = new Map<string, string>();
-
+  // W2-S2: Freeze L0 strictly per active run while re-checking live source_read_grants on EVERY prompt build
+  // so revoking a domain read grant immediately excludes L0 across runs, delegations, compactions, and retries!
   const l0Section = section("aegis-l0", (input) => {
     const convId = String(input.conversationId);
     const runtimeEpoch = options.getRuntimeEpoch();
-    const cacheKey = `${runtimeEpoch}:${convId}`;
-    const existing = frozenL0ByConv.get(cacheKey);
-    if (existing !== undefined) {
-      return existing.length > 0 ? existing : undefined;
-    }
     const auth = options.resolveConversationAuth(convId);
     const snap = freezeDomainL0Snapshot(options.govDb, {
       principalId: auth.principalId,
@@ -67,7 +61,6 @@ export function createAegisContextExtension(options: AegisContextExtensionOption
         now: nowFn(),
       });
     }
-    frozenL0ByConv.set(cacheKey, snap.renderedText);
     return snap.renderedText.length > 0 ? snap.renderedText : undefined;
   });
 

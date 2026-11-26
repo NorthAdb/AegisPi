@@ -22,6 +22,7 @@ export interface ImapEndpointConfig {
 export interface ImapReadResult {
   ok: boolean;
   code: string;
+  found?: boolean;
   error?: string;
   mode: "direct" | "connect_tunnel";
   tlsVerified: boolean;
@@ -40,7 +41,7 @@ export interface ImapReadResult {
     messageId: string;
     body: string;
     contentDigest: string;
-  };
+  } | null;
   childEnvKeysObserved?: string[];
 }
 
@@ -95,16 +96,81 @@ export async function readImapMessageReadOnly(params: {
     };
   }
 
-  const secret = params.vault.resolveConnectorSecretInMemory(params.endpoint.credentialSlotId, "imap");
-  if (!secret) {
+  // W2-G1: Check grant constraints against target host, TLS servername, and username BEFORE releasing credential!
+  const grantConstraints = JSON.parse(auth.grant.constraints_json || "{}") as {
+    allowedHosts?: string[];
+    allowedServernames?: string[];
+    allowedUsernames?: string[];
+  };
+  if (
+    Array.isArray(grantConstraints.allowedHosts) &&
+    !grantConstraints.allowedHosts.some((h) => h.toLowerCase() === params.endpoint.host.toLowerCase())
+  ) {
     return {
       ok: false,
-      code: "missing_imap_credential",
-      error: `IMAP credential slot ${params.endpoint.credentialSlotId} not loaded in host memory`,
+      code: "imap_grant_host_mismatch",
+      error: `IMAP grant does not authorize host ${params.endpoint.host}`,
       mode: params.endpoint.mode,
       tlsVerified: false,
     };
   }
+  if (
+    Array.isArray(grantConstraints.allowedServernames) &&
+    !grantConstraints.allowedServernames.some((s) => s.toLowerCase() === params.endpoint.servername.toLowerCase())
+  ) {
+    return {
+      ok: false,
+      code: "imap_grant_tls_identity_mismatch",
+      error: `IMAP grant does not authorize TLS servername ${params.endpoint.servername}`,
+      mode: params.endpoint.mode,
+      tlsVerified: false,
+    };
+  }
+  if (
+    Array.isArray(grantConstraints.allowedUsernames) &&
+    !grantConstraints.allowedUsernames.includes(params.endpoint.username)
+  ) {
+    return {
+      ok: false,
+      code: "imap_grant_account_mismatch",
+      error: `IMAP grant does not authorize account ${params.endpoint.username}`,
+      mode: params.endpoint.mode,
+      tlsVerified: false,
+    };
+  }
+
+  const secretRes = params.vault.resolveImapSecretForTarget(params.endpoint.credentialSlotId, {
+    host: params.endpoint.host,
+    port: params.endpoint.port,
+    servername: params.endpoint.servername,
+    username: params.endpoint.username,
+    mailbox: params.endpoint.mailbox,
+    proxy: params.endpoint.proxy,
+  });
+  if (!secretRes.ok) {
+    writeAuditEvent(params.govDb, {
+      entityType: "imap_read",
+      entityId: params.endpoint.mailbox,
+      eventKey: `cred_mismatch:${params.principalId}:${now}:${params.endpoint.credentialSlotId}`,
+      eventType: "imap_credential_rejected",
+      occurredAt: now,
+      details: {
+        code: secretRes.code,
+        reason: secretRes.reason,
+        host: params.endpoint.host,
+        servername: params.endpoint.servername,
+        username: params.endpoint.username,
+      },
+    });
+    return {
+      ok: false,
+      code: secretRes.code,
+      error: secretRes.reason,
+      mode: params.endpoint.mode,
+      tlsVerified: false,
+    };
+  }
+  const secret = secretRes.secret;
 
   const childScript = path.resolve("src/capabilities/mail/imap-child.ts");
   const child = spawn(process.execPath, [childScript], {

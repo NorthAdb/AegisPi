@@ -360,7 +360,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
         });
         if (!discCheck.ok) {
           const msg = `Blocked model send (${requestId}): ${discCheck.reason}`;
-          recordEgressDenial(requestId, "disclosure_denied", msg, {
+          recordEgressDenial(requestId, discCheck.code, msg, {
             conversationId: owner.conversationId,
             ownerTaskId: owner.ownerTaskId,
             purpose: owner.purpose,

@@ -72,6 +72,7 @@ import {
 } from "./extensions/aegis-policy.ts";
 import { createAegisContextExtension } from "./extensions/aegis-context.ts";
 import type { ImapEndpointConfig } from "../capabilities/mail/imap-client.ts";
+import type { ManagedWorkspaceImporter } from "../capabilities/workspace/importer.ts";
 import { inheritConversationSources } from "../governance/policy.ts";
 import type { GitHubMcpBridge } from "./mcp-bridge.ts";
 import {
@@ -97,6 +98,9 @@ export interface AegisHostConfig {
   imapEndpoint?: ImapEndpointConfig | (() => ImapEndpointConfig | null);
   githubMcpBridge?: GitHubMcpBridge | (() => GitHubMcpBridge | null);
   workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
+  /** W2-S3: Optional managed workspace importer for startup Step 5c receipt-loss reconciliation. */
+  managedWorkspaceImporter?: ManagedWorkspaceImporter;
+  approvalTtlMs?: number;
   now?: () => number;
   zone?: string;
   defaultTaskLimitMu?: number;
@@ -176,6 +180,16 @@ export interface ChatCommandReconcileReport {
   reason?: string;
 }
 
+export interface FileImportReconcileReport {
+  importId: string;
+  logicalKey: string;
+  conversationId: string;
+  targetRelPath: string;
+  outcome: "reconciled_installed" | "pending_reconcile";
+  installCount: number;
+  diskRewritten: false;
+}
+
 export interface StartupReport {
   health: HostHealthState;
   runtimeEpoch: string;
@@ -187,6 +201,7 @@ export interface StartupReport {
   pairedCheck: PairedCheckResult;
   reconciledQuarantinedEffects: string[];
   reconciledChatCommands: ChatCommandReconcileReport[];
+  reconciledFileImports: FileImportReconcileReport[];
   selfCheckErrors: string[];
   schedulingBeforeRelease: "paused" | "running" | "closing" | null;
 }
@@ -724,6 +739,7 @@ export class AegisHostRuntime {
               ? config.githubMcpBridge()
               : (config.githubMcpBridge ?? null),
           workspaceWriteHandler: config.workspaceWriteHandler,
+          approvalTtlMs: config.approvalTtlMs,
           onGovernanceMutated: (conversationId, reason) => {
             emitChange({ conversationId, kind: "governance", detail: { reason } });
           },
@@ -1003,6 +1019,7 @@ export class AegisHostRuntime {
           pairedCheck: { ok: true, observedChangeCounter: 0 },
           reconciledQuarantinedEffects: [],
           reconciledChatCommands: [],
+          reconciledFileImports: [],
           selfCheckErrors,
           schedulingBeforeRelease: inspBeforeRelease.scheduling,
         };
@@ -1087,6 +1104,7 @@ export class AegisHostRuntime {
           pairedCheck,
           reconciledQuarantinedEffects: [],
           reconciledChatCommands: [],
+          reconciledFileImports: [],
           selfCheckErrors: [`paired_trace_mismatch:${pairedCheck.code}`],
           schedulingBeforeRelease: inspBeforeRelease.scheduling,
         };
@@ -1321,6 +1339,11 @@ export class AegisHostRuntime {
         }
       }
 
+      // 5c: W2-S3 Managed File Import receipt-loss reconciliation strictly BEFORE scheduling release!
+      const reconciledFileImports: FileImportReconcileReport[] = config.managedWorkspaceImporter
+        ? config.managedWorkspaceImporter.reconcilePendingImportsOnStartup(govDb, epochBox.current, nowFn())
+        : [];
+
       // STEP 6: Release recovery scheduling and open intake
       const report: StartupReport = {
         health: "READY",
@@ -1333,6 +1356,7 @@ export class AegisHostRuntime {
         pairedCheck,
         reconciledQuarantinedEffects,
         reconciledChatCommands,
+        reconciledFileImports,
         selfCheckErrors: [],
         schedulingBeforeRelease: inspBeforeRelease.scheduling,
       };

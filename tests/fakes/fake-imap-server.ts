@@ -111,6 +111,7 @@ let totalExamine = 0;
 let totalSelect = 0;
 let totalBodyPeekFetch = 0;
 let totalNonPeekFetch = 0;
+const bodyTextFetchedUids: number[] = [];
 
 function recordAudit(entry: Omit<ImapAuditRecord, "seq" | "at">): void {
   auditSeq++;
@@ -245,6 +246,7 @@ const imapServer = tls.createServer({ key: cert.keyPem, cert: cert.certPem }, (s
             parts.push(`BODY[HEADER] {${Buffer.byteLength(hdr, "utf8")}}\r\n${hdr}`);
           }
           if (itemsUpper.includes("TEXT")) {
+            bodyTextFetchedUids.push(msg.uid);
             parts.push(`BODY[TEXT] {${Buffer.byteLength(msg.body, "utf8")}}\r\n${msg.body}`);
           }
           socket.write(`* ${idxMsg + 1} FETCH (${parts.join(" ")})\r\n`);
@@ -289,6 +291,7 @@ const controlServer = http.createServer(async (req, res) => {
       totalSelect,
       totalBodyPeekFetch,
       totalNonPeekFetch,
+      bodyTextFetchedUids: [...bodyTextFetchedUids],
       messages: mailboxMessages.map((m) => ({
         uid: m.uid,
         subject: m.subject,

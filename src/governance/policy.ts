@@ -391,9 +391,178 @@ export function inheritConversationSources(
 }
 
 /**
- * Verifies that EVERY provenance source attached to a conversation (and any derived artifact)
- * has an active, non-revoked model_disclosure_grant for the exact target destination
- * (provider, modelId, baseUrl, slotName).
+ * W2-S2: Verifies that a recorded conversation_sources row (and recursively all its parent sources)
+ * STILL holds an active, non-revoked source_read_grant in the governance DB.
+ */
+export function checkRecordedSourceReadStillAuthorized(
+  db: DatabaseSync,
+  params: {
+    principalId: string;
+    scopeId: string;
+    source: ConversationSourceRow;
+    visited?: Set<string>;
+  },
+): { ok: true } | { ok: false; code: "source_read_revoked"; blockedSource: { sourceType: string; sourceId: string; title: string }; reason: string } {
+  const visited = params.visited ?? new Set<string>();
+  if (visited.has(params.source.record_id)) {
+    return { ok: true };
+  }
+  visited.add(params.source.record_id);
+
+  const src = params.source;
+  const meta = JSON.parse(src.metadata_json || "{}") as Record<string, unknown>;
+
+  if (src.source_type === "memory") {
+    const domain = typeof meta["domain"] === "string" && meta["domain"].length > 0 ? meta["domain"] : null;
+    const resourceId = domain ? `memory:${domain}` : src.source_id;
+    const chk = checkSourceReadAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      sourceType: "memory",
+      resourceId,
+      operation: "read",
+    });
+    if (!chk.ok) {
+      return {
+        ok: false,
+        code: "source_read_revoked",
+        blockedSource: { sourceType: src.source_type, sourceId: src.source_id, title: src.title },
+        reason: `Source read grant revoked or missing for ${src.source_type} (${resourceId}): ${chk.reason}`,
+      };
+    }
+  } else if (src.source_type === "imap") {
+    let mailbox = typeof meta["mailbox"] === "string" ? meta["mailbox"] : "";
+    if (!mailbox) {
+      const m = /^imap:([^:]+)/.exec(src.source_id);
+      mailbox = m ? m[1]! : "";
+    }
+    const resourceId = mailbox ? `imap:${mailbox}` : src.source_id;
+    const chk = checkSourceReadAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      sourceType: "imap",
+      resourceId,
+      operation: "read",
+    });
+    if (!chk.ok) {
+      return {
+        ok: false,
+        code: "source_read_revoked",
+        blockedSource: { sourceType: src.source_type, sourceId: src.source_id, title: src.title },
+        reason: `Source read grant revoked or missing for ${src.source_type} (${resourceId}): ${chk.reason}`,
+      };
+    }
+  } else if (src.source_type === "github_mcp") {
+    const repoId = typeof meta["repoId"] === "string" ? meta["repoId"] : "";
+    const ref = typeof meta["ref"] === "string" ? meta["ref"] : undefined;
+    const filePath = typeof meta["path"] === "string" ? meta["path"] : undefined;
+    const resourceId = repoId ? `github:${repoId}` : src.source_id;
+    const chk = checkSourceReadAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      sourceType: "github_mcp",
+      resourceId,
+      operation: "read_file",
+      ref,
+      path: filePath,
+    });
+    if (!chk.ok) {
+      return {
+        ok: false,
+        code: "source_read_revoked",
+        blockedSource: { sourceType: src.source_type, sourceId: src.source_id, title: src.title },
+        reason: `Source read grant revoked or missing for ${src.source_type} (${resourceId}): ${chk.reason}`,
+      };
+    }
+  } else if (src.source_type === "workspace_file") {
+    const relPath = src.source_id.startsWith("workspace:") ? src.source_id.slice("workspace:".length) : src.title;
+    const chk = checkSourceReadAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      sourceType: "workspace_write",
+      resourceId: "workspace",
+      operation: "write",
+      path: relPath,
+    });
+    if (!chk.ok) {
+      return {
+        ok: false,
+        code: "source_read_revoked",
+        blockedSource: { sourceType: src.source_type, sourceId: src.source_id, title: src.title },
+        reason: `Workspace grant revoked for derived file ${relPath}: ${chk.reason}`,
+      };
+    }
+  }
+
+  // Recursively verify ALL parent sources!
+  const parentIds = JSON.parse(src.parent_source_ids_json || "[]") as string[];
+  for (const pid of parentIds) {
+    const parentRow = db
+      .prepare("SELECT * FROM conversation_sources WHERE record_id = ?")
+      .get(pid) as ConversationSourceRow | undefined;
+    if (!parentRow) continue;
+    const parentCheck = checkRecordedSourceReadStillAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      source: parentRow,
+      visited,
+    });
+    if (!parentCheck.ok) {
+      return parentCheck;
+    }
+  }
+
+  return { ok: true };
+}
+
+export function verifyAllConversationSourcesReadAuthorized(
+  db: DatabaseSync,
+  params: {
+    runtimeEpoch: string;
+    conversationIds: string[];
+    principalId: string;
+    scopeId: string;
+  },
+): { ok: true; checkedSources: number } | { ok: false; code: "source_read_revoked"; blockedSource: { sourceType: string; sourceId: string; title: string }; reason: string } {
+  const seen = new Set<string>();
+  let checked = 0;
+  for (const cid of params.conversationIds) {
+    const sources = listConversationSources(db, params.runtimeEpoch, cid);
+    for (const src of sources) {
+      if (seen.has(src.record_id)) continue;
+      seen.add(src.record_id);
+      checked++;
+      const res = checkRecordedSourceReadStillAuthorized(db, {
+        principalId: params.principalId,
+        scopeId: params.scopeId,
+        source: src,
+      });
+      if (!res.ok) return res;
+    }
+  }
+  return { ok: true, checkedSources: checked };
+}
+
+export function getSourceReadRevocationWatermark(
+  db: DatabaseSync,
+  principalId: string,
+  scopeId: string,
+): string {
+  const row = db
+    .prepare(
+      `SELECT count(*) AS revoked_count, COALESCE(MAX(revoked_at), 0) AS max_revoked_at
+         FROM source_read_grants
+        WHERE principal_id = ? AND scope_id = ? AND revoked_at IS NOT NULL`,
+    )
+    .get(principalId, scopeId) as { revoked_count: number; max_revoked_at: number };
+  return `${row.revoked_count}:${row.max_revoked_at}`;
+}
+
+/**
+ * Verifies that EVERY provenance source attached to a conversation (and any derived artifact / parent source)
+ * STILL holds BOTH:
+ * 1. An active, non-revoked source_read_grant (W2-S2: live read revocation blocks generation/delegation/compaction/retry!)
+ * 2. An active, non-revoked model_disclosure_grant for the exact target destination (provider, modelId, baseUrl, slotName).
  */
 export function checkConversationModelDisclosure(
   db: DatabaseSync,
@@ -409,7 +578,7 @@ export function checkConversationModelDisclosure(
   },
 ):
   | { ok: true; checkedSources: number }
-  | { ok: false; code: "disclosure_denied"; blockedSource: { sourceType: string; sourceId: string; title: string }; reason: string } {
+  | { ok: false; code: "disclosure_denied" | "source_read_revoked"; blockedSource: { sourceType: string; sourceId: string; title: string }; reason: string } {
   const sources = listConversationSources(db, params.runtimeEpoch, params.conversationId);
   if (sources.length === 0) {
     return { ok: true, checkedSources: 0 };
@@ -437,6 +606,17 @@ export function checkConversationModelDisclosure(
     ) as unknown as ModelDisclosureGrantRow[];
 
   for (const src of sources) {
+    // 1. Live source read grant check (including recursive parent sources)
+    const readStillActive = checkRecordedSourceReadStillAuthorized(db, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+      source: src,
+    });
+    if (!readStillActive.ok) {
+      return readStillActive;
+    }
+
+    // 2. Live model disclosure grant check for target model destination
     const allowed = grants.some(
       (g) =>
         (g.source_type === src.source_type || g.source_type === "*") &&

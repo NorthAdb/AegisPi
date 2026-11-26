@@ -1,11 +1,20 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { ImapEndpointConfig } from "./capabilities/mail/imap-client.ts";
+import {
+  cleanupTaskVolumeAsync,
+  DEFAULT_SANDBOX_IMAGE,
+  runTaskInDockerSandboxAsync,
+  stopAndRemoveContainerAsync,
+} from "./capabilities/workspace/docker-sandbox.ts";
+import { ManagedWorkspaceImporter } from "./capabilities/workspace/importer.ts";
 import {
   assertStage1LoopbackModelUrl,
   assertStage1LoopbackSmtpHost,
   HostCredentialVault,
 } from "./governance/credentials.ts";
 import { AegisHostRuntime } from "./runtime/harness.ts";
+import { GitHubMcpBridge } from "./runtime/mcp-bridge.ts";
 import type { ModelSlotConfig } from "./runtime/models.ts";
 import { startWebServer } from "./web/server.ts";
 
@@ -79,9 +88,11 @@ const dayLimitMu = Number(args["day-limit-mu"] ?? "5000000");
 const syntheticUpperMu = args["synthetic-upper-mu"] ? Number(args["synthetic-upper-mu"]) : 100;
 const syntheticActualMu = args["synthetic-actual-mu"] ? Number(args["synthetic-actual-mu"]) : 60;
 const smtpTimeoutMs = args["smtp-timeout-ms"] ? Number(args["smtp-timeout-ms"]) : 60_000;
+const approvalTtlMs = args["approval-ttl-ms"] ? Number(args["approval-ttl-ms"]) : undefined;
 const pauseOutbox = args["pause-outbox"] === "true";
+const connectorsConfigPath = args["connectors-config"] ?? process.env["AEGISPI_CONNECTORS_CONFIG"];
 
-// Explicit test-only fault barriers for R5/V04 real Windows Stop-Process -Force window verification
+// Explicit test-only fault barriers for R5/V04/V03 real Windows Stop-Process -Force window verification
 const faultBeforeT2CommitFile = args["fault-before-t2-commit"];
 const faultAfterSignalBeforeAckFile = args["fault-after-signal-before-ack"];
 const faultAfterClaimBeforeSmtpFile = args["fault-after-claim-before-smtp"];
@@ -89,8 +100,83 @@ const faultAfterChatGovRegisterFile = args["fault-after-chat-gov-register"];
 const faultAfterPiAdmitBeforeGovReceiptFile = args["fault-after-pi-admit-before-gov-receipt"];
 const faultAfterChatGovReceiptBeforeHttpFile = args["fault-after-chat-gov-receipt-before-http"];
 const faultChatReconcileReadFailure = args["fault-chat-reconcile-read-failure"];
+const faultAfterImportInstallBeforeReceiptFile = args["fault-after-import-install-before-receipt"];
+
+interface TrustedConnectorsConfig {
+  defaultMemoryDomain?: string;
+  imap?: {
+    mode: "direct" | "connect_tunnel";
+    host: string;
+    port: number;
+    servername: string;
+    caCertPath?: string;
+    proxy?: { host: string; port: number };
+    username: string;
+    mailbox: string;
+    allowedMailboxes?: string[];
+    credentialSlotId?: string;
+    secretEnvVar?: string;
+  };
+  githubMcp?: {
+    serverId: string;
+    command: string;
+    args: string[];
+    pinnedArtifactPath: string;
+    pinnedArtifactSha256: string;
+    credentialSlotId?: string;
+    secretEnvVar?: string;
+  };
+  workspace?: {
+    workspaceDir: string;
+    approvedImageId: string;
+    imageName?: string;
+    trackedBaselineRelPaths?: string[];
+  };
+}
+
+let connectorsCfg: TrustedConnectorsConfig | null = null;
+if (connectorsConfigPath) {
+  try {
+    connectorsCfg = JSON.parse(readFileSync(path.resolve(connectorsConfigPath), "utf8")) as TrustedConnectorsConfig;
+  } catch (err) {
+    process.stderr.write(
+      `Refusing startup: invalid connectors-config (${err instanceof Error ? err.message : String(err)})\n`,
+    );
+    process.exit(1);
+  }
+}
 
 const vault = new HostCredentialVault();
+const routerSecret =
+  process.env["AEGISPI_MODEL_ROUTER_KEY"] ??
+  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
+  "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2";
+const workerSecret =
+  process.env["AEGISPI_MODEL_WORKER_KEY"] ??
+  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
+  routerSecret;
+
+vault.registerSlot(
+  {
+    slotId: "slot:model-router",
+    provider: "fake-local",
+    allowedBaseUrls: [modelBaseUrl],
+    allowedModelIds: ["fake-router-1"],
+    priceVersion: "synthetic-v1",
+  },
+  routerSecret,
+);
+vault.registerSlot(
+  {
+    slotId: "slot:model-worker",
+    provider: "fake-local",
+    allowedBaseUrls: [modelBaseUrl],
+    allowedModelIds: ["fake-worker-1"],
+    priceVersion: "synthetic-v1",
+  },
+  workerSecret,
+);
+// Keep legacy slot alias for Week 1 compatibility
 vault.registerSlot(
   {
     slotId: "slot:fake-local",
@@ -99,8 +185,67 @@ vault.registerSlot(
     allowedModelIds: ["fake-router-1", "fake-worker-1"],
     priceVersion: "synthetic-v1",
   },
-  process.env["AEGISPI_FAKE_MODEL_KEY"] ?? "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2",
+  routerSecret,
 );
+
+// W2-G1 / W2-S1: Register trusted connector slots strictly bound to verified target descriptors in host memory!
+let configuredImapEndpoint: ImapEndpointConfig | null = null;
+if (connectorsCfg?.imap) {
+  const ic = connectorsCfg.imap;
+  const slotId = ic.credentialSlotId ?? "slot:imap-readonly";
+  const secretEnvVar = ic.secretEnvVar ?? "AEGISPI_IMAP_SECRET";
+  const imapSecret = process.env[secretEnvVar];
+  if (imapSecret && imapSecret.length > 0) {
+    vault.registerConnectorSlot({
+      slotId,
+      kind: "imap",
+      target: `${ic.host}:${ic.port}/${ic.mailbox}`,
+      secretValue: imapSecret,
+      imapBinding: {
+        host: ic.host,
+        port: ic.port,
+        servername: ic.servername,
+        username: ic.username,
+        allowedMailboxes: ic.allowedMailboxes ?? [ic.mailbox],
+        ...(ic.proxy ? { proxyHost: ic.proxy.host, proxyPort: ic.proxy.port } : {}),
+      },
+    });
+    configuredImapEndpoint = {
+      mode: ic.mode,
+      host: ic.host,
+      port: ic.port,
+      servername: ic.servername,
+      ...(ic.caCertPath && existsSync(ic.caCertPath) ? { caPem: readFileSync(ic.caCertPath, "utf8") } : {}),
+      ...(ic.proxy ? { proxy: ic.proxy } : {}),
+      username: ic.username,
+      credentialSlotId: slotId,
+      mailbox: ic.mailbox,
+    };
+  }
+}
+
+if (connectorsCfg?.githubMcp) {
+  const mc = connectorsCfg.githubMcp;
+  const slotId = mc.credentialSlotId ?? "slot:github-mcp-pat";
+  const secretEnvVar = mc.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT";
+  const mcpPat = process.env[secretEnvVar];
+  if (mcpPat && mcpPat.length > 0) {
+    vault.registerConnectorSlot({
+      slotId,
+      kind: "github_mcp",
+      target: mc.serverId,
+      secretValue: mcpPat,
+      githubMcpBinding: {
+        serverId: mc.serverId,
+        command: mc.command,
+        args: mc.args,
+        executablePath: mc.pinnedArtifactPath,
+        executableSha256: mc.pinnedArtifactSha256,
+        readOnlyRequired: true,
+      },
+    });
+  }
+}
 
 const priceSchedule = {
   priceVersion: "synthetic-v1",
@@ -116,7 +261,7 @@ const modelSlots: ModelSlotConfig[] = [
     provider: "fake-local",
     modelId: "fake-router-1",
     baseUrl: modelBaseUrl,
-    credentialSlotId: "slot:fake-local",
+    credentialSlotId: "slot:model-router",
     contextWindow: 128_000,
     maxTokens: 1024,
     priceSchedule,
@@ -127,13 +272,32 @@ const modelSlots: ModelSlotConfig[] = [
     provider: "fake-local",
     modelId: "fake-worker-1",
     baseUrl: modelBaseUrl,
-    credentialSlotId: "slot:fake-local",
+    credentialSlotId: "slot:model-worker",
     contextWindow: 128_000,
     maxTokens: 1024,
     priceSchedule,
     outboundAuthorized: true,
   },
 ];
+
+// W2-S1 / W2-S3: Host-managed workspace importer + host baseline snapshot map (NEVER trusting model baseSha256!)
+let managedImporter: ManagedWorkspaceImporter | undefined;
+let hostRef: AegisHostRuntime | null = null;
+let mcpBridge: GitHubMcpBridge | null = null;
+const hostBaselinesByRelPath = new Map<string, string | null>();
+const sandboxInputSnapDir = path.join(dataDir, "sandbox-input-snapshot");
+
+if (connectorsCfg?.workspace) {
+  const wc = connectorsCfg.workspace;
+  managedImporter = new ManagedWorkspaceImporter(path.resolve(wc.workspaceDir));
+  mkdirSync(sandboxInputSnapDir, { recursive: true });
+  for (const rel of wc.trackedBaselineRelPaths ?? []) {
+    const cap = managedImporter.captureHostBaseline(rel);
+    if (cap.ok) {
+      hostBaselinesByRelPath.set(cap.normalizedRelPath, cap.baseSha256);
+    }
+  }
+}
 
 const host = await AegisHostRuntime.start({
   dataDir,
@@ -146,9 +310,128 @@ const host = await AegisHostRuntime.start({
     timeoutMs: smtpTimeoutMs,
   },
   defaultPrincipalId,
+  defaultMemoryDomain: connectorsCfg?.defaultMemoryDomain ?? "default",
   defaultTaskLimitMu: taskLimitMu,
   defaultDayLimitMu: dayLimitMu,
+  approvalTtlMs,
   pauseOutboxDelivery: pauseOutbox,
+  managedWorkspaceImporter: managedImporter,
+  ...(configuredImapEndpoint ? { imapEndpoint: configuredImapEndpoint } : {}),
+  ...(connectorsCfg?.githubMcp
+    ? {
+        githubMcpBridge: () => mcpBridge,
+      }
+    : {}),
+  ...(managedImporter && connectorsCfg?.workspace
+    ? {
+        workspaceWriteHandler: async (wp) => {
+          const wc = connectorsCfg!.workspace!;
+          const importer = managedImporter!;
+          const currentHost = hostRef!;
+          const cap = importer.captureHostBaseline(wp.relPath);
+          if (!cap.ok) {
+            return { ok: false, code: cap.code, message: cap.reason };
+          }
+          // Host uses its own task-start baseline if tracked (detecting user edits mid-task!), else current host baseline at snapshot time
+          const hostBaseSha256 = hostBaselinesByRelPath.has(cap.normalizedRelPath)
+            ? hostBaselinesByRelPath.get(cap.normalizedRelPath)!
+            : cap.baseSha256;
+
+          const sb = await runTaskInDockerSandboxAsync({
+            approvedImageId: wc.approvedImageId,
+            imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
+            inputSnapshotDir: sandboxInputSnapDir,
+            nodeScript: `
+              const fs = require("node:fs");
+              const path = require("node:path");
+              const rel = ${JSON.stringify(cap.normalizedRelPath)};
+              const full = path.join("/out", rel);
+              fs.mkdirSync(path.dirname(full), { recursive: true });
+              fs.writeFileSync(full, ${JSON.stringify(wp.content)}, "utf8");
+            `,
+          });
+          if (!sb.ok) {
+            if (sb.containerName) await stopAndRemoveContainerAsync(sb.containerName);
+            if (sb.volumeName) await cleanupTaskVolumeAsync(sb.volumeName);
+            return {
+              ok: false,
+              code: sb.code ?? "sandbox_execution_failed",
+              message: sb.error ?? (sb.stderr || "Docker sandbox failed"),
+              executorImageId: sb.executorImageId,
+            };
+          }
+
+          try {
+            // Collect related conversation IDs (e.g. parent + worker) for W2-S2 recursive source revocation checks
+            const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
+            const relatedIds = new Set<string>([wp.conversationId]);
+            if (boundTask) {
+              const rows = currentHost.govDb
+                .prepare(
+                  "SELECT DISTINCT conversation_id FROM budget_task_bindings WHERE runtime_epoch = ? AND owner_task_id = ?",
+                )
+                .all(wp.runtimeEpoch, boundTask) as Array<{ conversation_id: string }>;
+              for (const r of rows) relatedIds.add(r.conversation_id);
+            }
+
+            const impRes = await importer.importFileFromTaskVolume({
+              govDb: currentHost.govDb,
+              runtimeEpoch: wp.runtimeEpoch,
+              conversationId: wp.conversationId,
+              relatedConversationIds: [...relatedIds],
+              principalId: wp.principalId,
+              scopeId: wp.scopeId,
+              logicalKey: wp.logicalKey,
+              volumeName: sb.volumeName,
+              approvedImageId: wc.approvedImageId,
+              containerId: sb.containerId,
+              targetRelPath: cap.normalizedRelPath,
+              baseSha256: hostBaseSha256,
+              ...(faultAfterImportInstallBeforeReceiptFile
+                ? {
+                    onAfterAtomicInstallBeforeReceipt: (info) => {
+                      writeFileSync(
+                        faultAfterImportInstallBeforeReceiptFile,
+                        JSON.stringify({
+                          pid: process.pid,
+                          window: "after_import_install_before_receipt",
+                          logicalKey: wp.logicalKey,
+                          conversationId: wp.conversationId,
+                          targetRelPath: cap.normalizedRelPath,
+                          ...info,
+                          at: new Date().toISOString(),
+                        }) + "\n",
+                        "utf8",
+                      );
+                      const shared = new Int32Array(new SharedArrayBuffer(4));
+                      Atomics.wait(shared, 0, 0, 60_000);
+                    },
+                  }
+                : {}),
+            });
+            if (impRes.ok && impRes.state === "INSTALLED") {
+              hostBaselinesByRelPath.set(cap.normalizedRelPath, impRes.currentTargetSha256After);
+            }
+            return {
+              ok: impRes.ok,
+              code: impRes.code,
+              message: impRes.message,
+              importId: impRes.importId,
+              state: impRes.state,
+              targetRelPath: impRes.targetRelPath,
+              artifactSha256: impRes.artifactSha256 ?? undefined,
+              conflictPath: impRes.conflictRelPath,
+              installCount: impRes.installCount,
+              executorImageId: sb.executorImageId,
+              exporterImageId: impRes.exporterImageId,
+            };
+          } finally {
+            await stopAndRemoveContainerAsync(sb.containerName);
+            await cleanupTaskVolumeAsync(sb.volumeName);
+          }
+        },
+      }
+    : {}),
   ...(faultAfterSignalBeforeAckFile
     ? {
         onAfterSignalBeforeAck: (info) => {
@@ -239,6 +522,28 @@ const host = await AegisHostRuntime.start({
     : {}),
 });
 
+hostRef = host;
+
+// W2-S1 / W2-G1: Connect pinned GitHub MCP bridge strictly AFTER governance DB is open & verified!
+if (connectorsCfg?.githubMcp) {
+  const mc = connectorsCfg.githubMcp;
+  const bridge = new GitHubMcpBridge({
+    serverId: mc.serverId,
+    command: mc.command,
+    args: mc.args,
+    pinnedArtifactPath: mc.pinnedArtifactPath,
+    credentialSlotId: mc.credentialSlotId ?? "slot:github-mcp-pat",
+    govDb: host.govDb,
+    vault,
+  });
+  const connRes = await bridge.connect();
+  if (connRes.ok) {
+    mcpBridge = bridge;
+  } else {
+    process.stderr.write(`GitHub MCP bridge not connected (${connRes.code}): ${connRes.reason ?? ""}\n`);
+  }
+}
+
 const web = await startWebServer({
   host,
   bindHost,
@@ -265,6 +570,7 @@ const web = await startWebServer({
 
 const shutdown = async (): Promise<void> => {
   await web.close().catch(() => {});
+  await mcpBridge?.close().catch(() => {});
   await host.close().catch(() => {});
   process.exit(0);
 };
@@ -285,7 +591,13 @@ process.stdout.write(
     recoveredSubmittingToUnknown: host.startupReport.recoveredSubmittingToUnknown,
     reconciledQuarantinedEffects: host.startupReport.reconciledQuarantinedEffects,
     reconciledChatCommands: host.startupReport.reconciledChatCommands,
+    reconciledFileImports: host.startupReport.reconciledFileImports,
     chargedBoundReservations: host.startupReport.chargedBoundReservations,
     pairedCheckOk: host.startupReport.pairedCheck.ok,
+    connectorsConfigured: {
+      imap: Boolean(configuredImapEndpoint),
+      githubMcp: Boolean(mcpBridge),
+      workspace: Boolean(managedImporter),
+    },
   }) + "\n",
 );

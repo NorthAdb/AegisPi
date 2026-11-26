@@ -247,6 +247,8 @@ CREATE TABLE IF NOT EXISTS mcp_server_pins (
   server_id TEXT PRIMARY KEY NOT NULL,
   executable_path TEXT NOT NULL,
   executable_sha256 TEXT NOT NULL,
+  command TEXT NOT NULL DEFAULT '',
+  args_json TEXT NOT NULL DEFAULT '[]',
   read_only_mode INTEGER NOT NULL DEFAULT 1 CHECK(read_only_mode IN (0,1)),
   approved_by TEXT NOT NULL,
   approved_at INTEGER NOT NULL
@@ -561,6 +563,16 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
       });
     }
   });
+
+  // Migration 3: Idempotently add pinned launch command/args columns to older mcp_server_pins tables
+  const mcpCols = db.prepare("PRAGMA table_info(mcp_server_pins);").all() as Array<{ name: string }>;
+  const mcpColNames = new Set(mcpCols.map((c) => c.name));
+  if (!mcpColNames.has("command")) {
+    db.exec("ALTER TABLE mcp_server_pins ADD COLUMN command TEXT NOT NULL DEFAULT '';");
+  }
+  if (!mcpColNames.has("args_json")) {
+    db.exec("ALTER TABLE mcp_server_pins ADD COLUMN args_json TEXT NOT NULL DEFAULT '[]';");
+  }
 }
 
 export function withImmediateTx<T>(db: DatabaseSync, fn: () => T): T {

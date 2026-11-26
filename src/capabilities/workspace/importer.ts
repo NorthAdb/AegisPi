@@ -7,11 +7,11 @@ import { withImmediateTx, writeAuditEvent } from "../../governance/db.ts";
 import {
   checkSourceReadAuthorized,
   listConversationSources,
-  recordConversationSource,
+  verifyAllConversationSourcesReadAuthorized,
 } from "../../governance/policy.ts";
 import {
-  exportRegularFilesFromVolumeReadOnly,
-  verifyAllVolumeWritersExited,
+  exportRegularFilesFromVolumeReadOnlyAsync,
+  verifyAllVolumeWritersExitedAsync,
   type VolumeWriterCheck,
 } from "./docker-sandbox.ts";
 import { validateAndResolveWorkspacePath } from "./path-jail.ts";
@@ -51,7 +51,59 @@ export interface ManagedImportOutcome {
   artifactSha256: string | null;
   conflictRelPath: string | null;
   installCount: number;
+  exporterImageId?: string | null;
   writerCheck?: VolumeWriterCheck;
+}
+
+function insertWorkspaceFileSourceInTx(
+  govDb: DatabaseSync,
+  params: {
+    runtimeEpoch: string;
+    conversationId: string;
+    principalId: string;
+    normalizedRelPath: string;
+    artifactSha256: string;
+    artifactBytes: number;
+    importId: string;
+    volumeName: string;
+    parentSourceIds: string[];
+    now: number;
+  },
+): void {
+  const sourceId = `workspace:${params.normalizedRelPath}`;
+  const versionRef = `sha256:${params.artifactSha256.slice(0, 16)}`;
+  const existing = govDb
+    .prepare(
+      `SELECT 1 AS ok FROM conversation_sources
+        WHERE runtime_epoch = ? AND conversation_id = ? AND source_type = 'workspace_file' AND source_id = ? AND version_ref = ?`,
+    )
+    .get(params.runtimeEpoch, params.conversationId, sourceId, versionRef);
+  if (existing) return;
+  govDb
+    .prepare(
+      `INSERT INTO conversation_sources(
+         record_id, runtime_epoch, conversation_id, principal_id,
+         source_type, source_id, version_ref, title, content_digest,
+         metadata_json, parent_source_ids_json, created_at
+       ) VALUES (?, ?, ?, ?, 'workspace_file', ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      mintId("src"),
+      params.runtimeEpoch,
+      params.conversationId,
+      params.principalId,
+      sourceId,
+      versionRef,
+      params.normalizedRelPath,
+      params.artifactSha256,
+      JSON.stringify({
+        importId: params.importId,
+        bytes: params.artifactBytes,
+        volumeName: params.volumeName,
+      }),
+      JSON.stringify(params.parentSourceIds),
+      params.now,
+    );
 }
 
 export function sha256FileIfExists(absPath: string): string | null {
@@ -94,6 +146,167 @@ export class ManagedWorkspaceImporter {
     return this.#workspaceRoot;
   }
 
+  /**
+   * W2-S3: Host-side authoritative baseline capture at task/snapshot preparation time.
+   * Model-supplied baseSha256 is NEVER trusted.
+   */
+  captureHostBaseline(targetRelPath: string): { ok: true; normalizedRelPath: string; baseSha256: string | null } | { ok: false; code: string; reason: string } {
+    const check = validateAndResolveWorkspacePath(this.#workspaceRoot, targetRelPath);
+    if (!check.ok) return check;
+    return {
+      ok: true,
+      normalizedRelPath: check.normalizedRelPath,
+      baseSha256: sha256FileIfExists(check.absolutePath),
+    };
+  }
+
+  /**
+   * W2-S3: Host startup recovery Step 5c — reconciles any PREPARED managed_file_imports rows
+   * left behind by a crash between atomic disk install and governance receipt commit.
+   * Atomically commits INSTALLED receipt + workspace_file provenance WITHOUT rewriting disk!
+   */
+  reconcilePendingImportsOnStartup(
+    govDb: DatabaseSync,
+    runtimeEpoch: string,
+    now: number,
+  ): Array<{
+    importId: string;
+    logicalKey: string;
+    conversationId: string;
+    targetRelPath: string;
+    outcome: "reconciled_installed" | "pending_reconcile";
+    installCount: number;
+    diskRewritten: false;
+  }> {
+    const rows = govDb
+      .prepare(
+        `SELECT * FROM managed_file_imports
+          WHERE runtime_epoch = ? AND state = 'PREPARED'
+          ORDER BY created_at ASC`,
+      )
+      .all(runtimeEpoch) as unknown as ManagedFileImportRow[];
+
+    const results: Array<{
+      importId: string;
+      logicalKey: string;
+      conversationId: string;
+      targetRelPath: string;
+      outcome: "reconciled_installed" | "pending_reconcile";
+      installCount: number;
+      diskRewritten: false;
+    }> = [];
+
+    for (const row of rows) {
+      const pathCheck = validateAndResolveWorkspacePath(this.#workspaceRoot, row.target_rel_path);
+      if (!pathCheck.ok) {
+        withImmediateTx(govDb, () => {
+          govDb
+            .prepare(
+              `UPDATE managed_file_imports
+                  SET state = 'PENDING_RECONCILE',
+                      reason = ?,
+                      updated_at = ?
+                WHERE import_id = ? AND state = 'PREPARED'`,
+            )
+            .run(`startup_reconcile_invalid_path:${pathCheck.code}`, now, row.import_id);
+        });
+        results.push({
+          importId: row.import_id,
+          logicalKey: row.logical_key,
+          conversationId: row.conversation_id,
+          targetRelPath: row.target_rel_path,
+          outcome: "pending_reconcile",
+          installCount: row.install_count,
+          diskRewritten: false,
+        });
+        continue;
+      }
+
+      const diskSha = sha256FileIfExists(pathCheck.absolutePath);
+      if (diskSha !== null && diskSha === row.artifact_sha256) {
+        const parentSourceIds = JSON.parse(row.parent_source_ids_json || "[]") as string[];
+        withImmediateTx(govDb, () => {
+          govDb
+            .prepare(
+              `UPDATE managed_file_imports
+                  SET state = 'INSTALLED',
+                      install_count = CASE WHEN install_count < 1 THEN 1 ELSE install_count END,
+                      reason = 'reconciled_installed_after_receipt_loss',
+                      updated_at = ?
+                WHERE import_id = ? AND state = 'PREPARED'`,
+            )
+            .run(now, row.import_id);
+          writeAuditEvent(govDb, {
+            entityType: "file_import",
+            entityId: row.import_id,
+            eventKey: `reconcile_installed:${row.import_id}`,
+            eventType: "file_import_reconciled_installed",
+            occurredAt: now,
+            details: {
+              targetRelPath: row.target_rel_path,
+              artifactSha256: row.artifact_sha256,
+              rewrittenDisk: false,
+              recoveredOnStartup: true,
+            },
+          });
+          insertWorkspaceFileSourceInTx(govDb, {
+            runtimeEpoch: row.runtime_epoch,
+            conversationId: row.conversation_id,
+            principalId: row.principal_id,
+            normalizedRelPath: row.target_rel_path,
+            artifactSha256: row.artifact_sha256,
+            artifactBytes: row.artifact_bytes,
+            importId: row.import_id,
+            volumeName: row.volume_name,
+            parentSourceIds,
+            now,
+          });
+        });
+        const updated = govDb
+          .prepare("SELECT install_count FROM managed_file_imports WHERE import_id = ?")
+          .get(row.import_id) as { install_count: number };
+        results.push({
+          importId: row.import_id,
+          logicalKey: row.logical_key,
+          conversationId: row.conversation_id,
+          targetRelPath: row.target_rel_path,
+          outcome: "reconciled_installed",
+          installCount: updated.install_count,
+          diskRewritten: false,
+        });
+      } else {
+        withImmediateTx(govDb, () => {
+          govDb
+            .prepare(
+              `UPDATE managed_file_imports
+                  SET state = 'PENDING_RECONCILE',
+                      reason = ?,
+                      updated_at = ?
+                WHERE import_id = ? AND state = 'PREPARED'`,
+            )
+            .run(
+              diskSha === row.base_sha256
+                ? "prepared_without_disk_install"
+                : "unprovable_target_state_after_crash",
+              now,
+              row.import_id,
+            );
+        });
+        results.push({
+          importId: row.import_id,
+          logicalKey: row.logical_key,
+          conversationId: row.conversation_id,
+          targetRelPath: row.target_rel_path,
+          outcome: "pending_reconcile",
+          installCount: row.install_count,
+          diskRewritten: false,
+        });
+      }
+    }
+
+    return results;
+  }
+
   async #withTargetLock<T>(normalizedRelPath: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.#targetLocks.get(normalizedRelPath) ?? Promise.resolve();
     let release!: () => void;
@@ -122,13 +335,17 @@ export class ManagedWorkspaceImporter {
     govDb: DatabaseSync;
     runtimeEpoch: string;
     conversationId: string;
+    /** Optional additional conversation IDs (e.g. parent conversation of a delegated worker) whose sources must also be checked and inherited. */
+    relatedConversationIds?: string[];
     principalId: string;
     scopeId: string;
     logicalKey: string;
     volumeName: string;
+    /** W2-G2: Approved immutable Docker image digest required BEFORE launching read-only exporter. */
+    approvedImageId: string;
     containerId?: string | null;
     targetRelPath: string;
-    /** Base target SHA-256 captured at task snapshot time; null means target did NOT exist at snapshot time. */
+    /** Base target SHA-256 captured by HOST at task snapshot time (NEVER from model args); null means target did NOT exist. */
     baseSha256: string | null;
     maxFiles?: number;
     maxFileBytes?: number;
@@ -201,7 +418,8 @@ export class ManagedWorkspaceImporter {
         if (existing.state === "PREPARED") {
           // Crash happened after PREPARED was persisted (possibly after atomic rename, before receipt commit!)
           if (beforeSha !== null && beforeSha === existing.artifact_sha256) {
-            // Provably already installed with exact artifact digest -> backfill receipt WITHOUT rewriting disk!
+            // Provably already installed with exact artifact digest -> backfill receipt + source atomically WITHOUT rewriting disk!
+            const parentSourceIds = JSON.parse(existing.parent_source_ids_json || "[]") as string[];
             withImmediateTx(params.govDb, () => {
               params.govDb
                 .prepare(
@@ -224,6 +442,18 @@ export class ManagedWorkspaceImporter {
                   artifactSha256: existing.artifact_sha256,
                   rewrittenDisk: false,
                 },
+              });
+              insertWorkspaceFileSourceInTx(params.govDb, {
+                runtimeEpoch: existing.runtime_epoch,
+                conversationId: existing.conversation_id,
+                principalId: existing.principal_id,
+                normalizedRelPath: existing.target_rel_path,
+                artifactSha256: existing.artifact_sha256,
+                artifactBytes: existing.artifact_bytes,
+                importId: existing.import_id,
+                volumeName: existing.volume_name,
+                parentSourceIds,
+                now,
               });
             });
             const updated = params.govDb
@@ -317,8 +547,49 @@ export class ManagedWorkspaceImporter {
         };
       }
 
+      // 1b. W2-S2: Re-verify ALL parent/conversation source read grants BEFORE writing target OR conflict candidate!
+      const checkConvIds = [
+        ...new Set([params.conversationId, ...(params.relatedConversationIds ?? [])]),
+      ];
+      const sourceAuthCheck = verifyAllConversationSourcesReadAuthorized(params.govDb, {
+        runtimeEpoch: params.runtimeEpoch,
+        conversationIds: checkConvIds,
+        principalId: params.principalId,
+        scopeId: params.scopeId,
+      });
+      if (!sourceAuthCheck.ok) {
+        this.#recordRejectedImport(params.govDb, {
+          importId,
+          logicalKey: `${params.logicalKey}:srcrev:${importId}`,
+          runtimeEpoch: params.runtimeEpoch,
+          conversationId: params.conversationId,
+          principalId: params.principalId,
+          scopeId: params.scopeId,
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          volumeName: params.volumeName,
+          containerId: params.containerId ?? null,
+          reason: `${sourceAuthCheck.code}: ${sourceAuthCheck.reason}`,
+          now,
+        });
+        return {
+          ok: false,
+          code: "source_read_revoked",
+          message: sourceAuthCheck.reason,
+          importId,
+          state: "REJECTED",
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          currentTargetSha256Before: beforeSha,
+          currentTargetSha256After: sha256FileIfExists(absolutePath),
+          artifactSha256: null,
+          conflictRelPath: null,
+          installCount: 0,
+        };
+      }
+
       // 2. Verify ALL writers on task volume have completely exited BEFORE opening read-only export!
-      const writerCheck = verifyAllVolumeWritersExited(params.volumeName);
+      const writerCheck = await verifyAllVolumeWritersExitedAsync(params.volumeName);
       if (!writerCheck.allExited) {
         const reason = `Active writers still attached to volume ${params.volumeName}: ${writerCheck.activeWriters.map((w) => `${w.name}(${w.state})`).join(",")}`;
         this.#recordRejectedImport(params.govDb, {
@@ -352,9 +623,10 @@ export class ManagedWorkspaceImporter {
         };
       }
 
-      // 3. Controlled read-only export of verified regular file bytes from volume
-      const exported = exportRegularFilesFromVolumeReadOnly({
+      // 3. Controlled read-only export of verified regular file bytes from volume (strictly by approved immutable image digest)
+      const exported = await exportRegularFilesFromVolumeReadOnlyAsync({
         volumeName: params.volumeName,
+        approvedImageId: params.approvedImageId,
         maxFiles: params.maxFiles,
         maxFileBytes: params.maxFileBytes,
         maxTotalBytes: params.maxTotalBytes,
@@ -425,9 +697,14 @@ export class ManagedWorkspaceImporter {
         };
       }
 
-      // Collect parent conversation source IDs so report inherits ALL parent provenance permissions!
-      const parentSources = listConversationSources(params.govDb, params.runtimeEpoch, params.conversationId);
-      const parentSourceIds = parentSources.map((s) => s.record_id);
+      // Collect parent conversation source IDs across conversation + related conversations
+      const parentSourceIdSet = new Set<string>();
+      for (const cid of checkConvIds) {
+        for (const s of listConversationSources(params.govDb, params.runtimeEpoch, cid)) {
+          parentSourceIdSet.add(s.record_id);
+        }
+      }
+      const parentSourceIds = [...parentSourceIdSet];
 
       // 4. Re-check current target version against baseSha256 (conflict detection!)
       const currentSha = sha256FileIfExists(absolutePath);
@@ -550,7 +827,7 @@ export class ManagedWorkspaceImporter {
         });
       }
 
-      // 7. Commit durable INSTALLED receipt & record derived file provenance inheriting all parent sources!
+      // 7. Commit durable INSTALLED receipt & record derived file provenance ATOMICALLY in the SAME transaction!
       withImmediateTx(params.govDb, () => {
         params.govDb
           .prepare(
@@ -573,24 +850,22 @@ export class ManagedWorkspaceImporter {
             artifactSha256: targetFile.sha256,
             artifactBytes: targetFile.sizeBytes,
             volumeName: params.volumeName,
+            exporterImageId: exported.exporterImageId,
             parentSourceIds,
           },
         });
-      });
-
-      // Record report in conversation_sources inheriting parent source IDs
-      recordConversationSource(params.govDb, {
-        runtimeEpoch: params.runtimeEpoch,
-        conversationId: params.conversationId,
-        principalId: params.principalId,
-        sourceType: "workspace_file",
-        sourceId: `workspace:${normalizedRelPath}`,
-        versionRef: `sha256:${targetFile.sha256.slice(0, 16)}`,
-        title: normalizedRelPath,
-        contentDigest: targetFile.sha256,
-        metadata: { importId, bytes: targetFile.sizeBytes, volumeName: params.volumeName },
-        parentSourceIds,
-        now,
+        insertWorkspaceFileSourceInTx(params.govDb, {
+          runtimeEpoch: params.runtimeEpoch,
+          conversationId: params.conversationId,
+          principalId: params.principalId,
+          normalizedRelPath,
+          artifactSha256: targetFile.sha256,
+          artifactBytes: targetFile.sizeBytes,
+          importId,
+          volumeName: params.volumeName,
+          parentSourceIds,
+          now,
+        });
       });
 
       const finalRow = params.govDb
@@ -610,6 +885,7 @@ export class ManagedWorkspaceImporter {
         artifactSha256: targetFile.sha256,
         conflictRelPath: null,
         installCount: finalRow.install_count,
+        exporterImageId: exported.exporterImageId,
         writerCheck,
       };
     });
