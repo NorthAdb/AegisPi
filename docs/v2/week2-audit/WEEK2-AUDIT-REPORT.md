@@ -544,34 +544,55 @@ $w2 = Join-Path $env:TEMP 'aegis-w2r3-w2-88fcde82'
 
 ### 12.3 第 3 轮审计人独立复跑与源码审查签收栏
 
-> 本节留白，供外部审计人基于冻结代码候选 `2dffb01fe0711a9b727b9f41006ed55bcac335b7` 填写第 3 轮独立复跑与源码复审结论。
+本节记录冻结候选 `2dffb01fe0711a9b727b9f41006ed55bcac335b7` 的第 3 轮独立复跑和源码结论。§12.1–12.2 为实施方提审记录。
 
 #### 12.3.1 独立复跑核对表（第 3 轮）
 
 | 核对项 | 审计人复跑结果（通过 / 未通过 / 待验证） | 备注 / 复跑 `runId` / 退出码 |
 |---|---|---|
-| 核对候选 `2dffb01fe0711a9b727b9f41006ed55bcac335b7` 与仅文档差异 | | |
-| 依赖锁定、类型检查 `tsc --noEmit`、分层守卫 | | |
-| 第 2 周全量 `tests/week2/run-all.ts`（含实机 Edge CDP 与汇总落盘） | | |
-| 同候选第 1 周全量 `tests/week1/run-all.ts`（`S1–S5`、`W1-A`、`W1-B`、25 项矩阵） | | |
-| 旧治理库副本连续开库升级校验（含第 1 轮 V02 旧 MCP 库副本，0 预算拒绝） | | |
+| 核对候选 `2dffb01fe0711a9b727b9f41006ed55bcac335b7` 与仅文档差异 | 通过 | 使用分离工作树独立复跑。提审 HEAD `f66366b` 与代码候选之间仅有审计文档和证据差异。 |
+| 依赖锁定、类型检查 `tsc --noEmit`、分层守卫 | 通过 | 8 项直接依赖的已安装版本与 lockfile 一致。Git blob SHA-256 与 §12 一致，工作树文件仅有 CRLF 差异。类型检查和分层守卫通过。 |
+| 第 2 周全量 `tests/week2/run-all.ts`（含实机 Edge CDP 与汇总落盘） | 通过 | `week2_79a711ec` 退出 0。V04/V05 `v04v05_bef86357`、V02 `v02_e9d8fed2`、V03 `v03_47e5dfd2`、S6 `s6_b3cd2551`、Edge `v01v06_affcd5f1` 均为 PASS。额外正式入口顺序更新夹具退出 1，见 W2-S3。 |
+| 同候选第 1 周全量 `tests/week1/run-all.ts`（`S1–S5`、`W1-A`、`W1-B`、25 项矩阵） | 通过 | `week1_021ce305` 退出 0，S1–S5 5/5，矩阵 25/25。W1-A `w1a_7ab92925` 三例足额各发送 1 次，六例不足各发送 0 次。W1-B `w1b_06715189` 独立 SMTP 收件 1、领取 1，原会话 UNKNOWN。 |
+| 旧治理库副本连续开库升级校验（含第 1 轮 V02 旧 MCP 库副本，0 预算拒绝） | 通过 | 两份副本各连续开库两次，两项命令均退出 0。第 1 周旧库保留 8 条授权、补齐 6 条拒绝记录的归属。第 1 轮 V02 副本补齐 2 列并保留旧钉扎行。两份副本外键异常均为 0。 |
 
 #### 12.3.2 §11.3 未关闭及新增审计项逐项关闭复核表（第 3 轮）
 
 | 审计编号 | 级别 | 复核结论（关闭 / 未关闭） | 审计人复核说明 |
 |---|---|---|---|
-| `W2-R2-M1` | P1 | | |
-| `W2-S1` | P1 | | |
-| `W2-S2` | P1 | | |
-| `W2-S3` | P1 | | |
-| `W2-S4` | P2 | | |
-| `W2-S6` | P1 | | |
-| `W2-R2-E1` | P2 | | |
+| `W2-R2-M1` | P1 | **关闭** | 第 1 轮 V02 实存旧表副本连续开库两次，均有 `command` 和 `args_json`，服务器及工具钉扎各保留 1 行，外键异常 0。V02 夹具另验证重新登记绑定。 |
+| `W2-S1` | P1 | **关闭** | 正式入口在 `beforeResume` 绑定宿主并等待 MCP 建连。独立 Edge 套件通过正式重启验证，挂起任务恢复后完成仓库读取和 `reports/resumed.md` 受管写入。[装配](../../../src/index.ts#L330) · [调度放行](../../../src/runtime/harness.ts#L1385) |
+| `W2-S2` | P1 | **未关闭** | 旧游标重连、已连接流、Worker 派生输入和服务端草稿快照的整改已覆盖。源码仍显示界面忽略快照的 `draftRedacted`，以 PENDING 为准恢复本地未保存草稿，并继续提供改稿和批准操作。撤权后的页面可重新显示撤权前留存的正文，只有服务端 JSON 脱敏的断言无法证明界面清除。复验需在浏览器覆盖有本地编辑的派生草稿，确认撤权后清除正文、禁用受限操作，并由宿主在处理决定和领取时复核来源权限。[快照标记](../../../src/web/server.ts#L258) · [草稿缓存与按钮](../../../src/web/view1.ts#L600) · [领取](../../../src/runtime/submitter.ts#L94) |
+| `W2-S3` | P1 | **未关闭** | 导出后复核授权、同摘要无写盘及保守恢复已落实。额外正式入口实测中，同一会话连续提交两个独立更新，提交号 15 和 24。第一条安装一次，第二条在权威文件无外部编辑的情况下仍以 `null` 为基准，返回 `CONFLICT_SAVED`，权威文件停在第一版。缓存键沿用了会话级预算归属。此外，快照复制器将整个工作区的普通文件收入任务输入，`trackedBaselineRelPaths` 仅补充基准。复验需证明顺序命令各用自己的基准，重叠任务各保留原基准，容器输入仅含获准路径。[缓存键](../../../src/index.ts#L367) · [会话预算归属](../../../src/runtime/harness.ts#L1489) · [快照复制](../../../src/capabilities/workspace/importer.ts#L198) |
+| `W2-S4` | P2 | **聊天路径关闭，审批回执待补** | 独立 Edge 复跑旧卡片为 0，迟到聊天回执保留新会话输入，并且只清原键。保存、批准及拒绝的异步回执仍会主动重新选择原会话。按 V05 切换契约，复验待审批操作回执只更新原请求所属记录，并且无法改变当前选择或重开旧流。[审批回执](../../../src/web/view1.ts#L645) |
+| `W2-S6` | P1 | **实现已修复，证据未关闭** | 正式入口装载后清除凭据环境键，两个 Docker CLI 启动封装均传白名单环境。报告中 Docker CLI 环境来自审计进程用白名单启动的独立 Node 探针，正式调用的 IMAP 子进程和任务容器环境未采集，`uncollectedSamples` 与环境擦除指标为固定值。保留白名单对照，补正式调用的逐槽采样，实际观察到的活跃 WAL、SSE 帧、子进程和任务卷分别入证，未采样项明确登记。[正式装载](../../../src/index.ts#L250) · [启动封装](../../../src/capabilities/workspace/docker-sandbox.ts#L47) · [独立探针](../../../tests/week2/run-s6.ts#L179) · [覆盖标记](../../../tests/week2/run-s6.ts#L653) |
+| `W2-R2-E1` | P2 | **关闭** | 第 1 轮资料与 `5cb67ee` 一致，第 2 轮迁移目录与 `c83dc44` 的原目录 Git tree SHA 一致。三轮归档的两周摘要 runId 均与报告对应，引用的 JSON 文件路径可解析。 |
 
 #### 12.3.3 第 3 轮最终签收结论
 
-- **第 3 轮签收结论**：[ ] 同意阶段一第 2 周签收（本地替身 + 实机 Docker + 实机浏览器范围，真实只读与首 token 保留“待验证”） / [ ] 退回继续整改
-- **审计人 / 日期**：
-- **补充意见或新发现（如有）**：
+- **第 3 轮签收结论**：退回继续整改，暂缓阶段一第 2 周签收。两周既有全量夹具均通过，额外正式入口复跑确认了 W2-S3 的顺序更新缺口。W2-S2 撤权后的本地草稿、W2-S4 的审批回执以及 W2-S6 实际进程证据仍需补齐。真实只读和首 token 保留待验证。
+- **审计人 / 日期**：Codex 独立复审，2026-11-26（香港时间）。
+- **整改交接**：请在同一份报告 §13 回填四项剩余内容及新候选 SHA，附相应复验和同候选两周全量结果。
+
+#### 12.3.4 独立复跑命令与证据
+
+审计在分离工作树使用 Windows、锁定 Node 22.23.5、SQLite 3.54.1 和既有锁定依赖目录联接。两周全量分别在新数据目录执行，旧源库均通过只读连接备份后再打开副本。
+
+```powershell
+$auditRoot = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\week2-round3-2dffb01'
+$auditNode = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+Set-Location (Join-Path $auditRoot 'candidate')
+git rev-parse HEAD
+& $auditNode tests/week1/run-all.ts --data-dir '../week1/data' --evidence-dir '../week1/evidence' --keep-data true *> '../week1.log'
+& $auditNode tests/week2/run-all.ts --data-dir '../week2/data' --evidence-dir '../week2/evidence' --keep-data true *> '../week2.log'
+$probe = Get-Content -Raw -Encoding utf8 '..\..\round4-1795655498209\legacy-schema-probe.mjs'
+& $auditNode --input-type=module -e $probe '..\..\round2-1795619937294\data\w1-a\host-data\aegis-gov.sqlite' '../legacy-copy.sqlite' '../legacy-schema-check.json'
+$probe = Get-Content -Raw -Encoding utf8 '..\..\week2-round2-c4c3f954\mcp-legacy-probe.mjs'
+& $auditNode --input-type=module -e $probe '..\..\week2-round1-fadcc51d\week2\data\v02\host-data\aegis-gov.sqlite' '../mcp-legacy-copy.sqlite' '../mcp-legacy-check.json'
+$probe = Get-Content -Raw -Encoding utf8 '../sequential-report-final-probe.mjs'
+& $auditNode --input-type=module -e $probe *> '../sequential-report-final.log'
+```
+
+两周的汇总与专项 JSON 分别位于 `week1/evidence`、`week2/evidence`。旧库证据为 `legacy-schema-check.json` 与 `mcp-legacy-check.json`，顺序更新证据为 `sequential-report-final/result.json`。顺序更新的首次夹具因用字符串检查结构化消息未识别结束状态，复跑修正该观察条件并使用新数据目录。正式候选代码保持冻结。
 
 
