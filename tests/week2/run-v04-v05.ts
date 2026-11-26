@@ -11,6 +11,7 @@ import {
   proposeOrGetApproval,
 } from "../../src/governance/approvals.ts";
 import { HostCredentialVault } from "../../src/governance/credentials.ts";
+import { openGovernanceDb } from "../../src/governance/db.ts";
 import { grantSourceRead, recordConversationSource, revokeSourceReadGrant } from "../../src/governance/policy.ts";
 import { AegisHostRuntime } from "../../src/runtime/harness.ts";
 import type { ModelSlotConfig } from "../../src/runtime/models.ts";
@@ -628,6 +629,8 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
     let v05RestartResyncReason = "";
     let v05PostLogoutFrames = -1;
     let v05ReusedConvId = "";
+    let claimConvIdForRevCheck = "";
+    let claimEpochForRevCheck = "";
 
     try {
       const ownerCookie = await httpLogin(web5.baseUrl, tokens.owner);
@@ -1110,82 +1113,92 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
       });
       assert.equal(rejectRevokedRes.status, 200);
 
-      // Test effect CLAIM re-verification: approve while source is granted, THEN revoke source BEFORE submitApprovedEmailEffect()!
-      const preAppGrant = grantSourceRead(host5.govDb, {
-        principalId: "owner",
-        scopeId: "scope:default",
-        sourceType: "memory",
-        resourceId: "memory:claim-recheck",
-        operations: ["read"],
-        now: Date.now(),
-      });
       const claimConv = await host5.createManagedConversation({ slotName: "router", budgetTaskId: "bt-claim-rev" });
-      recordConversationSource(host5.govDb, {
-        runtimeEpoch: host5.runtimeEpoch,
-        conversationId: String(claimConv.id),
-        principalId: "owner",
-        sourceType: "memory",
-        sourceId: "memory:claim-note-1",
-        versionRef: "v1",
-        title: "Claim recheck note",
-        contentDigest: "d".repeat(64),
-        metadata: { domain: "claim-recheck", tier: "L1" },
-        now: Date.now(),
-      });
-      const claimPayload = { to: ["claim-rev@local.test"], subject: "Subj", body: "Body" };
-      const propClaim = proposeOrGetApproval(host5.govDb, {
-        runtimeEpoch: host5.runtimeEpoch,
-        conversationId: String(claimConv.id),
-        toolTaskId: "9901",
-        callId: `call_claim_${runId}`,
-        scopeId: "scope:default",
-        toolName: "send_email",
-        target: "smtp:claim-rev@local.test",
-        payload: claimPayload,
-        expiresAt: Date.now() + 60_000,
-        now: Date.now(),
-      });
-      const decPreApp = decideApproval(host5.govDb, {
-        approvalId: propClaim.approval.approval_id,
-        conversationId: String(claimConv.id),
-        principalId: "owner",
-        decision: "APPROVE",
-        expectedRevision: 1,
-        expectedActionHash: propClaim.revision.action_hash,
-        nonce: propClaim.nonce!,
-        decisionKey: `dk-pre-claim-${runId}`,
-        now: Date.now(),
-      });
-      assert.equal(decPreApp.ok, true);
-      assert.ok(decPreApp.effectId);
-
-      // Revoke source grant strictly AFTER approval and BEFORE claim/submit!
-      revokeSourceReadGrant(host5.govDb, {
-        grantId: preAppGrant.grant_id,
-        reason: "w2_s2_revoke_before_claim",
-        now: Date.now(),
-      });
-      const smtpBeforeRevClaim = (await fakeSmtp.stats()).totalReceived;
-      const claimRevRes = await submitApprovedEmailEffect({
-        govDb: host5.govDb,
-        runtimeEpoch: host5.runtimeEpoch,
-        effectId: decPreApp.effectId!,
-        conversationId: String(claimConv.id),
-        toolTaskId: "9901",
-        callId: `call_claim_${runId}`,
-        toolName: "send_email",
-        finalTarget: "smtp:claim-rev@local.test",
-        finalPayload: claimPayload,
-        smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "claim@local.test" },
-        now: () => Date.now(),
-      });
-      assert.equal(claimRevRes.ok, false);
-      assert.equal(claimRevRes.claimed, false);
-      assert.equal(claimRevRes.code, "source_read_revoked");
-      assert.equal((await fakeSmtp.stats()).totalReceived - smtpBeforeRevClaim, 0, "W2-S2: Revoked-source effect claim MUST send 0 emails");
+      claimConvIdForRevCheck = String(claimConv.id);
+      claimEpochForRevCheck = host5.runtimeEpoch;
     } finally {
       await web5.close();
       await host5.close();
+    }
+
+    // W2-S2 Effect CLAIM re-verification (deterministic after host5 closes so maintenance timer doesn't auto-quarantine synthetic toolTaskId):
+    // Approve while source is granted, THEN revoke source grant BEFORE submitApprovedEmailEffect() claims!
+    {
+      const { db: claimDb } = openGovernanceDb(path.join(v05Dir, "aegis-gov.sqlite"));
+      try {
+        const preAppGrant = grantSourceRead(claimDb, {
+          principalId: "owner",
+          scopeId: "scope:default",
+          sourceType: "memory",
+          resourceId: "memory:claim-recheck",
+          operations: ["read"],
+          now: Date.now(),
+        });
+        recordConversationSource(claimDb, {
+          runtimeEpoch: claimEpochForRevCheck,
+          conversationId: claimConvIdForRevCheck,
+          principalId: "owner",
+          sourceType: "memory",
+          sourceId: "memory:claim-note-1",
+          versionRef: "v1",
+          title: "Claim recheck note",
+          contentDigest: "d".repeat(64),
+          metadata: { domain: "claim-recheck", tier: "L1" },
+          now: Date.now(),
+        });
+        const claimPayload = { to: ["claim-rev@local.test"], subject: "Subj", body: "Body" };
+        const propClaim = proposeOrGetApproval(claimDb, {
+          runtimeEpoch: claimEpochForRevCheck,
+          conversationId: claimConvIdForRevCheck,
+          toolTaskId: "9901",
+          callId: `call_claim_${runId}`,
+          scopeId: "scope:default",
+          toolName: "send_email",
+          target: "smtp:claim-rev@local.test",
+          payload: claimPayload,
+          expiresAt: Date.now() + 60_000,
+          now: Date.now(),
+        });
+        const decPreApp = decideApproval(claimDb, {
+          approvalId: propClaim.approval.approval_id,
+          conversationId: claimConvIdForRevCheck,
+          principalId: "owner",
+          decision: "APPROVE",
+          expectedRevision: 1,
+          expectedActionHash: propClaim.revision.action_hash,
+          nonce: propClaim.nonce!,
+          decisionKey: `dk-pre-claim-${runId}`,
+          now: Date.now(),
+        });
+        assert.equal(decPreApp.ok, true);
+        assert.ok(decPreApp.effectId);
+
+        revokeSourceReadGrant(claimDb, {
+          grantId: preAppGrant.grant_id,
+          reason: "w2_s2_revoke_before_claim",
+          now: Date.now(),
+        });
+        const smtpBeforeRevClaim = (await fakeSmtp.stats()).totalReceived;
+        const claimRevRes = await submitApprovedEmailEffect({
+          govDb: claimDb,
+          runtimeEpoch: claimEpochForRevCheck,
+          effectId: decPreApp.effectId!,
+          conversationId: claimConvIdForRevCheck,
+          toolTaskId: "9901",
+          callId: `call_claim_${runId}`,
+          toolName: "send_email",
+          finalTarget: "smtp:claim-rev@local.test",
+          finalPayload: claimPayload,
+          smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "claim@local.test" },
+          now: () => Date.now(),
+        });
+        assert.equal(claimRevRes.ok, false);
+        assert.equal(claimRevRes.claimed, false);
+        assert.equal(claimRevRes.code, "source_read_revoked");
+        assert.equal((await fakeSmtp.stats()).totalReceived - smtpBeforeRevClaim, 0, "W2-S2: Revoked-source effect claim MUST send 0 emails");
+      } finally {
+        claimDb.close();
+      }
     }
 
     // W2-S4: Deterministic serialization test for ConversationProjectionHub concurrent async buildSnapshot race!
