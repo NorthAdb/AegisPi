@@ -1,7 +1,0 @@
-PASS  cpu-quota-has-measurable-effect 鈥?2 worker threads: --cpus 1 瀹炴祴 1781ms vs --cpus 2 瀹炴祴 763ms (ratio 2.33)
-PASS  memory-2gib-placeholder-enforced-with-dirty-pages 鈥?1.5GiB dirty -> exit 0 OK; 3GiB dirty -> exit 137 killed
-PASS  pids-256-placeholder-bounds-spawn-storm 鈥?spawn storm topped out at 249 (limit 256)
-PASS  tmpfs-work-volume-bounds-disk-writes 鈥?512MiB bound: 8x64MiB ok (exit 0); 12x64MiB -> ENOSPC (exit 9) 鈥?the SIZE bound must be the killer, any other code means the mount contract broke
-PASS  agent-1cpu-1gib-placeholder-runs-self-check 鈥?agent self-check under 1 CPU / 1 GiB / pids 256 -> exit 0
-
-=== quota-calibration: 5 pass, 0 fail, 5 judged ===

@@ -10,10 +10,10 @@
 1. [AGENTS.md](../../AGENTS.md)：仓库级硬约束（Node 版本锁、Pi 精确版本、严禁读取/输出/提交 `.env` 密钥、evidence 纪律）。
 2. [README.md](../../README.md) 与 [docs/README.md](../README.md)：当前 v1 封存定位与统一文档索引。
 3. [docs/V1-CLOSURE-AND-V2-MIGRATION.md](../V1-CLOSURE-AND-V2-MIGRATION.md)：**现行最终收官与 v2 迁移处置文档**。
-4. [docs/phase5/reports/phase5-final-closure.md](../phase5/reports/phase5-final-closure.md)：Phase 5 终局收口报告（单元 5.6 许可 2 实盘与 CalDAV 延后裁定）。
-5. [docs/phase4/reports/user-value-report.md](../phase4/reports/user-value-report.md)：全量聚合报告（**327/327 PASS**）。
-6. [docs/phase3/reports/image-digest.md](../phase3/reports/image-digest.md)：现行 OCI 镜像 digest（随后续自用改造更新至 `agent:phase3-357d3a70e2ea`）。
-7. [.audit/decision-trail.tsv](../../.audit/decision-trail.tsv) 末尾 `D-102`、`D-103`：Phase 5 终局裁定与实测费用记录。
+4. [docs/phase5/reports/phase5-final-closure.md](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/docs/phase5/reports/phase5-final-closure.md)：Phase 5 终局收口报告（单元 5.6 许可 2 实盘与 CalDAV 延后裁定）。
+5. [docs/phase4/reports/user-value-report.md](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/docs/phase4/reports/user-value-report.md)：全量聚合报告（**327/327 PASS**）。
+6. [docs/phase3/reports/image-digest.md](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/docs/phase3/reports/image-digest.md)：现行 OCI 镜像 digest（随后续自用改造更新至 `agent:phase3-357d3a70e2ea`）。
+7. [.audit/decision-trail.tsv](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/.audit/decision-trail.tsv) 末尾 `D-102`、`D-103`：Phase 5 终局裁定与实测费用记录。
 8. 设计包规范（仓库外）：`D:\AegisPi\aegis-pi-design-pack-v1.4.1\docs\04-Frontend-Console-UX-and-6-Phase-Taskbook.md` 第 6 节。
 
 ---

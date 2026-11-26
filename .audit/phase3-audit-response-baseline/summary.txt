@@ -1,5 +1,0 @@
-durability	exit=0	seconds=50	tail=report: D:\AegisPi\aegis-pi\docs\phase2\evidence\durability-report.json | log: D:\AegisPi\aegis-pi\docs\phase2\evidence\durability-log.md
-budget	exit=0	seconds=5	tail=report: D:\AegisPi\aegis-pi\docs\phase2\evidence\budget-report.json | log: D:\AegisPi\aegis-pi\docs\phase2\evidence\budget-log.md
-acl	exit=0	seconds=17	tail=report: D:\AegisPi\aegis-pi\docs\phase2\evidence\acl-report.json | log: D:\AegisPi\aegis-pi\docs\phase2\evidence\acl-log.md
-contracts	exit=0	seconds=41	tail=15 probe(s): all PASS with falsifiable evidence | report: D:\AegisPi\aegis-pi\docs\phase1\evidence\contracts-report.json
-hono-pair	exit=0	seconds=26	tail=hono-4.13.19 lockfile sha256 e5d0c57e9d576d5430cf0964deb3ccf228f862f8a9e809556f3cbf9d6247ba5e | hono-4.12.24 lockfile sha256 db2bb1344fd16b2b2db9c2197a877bc9f3f853393706b6c62c5c5747ab95dad4

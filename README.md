@@ -24,4 +24,4 @@ $runRoot = Join-Path $env:TEMP ('aegis-v2-' + [guid]::NewGuid().ToString('N'))
 ## 文档
 
 - [文档索引](docs/README.md) 汇总 v2 的工程约束、架构决策和周次验收。
-- [v1 封存与迁移说明](docs/V1-CLOSURE-AND-V2-MIGRATION.md) 记录历史零信任基线 `v1-zero-trust-baseline`，包括 v1 的 `327/327` 和 `selfuse 31/31`。
+- [v1 封存与迁移说明](docs/V1-CLOSURE-AND-V2-MIGRATION.md) 记录 v1 的封存成绩（`327/327` 和 `selfuse 31/31`）及迁移决议。Phase 1–5 报告、审计证据和自用指南见 [`v1-zero-trust-baseline` 标签](https://github.com/NorthAdb/AegisPi/tree/v1-zero-trust-baseline)。

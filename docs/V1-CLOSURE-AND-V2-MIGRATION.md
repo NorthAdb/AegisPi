@@ -69,5 +69,5 @@
 
 - [v1/GAP-INVENTORY-AND-PHASE6.md](v1/GAP-INVENTORY-AND-PHASE6.md)：v1 历史缺口盘点与最终处置台账
 - [v1/HANDOFF-PHASE5-TO-SELFUSE.md](v1/HANDOFF-PHASE5-TO-SELFUSE.md)：Phase 5 收官基线与自用过渡历史交接记录
-- [SELF-USE-GUIDE.md](SELF-USE-GUIDE.md)：v1 个人本地单命令启动与 Web Console 设置指南
-- [phase5/reports/phase5-final-closure.md](phase5/reports/phase5-final-closure.md)：Phase 5 终局收口报告（`D-102` / `D-103`）
+- [SELF-USE-GUIDE.md](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/docs/SELF-USE-GUIDE.md)：v1 个人本地单命令启动与 Web Console 设置指南
+- [phase5/reports/phase5-final-closure.md](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/docs/phase5/reports/phase5-final-closure.md)：Phase 5 终局收口报告（`D-102` / `D-103`）

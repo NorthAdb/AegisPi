@@ -1,5 +1,0 @@
-{
-  "$comment": "Canonical DDL pointer (decision D-01: the design pack does not ship with the repo). The migrator hashes this file's UTF-8 bytes with newlines normalized to LF and refuses to apply anything that does not match expectedSha256Lf. AEGISPI_SCHEMA_SQL overrides schemaSqlPath for other machines.",
-  "schemaSqlPath": "D:\\AegisPi\\aegis-pi-design-pack-v1.4.1\\docs\\reference\\schema.sql",
-  "expectedSha256Lf": "ede73ecaa7b98b850dfaa85f322472b50728ac3afbc70a8da3cee6bbccaa2995"
-}
