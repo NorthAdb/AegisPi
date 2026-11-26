@@ -955,6 +955,47 @@ $evRoot = Join-Path $env:TEMP 'aegis-w2r7-final-8b3aad9d'
 
 ### 16.3 第 7 轮审计人复审与签收栏
 
-- **待复审项**：`W2-S3`、`W2-S6`（候选 `8b3aad9d564dc966d62c13a1b0814170e2113a9f`，对应第 7 轮证据固定目录 `evidence/round7/`）。
-- **结论**：`[ ] 签收`　`[ ] 退回整改`
-- **审计人 / 日期**：`__________________` / `2026-11-__`
+- **结论**　`[x] 签收`　`[ ] 退回整改`。签收候选为 `8b3aad9d564dc966d62c13a1b0814170e2113a9f`，适用阶段一本机验收范围。W2-S3、W2-S6 均关闭，阶段一无剩余代码整改项。
+- **审计人 / 日期**　Codex 独立复审 / 2026-11-26（Asia/Hong_Kong）。
+
+#### 16.3.1 同候选独立复跑
+
+| 核对项 | 退出码 / 结果 | 实得 |
+|---|---|---|
+| 候选与归档 | 通过 | 分离工作树固定在 `8b3aad9d564dc966d62c13a1b0814170e2113a9f`。后续 `dcb0b58` 只更改两份报告并新增第 7 轮证据，前六轮的证据目录未改动。依赖清单与锁文件同第 6 轮，8 项直接依赖实装版本与锁定值一致。锁文件 LF 字节 SHA-256 为 `795485bdfbf93215f07ba67e2185bc513cca3f39879cebff6830b79d0cd8d291`。Windows x64，Node 22.23.5、SQLite 3.54.1、npm 10.9.9、Docker 29.9.2、Edge 157.0.4341.60。 |
+| 类型及分层 | `0` / 通过 | 独立 `tsc --noEmit` 退出 0，分层守卫 `violations: []`。 |
+| 第 1 周全量 | `0` / 通过 | `week1_9feecd58`，S1–S5 5/5，矩阵 25/25。W1-A `w1a_3f7b6283` 足额对照各新增 1 次，六个不足负例各新增 0 次。W1-B `w1b_bde79ca4` 独立 SMTP 累计收件与成功领取各 1 次，原会话刷新仍显示 `UNKNOWN` 对应的“结果待核对”。 |
+| 第 2 周全量 | `0` / 通过 | `week2_9701b8cc`，V04/V05 `v04v05_a1a6e1db`、V02 替身 `v02_1951bb6f`、V03 `v03_764ced13`、S6 `s6_bf6a155b` 和正式入口 Edge `v01v06_4d696acf` 均通过。 |
+| 两份历史治理库 | 各 `0` / 通过 | 旧 W1 库二次打开保留 8 条会话授权，补齐 6 条拒绝记录代际。首轮旧 MCP 库二次打开保留服务与工具 Pin 各 1 条，补齐 `command` 和 `args_json`。两份副本外键异常均为 0。 |
+
+#### 16.3.2 逐项签收
+
+| 编号 | 裁定 | 独立核对结果 |
+|---|---|---|
+| W2-S3 | **关闭** | 用同一份上轮已失败的回执探针复跑，新治理库副本中的 `INSTALLED` 状态、原 `importId` 和安装次数 1 均保留，权威文件 SHA-256 前后一致。独立待核对重入探针退出 0，重复登记与普通导入均返回原 `importId` 和 `PENDING_RECONCILE`，安装次数 0、文件摘要不变。同候选 V03 同时覆盖正式入口的 Router 和同一 Worker 强杀、缺失 Worker 根、恢复后使用原基准以及缓存路径撤权。 |
+| W2-S6 | **关闭（合成凭据与本地替身）** | 独立专项 `s6_de408f31` 退出 0。文件/缓冲、内存子串、实际 MCP 替身子进程三个阳性对照各 2/2，替身运行包含实际环境值扫描，五个槽位及模型别名的实测禁止命中为 0，`uncollectedSamples=[]`。补测精确 PAT 在允许变量中命中 0，同一值增加前后缀时命中 1，Worker 标记包含于普通变量值中时命中 1。变量名用于判定允许位置，子串匹配作用于变量值。独立观察目录只有 4 份脱敏 JSON，卷原始字节未落盘。MCP 加盐承诺仅在本地合成夹具中用作扫描输入。 |
+
+真实 Gmail IMAP 与真实 GitHub MCP 的授权只读分别保留**待验证**，本轮 V02 签收使用本地替身。V01 逐 token 首延迟继续列为待验证。S6 签收覆盖合成凭据下的观察器，真实凭据取证随授权实机项另行核对。
+
+#### 16.3.3 独立复跑命令与证据
+
+命令在分离工作树及各自的新数据目录中执行。专项探针和独立证据位于以下审计根目录。
+
+```powershell
+$auditRoot = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\week2-round7-8b3aad9'
+$auditNode = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+Set-Location (Join-Path $auditRoot 'candidate')
+git rev-parse HEAD
+& $auditNode ./node_modules/typescript/bin/tsc --noEmit
+& $auditNode tests/week1/run-all.ts --data-dir "$auditRoot/week1/data" --evidence-dir "$auditRoot/week1/evidence" --keep-data true
+& $auditNode tests/week2/run-all.ts --data-dir "$auditRoot/week2/data" --evidence-dir "$auditRoot/week2/evidence" --keep-data true
+$probe = Get-Content -Raw -Encoding utf8 '../receipt-before-reconcile-probe.mjs'
+& $auditNode --input-type=module -e $probe
+$probe = Get-Content -Raw -Encoding utf8 '../pending-reconcile-reentry-probe.mjs'
+& $auditNode --input-type=module -e $probe
+& $auditNode tests/week2/run-s6.ts --data-dir '../s6-repeat/data' --evidence-dir '../s6-repeat/evidence'
+$probe = Get-Content -Raw -Encoding utf8 '../s6-allowed-placement-probe.mjs'
+& $auditNode --input-type=module -e $probe
+```
+
+两周汇总、V03 和 S6 全量实得见 `week1/evidence`、`week2/evidence`。原回执与待核对探针的结果分别见 `receipt-before-reconcile.json` 和 `pending-reconcile-reentry-final/result.json`。待核对探针的两次初始化尝试因测试库 seed 参数有误未进入断言，修正后使用全新库完成。S6 专项与放置规则对照见 `s6-repeat/evidence/s6-evidence.json`、`s6-allowed-placement.json`。旧库沿用 §12.3.4 的只读备份探针，结果见 `legacy-schema-check.json` 和 `mcp-legacy-check.json`。

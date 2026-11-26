@@ -2,24 +2,32 @@
 
 维护规则：本索引只指路并标明每份资料的用途与身份，不复制正文（避免多副本口径漂移）。`docs/` 根目录只保留 **3 个主入口**（[README.md](README.md)、[SELF-USE-GUIDE.md](SELF-USE-GUIDE.md)、[V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md)），过渡交接与缺口盘点档案集中归档于 [v1/](v1/)，Phase 1–5 收口报告与证据路径按评测脚本契约保持在 `phase1/`–`phase5/` 与 `adr/`。审计原稿、冻结报告、原始日志与证据文件字节不变。
 
-## 推荐阅读顺序
+## AegisPi v2
 
-1. 根 [README](../README.md)：项目定位、v1 封存基线总览与运行前置条件。
+1. 根 [README](../README.md) 提供当前签收状态与本地复跑入口。
+2. [AGENTS.md](../AGENTS.md) 给出工具链、依赖、分层、阶段边界和证据要求，并指向本机 v2.3 总览与任务书。
+3. [ADR-0002](adr/0002-v2-pi-durable-migration.md) 记录 Pi Durable 迁移决议。[ADR-0003](adr/0003-week1-budget-attribution-and-paired-recovery.md) 记录预算归属及双库配对恢复。
+4. [第 1 周签收报告](v2/week1-audit/WEEK1-AUDIT-REPORT.md) 记录第一周签收及 W1-A、W1-B。
+5. [第 2 周验收报告](v2/week2-audit/WEEK2-ACCEPTANCE-REPORT.md) 与 [最终独立审签](v2/week2-audit/WEEK2-AUDIT-REPORT.md#163-第-7-轮审计人复审与签收栏) 记录阶段一本机签收、冻结候选 `8b3aad9`、同候选两周独立复跑与待验证实机项。
+
+## v1 历史资料阅读顺序
+
+1. [v1 封存基线 README](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/README.md) 记录 v1 的项目定位、运行前置条件和已验收能力。
 2. [V1-CLOSURE-AND-V2-MIGRATION.md](V1-CLOSURE-AND-V2-MIGRATION.md)：**v1 正式封存裁决、全部剩余项处置结论及 v2 拟复用资产清单**（首读收官结论）。
 3. [SELF-USE-GUIDE.md](SELF-USE-GUIDE.md)：v1 本地单命令冷启动与 Web Console `⑤ 设置与接入` 操作指南。
 4. 本文：按类别找对历史资料（[v1/](v1/)、[phase1/](phase1/)–[phase5/](phase5/)、[adr/](adr/)）。
 5. 历史审计与阶段收口：phase1–5 下各收口报告、证据及 [v1/](v1/) 历史交接档（仅作史实追溯，不作为后续开发任务单）。
 
-## 现行规范（操作依据）
+## v1 规范与配置（历史）
 
 | 资料 | 用途 |
 | --- | --- |
-| 本机设计包 `D:\AegisPi\aegis-pi-design-pack-v1.4.1` | 唯一规范来源，不随库分发；修订契约读原包 |
-| 根 [AGENTS.md](../AGENTS.md) | 仓库级硬约束（版本锁定、Phase 边界、敏感内容、证据格式、不越界） |
-| [apps/daemon/config/defaults.json](../apps/daemon/config/defaults.json) | 唯一策略默认（预算 $0.80/$5、失败关闭开关：baseUrl=null、双白名单=[]、allowReal*=false、四项 priceCatalog=null） |
-| [apps/daemon/config/schema-source.json](../apps/daemon/config/schema-source.json) | schema.sql 指针与哈希门（漂移即红） |
+| 本机设计包 `D:\AegisPi\aegis-pi-design-pack-v1.4.1` | v1 规范来源，不随库分发 |
+| [v1 AGENTS.md](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/AGENTS.md) | v1 封存时的仓库约束 |
+| [apps/daemon/config/defaults.json](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/apps/daemon/config/defaults.json) | 唯一策略默认（预算 $0.80/$5、失败关闭开关：baseUrl=null、双白名单=[]、allowReal*=false、四项 priceCatalog=null） |
+| [apps/daemon/config/schema-source.json](https://github.com/NorthAdb/AegisPi/blob/v1-zero-trust-baseline/apps/daemon/config/schema-source.json) | schema.sql 指针与哈希门（漂移即红） |
 
-## 设计决策（现行）
+## v1 设计决策（历史）
 
 | 资料 | 状态与用途 |
 | --- | --- |
@@ -27,7 +35,7 @@
 | [phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md](phase4/reviews/REVIEW-MODEL-ADR-cde9bd3.md) | 方案审核原稿（字节冻结，SHA-256 `685192d7…`，判定「需改后通过、4.1 可实施候选、不授权实施」） |
 | [phase4/reviews/response-review-model-adr-cde9bd3.md](phase4/reviews/response-review-model-adr-cde9bd3.md) | 对上述审核的逐项回应与追记（四项更正落点 + 两句澄清记录 + 方案确认追记） |
 
-## 阶段计划（现行）
+## v1 阶段计划（历史）
 
 | 资料 | 状态与用途 |
 | --- | --- |
@@ -37,7 +45,7 @@
 | [phase4/phase4-2-offline-task-spec.md](phase4/phase4-2-offline-task-spec.md) | **单元 4.2 许可 1 离线任务书**：只读 Repo Observe 离线编排、业务级 `maxInputBytes`/`maxOutputTokens` 硬上限、`HELD` 停机语义、4.1 延后 P2 项与 `model:real` opt-in 守卫（不含任何真实运行授权） |
 | [phase3/reports/real-acceptance-plan.md](phase3/reports/real-acceptance-plan.md) | A/B/C/D 真实验收计划。A/B/C 已执行且授权闭合（无剩余额度），D 延期——文中「待主人逐项授权」对 D 与任何重跑仍然有效，对已闭合项不提供剩余额度 |
 
-## 状态说明（现行权威）
+## v1 状态与收口记录
 
 | 资料 | 用途 |
 | --- | --- |
@@ -93,7 +101,7 @@
 
 - 设计与计划见上文「设计决策」「阶段计划」；**单元 4.5 与 Phase 4 终局收口报告**见 [phase4/reports/phase4-5-closure.md](phase4/reports/phase4-5-closure.md)、[phase4/reports/user-value-report.md](phase4/reports/user-value-report.md) 与实盘证据 [triage-real-report.json](phase3/evidence/triage-real-report.json)；前序报告与交接见 [phase4/HANDOFF-UNIT4-5.md](phase4/HANDOFF-UNIT4-5.md)、[phase4/reports/phase4-4-closure.md](phase4/reports/phase4-4-closure.md)、[phase4/reports/phase4-3-closure.md](phase4/reports/phase4-3-closure.md)、[phase4/reports/phase4-2-real-acceptance.md](phase4/reports/phase4-2-real-acceptance.md)、[phase4/reports/phase4-2-offline-closure.md](phase4/reports/phase4-2-offline-closure.md) 与 [phase4/reports/phase4-1-closure.md](phase4/reports/phase4-1-closure.md)；独立对抗审计原稿见 [phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md](phase4/audits/AUDIT-PHASE4-UNIT4-1-8943a10.md)（`PASS WITH RESIDUALS`，路线 A 冻结）；[phase4/reviews/](phase4/reviews) 为方案审核往来记录。
 
-## 纪律速记
+## v1 运行与验收纪律（历史）
 
 - 真实入口四类（A 模型 / B 外部写 / C Telegram / D 公网 webhook）：逐项书面授权「仅限本次」，闭合后零剩余额度，重跑即需新授权；D 延期至首次启用 Telegram 公网入站 webhook 前（2026-11-22 确认：在备齐公网 HTTPS 域名/端口材料前先走路线 1 `getUpdates` 主动长轮询入站，D 项继续推迟且不阻挡 Phase 5 及后续进度），出站发送与实盘轮询另需授权。
 - 单元 5.6 许可 2 实盘（`eval:scenarios:real`，`AEGISPI_ALLOW_REAL_PHASE5_ACCEPTANCE=1`，缺省 `exit 4`）：`D-102` 裁定范围已执行一批（Telegram Pull 隔离 + 真实邮箱恰 1 封回信；授权闭合，重跑即需新授权）；**真实 CalDAV 实盘延后：`CALDAV_*` 未配置，登记为 `DEFERRED / NOT VERIFIED`，不阻塞 Phase 5**（场景二闭环由 Permit 1 环回夹具 `eval:scenarios` 89/89 验收在案）。
