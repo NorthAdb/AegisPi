@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { buildCanonicalDraft } from "./canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "./db.ts";
 import { isPrincipalAuthorizedForScope, type ApprovalRow, type DraftRevisionRow, type ProposalRow, type ScopeRow } from "./approvals.ts";
+import { verifyProposalSourcesReadAuthorized } from "./policy.ts";
 
 export type EffectState =
   | "READY"
@@ -155,6 +156,21 @@ export function claimEffectForSubmission(
     }
     if (!allowedTargets.includes(params.finalTarget) && !allowedTargets.includes("*")) {
       return refuse("target_acl_denied", `Target ${params.finalTarget} is not allowed in scope ${scope.scope_id}`);
+    }
+
+    // W2-S2: Live source read re-verification across proposal conversation & related worker/parent conversations
+    const convScope = db
+      .prepare("SELECT principal_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+      .get(proposal.runtime_epoch, proposal.conversation_id) as { principal_id: string } | undefined;
+    const effectivePrincipal = convScope?.principal_id ?? approval.principal_id ?? "owner";
+    const sourceAuth = verifyProposalSourcesReadAuthorized(db, {
+      runtimeEpoch: proposal.runtime_epoch,
+      conversationId: proposal.conversation_id,
+      principalId: effectivePrincipal,
+      scopeId: proposal.scope_id,
+    });
+    if (!sourceAuth.ok) {
+      return refuse("source_read_revoked", sourceAuth.reason);
     }
 
     // Recompute RFC 8785 canonical snapshot & hash from actual final arguments

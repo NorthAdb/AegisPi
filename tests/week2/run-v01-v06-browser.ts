@@ -289,6 +289,14 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
       operations: ["read"],
       now,
     });
+    const s2BrowserGrant = grantSourceRead(seedDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "memory",
+      resourceId: "memory:s2-browser",
+      operations: ["read"],
+      now,
+    });
     grantSourceRead(seedDb, {
       principalId: "owner",
       scopeId: "scope:default",
@@ -379,6 +387,17 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
       now,
     });
     upsertMemoryNote(seedDb, {
+      noteId: "mem-s2-browser-secret",
+      principalId: "owner",
+      scopeId: "scope:default",
+      domain: "s2-browser",
+      tier: "L1",
+      title: "S2 Browser Restricted Note",
+      body: `S2_BROWSER_MEM_SECRET_${runId}`,
+      version: 1,
+      now,
+    });
+    upsertMemoryNote(seedDb, {
       noteId: "mem-tombstoned",
       principalId: "owner",
       scopeId: "scope:default",
@@ -463,7 +482,7 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
         smtpPort: fakeSmtp.smtpPort,
         consoleToken,
         connectorsConfigPath: connectorsCfgPath,
-        approvalTtlMs: 4000,
+        approvalTtlMs: 6000,
         env: hostEnv,
       });
     } catch {
@@ -475,7 +494,7 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
         smtpPort: fakeSmtp.smtpPort,
         consoleToken,
         connectorsConfigPath: connectorsCfgPath,
-        approvalTtlMs: 4000,
+        approvalTtlMs: 6000,
         env: hostEnv,
       });
     }
@@ -794,6 +813,238 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
     assert.ok(v05BrowserSeq.resyncAfterFirstFrameGap >= 1, "W2-S4: First-frame seq gap MUST trigger resync");
     assert.equal(v05BrowserSeq.cursorMatchesSnapshot, true);
 
+    // 3d. W2-S4 Browser Checks for ASYNC APPROVAL RECEIPTS (save-draft, approve, reject) across session switch:
+    //     Late receipt MUST NEVER switch back to original conversation or reopen old SSE stream!
+    const runDelayedApprovalSwitchTest = async (
+      action: "save" | "approve" | "reject",
+      urlNeedle: string,
+      expectedConvASubject: string,
+    ): Promise<{
+      stayedOnNewConv: boolean;
+      newConvInputPreserved: boolean;
+      newConvSseActive: boolean;
+      oldConvCardsCount: number;
+      backendUpdated: boolean;
+    }> => {
+      const prevCid = await cdp.evalJs<string>(`String(window.__aegisView1State.conversationId || '')`);
+      await cdp.evalJs(`document.getElementById('new-conv-btn').click();`);
+      const convA = await cdp.waitFor<string>(
+        `window.__aegisView1State.conversationId && String(window.__aegisView1State.conversationId) !== ${JSON.stringify(prevCid)} && window.__aegisView1State.snapshot && String(window.__aegisView1State.snapshot.conversationId) === String(window.__aegisView1State.conversationId) ? String(window.__aegisView1State.conversationId) : ''`,
+      );
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_s4_${action}_${runId}`,
+              name: "send_email",
+              arguments: {
+                to: [`s4-${action}@local.test`],
+                subject: expectedConvASubject,
+                body: `Initial body ${action}`,
+              },
+            },
+          },
+          { kind: "text", text: "Queued." },
+        ],
+      });
+      await cdp.evalJs(`
+        document.getElementById('chat-input').value = ${JSON.stringify(`Create pending proposal for ${action}`)};
+        document.getElementById('chat-send-btn').click();
+      `);
+      const cardInfo = await cdp.waitFor<{ proposalId: string; approvalId: string }>(
+        `(() => {
+          const p = window.__aegisView1State.snapshot?.proposals?.[0];
+          return p && p.approvalState === 'PENDING' ? { proposalId: p.proposalId, approvalId: p.approvalId } : null;
+        })()`,
+        12_000,
+      );
+
+      const res = await cdp.evalJs<{
+        stayedOnNewConv: boolean;
+        newConvInputPreserved: boolean;
+        newConvSseActive: boolean;
+        oldConvCardsCount: number;
+        backendUpdated: boolean;
+      }>(`(async () => {
+        const s = window.__aegisView1State;
+        const origFetch = window.fetch.bind(window);
+        let releaseResp;
+        const gate = new Promise(r => { releaseResp = r; });
+        window.fetch = async (url, opts) => {
+          const r = await origFetch(url, opts);
+          if (typeof url === 'string' && url.includes(${JSON.stringify(urlNeedle)})) {
+            await gate;
+          }
+          return r;
+        };
+        try {
+          if (${JSON.stringify(action)} === 'save') {
+            const ta = document.querySelector('#approvals-list textarea');
+            ta.value = 'UPDATED_BODY_WHILE_SWITCHING';
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            document.querySelector('#approvals-list [data-action="save-draft"]').click();
+          } else if (${JSON.stringify(action)} === 'approve') {
+            document.querySelector('#approvals-list [data-action="approve"]').click();
+          } else {
+            document.querySelector('#approvals-list [data-action="reject"]').click();
+          }
+          await new Promise(r => setTimeout(r, 90));
+          document.getElementById('new-conv-btn').click();
+          for (let i = 0; i < 60; i++) {
+            if (s.conversationId && String(s.conversationId) !== ${JSON.stringify(convA)} && s.snapshot && String(s.snapshot.conversationId) === String(s.conversationId)) break;
+            await new Promise(r => setTimeout(r, 25));
+          }
+          const convB = String(s.conversationId);
+          const convBDraft = 'NEW_CONV_DRAFT_PRESERVED_' + ${JSON.stringify(action)};
+          document.getElementById('chat-input').value = convBDraft;
+
+          releaseResp();
+          await new Promise(r => setTimeout(r, 300));
+
+          const stayedOnNewConv = String(s.conversationId) === convB && convB !== ${JSON.stringify(convA)} &&
+            s.snapshot && String(s.snapshot.conversationId) === convB;
+          const newConvInputPreserved = document.getElementById('chat-input').value === convBDraft;
+          const newConvSseActive = Boolean(s.eventSource && s.eventSource.url.includes('/api/conversations/' + encodeURIComponent(convB) + '/events'));
+          const oldConvCardsCount = document.querySelectorAll('#approvals-list [data-proposal-id="' + ${JSON.stringify(cardInfo.proposalId)} + '"]').length;
+
+          const snapA = await (await origFetch('/api/conversations/' + encodeURIComponent(${JSON.stringify(convA)}) + '/snapshot', { credentials: 'same-origin' })).json();
+          const propA = (snapA.proposals || []).find(p => p.proposalId === ${JSON.stringify(cardInfo.proposalId)});
+          const backendUpdated = Boolean(
+            (${JSON.stringify(action)} === 'save' && propA && propA.revision === 2) ||
+            (${JSON.stringify(action)} === 'approve' && propA && propA.approvalState === 'APPROVED') ||
+            (${JSON.stringify(action)} === 'reject' && propA && propA.approvalState === 'REJECTED')
+          );
+          return { stayedOnNewConv, newConvInputPreserved, newConvSseActive, oldConvCardsCount, backendUpdated };
+        } finally {
+          window.fetch = origFetch;
+        }
+      })()`);
+      assert.equal(res.stayedOnNewConv, true, `W2-S4: Late ${action} receipt MUST NOT switch back to old conversation`);
+      assert.equal(res.newConvInputPreserved, true, `W2-S4: Late ${action} receipt MUST preserve new conversation draft`);
+      assert.equal(res.newConvSseActive, true, `W2-S4: Late ${action} receipt MUST NOT close new conversation SSE or reopen old stream`);
+      assert.equal(res.oldConvCardsCount, 0, `W2-S4: Old proposal cards MUST remain 0 on new conversation`);
+      assert.equal(res.backendUpdated, true, `W2-S4: Delayed ${action} MUST still complete cleanly for original record`);
+      return res;
+    };
+
+    const lateSaveCheck = await runDelayedApprovalSwitchTest("save", "/draft", `S4 Late Save ${runId}`);
+    const lateApproveCheck = await runDelayedApprovalSwitchTest("approve", "/api/approvals/decide", `S4 Late Approve ${runId}`);
+    const lateRejectCheck = await runDelayedApprovalSwitchTest("reject", "/api/approvals/decide", `S4 Late Reject ${runId}`);
+
+    // 3e. W2-S2 Browser Check: Local unsaved draft edit on a derived proposal -> revoke source_read_grant
+    //     -> live SSE/snapshot immediately clears textarea body & local cache, disables edit/approve controls!
+    const prevCidS2 = await cdp.evalJs<string>(`String(window.__aegisView1State.conversationId || '')`);
+    await cdp.evalJs(`document.getElementById('new-conv-btn').click();`);
+    await cdp.waitFor<string>(
+      `window.__aegisView1State.conversationId && String(window.__aegisView1State.conversationId) !== ${JSON.stringify(prevCidS2)} && window.__aegisView1State.snapshot && String(window.__aegisView1State.snapshot.conversationId) === String(window.__aegisView1State.conversationId) ? String(window.__aegisView1State.conversationId) : ''`,
+    );
+    const s2SecretMarker = `S2_BROWSER_MEM_SECRET_${runId}`;
+    const s2LocalEditMarker = `LOCAL_UNSAVED_REVOKED_EDIT_${runId}`;
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: `tc_s2_mem_${runId}`,
+            name: "memory_recall",
+            arguments: { query: "S2 Browser Restricted", domain: "s2-browser" },
+          },
+        },
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: `tc_s2_mail_${runId}`,
+            name: "send_email",
+            arguments: {
+              to: ["s2-rev@local.test"],
+              subject: "Derived Draft Before Revoke",
+              body: `Derived body containing ${s2SecretMarker}`,
+            },
+          },
+        },
+        { kind: "text", text: "Done." },
+      ],
+    });
+    await cdp.evalJs(`
+      document.getElementById('chat-input').value = 'Recall restricted note and draft email';
+      document.getElementById('chat-send-btn').click();
+    `);
+    const s2Card = await cdp.waitFor<{ proposalId: string; bodyValue: string }>(
+      `(() => {
+        const p = window.__aegisView1State.snapshot?.proposals?.[0];
+        const ta = document.querySelector('#approvals-list textarea');
+        return p && ta && ta.value.includes(${JSON.stringify(s2SecretMarker)})
+          ? { proposalId: p.proposalId, bodyValue: ta.value }
+          : null;
+      })()`,
+      15_000,
+    );
+    assert.ok(s2Card.bodyValue.includes(s2SecretMarker));
+
+    // Type unsaved local draft edit so state.dirtyByProposal & state.localDraftTextByProposal hold sensitive local edit
+    await cdp.evalJs(`
+      const ta = document.querySelector('#approvals-list textarea');
+      ta.value = ${JSON.stringify(s2LocalEditMarker)};
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+
+    // Revoke the underlying source_read_grant via authorized API -> SSE resync updates Edge UI automatically!
+    const revokeUiRes = await cdp.evalJs<{ status: number }>(
+      `(async () => {
+        const r = await fetch('/api/source-grants/' + encodeURIComponent(${JSON.stringify(s2BrowserGrant.grant_id)}) + '/revoke', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ reason: 'w2_s2_browser_live_revoke' })
+        });
+        return { status: r.status };
+      })()`,
+    );
+    assert.equal(revokeUiRes.status, 200);
+
+    const s2BrowserAfterRevoke = await cdp.waitFor<{
+      redactedAttr: string;
+      textareaValue: string;
+      textareaDisabled: boolean;
+      saveDisabled: boolean;
+      approveDisabled: boolean;
+      dirtyCleared: boolean;
+      localDraftCleared: boolean;
+      approvalsDomText: string;
+    }>(
+      `(() => {
+        const s = window.__aegisView1State;
+        const card = document.querySelector('#approvals-list [data-proposal-id="' + ${JSON.stringify(s2Card.proposalId)} + '"][data-draft-redacted="true"]');
+        if (!card) return null;
+        const ta = card.querySelector('textarea');
+        const saveBtn = card.querySelector('[data-action="save-draft"]');
+        const approveBtn = card.querySelector('[data-action="approve"]');
+        return {
+          redactedAttr: card.getAttribute('data-draft-redacted'),
+          textareaValue: ta ? ta.value : '__MISSING__',
+          textareaDisabled: Boolean(ta && ta.disabled),
+          saveDisabled: Boolean(saveBtn && saveBtn.disabled),
+          approveDisabled: Boolean(approveBtn && approveBtn.disabled),
+          dirtyCleared: !s.dirtyByProposal[${JSON.stringify(s2Card.proposalId)}],
+          localDraftCleared: s.localDraftTextByProposal[${JSON.stringify(s2Card.proposalId)}] === undefined,
+          approvalsDomText: document.getElementById('approvals-list').textContent || '',
+        };
+      })()`,
+      12_000,
+    );
+    assert.equal(s2BrowserAfterRevoke.redactedAttr, "true");
+    assert.equal(s2BrowserAfterRevoke.textareaValue, "", "W2-S2: Local unsaved draft textarea MUST be cleared after source revocation");
+    assert.equal(s2BrowserAfterRevoke.textareaDisabled, true);
+    assert.equal(s2BrowserAfterRevoke.saveDisabled, true, "W2-S2: Save button MUST be disabled after source revocation");
+    assert.equal(s2BrowserAfterRevoke.approveDisabled, true, "W2-S2: Approve button MUST be disabled after source revocation");
+    assert.equal(s2BrowserAfterRevoke.dirtyCleared, true);
+    assert.equal(s2BrowserAfterRevoke.localDraftCleared, true);
+    assert.equal(s2BrowserAfterRevoke.approvalsDomText.includes(s2SecretMarker), false);
+    assert.equal(s2BrowserAfterRevoke.approvalsDomText.includes(s2LocalEditMarker), false);
+
     // =========================================================================
     // 4. W2-S7 & V06 Browser Checks on REAL Formal Host:
     //    - Switch conversation clears old session cards
@@ -920,7 +1171,7 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
           text: card.textContent || ''
         };
       })()`,
-      10_000,
+      15_000,
     );
     assert.equal(expiredCardLive.approveDisabled, true, "W2-S7: Open approval card crossing TTL MUST auto-disable Approve WITHOUT manual refresh");
     assert.ok(expiredCardLive.text.includes("已过期"));
@@ -1273,6 +1524,16 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
         lateReceiptCrossSessionPreservedNewInput: lateReceiptCheck.convBInputPreserved,
         lateReceiptClearedOriginalPendingKeyOnly: lateReceiptCheck.convAPendingKeyCleared,
         lateReceiptSingleLogicalSubmission: lateReceiptCheck.convASingleSubmission,
+        lateSaveReceiptNoSwitchOrReopen: lateSaveCheck,
+        lateApproveReceiptNoSwitchOrReopen: lateApproveCheck,
+        lateRejectReceiptNoSwitchOrReopen: lateRejectCheck,
+        sourceRevokeClearedLocalDraftAndDisabledControls: {
+          redactedAttr: s2BrowserAfterRevoke.redactedAttr,
+          textareaValueCleared: s2BrowserAfterRevoke.textareaValue === "",
+          saveDisabled: s2BrowserAfterRevoke.saveDisabled,
+          approveDisabled: s2BrowserAfterRevoke.approveDisabled,
+          localDraftCleared: s2BrowserAfterRevoke.localDraftCleared,
+        },
         duplicateDeltaIgnored: v05BrowserSeq.dupAfterDelta,
         duplicatePartialIgnored: v05BrowserSeq.dupAfterPartial - v05BrowserSeq.dupAfterDelta,
         partialGapTriggeredResync: v05BrowserSeq.resyncAfterPartialGap >= 1,

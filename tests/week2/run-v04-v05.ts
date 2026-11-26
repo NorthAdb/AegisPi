@@ -5,11 +5,16 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { ensureScope } from "../../src/governance/approvals.ts";
+import {
+  decideApproval,
+  ensureScope,
+  proposeOrGetApproval,
+} from "../../src/governance/approvals.ts";
 import { HostCredentialVault } from "../../src/governance/credentials.ts";
 import { grantSourceRead, recordConversationSource, revokeSourceReadGrant } from "../../src/governance/policy.ts";
 import { AegisHostRuntime } from "../../src/runtime/harness.ts";
 import type { ModelSlotConfig } from "../../src/runtime/models.ts";
+import { submitApprovedEmailEffect } from "../../src/runtime/submitter.ts";
 import { ConversationProjectionHub } from "../../src/web/projection.ts";
 import { startWebServer } from "../../src/web/server.ts";
 import { LOCKED_NODE_EXE, startFakeModelServer, startFakeSmtpServer } from "../fakes/client.ts";
@@ -1044,6 +1049,140 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         false,
         "W2-S2: Refetched delegated Worker snapshot MUST contain zero restricted content",
       );
+
+      // W2-S2 Host-side re-verification on draft save, approval decision (APPROVE vs REJECT), AND effect claim/submit!
+      const snapAfterSrcRevObj = JSON.parse(snapAfterSrcRevRaw) as {
+        proposals: Array<{ proposalId: string; approvalId: string; revision: number; draftRedacted?: boolean }>;
+      };
+      const revProp = snapAfterSrcRevObj.proposals[0]!;
+      assert.equal(revProp.draftRedacted, true);
+
+      const editRevokedRes = await fetch(`${web5.baseUrl}/api/proposals/${encodeURIComponent(revProp.proposalId)}/draft`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ownerCookieSrc, origin: web5.baseUrl },
+        body: JSON.stringify({
+          conversationId: srcConv.conversationId,
+          expectedHeadRev: revProp.revision,
+          payload: { to: ["recipient@local.test"], subject: "Tamper", body: "Tamper" },
+        }),
+      });
+      assert.equal(editRevokedRes.status, 403, "W2-S2: Editing derived draft after source revocation MUST return 403");
+      const editRevokedBody = (await editRevokedRes.json()) as { code?: string };
+      assert.equal(editRevokedBody.code, "source_read_revoked");
+
+      const chRevRes = await fetch(`${web5.baseUrl}/api/approvals/${encodeURIComponent(revProp.approvalId)}/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ownerCookieSrc, origin: web5.baseUrl },
+        body: JSON.stringify({ conversationId: srcConv.conversationId }),
+      });
+      const chRevBody = (await chRevRes.json()) as { ok: boolean; revision: number; actionHash: string; nonce: string };
+      assert.equal(chRevBody.ok, true);
+
+      const approveRevokedRes = await fetch(`${web5.baseUrl}/api/approvals/decide`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ownerCookieSrc, origin: web5.baseUrl },
+        body: JSON.stringify({
+          approvalId: revProp.approvalId,
+          conversationId: srcConv.conversationId,
+          decision: "APPROVE",
+          expectedRevision: chRevBody.revision,
+          expectedActionHash: chRevBody.actionHash,
+          nonce: chRevBody.nonce,
+          decisionKey: `dk-rev-app-${runId}`,
+        }),
+      });
+      assert.equal(approveRevokedRes.status, 403, "W2-S2: APPROVE after source revocation MUST return 403");
+      assert.equal(((await approveRevokedRes.json()) as { code?: string }).code, "source_read_revoked");
+
+      // REJECT remains permitted so user can cancel a restricted pending proposal
+      const rejectRevokedRes = await fetch(`${web5.baseUrl}/api/approvals/decide`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ownerCookieSrc, origin: web5.baseUrl },
+        body: JSON.stringify({
+          approvalId: revProp.approvalId,
+          conversationId: srcConv.conversationId,
+          decision: "REJECT",
+          expectedRevision: chRevBody.revision,
+          expectedActionHash: chRevBody.actionHash,
+          nonce: chRevBody.nonce,
+          decisionKey: `dk-rev-rej-${runId}`,
+        }),
+      });
+      assert.equal(rejectRevokedRes.status, 200);
+
+      // Test effect CLAIM re-verification: approve while source is granted, THEN revoke source BEFORE submitApprovedEmailEffect()!
+      const preAppGrant = grantSourceRead(host5.govDb, {
+        principalId: "owner",
+        scopeId: "scope:default",
+        sourceType: "memory",
+        resourceId: "memory:claim-recheck",
+        operations: ["read"],
+        now: Date.now(),
+      });
+      const claimConv = await host5.createManagedConversation({ slotName: "router", budgetTaskId: "bt-claim-rev" });
+      recordConversationSource(host5.govDb, {
+        runtimeEpoch: host5.runtimeEpoch,
+        conversationId: String(claimConv.id),
+        principalId: "owner",
+        sourceType: "memory",
+        sourceId: "memory:claim-note-1",
+        versionRef: "v1",
+        title: "Claim recheck note",
+        contentDigest: "d".repeat(64),
+        metadata: { domain: "claim-recheck", tier: "L1" },
+        now: Date.now(),
+      });
+      const claimPayload = { to: ["claim-rev@local.test"], subject: "Subj", body: "Body" };
+      const propClaim = proposeOrGetApproval(host5.govDb, {
+        runtimeEpoch: host5.runtimeEpoch,
+        conversationId: String(claimConv.id),
+        toolTaskId: "9901",
+        callId: `call_claim_${runId}`,
+        scopeId: "scope:default",
+        toolName: "send_email",
+        target: "smtp:claim-rev@local.test",
+        payload: claimPayload,
+        expiresAt: Date.now() + 60_000,
+        now: Date.now(),
+      });
+      const decPreApp = decideApproval(host5.govDb, {
+        approvalId: propClaim.approval.approval_id,
+        conversationId: String(claimConv.id),
+        principalId: "owner",
+        decision: "APPROVE",
+        expectedRevision: 1,
+        expectedActionHash: propClaim.revision.action_hash,
+        nonce: propClaim.nonce!,
+        decisionKey: `dk-pre-claim-${runId}`,
+        now: Date.now(),
+      });
+      assert.equal(decPreApp.ok, true);
+      assert.ok(decPreApp.effectId);
+
+      // Revoke source grant strictly AFTER approval and BEFORE claim/submit!
+      revokeSourceReadGrant(host5.govDb, {
+        grantId: preAppGrant.grant_id,
+        reason: "w2_s2_revoke_before_claim",
+        now: Date.now(),
+      });
+      const smtpBeforeRevClaim = (await fakeSmtp.stats()).totalReceived;
+      const claimRevRes = await submitApprovedEmailEffect({
+        govDb: host5.govDb,
+        runtimeEpoch: host5.runtimeEpoch,
+        effectId: decPreApp.effectId!,
+        conversationId: String(claimConv.id),
+        toolTaskId: "9901",
+        callId: `call_claim_${runId}`,
+        toolName: "send_email",
+        finalTarget: "smtp:claim-rev@local.test",
+        finalPayload: claimPayload,
+        smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "claim@local.test" },
+        now: () => Date.now(),
+      });
+      assert.equal(claimRevRes.ok, false);
+      assert.equal(claimRevRes.claimed, false);
+      assert.equal(claimRevRes.code, "source_read_revoked");
+      assert.equal((await fakeSmtp.stats()).totalReceived - smtpBeforeRevClaim, 0, "W2-S2: Revoked-source effect claim MUST send 0 emails");
     } finally {
       await web5.close();
       await host5.close();
@@ -1155,6 +1294,9 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         sourceRevokeRefetchedSnapshotRedacted: true,
         sourceRevokeApprovalDraftRedacted: true,
         sourceRevokeDelegatedWorkerUserInputRedacted: true,
+        sourceRevokeDraftEditDenied403: true,
+        sourceRevokeApproveDenied403: true,
+        sourceRevokeClaimRefusedZeroSends: true,
         projectionConcurrentStaleReadSerialized: true,
         crossPrincipalForbidden403: true,
       },

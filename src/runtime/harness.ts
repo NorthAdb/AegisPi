@@ -577,6 +577,50 @@ export class AegisHostRuntime {
         }>
       >();
       const parentByWorkerConv = new Map<string, string>();
+      const workerExecutionRootByConv = new Map<string, string>();
+      const resolveExecutionRootTaskId = async (conversationId: string, taskId: string): Promise<string> => {
+        const mapped = workerExecutionRootByConv.get(conversationId);
+        if (mapped) return mapped;
+        const cid = Number(conversationId) as ConversationId;
+        if (harnessRef && Number.isFinite(cid)) {
+          try {
+            const obs = await harnessRef.observeConversation(
+              cid,
+              { advance: () => {}, end: () => {} },
+              BACKGROUND_CONTEXT,
+            );
+            try {
+              const liveDoc = obs.value.docs["pi.live"] as
+                | { run?: { taskId?: number; inputs?: number[]; first?: number } }
+                | undefined;
+              const run = liveDoc?.run;
+              if (run && (Array.isArray(run.inputs) && run.inputs.length > 0)) {
+                return `run:${conversationId}:subs:${run.inputs.join(",")}:first:${run.first ?? "none"}`;
+              }
+              if (run && run.taskId !== undefined) {
+                return `run:${conversationId}:task:${run.taskId}:first:${run.first ?? "none"}`;
+              }
+            } finally {
+              obs.detach();
+            }
+          } catch {
+            // fallback to task owner walk below
+          }
+        }
+        if (!harnessRef) return `task:${taskId}`;
+        let curId = Number(taskId);
+        const visited = new Set<number>();
+        while (Number.isFinite(curId) && !visited.has(curId)) {
+          visited.add(curId);
+          const rec = await harnessRef.getTask(curId as TaskId, BACKGROUND_CONTEXT);
+          if (!rec) break;
+          if (rec.owner === undefined || rec.owner === null) {
+            return `pitask:${rec.id}`;
+          }
+          curId = rec.owner;
+        }
+        return `task:${taskId}`;
+      };
       const changeListeners = new Set<(ev: ConversationLiveChange) => void>();
       const emitChange = (ev: ConversationLiveChange): void => {
         for (const fn of [...changeListeners]) {
@@ -741,6 +785,7 @@ export class AegisHostRuntime {
               ? config.githubMcpBridge()
               : (config.githubMcpBridge ?? null),
           workspaceWriteHandler: config.workspaceWriteHandler,
+          resolveExecutionRootTaskId,
           approvalTtlMs: config.approvalTtlMs,
           onGovernanceMutated: (conversationId, reason) => {
             emitChange({ conversationId, kind: "governance", detail: { reason } });
@@ -839,6 +884,8 @@ export class AegisHostRuntime {
             list.push(workerEntry);
             workerTasksByParent.set(parentConversationId, list);
             parentByWorkerConv.set(String(workerConv.id), parentConversationId);
+            const parentExecRoot = await resolveExecutionRootTaskId(parentConversationId, parentTaskId);
+            workerExecutionRootByConv.set(String(workerConv.id), parentExecRoot);
             emitChange({
               conversationId: parentConversationId,
               kind: "pi_task_graph",

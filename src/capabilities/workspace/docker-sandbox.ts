@@ -44,29 +44,33 @@ export function buildMinimalDockerCliEnv(sourceEnv: NodeJS.ProcessEnv = process.
 function execDockerSync(
   args: string[],
   opts?: { timeoutMs?: number; maxBuffer?: number },
-): { status: number | null; stdout: string; stderr: string } {
+): { status: number | null; stdout: string; stderr: string; cliEnvKeys: string[] } {
+  const cliEnv = buildMinimalDockerCliEnv();
   const res = spawnSync("docker", args, {
     encoding: "utf8",
     timeout: opts?.timeoutMs ?? 10_000,
     ...(opts?.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}),
-    env: buildMinimalDockerCliEnv(),
+    env: cliEnv,
     windowsHide: true,
   });
   return {
     status: res.status,
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? (res.error ? res.error.message : ""),
+    cliEnvKeys: Object.keys(cliEnv).sort(),
   };
 }
 
 async function execDockerAsync(
   args: string[],
   timeoutMs = 25_000,
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
+): Promise<{ status: number | null; stdout: string; stderr: string; cliEnvKeys: string[] }> {
+  const cliEnv = buildMinimalDockerCliEnv();
+  const cliEnvKeys = Object.keys(cliEnv).sort();
   return await new Promise((resolve) => {
     const child = spawn("docker", args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: buildMinimalDockerCliEnv(),
+      env: cliEnv,
       windowsHide: true,
     });
     let stdout = "";
@@ -76,7 +80,7 @@ async function execDockerAsync(
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ status, stdout, stderr });
+      resolve({ status, stdout, stderr, cliEnvKeys });
     };
     const timer = setTimeout(() => {
       try {
@@ -196,6 +200,7 @@ export interface SandboxTaskRunResult {
   networkMode: "none";
   mounts: Array<{ source: string; destination: string; rw: boolean }>;
   envKeysInContainer: string[];
+  dockerCliEnvKeys?: string[];
   exitCode: number | null;
   stdout: string;
   stderr: string;
@@ -330,6 +335,7 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
     networkMode: "none",
     mounts,
     envKeysInContainer,
+    dockerCliEnvKeys: run.cliEnvKeys,
     exitCode: run.status,
     stdout: run.stdout,
     stderr: run.stderr,
@@ -788,6 +794,7 @@ export async function runTaskInDockerSandboxAsync(opts: SandboxTaskRunOptions): 
     networkMode: "none",
     mounts,
     envKeysInContainer,
+    dockerCliEnvKeys: run.cliEnvKeys,
     exitCode: run.status,
     stdout: run.stdout,
     stderr: run.stderr,

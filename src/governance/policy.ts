@@ -543,6 +543,94 @@ export function verifyAllConversationSourcesReadAuthorized(
   return { ok: true, checkedSources: checked };
 }
 
+/**
+ * W2-S2: Collects the conversation itself and any co-owned parent/worker conversations sharing
+ * the same durable budget owner_task_id for the runtime epoch.
+ */
+export function findRelatedConversationIdsByOwnerTask(
+  db: DatabaseSync,
+  runtimeEpoch: string,
+  conversationId: string,
+): string[] {
+  const related = new Set<string>([conversationId]);
+  const ownerRow = db
+    .prepare(
+      `SELECT owner_task_id FROM budget_task_bindings
+        WHERE runtime_epoch = ? AND binding_kind = 'CONVERSATION' AND binding_key = ?
+        LIMIT 1`,
+    )
+    .get(runtimeEpoch, conversationId) as { owner_task_id: string } | undefined;
+  if (ownerRow?.owner_task_id) {
+    const peerRows = db
+      .prepare(
+        `SELECT DISTINCT conversation_id FROM budget_task_bindings
+          WHERE runtime_epoch = ? AND owner_task_id = ?`,
+      )
+      .all(runtimeEpoch, ownerRow.owner_task_id) as Array<{ conversation_id: string }>;
+    for (const r of peerRows) {
+      if (r.conversation_id) related.add(r.conversation_id);
+    }
+  }
+  return [...related];
+}
+
+/**
+ * W2-S2: Verifies that every recorded source across a conversation AND its co-owned
+ * parent/worker conversations STILL holds an active source_read_grant.
+ */
+export function verifyProposalSourcesReadAuthorized(
+  db: DatabaseSync,
+  params: {
+    runtimeEpoch: string;
+    conversationId: string;
+    principalId: string;
+    scopeId: string;
+  },
+): { ok: true; checkedSources: number } | { ok: false; code: "source_read_revoked"; blockedSource: { sourceType: string; sourceId: string; title: string }; reason: string } {
+  const convIds = findRelatedConversationIdsByOwnerTask(db, params.runtimeEpoch, params.conversationId);
+  return verifyAllConversationSourcesReadAuthorized(db, {
+    runtimeEpoch: params.runtimeEpoch,
+    conversationIds: convIds,
+    principalId: params.principalId,
+    scopeId: params.scopeId,
+  });
+}
+
+/**
+ * W2-S3: Enumerates explicit authorized workspace relative paths (excluding wildcard "*")
+ * from active, non-revoked workspace_write grants for (principalId, scopeId).
+ */
+export function listAuthorizedWorkspaceRelPaths(
+  db: DatabaseSync,
+  params: { principalId: string; scopeId: string },
+): string[] {
+  const rows = db
+    .prepare(
+      `SELECT operations_json, constraints_json FROM source_read_grants
+        WHERE principal_id = ?
+          AND scope_id = ?
+          AND source_type = 'workspace_write'
+          AND revoked_at IS NULL
+          AND (resource_id = 'workspace' OR resource_id = 'workspace_write:*' OR resource_id = '*')`,
+    )
+    .all(params.principalId, params.scopeId) as Array<{ operations_json: string; constraints_json: string }>;
+
+  const out = new Set<string>();
+  for (const row of rows) {
+    const ops = JSON.parse(row.operations_json || "[]") as string[];
+    if (!ops.includes("write") && !ops.includes("*")) continue;
+    const constraints = JSON.parse(row.constraints_json || "{}") as { allowedRelPaths?: unknown };
+    if (Array.isArray(constraints.allowedRelPaths)) {
+      for (const p of constraints.allowedRelPaths) {
+        if (typeof p === "string" && p.trim().length > 0 && p.trim() !== "*") {
+          out.add(p.trim());
+        }
+      }
+    }
+  }
+  return [...out];
+}
+
 export function getSourceReadRevocationWatermark(
   db: DatabaseSync,
   principalId: string,

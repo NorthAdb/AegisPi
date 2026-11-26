@@ -121,6 +121,7 @@ export function renderMinimalView1Html(): string {
       selectionGeneration: 0,
       dirtyByProposal: {},
       localDraftTextByProposal: {},
+      proposalStatusById: {},
       serverClockOffsetMs: 0,
       pendingChat: { key: null, content: null, convId: null, epoch: null },
       sseFramesReceived: 0,
@@ -193,6 +194,12 @@ export function renderMinimalView1Html(): string {
       'budget-panel',
       'messages-panel'
     ];
+
+    function isCurrentView(reqConvId, reqEpoch, reqGen) {
+      return state.selectionGeneration === reqGen &&
+        String(state.conversationId) === String(reqConvId) &&
+        String(state.runtimeEpoch || '') === String(reqEpoch || '');
+    }
 
     function clearEl(el) {
       while (el.firstChild) el.removeChild(el.firstChild);
@@ -597,26 +604,32 @@ export function renderMinimalView1Html(): string {
             card.appendChild(textEl('div', 'effectId=' + p.effect.effectId + ' | state=' + p.effect.state + (p.effect.receiptRef ? ' | receipt=' + p.effect.receiptRef : '') + (p.effect.reason ? ' | reason=' + p.effect.reason : ''), 'muted'));
           }
 
+          const isRedacted = Boolean(p.draftRedacted || (p.snapshot && p.snapshot.redacted));
           const isPendingActive = effectiveState === 'PENDING' && !p.expired && !locallyExpired;
-          if (!isPendingActive) {
+          const isActionablePending = isPendingActive && !isRedacted;
+          if (!isActionablePending) {
             delete state.dirtyByProposal[p.proposalId];
             delete state.localDraftTextByProposal[p.proposalId];
           }
-          const payload = (p.snapshot && p.snapshot.payload) ? p.snapshot.payload : {};
+          card.setAttribute('data-draft-redacted', isRedacted ? 'true' : 'false');
+          const payload = (!isRedacted && p.snapshot && p.snapshot.payload) ? p.snapshot.payload : {};
           const bodyBox = document.createElement('textarea');
           bodyBox.rows = 3;
           bodyBox.style.width = '100%';
           bodyBox.style.marginTop = '6px';
-          // W2-S7: Preserve unsaved local draft text across SSE re-renders while dirty!
-          if (isPendingActive && state.dirtyByProposal[p.proposalId] && typeof state.localDraftTextByProposal[p.proposalId] === 'string') {
+          if (isRedacted) {
+            bodyBox.value = '';
+            bodyBox.placeholder = '来源读取权限已撤销，受限草稿正文已清除';
+          } else if (isActionablePending && state.dirtyByProposal[p.proposalId] && typeof state.localDraftTextByProposal[p.proposalId] === 'string') {
+            // W2-S7: Preserve unsaved local draft text across SSE re-renders while dirty!
             bodyBox.value = state.localDraftTextByProposal[p.proposalId];
           } else {
             bodyBox.value = String(payload.body || '');
           }
-          bodyBox.disabled = !isPendingActive;
+          bodyBox.disabled = !isActionablePending;
           card.appendChild(bodyBox);
 
-          const cardMsg = textEl('div', '', 'muted');
+          const cardMsg = textEl('div', isRedacted ? (state.proposalStatusById[p.proposalId] || '来源读取权限已撤销：草稿正文已清除，已禁用改稿与批准操作') : (state.proposalStatusById[p.proposalId] || ''), 'muted');
           const actions = document.createElement('div');
           actions.className = 'row';
           actions.style.marginTop = '8px';
@@ -624,12 +637,12 @@ export function renderMinimalView1Html(): string {
           const saveBtn = textEl('button', '保存新版本', 'secondary');
           saveBtn.type = 'button';
           saveBtn.setAttribute('data-action', 'save-draft');
-          saveBtn.disabled = !isPendingActive;
+          saveBtn.disabled = !isActionablePending;
 
           const approveBtn = textEl('button', '批准当前版本', '');
           approveBtn.type = 'button';
           approveBtn.setAttribute('data-action', 'approve');
-          approveBtn.disabled = !isPendingActive || Boolean(state.dirtyByProposal[p.proposalId]);
+          approveBtn.disabled = !isActionablePending || Boolean(state.dirtyByProposal[p.proposalId]);
 
           const rejectBtn = textEl('button', '拒绝', 'secondary');
           rejectBtn.type = 'button';
@@ -637,83 +650,85 @@ export function renderMinimalView1Html(): string {
           rejectBtn.disabled = !isPendingActive;
 
           bodyBox.addEventListener('input', () => {
+            if (!isActionablePending) return;
             state.dirtyByProposal[p.proposalId] = true;
             state.localDraftTextByProposal[p.proposalId] = bodyBox.value;
             approveBtn.disabled = true;
           });
 
           saveBtn.addEventListener('click', async () => {
+            const reqConvId = String(snap.conversationId);
+            const reqEpoch = snap.runtimeEpoch;
+            const reqGen = state.selectionGeneration;
             const nextPayload = { ...payload, body: bodyBox.value };
             const res = await api('/api/proposals/' + encodeURIComponent(p.proposalId) + '/draft', {
               method: 'POST',
               body: JSON.stringify({
-                conversationId: snap.conversationId,
+                conversationId: reqConvId,
                 expectedHeadRev: p.revision,
                 payload: nextPayload
               })
             });
+            let msg;
             if (res.ok) {
-              state.dirtyByProposal[p.proposalId] = false;
+              delete state.dirtyByProposal[p.proposalId];
               delete state.localDraftTextByProposal[p.proposalId];
-              cardMsg.textContent = '已保存新版本 rev=' + (res.body.revision ? res.body.revision.revision : '');
-              await selectAndSubscribe(snap.conversationId, snap.runtimeEpoch);
+              msg = '已保存新版本 rev=' + (res.body.revision ? res.body.revision.revision : '');
             } else {
-              cardMsg.textContent = '保存失败 (' + res.status + '): ' + (res.body.code || res.body.error || '');
+              msg = '保存失败 (' + res.status + '): ' + (res.body.code || res.body.error || '');
+            }
+            state.proposalStatusById[p.proposalId] = msg;
+            if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
+              cardMsg.textContent = msg;
+              if (res.ok) {
+                await selectAndSubscribe(reqConvId, reqEpoch);
+              }
             }
           });
 
-          approveBtn.addEventListener('click', async () => {
+          const submitDecision = async (decision, keyPrefix, okLabel) => {
+            const reqConvId = String(snap.conversationId);
+            const reqEpoch = snap.runtimeEpoch;
+            const reqGen = state.selectionGeneration;
+            const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
+              method: 'POST',
+              body: JSON.stringify({ conversationId: reqConvId })
+            });
+            if (!ch.ok || !ch.body || !ch.body.nonce) {
+              const chErr = '获取挑战失败 (' + ch.status + '): ' + (ch.body.code || '');
+              state.proposalStatusById[p.proposalId] = chErr;
+              if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
+                cardMsg.textContent = chErr;
+                await selectAndSubscribe(reqConvId, reqEpoch);
+              }
+              return;
+            }
+            const dec = await api('/api/approvals/decide', {
+              method: 'POST',
+              body: JSON.stringify({
+                approvalId: p.approvalId,
+                conversationId: reqConvId,
+                decision,
+                expectedRevision: ch.body.revision,
+                expectedActionHash: ch.body.actionHash,
+                nonce: ch.body.nonce,
+                decisionKey: keyPrefix + p.approvalId + '-r' + p.revision
+              })
+            });
+            const msg = dec.ok ? okLabel : ('决定被拒 (' + dec.status + '): ' + (dec.body.code || ''));
+            state.proposalStatusById[p.proposalId] = msg;
+            if (isCurrentView(reqConvId, reqEpoch, reqGen)) {
+              cardMsg.textContent = msg;
+              await selectAndSubscribe(reqConvId, reqEpoch);
+            }
+          };
+
+          approveBtn.addEventListener('click', () => {
             if (state.dirtyByProposal[p.proposalId]) return;
-            const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
-              method: 'POST',
-              body: JSON.stringify({ conversationId: snap.conversationId })
-            });
-            if (!ch.ok || !ch.body || !ch.body.nonce) {
-              cardMsg.textContent = '获取挑战失败 (' + ch.status + '): ' + (ch.body.code || '');
-              await selectAndSubscribe(snap.conversationId, snap.runtimeEpoch);
-              return;
-            }
-            const dec = await api('/api/approvals/decide', {
-              method: 'POST',
-              body: JSON.stringify({
-                approvalId: p.approvalId,
-                conversationId: snap.conversationId,
-                decision: 'APPROVE',
-                expectedRevision: ch.body.revision,
-                expectedActionHash: ch.body.actionHash,
-                nonce: ch.body.nonce,
-                decisionKey: 'ui-' + p.approvalId + '-r' + p.revision
-              })
-            });
-            cardMsg.textContent = dec.ok ? '已提交批准' : ('决定被拒 (' + dec.status + '): ' + (dec.body.code || ''));
-            await selectAndSubscribe(snap.conversationId, snap.runtimeEpoch);
+            return submitDecision('APPROVE', 'ui-', '已提交批准');
           });
 
-          rejectBtn.addEventListener('click', async () => {
-            const ch = await api('/api/approvals/' + encodeURIComponent(p.approvalId) + '/challenge', {
-              method: 'POST',
-              body: JSON.stringify({ conversationId: snap.conversationId })
-            });
-            if (!ch.ok || !ch.body || !ch.body.nonce) {
-              cardMsg.textContent = '获取挑战失败 (' + ch.status + ')';
-              await selectAndSubscribe(snap.conversationId, snap.runtimeEpoch);
-              return;
-            }
-            const dec = await api('/api/approvals/decide', {
-              method: 'POST',
-              body: JSON.stringify({
-                approvalId: p.approvalId,
-                conversationId: snap.conversationId,
-                decision: 'REJECT',
-                expectedRevision: ch.body.revision,
-                expectedActionHash: ch.body.actionHash,
-                nonce: ch.body.nonce,
-                decisionKey: 'ui-rej-' + p.approvalId + '-r' + p.revision
-              })
-            });
-            cardMsg.textContent = dec.ok ? '已提交拒绝' : ('决定被拒 (' + dec.status + '): ' + (dec.body.code || ''));
-            await selectAndSubscribe(snap.conversationId, snap.runtimeEpoch);
-          });
+          rejectBtn.addEventListener('click', () => submitDecision('REJECT', 'ui-rej-', '已提交拒绝'));
 
           actions.appendChild(saveBtn);
           actions.appendChild(approveBtn);
@@ -754,8 +769,10 @@ export function renderMinimalView1Html(): string {
     });
 
     document.getElementById('logout-btn').addEventListener('click', async () => {
+      const outGen = ++state.selectionGeneration;
       closeSse();
       await api('/api/auth/logout', { method: 'POST', body: '{}' });
+      if (outGen !== state.selectionGeneration) return;
       state.principalId = null;
       state.conversationId = null;
       state.runtimeEpoch = null;

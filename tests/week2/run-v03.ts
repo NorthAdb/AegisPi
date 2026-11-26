@@ -657,24 +657,69 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
     writeFileSync(overlapPath, overlapV0, "utf8");
     const overlapV0Sha = sha256Text(overlapV0);
 
+    // Place BOTH an unauthorized host secret file AND an ungranted tracked path in workspaceRoot!
+    mkdirSync(path.join(workspaceRoot, "secrets"), { recursive: true });
+    writeFileSync(path.join(workspaceRoot, "secrets", "host-private.txt"), "TOP_SECRET_MUST_NEVER_MOUNT_IN_INPUT\n", "utf8");
+    writeFileSync(path.join(workspaceRoot, "reports", "ungranted-tracked.md"), "UNGRANTED_FILE_MUST_NEVER_MOUNT_IN_INPUT\n", "utf8");
+
     // Freeze TWO independent per-task snapshots while overlap.md == V0!
+    // Also verify snapshots include ONLY authorized paths (NEVER secrets/host-private.txt or reports/ungranted-tracked.md)!
     const snapRoot = path.join(rootDir, "per-task-snaps");
-    const taskSnapA = importer.createTaskFrozenSnapshot(snapRoot, ["reports/overlap.md"]);
-    const taskSnapB = importer.createTaskFrozenSnapshot(snapRoot, ["reports/overlap.md"]);
+    const taskSnapA = importer.createTaskFrozenSnapshot({
+      snapshotRootDir: snapRoot,
+      govDb,
+      principalId: "owner",
+      scopeId: "scope:default",
+      candidateRelPaths: ["reports/overlap.md", "reports/ungranted-tracked.md", "secrets/host-private.txt"],
+    });
+    const taskSnapB = importer.createTaskFrozenSnapshot({
+      snapshotRootDir: snapRoot,
+      govDb,
+      principalId: "owner",
+      scopeId: "scope:default",
+      candidateRelPaths: ["reports/overlap.md", "reports/ungranted-tracked.md", "secrets/host-private.txt"],
+    });
     assert.notEqual(taskSnapA.snapshotDir, taskSnapB.snapshotDir, "W2-S3: Concurrent tasks MUST NOT share one input snapshot directory");
     assert.equal(taskSnapA.getBaseline("reports/overlap.md"), overlapV0Sha);
     assert.equal(taskSnapB.getBaseline("reports/overlap.md"), overlapV0Sha);
+    assert.equal(existsSync(path.join(taskSnapA.snapshotDir, "reports", "overlap.md")), true);
+    assert.equal(existsSync(path.join(taskSnapA.snapshotDir, "secrets", "host-private.txt")), false, "W2-S3: Unauthorized file MUST NOT enter frozen /input");
+    assert.equal(existsSync(path.join(taskSnapA.snapshotDir, "reports", "ungranted-tracked.md")), false, "W2-S3: Ungranted tracked file MUST NOT enter frozen /input");
 
     const overlapV1 = `OVERLAP_TASK_A_V1_${runId}\n`;
     const overlapV1Sha = sha256Text(overlapV1);
     const runOverlapA = runTaskInDockerSandbox({
       approvedImageId,
       inputSnapshotDir: taskSnapA.snapshotDir,
-      nodeScript: `const fs=require('fs');fs.mkdirSync('/out/reports',{recursive:true});fs.writeFileSync('/out/reports/overlap.md',${JSON.stringify(overlapV1)},'utf8');`,
+      nodeScript: `
+        const fs = require('fs');
+        const path = require('path');
+        const seen = [];
+        function walk(dir, rel) {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            const r = rel ? rel + '/' + ent.name : ent.name;
+            if (ent.isDirectory()) walk(path.join(dir, ent.name), r);
+            else seen.push(r);
+          }
+        }
+        walk('/input', '');
+        if (seen.some(p => p.includes('host-private') || p.includes('ungranted-tracked'))) {
+          throw new Error('Unauthorized file visible in /input: ' + JSON.stringify(seen));
+        }
+        process.stdout.write('INPUT_FILES=' + JSON.stringify(seen.sort()) + '\\n');
+        fs.mkdirSync('/out/reports', { recursive: true });
+        fs.writeFileSync('/out/reports/overlap.md', ${JSON.stringify(overlapV1)}, 'utf8');
+      `,
     });
     volumesToClean.push(runOverlapA.volumeName);
     containersToClean.push(runOverlapA.containerName);
-    assert.equal(runOverlapA.ok, true);
+    assert.equal(runOverlapA.ok, true, `Overlap A sandbox failed: ${runOverlapA.stderr}`);
+    assert.ok(runOverlapA.stdout.includes("INPUT_FILES="));
+    const observedContainerInputLine = runOverlapA.stdout.split(/\r?\n/).find((l) => l.startsWith("INPUT_FILES="))!;
+    const observedContainerInputFiles = JSON.parse(observedContainerInputLine.slice("INPUT_FILES=".length)) as string[];
+    assert.equal(observedContainerInputFiles.includes("reports/overlap.md"), true);
+    assert.equal(observedContainerInputFiles.includes("secrets/host-private.txt"), false);
+    assert.equal(observedContainerInputFiles.includes("reports/ungranted-tracked.md"), false);
 
     const overlapV2 = `OVERLAP_TASK_B_V2_${runId}\n`;
     const runOverlapB = runTaskInDockerSandbox({
@@ -921,6 +966,9 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
     let formalCrashLogicalKey = "";
     let formalCrashSha = "";
     let formalConflictRelPath: string | null = null;
+    let sequentialV1Sha = "";
+    let sequentialV2Sha = "";
+    let sequentialAuthorizedInputs: string[] = [];
     try {
       // Pre-seed write grant in formal host governance DB
       const { db: seedDb } = openGovernanceDb(path.join(formalDataDir, "aegis-gov.sqlite"));
@@ -937,7 +985,7 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         sourceType: "workspace_write",
         resourceId: "workspace",
         operations: ["write"],
-        constraints: { allowedRelPaths: ["reports/crash-test.md", "reports/spoof-check.md"] },
+        constraints: { allowedRelPaths: ["reports/crash-test.md", "reports/spoof-check.md", "reports/seq-update.md"] },
         now,
       });
       grantModelDisclosure(seedDb, {
@@ -953,10 +1001,12 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
       });
       seedDb.close();
 
-      // Pre-create spoof-check.md with v1 so formal host records v1 as its startup baseline!
+      // Pre-create spoof-check.md with v1 AND an unauthorized host secret file that MUST NOT enter /input!
       const spoofOrigText = "HOST_BASELINE_V1_ORIGINAL\n";
       mkdirSync(path.join(formalWorkspace, "reports"), { recursive: true });
+      mkdirSync(path.join(formalWorkspace, "secrets"), { recursive: true });
       writeFileSync(path.join(formalWorkspace, "reports", "spoof-check.md"), spoofOrigText, "utf8");
+      writeFileSync(path.join(formalWorkspace, "secrets", "formal-ungranted.txt"), "FORMAL_UNGRANTED_SECRET\n", "utf8");
 
       const connectorsCfgPath = path.join(formalDir, "connectors.json");
       writeFileSync(
@@ -967,7 +1017,12 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
               workspaceDir: formalWorkspace,
               approvedImageId,
               imageName: DEFAULT_SANDBOX_IMAGE,
-              trackedBaselineRelPaths: ["reports/crash-test.md", "reports/spoof-check.md"],
+              trackedBaselineRelPaths: [
+                "reports/crash-test.md",
+                "reports/spoof-check.md",
+                "reports/seq-update.md",
+                "secrets/formal-ungranted.txt",
+              ],
             },
           },
           null,
@@ -1096,12 +1151,16 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         assert.ok(srcSnap, "Reconciled workspace_file source MUST appear in original conversation snapshot");
         assert.equal(srcSnap.contentDigest, formalCrashSha);
 
-        // Now prove formal host's per-task frozen snapshot ignores model-spoofed baseSha256!
-        // Step 1 on conv1 writes reports/crash-test-step2.md -> freezes conv1's per-task snapshot while spoof-check.md is still V1!
-        // Step 2: user edits spoof-check.md on disk to V2 AFTER conv1's snapshot was frozen.
-        // Step 3: model tries to write spoof-check.md while spoofing baseSha256 = V2 -> host compares against conv1's frozen V1 -> CONFLICT_SAVED!
+        // Now prove WITHIN ONE TASK, frozen snapshot & baseline ignore model-spoofed baseSha256:
+        // Step 1 (tool_call 1 of task): writes reports/crash-test.md -> freezes THIS task's snapshot holding spoof-check.md == V1!
+        // Step 2 (immediately after tool 1 writes crash-test.md on disk, BEFORE tool 2 completes Docker sandbox):
+        //   user edits spoof-check.md on disk to V2!
+        // Step 3 (tool_call 2 inside SAME execution task): tries to write spoof-check.md while spoofing baseSha256 = V2
+        //   -> host compares against THIS task's frozen V1 baseline -> CONFLICT_SAVED!
         const userModifiedSpoof = "USER_MODIFIED_AFTER_HOST_SNAPSHOT\n";
         const userModifiedSpoofSha = sha256Text(userModifiedSpoof);
+        const freezeTriggerContent = `CONV1_FREEZE_TRIGGER_${runId}\n`;
+        const freezeTriggerSha = sha256Text(freezeTriggerContent);
 
         await fakeModel.queue({
           clear: true,
@@ -1113,39 +1172,10 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
                 name: "workspace_write_managed",
                 arguments: {
                   relPath: "reports/crash-test.md",
-                  content: `CONV1_FREEZE_TRIGGER_${runId}\n`,
+                  content: freezeTriggerContent,
                 },
               },
             },
-            { kind: "text", text: "Task snapshot frozen." },
-          ],
-        });
-        await fetch(`${hostCrash2.baseUrl}/api/conversations/${conv1.conversationId}/chat`, {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: cookie2, origin: hostCrash2.baseUrl },
-          body: JSON.stringify({
-            content: "Freeze per-task snapshot before user edits spoof-check.md",
-            chatKey: `v03-formal-freeze-${runId}`,
-            runtimeEpoch: hostCrash2.runtimeEpoch,
-          }),
-        });
-        const freezeDeadline = Date.now() + 20_000;
-        while (Date.now() < freezeDeadline) {
-          const sp = (await (
-            await fetch(`${hostCrash2.baseUrl}/api/conversations/${conv1.conversationId}/snapshot`, {
-              headers: { cookie: cookie2 },
-            })
-          ).json()) as { fileImports: Array<{ targetRelPath: string; artifactSha256: string }> };
-          if (sp.fileImports.some((f) => f.artifactSha256 === sha256Text(`CONV1_FREEZE_TRIGGER_${runId}\n`))) break;
-          await new Promise((r) => setTimeout(r, 120));
-        }
-
-        // Now user edits spoof-check.md AFTER conv1 froze its per-task snapshot (which holds V1)!
-        writeFileSync(path.join(formalWorkspace, "reports", "spoof-check.md"), userModifiedSpoof, "utf8");
-
-        await fakeModel.queue({
-          clear: true,
-          scripts: [
             {
               kind: "tool_call",
               toolCall: {
@@ -1159,28 +1189,47 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
                 },
               },
             },
-            { kind: "text", text: "Handled conflict." },
+            { kind: "text", text: "Handled conflict within same execution task." },
           ],
         });
         await fetch(`${hostCrash2.baseUrl}/api/conversations/${conv1.conversationId}/chat`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie: cookie2, origin: hostCrash2.baseUrl },
           body: JSON.stringify({
-            content: "Try writing spoof-check.md",
-            chatKey: `v03-formal-spoof-${runId}`,
+            content: "Freeze per-task snapshot in step 1 then attempt spoofed write to spoof-check.md in step 2",
+            chatKey: `v03-formal-freeze-and-spoof-${runId}`,
             runtimeEpoch: hostCrash2.runtimeEpoch,
           }),
         });
-        const deadline = Date.now() + 20_000;
+        const crashTestDiskPath = path.join(formalWorkspace, "reports", "crash-test.md");
+        const freezeDeadline = Date.now() + 25_000;
+        let sawFreezeDiskWrite = false;
+        while (Date.now() < freezeDeadline) {
+          if (sha256FileIfExists(crashTestDiskPath) === freezeTriggerSha) {
+            sawFreezeDiskWrite = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        assert.equal(sawFreezeDiskWrite, true, "Tool 1 MUST freeze per-task snapshot and write crash-test.md");
+
+        // Now user edits spoof-check.md on disk BEFORE Tool 2 inside the SAME task installs!
+        writeFileSync(path.join(formalWorkspace, "reports", "spoof-check.md"), userModifiedSpoof, "utf8");
+
+        const deadline = Date.now() + 25_000;
         let spoofImport: { state: string; conflictRelPath: string | null } | undefined;
         while (Date.now() < deadline) {
           const sp = (await (
             await fetch(`${hostCrash2.baseUrl}/api/conversations/${conv1.conversationId}/snapshot`, {
               headers: { cookie: cookie2 },
             })
-          ).json()) as { fileImports: Array<{ targetRelPath: string; state: string; conflictRelPath: string | null }> };
+          ).json()) as {
+            fileImports: Array<{ targetRelPath: string; state: string; conflictRelPath: string | null }>;
+            messages?: Array<{ role: string; content: unknown }>;
+          };
           spoofImport = sp.fileImports.find((f) => f.targetRelPath === "reports/spoof-check.md");
-          if (spoofImport) break;
+          const turnFinished = Boolean(sp.messages?.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("Handled conflict")));
+          if (spoofImport && turnFinished) break;
           await new Promise((r) => setTimeout(r, 120));
         }
         assert.equal(spoofImport?.state, "CONFLICT_SAVED", "W2-S3: Host baseline MUST detect conflict even if model spoofs baseSha256");
@@ -1191,9 +1240,129 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
           userModifiedSpoofSha,
           "User modified file MUST remain preserved",
         );
+
+        // W2-S3 Round 4: Submit TWO sequential updates on the SAME conversation (`seqConv`)
+        // WITHOUT any external edits -> BOTH MUST install cleanly (NO spurious CONFLICT_SAVED)!
+        const seqConv = (await (
+          await fetch(`${hostCrash2.baseUrl}/api/conversations`, {
+            method: "POST",
+            headers: { "content-type": "application/json", cookie: cookie2, origin: hostCrash2.baseUrl },
+            body: JSON.stringify({ slotName: "router" }),
+          })
+        ).json()) as { conversationId: string; runtimeEpoch: string };
+
+        const seqV1Content = `SEQ_SAME_CONV_V1_${runId}\n`;
+        const seqV2Content = `SEQ_SAME_CONV_V2_${runId}\n`;
+        sequentialV1Sha = sha256Text(seqV1Content);
+        sequentialV2Sha = sha256Text(seqV2Content);
+
+        await fakeModel.queue({
+          clear: true,
+          scripts: [
+            {
+              kind: "tool_call",
+              toolCall: {
+                id: `tc_v03_seq1_${runId}`,
+                name: "workspace_write_managed",
+                arguments: { relPath: "reports/seq-update.md", content: seqV1Content },
+              },
+            },
+            { kind: "text", text: "Sequential update 1 installed." },
+          ],
+        });
+        await fetch(`${hostCrash2.baseUrl}/api/conversations/${seqConv.conversationId}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: cookie2, origin: hostCrash2.baseUrl },
+          body: JSON.stringify({
+            content: "Sequential write v1",
+            chatKey: `v03-seq-1-${runId}`,
+            runtimeEpoch: seqConv.runtimeEpoch,
+          }),
+        });
+        const seq1Deadline = Date.now() + 25_000;
+        let seq1Imp: { state: string; installCount: number } | undefined;
+        while (Date.now() < seq1Deadline) {
+          const sp = (await (
+            await fetch(`${hostCrash2.baseUrl}/api/conversations/${seqConv.conversationId}/snapshot`, {
+              headers: { cookie: cookie2 },
+            })
+          ).json()) as {
+            fileImports: Array<{ targetRelPath: string; state: string; installCount: number }>;
+            messages?: Array<{ role: string; content: unknown }>;
+          };
+          seq1Imp = sp.fileImports.find((f) => f.targetRelPath === "reports/seq-update.md");
+          const turn1Finished = Boolean(
+            sp.messages?.some((m) => m.role === "assistant" && JSON.stringify(m.content).includes("Sequential update 1 installed")),
+          );
+          if (seq1Imp && turn1Finished) break;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        assert.equal(seq1Imp?.state, "INSTALLED");
+        assert.equal(sha256FileIfExists(path.join(formalWorkspace, "reports", "seq-update.md")), sequentialV1Sha);
+
+        // Command #2 sequentially in SAME conversation -> MUST capture latest V1 baseline & install V2 cleanly!
+        await fakeModel.queue({
+          clear: true,
+          scripts: [
+            {
+              kind: "tool_call",
+              toolCall: {
+                id: `tc_v03_seq2_${runId}`,
+                name: "workspace_write_managed",
+                arguments: { relPath: "reports/seq-update.md", content: seqV2Content },
+              },
+            },
+            { kind: "text", text: "Sequential update 2 installed." },
+          ],
+        });
+        await fetch(`${hostCrash2.baseUrl}/api/conversations/${seqConv.conversationId}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: cookie2, origin: hostCrash2.baseUrl },
+          body: JSON.stringify({
+            content: "Sequential write v2",
+            chatKey: `v03-seq-2-${runId}`,
+            runtimeEpoch: seqConv.runtimeEpoch,
+          }),
+        });
+        const seq2Deadline = Date.now() + 20_000;
+        let seqImports: Array<{ targetRelPath: string; state: string; installCount: number; baseSha256: string | null; artifactSha256: string }> = [];
+        while (Date.now() < seq2Deadline) {
+          const sp = (await (
+            await fetch(`${hostCrash2.baseUrl}/api/conversations/${seqConv.conversationId}/snapshot`, {
+              headers: { cookie: cookie2 },
+            })
+          ).json()) as {
+            fileImports: Array<{
+              targetRelPath: string;
+              state: string;
+              installCount: number;
+              baseSha256: string | null;
+              artifactSha256: string;
+            }>;
+          };
+          seqImports = sp.fileImports.filter((f) => f.targetRelPath === "reports/seq-update.md");
+          if (seqImports.length >= 2) break;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        assert.equal(seqImports.length, 2);
+        assert.equal(seqImports[0]!.state, "INSTALLED");
+        assert.equal(seqImports[0]!.baseSha256, null);
+        assert.equal(seqImports[1]!.state, "INSTALLED", "W2-S3: Sequential command #2 in same conversation MUST install cleanly without CONFLICT_SAVED");
+        assert.equal(seqImports[1]!.baseSha256, sequentialV1Sha, "W2-S3: Sequential command #2 MUST use V1 authoritative SHA as its baseline");
+        assert.equal(seqImports[1]!.installCount, 1);
+        assert.equal(sha256FileIfExists(path.join(formalWorkspace, "reports", "seq-update.md")), sequentialV2Sha);
       } finally {
         await hostCrash2.stop();
       }
+      const { db: postFormalDb } = openGovernanceDb(path.join(formalDataDir, "aegis-gov.sqlite"));
+      const sboxAudits = postFormalDb
+        .prepare("SELECT details_json FROM audit_events WHERE event_type = 'docker_sandbox_observed' ORDER BY occurred_at DESC")
+        .all() as Array<{ details_json: string }>;
+      postFormalDb.close();
+      assert.ok(sboxAudits.length >= 2);
+      const lastSbox = JSON.parse(sboxAudits[0]!.details_json) as { inputAuthorizedFiles: string[] };
+      sequentialAuthorizedInputs = lastSbox.inputAuthorizedFiles;
+      assert.equal(sequentialAuthorizedInputs.includes("secrets/formal-ungranted.txt"), false);
     } finally {
       await fakeSmtp.stop().catch(() => {});
       await fakeModel.stop().catch(() => {});
@@ -1249,6 +1418,8 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
       perTaskAndMidExportHardening: {
         overlappingSamePathTasksConflictSaved: true,
         overlappingConflictRelPath: impOverlapB.conflictRelPath,
+        containerInputOnlyAuthorizedPaths: observedContainerInputFiles,
+        unauthorizedFilesExcludedFromInput: true,
         midExportSourceRevokedCode: impMidRev.code,
         midExportSourceRevokedTargetAndConflictUnchanged: true,
         midExportWriteRevokedCode: impMidWriteRev.code,
@@ -1268,6 +1439,10 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         workspaceFileSourceReconciledInSnapshot: true,
         modelSpoofedBaseSha256IgnoredConflictSaved: true,
         spoofConflictRelPath: formalConflictRelPath,
+        sequentialSameConversationUpdatesInstalled: true,
+        sequentialV1Sha256: sequentialV1Sha,
+        sequentialV2Sha256: sequentialV2Sha,
+        formalContainerAuthorizedInputs: sequentialAuthorizedInputs,
       },
     };
     const evidencePath = path.join(evidenceDir, "v03-evidence.json");

@@ -30,6 +30,7 @@ import {
   checkRecordedSourceReadStillAuthorized,
   getSourceReadRevocationWatermark,
   listConversationSources,
+  revokeSourceReadGrant,
 } from "../governance/policy.ts";
 import type { AegisHostRuntime } from "../runtime/harness.ts";
 import {
@@ -923,6 +924,30 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       await projectionHub.notifyAllActive("scope_revoked");
     }
     return c.json(res, res.httpStatus);
+  });
+
+  app.post("/api/source-grants/:id/revoke", async (c) => {
+    const session = c.get("authSession");
+    const grantId = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    const grantRow = config.host.govDb
+      .prepare("SELECT grant_id, principal_id, scope_id, revoked_at FROM source_read_grants WHERE grant_id = ?")
+      .get(grantId) as
+      | { grant_id: string; principal_id: string; scope_id: string; revoked_at: number | null }
+      | undefined;
+    if (!grantRow) {
+      return c.json({ ok: false, code: "grant_not_found" }, 404);
+    }
+    if (grantRow.principal_id !== session.principalId) {
+      return c.json({ ok: false, code: "forbidden" }, 403);
+    }
+    const revoked = revokeSourceReadGrant(config.host.govDb, {
+      grantId,
+      reason: body.reason ?? "user_revoked_source_grant",
+      now: nowFn(),
+    });
+    await projectionHub.notifyAllActive("source_read_revoked");
+    return c.json({ ok: true, revoked, grantId });
   });
 
   // V05: Principal-, epoch-, and conversation-scoped SSE with cursor continuity & Last-Event-ID

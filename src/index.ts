@@ -13,6 +13,8 @@ import {
   assertStage1LoopbackSmtpHost,
   HostCredentialVault,
 } from "./governance/credentials.ts";
+import { writeAuditEvent } from "./governance/db.ts";
+import { checkSourceReadAuthorized } from "./governance/policy.ts";
 import { AegisHostRuntime } from "./runtime/harness.ts";
 import { GitHubMcpBridge } from "./runtime/mcp-bridge.ts";
 import type { ModelSlotConfig } from "./runtime/models.ts";
@@ -329,6 +331,23 @@ const host = await AegisHostRuntime.start({
   // W2-S1: Bind hostRef AND connect pinned GitHub MCP bridge STRICTLY BEFORE harness.resume() releases scheduling!
   beforeResume: async (readyHost) => {
     hostRef = readyHost;
+    // W2-S6: Record dynamic verification of scrubbed startup secret env vars on live process.env
+    const remainingSecretVars = [...scrubbedSecretEnvVars]
+      .sort()
+      .filter((k) => Object.prototype.hasOwnProperty.call(process.env, k));
+    writeAuditEvent(readyHost.govDb, {
+      entityType: "host_runtime",
+      entityId: readyHost.runtimeEpoch,
+      eventKey: `startup_env_scrub:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
+      eventType: "host_startup_env_scrubbed",
+      occurredAt: Date.now(),
+      details: {
+        pid: process.pid,
+        scrubbedVarNames: [...scrubbedSecretEnvVars].sort(),
+        remainingSecretVars,
+        allScrubbed: remainingSecretVars.length === 0,
+      },
+    });
     if (connectorsCfg?.githubMcp) {
       const mc = connectorsCfg.githubMcp;
       const bridge = new GitHubMcpBridge({
@@ -364,16 +383,30 @@ const host = await AegisHostRuntime.start({
           if (!cap.ok) {
             return { ok: false, code: cap.code, message: cap.reason };
           }
-          // W2-S3: Per-task frozen input snapshot & baseline keyed by logical host task (or conversation).
-          // Each task gets its own isolated /input snapshot copy and immutable baseline; another task's install NEVER advances it!
+          const preAuth = checkSourceReadAuthorized(currentHost.govDb, {
+            principalId: wp.principalId,
+            scopeId: wp.scopeId,
+            sourceType: "workspace_write",
+            resourceId: "workspace",
+            operation: "write",
+            path: cap.normalizedRelPath,
+          });
+          if (!preAuth.ok) {
+            return { ok: false, code: "workspace_write_denied", message: preAuth.reason };
+          }
+          // W2-S3: Per-execution-root frozen input snapshot & baseline (NOT shared across sequential
+          // commands on one conversation, while still isolating overlapping tasks from advancing each other!).
           const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
-          const taskSnapKey = boundTask ? `task:${wp.runtimeEpoch}:${boundTask}` : `conv:${wp.runtimeEpoch}:${wp.conversationId}`;
+          const taskSnapKey = `${wp.runtimeEpoch}:${wp.executionRootTaskId}`;
           let frozenSnap = taskFrozenSnapshots.get(taskSnapKey);
           if (!frozenSnap) {
-            frozenSnap = importer.createTaskFrozenSnapshot(
-              taskSnapshotsRootDir,
-              [...(wc.trackedBaselineRelPaths ?? []), cap.normalizedRelPath],
-            );
+            frozenSnap = importer.createTaskFrozenSnapshot({
+              snapshotRootDir: taskSnapshotsRootDir,
+              govDb: currentHost.govDb,
+              principalId: wp.principalId,
+              scopeId: wp.scopeId,
+              candidateRelPaths: [...(wc.trackedBaselineRelPaths ?? []), cap.normalizedRelPath],
+            });
             taskFrozenSnapshots.set(taskSnapKey, frozenSnap);
           }
           const hostBaseSha256 = frozenSnap.getBaseline(cap.normalizedRelPath);
@@ -448,6 +481,29 @@ const host = await AegisHostRuntime.start({
                     },
                   }
                 : {}),
+            });
+            writeAuditEvent(currentHost.govDb, {
+              entityType: "sandbox_run",
+              entityId: sb.containerName || sb.volumeName,
+              eventKey: `sandbox:${wp.logicalKey}:${impRes.importId}`,
+              eventType: "docker_sandbox_observed",
+              occurredAt: Date.now(),
+              details: {
+                containerId: sb.containerId,
+                containerName: sb.containerName,
+                volumeName: sb.volumeName,
+                executorImageId: sb.executorImageId,
+                exporterImageId: impRes.exporterImageId ?? null,
+                networkMode: sb.networkMode,
+                mounts: sb.mounts,
+                envKeysInContainer: sb.envKeysInContainer,
+                dockerCliEnvKeys: sb.dockerCliEnvKeys ?? [],
+                inputAuthorizedFiles: frozenSnap.authorizedInputRelPaths,
+                targetRelPath: cap.normalizedRelPath,
+                importState: impRes.state,
+                importCode: impRes.code,
+                artifactSha256: impRes.artifactSha256,
+              },
             });
             return {
               ok: impRes.ok,

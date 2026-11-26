@@ -360,6 +360,9 @@ async function main(): Promise<void> {
             uidValidity,
             message: null,
             childEnvKeysObserved: Object.keys(process.env).sort(),
+            passwordPresentInEnv: Object.values(process.env).some(
+              (v) => typeof v === "string" && input.password.length > 0 && v.includes(input.password),
+            ),
           },
           secrets,
         );
@@ -411,6 +414,9 @@ async function main(): Promise<void> {
           body: rawBody,
         },
         childEnvKeysObserved: Object.keys(process.env).sort(),
+        passwordPresentInEnv: Object.values(process.env).some(
+          (v) => typeof v === "string" && input.password.length > 0 && v.includes(input.password),
+        ),
       },
       secrets,
     );

@@ -559,6 +559,73 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     await formalHost2.stop();
     formalHost2 = null;
 
+    // W2-S6: Query REAL formal-host audit records from aegis-gov.sqlite (env scrub, IMAP child observed env, Docker sandbox container & volume)!
+    const { db: postS6Db } = openGovernanceDb(path.join(hostDataDir, "aegis-gov.sqlite"));
+    const scrubAuditRow = postS6Db
+      .prepare("SELECT details_json FROM audit_events WHERE event_type = 'host_startup_env_scrubbed' ORDER BY occurred_at DESC LIMIT 1")
+      .get() as { details_json: string } | undefined;
+    const imapAuditRow = postS6Db
+      .prepare("SELECT details_json FROM audit_events WHERE event_type = 'imap_read_completed' ORDER BY occurred_at DESC LIMIT 1")
+      .get() as { details_json: string } | undefined;
+    const dockerAuditRow = postS6Db
+      .prepare("SELECT details_json FROM audit_events WHERE event_type = 'docker_sandbox_observed' ORDER BY occurred_at DESC LIMIT 1")
+      .get() as { details_json: string } | undefined;
+    postS6Db.close();
+
+    assert.ok(scrubAuditRow, "W2-S6: Formal host must record dynamic startup env scrub audit");
+    const scrubDetails = JSON.parse(scrubAuditRow.details_json) as {
+      scrubbedVarNames: string[];
+      remainingSecretVars: string[];
+      allScrubbed: boolean;
+    };
+    assert.equal(scrubDetails.allScrubbed, true, `W2-S6: Secret vars remained on host env: ${JSON.stringify(scrubDetails.remainingSecretVars)}`);
+    assert.equal(scrubDetails.remainingSecretVars.length, 0);
+
+    assert.ok(imapAuditRow, "W2-S6: Formal host must record IMAP child observed env");
+    const imapDetails = JSON.parse(imapAuditRow.details_json) as {
+      childEnvKeysObserved: string[];
+      passwordPresentInEnv: boolean;
+      tlsVerified: boolean;
+      readOnlyExamine: boolean;
+      usedBodyPeek: boolean;
+    };
+    assert.equal(imapDetails.passwordPresentInEnv, false);
+    assert.ok(imapDetails.childEnvKeysObserved.length >= 1, "W2-S6: IMAP child env keys must be sampled");
+    for (const k of imapDetails.childEnvKeysObserved) {
+      assert.equal(k.startsWith("AEGISPI_"), false, `IMAP child inherited forbidden key ${k}`);
+    }
+
+    assert.ok(dockerAuditRow, "W2-S6: Formal host must record Docker task container & volume inspect audit");
+    const dockerDetails = JSON.parse(dockerAuditRow.details_json) as {
+      containerId: string;
+      volumeName: string;
+      executorImageId: string;
+      exporterImageId: string | null;
+      networkMode: string;
+      mounts: Array<{ source: string; destination: string; rw: boolean }>;
+      envKeysInContainer: string[];
+      dockerCliEnvKeys: string[];
+      artifactSha256: string | null;
+    };
+    assert.ok(dockerDetails.containerId.length > 0);
+    assert.equal(dockerDetails.networkMode, "none");
+    assert.ok(dockerDetails.mounts.some((m) => m.destination === "/input" && m.rw === false));
+    assert.ok(dockerDetails.mounts.some((m) => m.destination === "/out" && m.rw === true));
+    for (const k of dockerDetails.envKeysInContainer) {
+      assert.equal(/(^AEGISPI_|_SECRET$|_TOKEN$|_PAT$|PERSONAL_ACCESS_TOKEN|API_KEY)/i.test(k), false, `Task container inherited secret env key: ${k}`);
+    }
+    for (const k of dockerDetails.dockerCliEnvKeys) {
+      assert.equal(/(^AEGISPI_|_SECRET$|_TOKEN$|_PAT$|PERSONAL_ACCESS_TOKEN|API_KEY)/i.test(k), false, `Docker CLI env contained secret key: ${k}`);
+    }
+
+    // Sampling point 4: Scan formal runtime audit observations (env keys, container inspect, mounts, IMAP child env, volume artifact)!
+    recordPoint("formal_child_and_container_observations", [
+      { name: "host_env_scrub_audit", content: scrubAuditRow.details_json },
+      { name: "imap_child_observed_env", content: imapAuditRow.details_json },
+      { name: "docker_task_container_and_volume_audit", content: dockerAuditRow.details_json },
+      { name: "docker_cli_whitelist_control_probe", content: dockerCliEnvJson },
+    ]);
+
     // Verify independent model server received exact per-slot auth SHA-256 prefixes (Router vs Worker!)
     const modelStats = await fakeModel.stats();
     const routerAuthPrefix = sha256Prefix16(markers.router);
@@ -595,6 +662,49 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     assert.ok(imapStats.totalLogins >= 1, "Formal host must have executed real IMAP read");
     assert.equal(forbiddenHits.length, 0, `S6 FORBIDDEN SECRET LEAK DETECTED: ${JSON.stringify(forbiddenHits)}`);
 
+    // Dynamically compute uncollectedSamples from ACTUAL observed artifacts across all sampling points!
+    const allObservedNames = new Map<string, number>();
+    for (const pt of samplingMatrix) {
+      for (const a of pt.scannedArtifacts) {
+        allObservedNames.set(a.name, Math.max(allObservedNames.get(a.name) ?? 0, a.bytes));
+      }
+    }
+    const requiredSampleNames = [
+      "aegis-gov.sqlite",
+      "aegis-gov.sqlite-wal",
+      "pi-durable.sqlite",
+      "pi-durable.sqlite-wal",
+      "web_snapshot",
+      "web_sse_frame",
+      "captured_urls",
+      "formal_host_stdout_stderr",
+      "fake_model_log",
+      "fake_imap_log",
+      "fake_mcp_log",
+      "imap_child_observed_env",
+      "docker_task_container_and_volume_audit",
+      "docker_cli_whitelist_control_probe",
+      "host_env_scrub_audit",
+      "workspace_output_file",
+    ];
+    const uncollectedSamples: string[] = [];
+    for (const reqName of requiredSampleNames) {
+      const b = allObservedNames.get(reqName);
+      if (b === undefined || b <= 0) {
+        uncollectedSamples.push(reqName);
+      }
+    }
+    if (!sseText.includes("event:")) {
+      uncollectedSamples.push("web_sse_frame_nonempty_event");
+    }
+    if (imapDetails.childEnvKeysObserved.length === 0) {
+      uncollectedSamples.push("imap_child_env_keys");
+    }
+    if (dockerDetails.envKeysInContainer.length === 0) {
+      uncollectedSamples.push("docker_container_env_keys");
+    }
+    assert.deepEqual(uncollectedSamples, [], `W2-S6: Missing required live S6 samples: ${JSON.stringify(uncollectedSamples)}`);
+
     const checkedLocationsAll = [
       "live_aegis-gov.sqlite",
       "live_aegis-gov.sqlite-wal",
@@ -608,7 +718,11 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       "fake_imap_log",
       "fake_mcp_log",
       "model_prompt_bodies",
-      "docker_cli_minimal_env",
+      "imap_child_observed_env",
+      "docker_task_container_env",
+      "docker_task_volume_audit",
+      "docker_cli_minimal_env_audit",
+      "docker_cli_whitelist_control_probe",
       "workspace_output_file",
     ];
 
@@ -656,17 +770,34 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       status: "PASS",
       formalEntrypointUsed: true,
       formalEntrypoint: "src/index.ts",
-      hostStartupSecretEnvScrubbed: true,
+      hostStartupSecretEnvScrubbed: scrubDetails.allScrubbed,
+      hostStartupRemainingSecretVars: scrubDetails.remainingSecretVars,
       scannerPositiveControl: {
         plantedMarkers: 2,
         detectedHits: canaryHits.length,
       },
       samplingPointMatrix: samplingMatrix,
-      uncollectedSamples: [] as string[],
+      uncollectedSamples,
+      notDirectlyCapturedFromExternalOs: [
+        "docker.exe external OS GetEnvironmentStrings (verified via docker-sandbox buildMinimalDockerCliEnv allowlist keys in audit_events + whitelist control probe + docker inspect .Config.Env)",
+      ],
       dockerDigests: {
         approvedImageId,
+        executorImageId: dockerDetails.executorImageId,
+        exporterImageId: dockerDetails.exporterImageId,
       },
-      dockerCliMinimalEnvKeys: dockerCliEnvKeys,
+      dockerTaskContainer: {
+        containerId: dockerDetails.containerId,
+        volumeName: dockerDetails.volumeName,
+        networkMode: dockerDetails.networkMode,
+        mounts: dockerDetails.mounts,
+        envKeysInContainer: dockerDetails.envKeysInContainer,
+        artifactSha256: dockerDetails.artifactSha256,
+      },
+      dockerCliMinimalEnvKeysPassed: dockerDetails.dockerCliEnvKeys,
+      dockerCliWhitelistControlEnvKeys: dockerCliEnvKeys,
+      imapChildObservedEnvKeys: imapDetails.childEnvKeysObserved,
+      imapChildPasswordPresentInEnv: imapDetails.passwordPresentInEnv,
       mcpChildEnvKeys: mcpStartup.envKeysReceived,
       capturedUrlsCount: capturedHttpUrls.length,
       totalForbiddenHits: forbiddenHits.length,

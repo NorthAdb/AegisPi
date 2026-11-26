@@ -7,7 +7,6 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -19,6 +18,7 @@ import { mintId } from "../../governance/canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "../../governance/db.ts";
 import {
   checkSourceReadAuthorized,
+  listAuthorizedWorkspaceRelPaths,
   listConversationSources,
   verifyAllConversationSourcesReadAuthorized,
 } from "../../governance/policy.ts";
@@ -150,6 +150,7 @@ export interface TaskFrozenWorkspaceSnapshot {
   snapshotId: string;
   snapshotDir: string;
   baselines: Map<string, string | null>;
+  authorizedInputRelPaths: string[];
   getBaseline: (normalizedRelPath: string) => string | null;
   cleanup: () => void;
 }
@@ -183,54 +184,74 @@ export class ManagedWorkspaceImporter {
 
   /**
    * W2-S3: Creates an isolated per-task frozen read-only input directory copy AND immutable
-   * baseline SHA-256 map captured strictly at task snapshot time. Concurrent tasks targeting
-   * the same file each hold their own frozen snapshot & baseline and never advance each other.
+   * baseline SHA-256 map captured strictly at task snapshot time.
+   * ONLY authorized regular files matching active workspace_write grants for (principalId, scopeId)
+   * are copied into /input — NEVER walks or exposes arbitrary ungranted files in the workspace!
    */
-  createTaskFrozenSnapshot(
-    snapshotRootDir: string,
-    extraTrackedRelPaths: string[] = [],
-  ): TaskFrozenWorkspaceSnapshot {
+  createTaskFrozenSnapshot(params: {
+    snapshotRootDir: string;
+    govDb: DatabaseSync;
+    principalId: string;
+    scopeId: string;
+    candidateRelPaths: string[];
+  }): TaskFrozenWorkspaceSnapshot {
     const snapshotId = `snap_${randomUUID().slice(0, 12)}`;
-    const snapshotDir = path.join(path.resolve(snapshotRootDir), snapshotId);
+    const snapshotDir = path.join(path.resolve(params.snapshotRootDir), snapshotId);
     mkdirSync(snapshotDir, { recursive: true });
     const baselines = new Map<string, string | null>();
+    const authorizedInputRelPaths: string[] = [];
 
-    const walkAndCopy = (srcDir: string, relPrefix: string): void => {
-      if (!existsSync(srcDir)) return;
-      const entries = readdirSync(srcDir).sort();
-      for (const name of entries) {
-        if (name.startsWith(".aegis-tmp-")) continue;
-        const srcFull = path.join(srcDir, name);
-        const st = lstatSync(srcFull);
-        if (st.isSymbolicLink()) continue;
-        const rel = relPrefix ? `${relPrefix}/${name}` : name;
-        if (st.isDirectory()) {
-          mkdirSync(path.join(snapshotDir, ...rel.split("/")), { recursive: true });
-          walkAndCopy(srcFull, rel);
-        } else if (st.isFile()) {
-          const check = validateAndResolveWorkspacePath(this.#workspaceRoot, rel);
-          if (!check.ok) continue;
-          const destFull = path.join(snapshotDir, ...check.normalizedRelPath.split("/"));
-          mkdirSync(path.dirname(destFull), { recursive: true });
-          copyFileSync(srcFull, destFull);
-          const sha = sha256FileIfExists(destFull);
-          baselines.set(check.normalizedRelPath, sha);
-        }
+    const hasSymlinkComponent = (relNorm: string): boolean => {
+      const segs = relNorm.split("/").filter(Boolean);
+      let cur = this.#workspaceRoot;
+      for (const seg of segs) {
+        cur = path.join(cur, seg);
+        if (!existsSync(cur)) return false;
+        if (lstatSync(cur).isSymbolicLink()) return true;
       }
+      return false;
     };
 
-    walkAndCopy(this.#workspaceRoot, "");
-    for (const rel of extraTrackedRelPaths) {
-      const check = validateAndResolveWorkspacePath(this.#workspaceRoot, rel);
-      if (check.ok && !baselines.has(check.normalizedRelPath)) {
-        baselines.set(check.normalizedRelPath, null);
+    const grantExplicitPaths = listAuthorizedWorkspaceRelPaths(params.govDb, {
+      principalId: params.principalId,
+      scopeId: params.scopeId,
+    });
+    const combinedCandidates = [...new Set([...params.candidateRelPaths, ...grantExplicitPaths])];
+
+    for (const rawRel of combinedCandidates) {
+      const check = validateAndResolveWorkspacePath(this.#workspaceRoot, rawRel);
+      if (!check.ok) continue;
+      const auth = checkSourceReadAuthorized(params.govDb, {
+        principalId: params.principalId,
+        scopeId: params.scopeId,
+        sourceType: "workspace_write",
+        resourceId: "workspace",
+        operation: "write",
+        path: check.normalizedRelPath,
+      });
+      if (!auth.ok) continue;
+      if (baselines.has(check.normalizedRelPath)) continue;
+
+      if (existsSync(check.absolutePath) && !hasSymlinkComponent(check.normalizedRelPath)) {
+        const st = lstatSync(check.absolutePath);
+        if (st.isFile()) {
+          const destFull = path.join(snapshotDir, ...check.normalizedRelPath.split("/"));
+          mkdirSync(path.dirname(destFull), { recursive: true });
+          copyFileSync(check.absolutePath, destFull);
+          const sha = sha256FileIfExists(destFull);
+          baselines.set(check.normalizedRelPath, sha);
+          authorizedInputRelPaths.push(check.normalizedRelPath);
+          continue;
+        }
       }
+      baselines.set(check.normalizedRelPath, null);
     }
 
     return {
       snapshotId,
       snapshotDir,
       baselines,
+      authorizedInputRelPaths,
       getBaseline: (normalizedRelPath: string) => baselines.get(normalizedRelPath) ?? null,
       cleanup: () => {
         try {

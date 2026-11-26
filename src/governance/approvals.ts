@@ -8,6 +8,7 @@ import {
   sha256Hex,
 } from "./canonical.ts";
 import { withImmediateTx, writeAuditEvent } from "./db.ts";
+import { verifyProposalSourcesReadAuthorized } from "./policy.ts";
 
 export type ApprovalState = "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | "SUPERSEDED";
 export type DecisionChoice = "APPROVE" | "REJECT";
@@ -382,6 +383,35 @@ export function saveDraftRevision(
         ok: false,
         code: "stale_revision",
         message: `Expected head_rev ${params.expectedHeadRev}, current is ${proposal.head_rev}`,
+      };
+    }
+
+    // W2-S2: Refuse draft editing once any underlying/inherited source read grant is revoked.
+    const srcAuth = verifyProposalSourcesReadAuthorized(db, {
+      runtimeEpoch: proposal.runtime_epoch,
+      conversationId: proposal.conversation_id,
+      principalId: convScope?.principal_id ?? params.principalId,
+      scopeId: proposal.scope_id,
+    });
+    if (!srcAuth.ok) {
+      writeAuditEvent(db, {
+        entityType: "proposal",
+        entityId: proposal.proposal_id,
+        eventKey: `edit_denied_revoked:${params.proposalId}:${params.now}`,
+        eventType: "draft_edit_denied_source_revoked",
+        occurredAt: params.now,
+        details: {
+          principalId: params.principalId,
+          conversationId: proposal.conversation_id,
+          blockedSource: srcAuth.blockedSource,
+          reason: srcAuth.reason,
+        },
+      });
+      return {
+        httpStatus: 403,
+        ok: false,
+        code: "source_read_revoked",
+        message: srcAuth.reason,
       };
     }
 
@@ -780,6 +810,37 @@ export function decideApproval(
         code: "context_changed",
         message: "Scope, policy version, or cancellation state changed since draft was created",
       };
+    }
+
+    // W2-S2: Refuse APPROVE once any underlying/inherited source read grant is revoked.
+    if (params.decision === "APPROVE") {
+      const srcAuth = verifyProposalSourcesReadAuthorized(db, {
+        runtimeEpoch: proposal.runtime_epoch,
+        conversationId: proposal.conversation_id,
+        principalId: convScope?.principal_id ?? params.principalId,
+        scopeId: proposal.scope_id,
+      });
+      if (!srcAuth.ok) {
+        writeAuditEvent(db, {
+          entityType: "approval",
+          entityId: params.approvalId,
+          eventKey: `approve_denied_revoked:${params.approvalId}:${params.now}:${params.decisionKey}`,
+          eventType: "approval_decision_denied_source_revoked",
+          occurredAt: params.now,
+          details: {
+            principalId: params.principalId,
+            conversationId: proposal.conversation_id,
+            blockedSource: srcAuth.blockedSource,
+            reason: srcAuth.reason,
+          },
+        });
+        return {
+          httpStatus: 403,
+          ok: false,
+          code: "source_read_revoked",
+          message: srcAuth.reason,
+        };
+      }
     }
 
     // 5. Atomic CAS consume + optional READY effect + signal_outbox

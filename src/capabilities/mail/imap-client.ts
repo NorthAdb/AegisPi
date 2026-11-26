@@ -221,9 +221,29 @@ export async function readImapMessageReadOnly(params: {
     };
   }
 
-  const parsed = JSON.parse(line) as ImapReadResult;
+  const parsed = JSON.parse(line) as ImapReadResult & { passwordPresentInEnv?: boolean };
   if (parsed.ok && parsed.message) {
     parsed.message.contentDigest = sha256Hex(`${parsed.message.subject}\n${parsed.message.body}`);
+  }
+  if (parsed.ok) {
+    writeAuditEvent(params.govDb, {
+      entityType: "imap_read",
+      entityId: params.endpoint.mailbox,
+      eventKey: `completed:${params.principalId}:${now}:${parsed.message?.uid ?? "none"}`,
+      eventType: "imap_read_completed",
+      occurredAt: now,
+      details: {
+        mailbox: params.endpoint.mailbox,
+        uid: parsed.message?.uid ?? null,
+        found: parsed.found ?? Boolean(parsed.message),
+        mode: parsed.mode,
+        tlsVerified: parsed.tlsVerified,
+        readOnlyExamine: parsed.readOnlyExamine ?? false,
+        usedBodyPeek: parsed.usedBodyPeek ?? false,
+        childEnvKeysObserved: parsed.childEnvKeysObserved ?? [],
+        passwordPresentInEnv: Boolean(parsed.passwordPresentInEnv),
+      },
+    });
   }
   return parsed;
 }

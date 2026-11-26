@@ -49,6 +49,8 @@ export interface ManagedWorkspaceWriteHandler {
   (params: {
     runtimeEpoch: string;
     conversationId: string;
+    toolTaskId: string;
+    executionRootTaskId: string;
     principalId: string;
     scopeId: string;
     logicalKey: string;
@@ -80,6 +82,7 @@ export interface AegisPolicyExtensionOptions {
   imapEndpoint?: () => ImapEndpointConfig | null;
   githubMcpBridge?: () => GitHubMcpBridge | null;
   workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
+  resolveExecutionRootTaskId?: (conversationId: string, toolTaskId: string) => Promise<string> | string;
   onGovernanceMutated?: (conversationId: string, reason: string) => void;
   now?: () => number;
   approvalTtlMs?: number;
@@ -545,10 +548,16 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
       const conversationId = String(api.conversationId);
       const auth = resolveAuth(conversationId);
       const runtimeEpoch = options.getRuntimeEpoch();
-      const logicalKey = `wimp:${runtimeEpoch}:${conversationId}:${String(api.taskId)}:${api.callId}`;
+      const toolTaskId = String(api.taskId);
+      const executionRootTaskId = options.resolveExecutionRootTaskId
+        ? await options.resolveExecutionRootTaskId(conversationId, toolTaskId)
+        : `task:${toolTaskId}`;
+      const logicalKey = `wimp:${runtimeEpoch}:${conversationId}:${toolTaskId}:${api.callId}`;
       const res = await options.workspaceWriteHandler({
         runtimeEpoch,
         conversationId,
+        toolTaskId,
+        executionRootTaskId,
         principalId: auth.principalId,
         scopeId: auth.scopeId,
         logicalKey,
