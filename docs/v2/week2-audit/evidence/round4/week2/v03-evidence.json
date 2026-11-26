@@ -1,0 +1,121 @@
+{
+  "suite": "V03",
+  "runId": "v03_d262dfd9",
+  "status": "PASS",
+  "dockerEnvironment": {
+    "available": true,
+    "clientVersion": "29.9.2",
+    "serverVersion": "29.9.2",
+    "imageName": "node:22.23.5-bookworm-slim",
+    "imageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee"
+  },
+  "immutableDigestChecks": {
+    "approvedImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "executorImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "exporterImageId": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "missingDigestRejectedCode": "unapproved_or_missing_image_digest",
+    "wrongDigestExecutorRejectedCode": "approved_image_digest_not_found",
+    "wrongDigestExporterRejectedCode": "approved_image_digest_not_found"
+  },
+  "normalImport": {
+    "targetRelPath": "reports/weekly.md",
+    "expectedSha256": "98bbd505fa12acfcec06737ea0e3a3021d19c342a45c7f69fe80ffd54e65ed8f",
+    "actualSha256": "98bbd505fa12acfcec06737ea0e3a3021d19c342a45c7f69fe80ffd54e65ed8f",
+    "installCount": 1,
+    "networkMode": "none",
+    "mounts": [
+      {
+        "source": "<DOCKER_HOST_TEMP_DIR>/w2-data/v03/input-snapshot",
+        "destination": "/input",
+        "rw": false
+      },
+      {
+        "source": "aegis-w2-vol-d476c512-b",
+        "destination": "/out",
+        "rw": true
+      }
+    ],
+    "allWritersExited": true
+  },
+  "conflictEdit": {
+    "state": "CONFLICT_SAVED",
+    "userVersionPreserved": true,
+    "conflictRelPath": "reports/weekly.conflict-ba2bf6086c.md",
+    "candidateSha256": "bc82256cdcc67cfc012b35482e64f82675f9a70965452fab153c27d9433273b1"
+  },
+  "conflictNewFile": {
+    "state": "CONFLICT_SAVED",
+    "conflictRelPath": "reports/new-note.conflict-ad657d6c93.md"
+  },
+  "rejections": {
+    "revokedParentSource": {
+      "code": "source_read_revoked",
+      "targetUnchanged": true,
+      "conflictFilesCreatedDelta": 0
+    },
+    "activeWriter": {
+      "code": "active_volume_writers",
+      "targetUnchanged": true
+    },
+    "symlink": {
+      "code": "symlink_rejected",
+      "targetUnchanged": true
+    },
+    "hardlink": {
+      "code": "hardlink_rejected",
+      "targetUnchanged": true
+    },
+    "quotaOverflow": {
+      "code": "file_size_quota_exceeded",
+      "targetUnchanged": true
+    },
+    "windowsAds": {
+      "code": "windows_ads_or_drive_rejected"
+    },
+    "traversal": {
+      "code": "path_traversal_or_empty_segment"
+    },
+    "windowsDevice": {
+      "code": "windows_device_name_rejected"
+    },
+    "revokedGrant": {
+      "code": "workspace_write_denied",
+      "targetUnchanged": true
+    }
+  },
+  "perTaskAndMidExportHardening": {
+    "overlappingSamePathTasksConflictSaved": true,
+    "overlappingConflictRelPath": "reports/overlap.conflict-c52dd7b76a.md",
+    "containerInputOnlyAuthorizedPaths": [
+      "reports/overlap.md"
+    ],
+    "unauthorizedFilesExcludedFromInput": true,
+    "midExportSourceRevokedCode": "source_read_revoked",
+    "midExportSourceRevokedTargetAndConflictUnchanged": true,
+    "midExportWriteRevokedCode": "workspace_write_denied",
+    "sameHashNoopCode": "noop_unchanged",
+    "sameHashNoopInstallCount": 0,
+    "sameHashPreparedStartupReconcileOutcome": "pending_reconcile",
+    "sameHashPreparedStartupReconcileReason": "ambiguous_same_hash_without_install_proof"
+  },
+  "formalHostReceiptLossAndBaseline": {
+    "killedFormalHostPid": 27200,
+    "restartedFormalHostPid": 19400,
+    "logicalKey": "wimp:ep_639120763f1046b2b4f3469fd3c64270:8:19:tc_v03_crash_v03_d262dfd9",
+    "artifactSha256": "efa4b18cd4d60e25d9fcdd02468519c01575123603523644cc466a117534f64f",
+    "reconciledOutcome": "reconciled_installed",
+    "installCount": 1,
+    "diskRewrittenOnRestart": false,
+    "workspaceFileSourceReconciledInSnapshot": true,
+    "modelSpoofedBaseSha256IgnoredConflictSaved": true,
+    "spoofConflictRelPath": "reports/spoof-check.conflict-88245ff1c3.md",
+    "sequentialSameConversationUpdatesInstalled": true,
+    "sequentialV1Sha256": "0f859831d9674d75d9ab10a806a4e1da3e99cf0ead5aa2a17e1b8ba932b4dcbf",
+    "sequentialV2Sha256": "7343e7db63c5792aedf003b954d68e67c265a1fb0dc888b1ed4def9f14d11fac",
+    "formalContainerAuthorizedInputs": [
+      "reports/crash-test.md",
+      "reports/spoof-check.md",
+      "reports/seq-update.md"
+    ]
+  }
+}

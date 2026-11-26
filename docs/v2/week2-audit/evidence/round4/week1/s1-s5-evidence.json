@@ -1,0 +1,174 @@
+{
+  "suite": "S1-S5",
+  "nodeVersion": "v22.23.5",
+  "sqliteVersion": "3.54.1",
+  "platform": "win32",
+  "results": [
+    {
+      "id": "S1",
+      "status": "PASS",
+      "summary": "Harness.open keeps scheduling=paused during open/inspect/getTask with 0 phase callbacks and 0 model calls; signal() and waitForIdle() both activate scheduling.",
+      "evidence": {
+        "gateToolTaskId": 12,
+        "schedulingAfterOpen": "paused",
+        "phaseCallbacksBeforeFence": 0,
+        "transportCallsBeforeFence": 0,
+        "schedulingAfterSignal": "running",
+        "schedulingAfterWaitForIdle": "running",
+        "timeline": [
+          "1:gov_recovery_done",
+          "2:hooks_and_models_installed",
+          "3:harness_open_returned",
+          "4:inspect_and_getTask_done",
+          "5:calling_signal",
+          "phase:pi.tool:call:t12",
+          "beforeTool:t12",
+          "tool_exec:hello-s1",
+          "phase:pi.generation:tools:t9",
+          "phase:pi.generation:prepare:t14",
+          "phase:pi.generation:request:t14",
+          "models:streamSimple:fake-router-1"
+        ]
+      }
+    },
+    {
+      "id": "S2",
+      "status": "PASS",
+      "summary": "beforeTool and execute align on (conversationId, taskId, callId) for both model calls and nested calls (<callId>/<key>), { arguments } delivers edited draft, and fork assigns a distinct conversationId.",
+      "evidence": {
+        "parentTaskId": 12,
+        "childTaskId": 14,
+        "parentConversationId": 1,
+        "forkedConversationId": 18,
+        "observations": [
+          {
+            "stage": "beforeTool",
+            "tool": "parent_tool",
+            "conversationId": 1,
+            "taskId": 12,
+            "callId": "call_s2_model",
+            "parent": null,
+            "args": {
+              "body": "draft-v1"
+            }
+          },
+          {
+            "stage": "beforeTool",
+            "tool": "parent_tool",
+            "conversationId": 1,
+            "taskId": 12,
+            "callId": "call_s2_model",
+            "parent": null,
+            "args": {
+              "body": "draft-v1"
+            }
+          },
+          {
+            "stage": "parent_execute",
+            "conversationId": 1,
+            "taskId": 12,
+            "callId": "call_s2_model",
+            "args": {
+              "body": "draft-v2-edited"
+            }
+          },
+          {
+            "stage": "beforeTool",
+            "tool": "child_tool",
+            "conversationId": 1,
+            "taskId": 14,
+            "callId": "call_s2_model/child1",
+            "parent": {
+              "taskId": 12,
+              "callId": "call_s2_model"
+            },
+            "args": {
+              "note": "from:draft-v2-edited"
+            }
+          },
+          {
+            "stage": "beforeTool",
+            "tool": "child_tool",
+            "conversationId": 1,
+            "taskId": 14,
+            "callId": "call_s2_model/child1",
+            "parent": {
+              "taskId": 12,
+              "callId": "call_s2_model"
+            },
+            "args": {
+              "note": "from:draft-v2-edited"
+            }
+          },
+          {
+            "stage": "child_execute",
+            "conversationId": 1,
+            "taskId": 14,
+            "callId": "call_s2_model/child1",
+            "args": {
+              "note": "child-v2-edited"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "S3",
+      "status": "PASS",
+      "summary": "Verified all 5 SignalResult values (delivered, duplicate, invalid, closed, not_found), watch/watchTaskGraph open+close, and graceful Harness.close.",
+      "evidence": {
+        "not_found": "not_found",
+        "invalid": "invalid",
+        "delivered": "delivered",
+        "duplicate": "duplicate",
+        "closed": "closed"
+      }
+    },
+    {
+      "id": "S4",
+      "status": "PASS",
+      "summary": "Product AegisHostRuntime + HostPhaseTelemetry WeakMap unforgeably attributed concurrent completeSimple (pi.compaction) and streamSimple (pi.generation) in the SAME conversationId to distinct budget_accounts (in-flight held_mu=100 each, settled=60 each); maxRetries=0 verified (503 -> 1 physical request).",
+      "evidence": {
+        "sharedConversationId": 8,
+        "compactionTaskId": 23,
+        "generationTaskId": 26,
+        "compactionReservation": {
+          "requestId": "mreq_0c97c6439ca84c369d30869f1878bb1a",
+          "taskAccount": "acct:task:budget-task-compaction-A",
+          "purpose": "compaction",
+          "state": "SETTLED",
+          "inFlightHeldMu": 100,
+          "finalChargedMu": 60
+        },
+        "generationReservation": {
+          "requestId": "mreq_2097c56ed98340858b711b9a13a35d9e",
+          "taskAccount": "acct:task:budget-task-gen-B",
+          "purpose": "router",
+          "state": "SETTLED",
+          "inFlightHeldMu": 100,
+          "finalChargedMu": 180
+        },
+        "physicalRequestsOn503WithMaxRetries0": 1
+      }
+    },
+    {
+      "id": "S5",
+      "status": "PASS",
+      "summary": "Governance DB WAL+FULL+FK verified, Pi trace DB WAL verified, Windows Stop-Process -Force releases named-pipe exclusive lock immediately, tx rollback verified, and trace rollback detected via missing observed conversationId.",
+      "evidence": {
+        "govPragmas": {
+          "journalMode": "wal",
+          "synchronous": 2,
+          "foreignKeys": 1,
+          "busyTimeout": 5000,
+          "sqliteVersion": "3.54.1"
+        },
+        "traceJournalMode": "wal",
+        "holderPidKilled": 42100,
+        "secondInstanceRejected": true,
+        "reacquiredAfterForceKill": true,
+        "rollbackMissingConversationId": 7
+      }
+    }
+  ]
+}

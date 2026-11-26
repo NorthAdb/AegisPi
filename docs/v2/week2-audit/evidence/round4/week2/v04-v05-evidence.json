@@ -1,0 +1,39 @@
+{
+  "suite": "V04_V05",
+  "runId": "v04v05_211de51d",
+  "status": "PASS",
+  "v04": {
+    "window1_gov_register_and_reconcile_read_failure": "PASS (PENDING_RECONCILE / 受理待核对, 0 extra sends)",
+    "window2_pi_admit_kill_reconcile": {
+      "status": "PASS",
+      "piRequestId": "chatreq:5f1971f41f1bcdaefec121d5c4d701a2",
+      "submissionId": 15,
+      "conflict409Verified": true,
+      "wrongEpoch409Verified": true,
+      "concurrentDoubleClickSingleSubmission": true
+    },
+    "window3_receipt_committed_http_lost": {
+      "status": "PASS",
+      "submissionId": 15
+    }
+  },
+  "v05": {
+    "snapshotCursor": "str_b799b8be-6de:3",
+    "firstReplayedEventIdAfterGapApprove": "str_b799b8be-6de:4",
+    "evictedHistoryResyncReason": "cursor_history_evicted",
+    "slowClientResyncReason": "slow_client_queue_overflow",
+    "sameEpochRestartResyncReason": "stream_instance_changed",
+    "postLogoutBusinessFrames": 0,
+    "sourceRevokeOldStreamResyncReason": "source_read_revoked",
+    "sourceRevokeOldStreamBusinessFrames": 0,
+    "sourceRevokeResubscribePreRevokeCursorBusinessFrames": 0,
+    "sourceRevokeRefetchedSnapshotRedacted": true,
+    "sourceRevokeApprovalDraftRedacted": true,
+    "sourceRevokeDelegatedWorkerUserInputRedacted": true,
+    "sourceRevokeDraftEditDenied403": true,
+    "sourceRevokeApproveDenied403": true,
+    "sourceRevokeClaimRefusedZeroSends": true,
+    "projectionConcurrentStaleReadSerialized": true,
+    "crossPrincipalForbidden403": true
+  }
+}
