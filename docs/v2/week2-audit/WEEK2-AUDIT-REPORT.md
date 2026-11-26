@@ -308,36 +308,59 @@ $base = Join-Path $env:TEMP "aegispi-w2-single-$(Get-Date -Format 'yyyyMMdd-HHmm
 
 ---
 
-## 10. 第 1 轮审计人独立复跑与审查签收栏（请外部审计人在此填写并回传）
+## 10. 第 1 轮独立审计结论（2026-11-26，香港时间）
 
-> 建议审计人在全新临时目录下按 §3.1–§3.4 独立复跑冻结候选 `ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb`，并结合 §5 源码导航与第 1 周旧治理库升级副本做源码/黑盒复核，将结果填写在下方表格后回传本文件。
+**退回整改，暂缓第 2 周签收。** 冻结候选为 `ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb`。正式启动入口尚无法完成纵切，连接器凭据、来源撤权和受管文件还存在宿主侧校验缺口。§1–§9 保留实施方提审记录，本节登记独立复跑及源码判定。请在同一份报告 §11 追加整改回复，逐项引用以下审计编号，给出新冻结 SHA、代码位置、实际命令、退出码和证据位置。
 
 ### 10.1 独立复跑核对表
 
 | 核对项 | 审计人复跑结果 | 备注 / 复跑 `runId` / 证据目录 |
 |---|---|---|
-| 核对基线（`69ce7b9` / `47a4dd4`）与候选 `ea9b59c` | （待填写） | |
-| 核对依赖锁定（`package-lock.json` SHA-256 与 8 项直接依赖） | （待填写） | |
-| 干净目录全量复跑 `tests/week2/run-all.ts`（`tsc` + 分层 + `S6` + `V01–V06`） | （待填写） | |
-| 同候选干净目录全量复跑 `tests/week1/run-all.ts`（`S1–S5` + 矩阵 + `W1-A` + `W1-B`） | （待填写） | |
-| 独立复跑或抽查 `V04`/`V05`、`V02`、`V03`、`V01`/`V06` 浏览器与 `S6` | （待填写） | |
-| 源码审查（D6–D10 权限、隔离、幂等、披露门控、Docker 导入、旧库升级兼容性） | （待填写） | |
-| **第 2 周第 1 轮签收结论** | **（待填写：通过 / 退回整改）** | （审计人署名与日期） |
+| 核对基线（`69ce7b9` / `47a4dd4`）与候选 `ea9b59c` | 通过 | 候选包含相对 W1 交接的 39 个变更文件。提审文档 HEAD `6814aa6` 相对候选仅增加报告与证据。复跑在 `ea9b59c` 的分离工作树上完成。 |
+| 依赖锁定、类型检查 | 通过 | 直接依赖及 lockfile 沿用第一周锁定记录，SHA-256 与 §2 一致。独立 `tsc --noEmit` 退出 0。 |
+| 第 2 周全量 `tests/week2/run-all.ts` | 未通过 | 退出 1。四个专项完成后，Edge 在 CDP 就绪前退出（子进程码 0，stderr 为空）。全量未生成汇总。浏览器两次独立重试均退出 1，分别见 §10.4。 |
+| V04/V05 协议、V02、V03、S6 夹具 | 现有夹具通过 | `v04v05_a448375d`、`v02_0e331fd2`、`v03_18a5a36d`、`s6_bf175985` 均生成 PASS 结果。浏览器、首 token、真实 Gmail / GitHub 只读为待验证。夹具覆盖与任务书的差异见 §10.3。 |
+| 同候选第 1 周全量 | 通过 | `week1_c291864d` 退出 0。S1–S5 5/5，矩阵 25/25。W1-A `w1a_9b41ea16` 的足额对照各 +1，六组不足各 +0。W1-B `w1b_38cca226` 实测独立 SMTP 累计收件 1、领取 1，原会话快照标记 UNKNOWN／“结果待核对”。 |
+| 旧治理库副本正常开库两次 | 通过 | 退出 0。8 条授权及历史审批、效果、账本摘要保留，6 条预算拒绝归属补齐，外键异常 0，第二次开库结果一致。 |
+| **第 2 周第 1 轮签收** | **退回整改** | Codex 独立审计，2026-11-26（香港时间）。 |
 
-### 10.2 工程约束审查发现（如无问题可填“无”）
+### 10.2 工程约束审查发现
 
 | 编号 | 级别（P1/P2） | 候选实现中的问题与源码位置 | 复验条件 |
 |---|---|---|---|
-| （待填写） | | | |
+| W2-G1 | P1 | **S6 · 凭据选择与实际目的端没有绑定。** 凭据库的连接器查找仅匹配 kind。IMAP 按 mailbox 授权后另取 host、TLS servername 和账号；MCP 校验登记文件的摘要，却通过单独配置的 command/args 启动。实际注入凭据的目标需要由受信配置和授权共同确定。[凭据库](../../../src/governance/credentials.ts#L79) · [IMAP](../../../src/capabilities/mail/imap-client.ts#L73) · [MCP](../../../src/runtime/mcp-bridge.ts#L99) | 在交付凭据前核对账号、目标和允许连接的 TLS 身份，以及实际启动的 MCP 工件、固定启动参数和只读配置。用合成凭据证明匹配配置可读，目标或工件不匹配时登录、启动增量均为 0。 |
+| W2-G2 | P2 | **执行镜像按可变 tag 启动。** 执行器在启动后才读取容器镜像 ID，导出器同样按 tag 启动。v2.3 裁决 1 要求记录镜像完整性，v1 设计包 02 §5 要求执行镜像以 digest 固定。[执行](../../../src/capabilities/workspace/docker-sandbox.ts#L77) · [导出](../../../src/capabilities/workspace/docker-sandbox.ts#L294) | 执行和只读导出启动前核对获准的不可变镜像身份，并留各自的实际镜像摘要。缺失或不匹配须在启动前终止。 |
 
-### 10.3 任务书与验收证据审查发现（如无问题可填“无”）
+### 10.3 任务书与验收证据审查发现
 
 | 编号 | 级别（P1/P2） | 候选实现或夹具与签收条件的差异 | 复验条件 |
 |---|---|---|---|
-| （待填写） | | | |
+| W2-S1 | P1 | **V01 · 正式入口没有接通纵切能力。** `src/index.ts` 启动 Runtime 时未传 IMAP、MCP 和工作区处理器，相关工具返回未配置。浏览器夹具自行构建 Runtime、注入处理器及写入预设报告，证明了组件组合路径。[正式入口](../../../src/index.ts#L138) · [能力注册](../../../src/runtime/extensions/aegis-policy.ts#L354) · [浏览器夹具](../../../tests/week2/run-v01-v06-browser.ts#L333) | 用交付的正式入口和受信本地配置启动独立宿主进程，由视图①完成演示。证据含所选邮件 UID、仓库提交 SHA、两处时间差异、Router/Worker 账本、授权文件字节及断线后界面。缺少授权或配置时保持拒绝。 |
+| W2-S2 | P1 | **V01–V03/V05 · 来源撤权未贯穿读、派生与回放。** 记忆引用遍历检查主体、作用域和墓碑，缺引用节点的域授权复核。冻结 L0 缓存跨运行复用，最终模型门控只查披露规则。导入只核文件写授权并记录父来源。快照及 SSE 逐帧校验也缺来源权限。[记忆引用](../../../src/capabilities/memory/store.ts#L410) · [L0 缓存](../../../src/runtime/extensions/aegis-context.ts#L39) · [披露门控](../../../src/governance/policy.ts#L413) · [导入](../../../src/capabilities/workspace/importer.ts#L280) · [SSE](../../../src/web/server.ts#L882) | 逐节点与派生物父来源复核实时授权。保留模型披露规则、单独撤销来源读取后，实际 Router、委派 Worker、压缩和 durable 重试均不发送被撤材料。重取快照及旧流后续帧无受限内容，收束旧流，权威目标和冲突候选字节均不变。 |
+| W2-S3 | P1 | **V03 · 基准版本来自模型，回执恢复缺产品路径。** 工具把模型参数 `baseSha256` 传入处理器，夹具也采用该值作为导入基准。导入器在重入时可核对 PREPARED，现有夹具只是同一宿主内抛异常后再次直接调用导入器；普通成功路径还在完成回执后另记来源。[工具](../../../src/runtime/extensions/aegis-policy.ts#L521) · [夹具处理器](../../../tests/week2/run-v01-v06-browser.ts#L351) · [导入器](../../../src/capabilities/workspace/importer.ts#L201) · [回执与来源](../../../src/capabilities/workspace/importer.ts#L551) · [V03 夹具](../../../tests/week2/run-v03.ts#L392) | 用宿主在任务快照时记录的目标版本与任务卷，不接受模型声明替代。原子安装后、回执前强杀正式宿主，从正常恢复入口核对同一逻辑导入、来源与原会话，证明累计安装 1 次。目标在快照后发生改变则保留两版。 |
+| W2-S4 | P2 | **V04/V05 · 浏览器重试键与游标处理仍有缺口。** 待提交键只在页面内存且切会话即清除，刷新时无法恢复原键。partial 帧绕过序号验证，首个序号断档也可略过。投影的并发刷新在异步读之后直接发布，新序号可以承载先前读到的旧状态。[聊天状态](../../../src/web/view1.ts#L676) · [游标](../../../src/web/view1.ts#L306) · [投影](../../../src/web/projection.ts#L294) | 浏览器跨刷新以同一主体、代际与会话下的原键重试。所有带序号帧走同一连续性检查。用确定性夹具覆盖旧读取后完成、首帧缺号、partial 重复或缺号及真实断线重连，终态和游标与权威快照一致。 |
+| W2-S5 | P2 | **V02 · 无符合主题的邮件时扩大了读取范围。** 当前筛选结果为空时改从所有邮件中选择最新 UID，随即读取正文。[IMAP 选择逻辑](../../../src/capabilities/mail/imap-child.ts#L326) | 用包含较新无关邮件的合成邮箱检查有命中和无命中两种路径。无命中返回明确结果，独立 IMAP 记录显示无关正文读取增量 0。 |
+| W2-S6 | P2 | **S6/V06 · 提审通过范围超出实际断言。** S6 在宿主关闭后才条件扫描 WAL，未保留运行中 WAL、URL、宿主日志及无关子进程的逐槽覆盖证据。V06 浏览器夹具通过 SQL 将效果改为 UNKNOWN 后刷新，该用例测到了展示，W1-B 另有真实强杀证据。[S6 采样](../../../tests/week2/run-s6.ts#L349) · [V06 状态写入](../../../tests/week2/run-v01-v06-browser.ts#L843) | 分时点记录实际采到的位置、阳性对照和逐槽命中数。未取到的样本标待验证。把 W1-B 实际恢复出的数据库与本候选的浏览器刷新相连，保留同一 effectId 的批准、领取、收件数及 UNKNOWN 页面断言。 |
+| W2-S7 | P2 | **V06 · 已打开审批页的本地状态依赖重绘。** 测试在期限经过后手动刷新才检查过期禁批。SSE 重绘只保留 dirty 标记，草稿文本会被服务端版本覆盖。[审批卡](../../../src/web/view1.ts#L486) · [过期夹具](../../../tests/week2/run-v01-v06-browser.ts#L781) | 卡片保持打开并跨过期限，无须手动刷新即可禁批。编辑中收到无关事件后保留本地草稿，旧 revision 仍由服务端拒绝。 |
 
-### 10.4 审计人独立复跑命令与原始证据位置（选填）
+### 10.4 审计人独立复跑命令与原始证据位置
+
+环境为 Windows x64 10.0.26300、Node 22.23.5、SQLite 3.54.1、npm 10.9.9、Docker Client/Server 29.9.2、Edge 157.0.4341.60，时区 Asia/Hong_Kong。本机使用同锁文件的既有 `node_modules`，通过目录联接供分离工作树使用。Docker 本地测试镜像摘要为 `sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee`。本次原始材料留在本机规划目录，报告仅写脱敏结果。
 
 ```powershell
-# 审计人可在此粘贴实际执行的复跑命令与本地 auditDir 路径，便于下一轮复验对齐
+$auditRoot = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\week2-round1-fadcc51d'
+$auditNode = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+Set-Location (Join-Path $auditRoot 'candidate')
+git rev-parse HEAD
+& $auditNode ./node_modules/typescript/bin/tsc --noEmit *> '../typecheck.log'
+& $auditNode tests/week1/run-all.ts --data-dir '../week1/data' --evidence-dir '../week1/evidence' --keep-data true *> '../week1.log'
+& $auditNode tests/week2/run-all.ts --data-dir '../week2/data' --evidence-dir '../week2/evidence' --keep-data true *> '../week2.log'
+$probe = Get-Content -Raw -Encoding utf8 '..\..\round4-1795655498209\legacy-schema-probe.mjs'
+& $auditNode --input-type=module -e $probe '..\..\round2-1795619937294\data\w1-a\host-data\aegis-gov.sqlite' '../legacy-copy.sqlite' '../legacy-schema-check.json'
+$browserData = Join-Path $env:TEMP 'agw2-fadcc51d-browser'
+& $auditNode tests/week2/run-v01-v06-browser.ts --data-dir $browserData --evidence-dir '../browser-retry/evidence' *> '../browser-retry.log'
+$browserData = Join-Path $env:TEMP 'agw2-fadcc51d-browser2'
+& $auditNode --input-type=module -e 'import {runV01V06Browser} from "./tests/week2/run-v01-v06-browser.ts"; const r = await runV01V06Browser({dataDir:process.argv[1],evidenceDir:process.argv[2]}); console.log(JSON.stringify({runId:r.report.runId,status:r.report.status,evidencePath:r.evidencePath}));' $browserData '../browser-retry2/evidence' *> '../browser-retry2.log'
 ```
+
+第一周、第二周全量使用独立数据目录并行运行。复跑证据在 `week1/evidence/`、`week2/evidence/` 和 `legacy-schema-check.json`，原始错误在上述日志。首次浏览器单项重试的 CLI 忽略目录参数，随后清理 profile 时出现 `EBUSY`。第二次直接调用导出函数传入短临时路径，仍在 CDP 就绪前退出。请在下一候选修正 §3.4 的单项入口参数和浏览器退出后的清理，并确保汇总能记录未完成子项。浏览器环境故障的原因尚未确定。
