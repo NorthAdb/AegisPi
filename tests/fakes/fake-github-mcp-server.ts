@@ -6,6 +6,10 @@ import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import {
+  scanEntriesAgainstCommitmentsInMemory,
+  type SaltedMarkerCommitmentsFile,
+} from "../../src/governance/leak-scanner.ts";
 
 function parseArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -29,6 +33,7 @@ const args = parseArgs(process.argv.slice(2));
 const logPath = path.resolve(args["log-path"] ?? ".tmp-fake-github-mcp/mcp-calls.jsonl");
 const fixturePath = args["fixture-path"] ? path.resolve(args["fixture-path"]) : null;
 const tamperFlagPath = args["tamper-flag-path"] ? path.resolve(args["tamper-flag-path"]) : null;
+const commitmentsPath = args["commitments-file"] ? path.resolve(args["commitments-file"]) : null;
 mkdirSync(path.dirname(logPath), { recursive: true });
 
 function appendJsonl(obj: unknown): void {
@@ -71,10 +76,12 @@ const fixture: RepoFixture =
 const patVal = process.env["GITHUB_PERSONAL_ACCESS_TOKEN"] ?? "";
 const patSha256Prefix = patVal ? createHash("sha256").update(patVal).digest("hex").slice(0, 16) : null;
 const envValueDigests: Record<string, string> = {};
+const allEnvEntries: Array<[string, string]> = [];
 let nonPatEnvCount = 0;
 let nonPatEnvScannedBytes = 0;
 for (const [k, v] of Object.entries(process.env).sort(([a], [b]) => a.localeCompare(b))) {
   if (typeof v !== "string") continue;
+  allEnvEntries.push([k, v]);
   envValueDigests[k] = createHash("sha256").update(v, "utf8").digest("hex").slice(0, 16);
   if (k !== "GITHUB_PERSONAL_ACCESS_TOKEN") {
     nonPatEnvCount++;
@@ -82,7 +89,31 @@ for (const [k, v] of Object.entries(process.env).sort(([a], [b]) => a.localeComp
   }
 }
 
-// W2-S6: Record ONLY sanitized keys, lengths & SHA-256 digests (NEVER raw env values to disk!)
+// W2-S6: In-child substring scan across all 5 slots via cryptographic salted commitments
+// (detects markers EVEN when wrapped inside larger env strings like "prefix_<marker>_suffix",
+// while NEVER writing raw env values or other slots' secrets to disk!).
+let envScanResult: {
+  substringScanPerformed: boolean;
+  scannedBytes: number;
+  forbiddenHitsBySlot: Record<string, number>;
+  totalForbiddenHits: number;
+} | null = null;
+if (commitmentsPath && existsSync(commitmentsPath)) {
+  const commitmentsFile = JSON.parse(readFileSync(commitmentsPath, "utf8")) as SaltedMarkerCommitmentsFile;
+  const res = scanEntriesAgainstCommitmentsInMemory(allEnvEntries, commitmentsFile, {
+    allowSlotInKeys: {
+      "slot:github-mcp-pat": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+    },
+  });
+  envScanResult = {
+    substringScanPerformed: true,
+    scannedBytes: res.scannedBytes,
+    forbiddenHitsBySlot: res.forbiddenHitsBySlot,
+    totalForbiddenHits: res.totalForbiddenHits,
+  };
+}
+
+// W2-S6: Record ONLY sanitized keys, lengths, SHA-256 digests & per-slot substring hit counts (NEVER raw env values to disk!)
 appendJsonl({
   kind: "startup",
   at: new Date().toISOString(),
@@ -94,6 +125,10 @@ appendJsonl({
   envValueDigests,
   nonPatEnvCount,
   nonPatEnvScannedBytes,
+  substringScanPerformed: Boolean(envScanResult?.substringScanPerformed),
+  allEnvScannedBytes: envScanResult?.scannedBytes ?? nonPatEnvScannedBytes,
+  forbiddenHitsBySlot: envScanResult?.forbiddenHitsBySlot ?? null,
+  totalForbiddenHits: envScanResult?.totalForbiddenHits ?? null,
   hasPat: patVal.length > 0,
   patSha256Prefix,
   repoRefBefore: `${fixture.ref}@${fixture.commitSha}`,

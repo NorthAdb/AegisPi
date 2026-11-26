@@ -10,6 +10,7 @@ import {
 } from "../../src/capabilities/workspace/docker-sandbox.ts";
 import { ensureScope } from "../../src/governance/approvals.ts";
 import { openGovernanceDb } from "../../src/governance/db.ts";
+import { createSaltedMarkerCommitments, scanBufferInMemory } from "../../src/governance/leak-scanner.ts";
 import { approveMcpToolDefinition, pinMcpServerBinary, sha256File } from "../../src/governance/mcp-pin.ts";
 import { grantModelDisclosure, grantSourceRead } from "../../src/governance/policy.ts";
 import { ensureActiveEpochAndManifest } from "../../src/governance/recovery.ts";
@@ -175,12 +176,63 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     { slotId: "slot:web-console", marker: markers.consoleToken },
   ];
 
-  // 0. Scanner positive control BEFORE real scan: prove scanner catches planted markers!
+  // 0. Scanner positive control BEFORE real scan: prove scanner catches planted markers + wrapped substrings in memory & MCP child!
   const canaryFile = path.join(rootDir, "scanner-canary.txt");
   writeFileSync(canaryFile, `canary payload containing ${markers.router} and ${markers.githubPat}\n`, "utf8");
   const canaryHits = scanBufferOrFile("canary", readFileSync(canaryFile), allMarkers);
   assert.equal(canaryHits.length, 2, "S6: leak scanner positive control MUST detect planted markers");
   rmSync(canaryFile, { force: true });
+
+  const inMemoryCanaryRes = scanBufferInMemory(
+    Buffer.from(`prefix_${markers.router}_middle_${markers.imap}_suffix`, "utf8"),
+    allMarkers,
+  );
+  assert.equal(inMemoryCanaryRes.totalForbiddenHits, 2, "W2-S6: in-memory scanner MUST catch wrapped substring markers");
+  assert.equal(inMemoryCanaryRes.forbiddenHitsBySlot["slot:model-router"], 1);
+  assert.equal(inMemoryCanaryRes.forbiddenHitsBySlot["slot:imap-readonly"], 1);
+
+  const posCommitmentsPath = path.join(rootDir, "scanner-pos-commitments.json");
+  const posMcpLogPath = path.join(rootDir, "scanner-pos-mcp.jsonl");
+  writeFileSync(posCommitmentsPath, JSON.stringify(createSaltedMarkerCommitments(allMarkers), null, 2), "utf8");
+  const posMcpRes = spawnSync(
+    LOCKED_NODE_EXE,
+    [
+      path.resolve("tests/fakes/fake-github-mcp-server.ts"),
+      "--log-path",
+      posMcpLogPath,
+      "--commitments-file",
+      posCommitmentsPath,
+    ],
+    {
+      input: "",
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        GITHUB_PERSONAL_ACCESS_TOKEN: markers.githubPat,
+        S6_POS_WRAP: `prefix_${markers.worker}_suffix`,
+        S6_POS_EXTRA_PAT: `wrap_${markers.githubPat}_end`,
+      },
+    },
+  );
+  assert.equal(posMcpRes.status, 0, `W2-S6: MCP positive control subprocess failed: ${posMcpRes.stderr}`);
+  const posMcpLogRaw = readFileSync(posMcpLogPath, "utf8");
+  assert.equal(posMcpLogRaw.includes(markers.worker), false, "MCP log MUST NOT write raw leaked value");
+  assert.equal(posMcpLogRaw.includes(markers.githubPat), false, "MCP log MUST NOT write raw PAT substring");
+  const posMcpStartup = JSON.parse(posMcpLogRaw.trim().split(/\r?\n/)[0]!) as {
+    substringScanPerformed: boolean;
+    rawValuesWrittenToDisk: boolean;
+    forbiddenHitsBySlot: Record<string, number>;
+    totalForbiddenHits: number;
+  };
+  assert.equal(posMcpStartup.substringScanPerformed, true);
+  assert.equal(posMcpStartup.rawValuesWrittenToDisk, false);
+  assert.equal(posMcpStartup.forbiddenHitsBySlot["slot:model-worker"], 1, "MCP child MUST catch wrapped non-PAT marker substring");
+  assert.equal(posMcpStartup.forbiddenHitsBySlot["slot:github-mcp-pat"], 1, "MCP child MUST catch wrapped PAT substring outside allowed key");
+  assert.equal(posMcpStartup.totalForbiddenHits, 2);
+  rmSync(posCommitmentsPath, { force: true });
+  rmSync(posMcpLogPath, { force: true });
 
   // 0b. W2-S6: Direct proof that buildMinimalDockerCliEnv() strips ALL 5 formal startup secrets from Docker CLI child env!
   const simulatedHostEnvWithSecrets: NodeJS.ProcessEnv = {
@@ -215,9 +267,10 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
   writeFileSync(imapCaPath, fakeImap.certPem, "utf8");
 
   const mcpLogPath = path.join(rootDir, "fake-mcp", "mcp-calls.jsonl");
+  const mcpCommitmentsPath = path.join(s6ObserveDir, "mcp-commitments.json");
   const mcpScript = path.resolve("tests/fakes/fake-github-mcp-server.ts");
   const mcpSha = sha256File(mcpScript);
-  const mcpArgs = [mcpScript, "--log-path", mcpLogPath];
+  const mcpArgs = [mcpScript, "--log-path", mcpLogPath, "--commitments-file", mcpCommitmentsPath];
 
   // Pre-seed governance DB with grants & MCP pins for formal src/index.ts
   const now = Date.now();
@@ -721,12 +774,13 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     const githubPatPrefix = sha256Prefix16(markers.githubPat);
     const consoleTokenPrefix = sha256Prefix16(markers.consoleToken);
 
+    const mcpCommitmentsRawText = readFileSync(mcpCommitmentsPath, "utf8");
     const mcpLogRaw = readFileSync(mcpLogPath, "utf8");
     const mcpLines = mcpLogRaw
       .split(/\r?\n/)
       .filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>);
-    const mcpStartup = mcpLines.find((l) => l["kind"] === "startup") as {
+    const mcpStartups = mcpLines.filter((l) => l["kind"] === "startup") as Array<{
       observedInMemoryOnly?: boolean;
       rawValuesWrittenToDisk?: boolean;
       patSha256Prefix: string;
@@ -734,9 +788,20 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       envValueDigests?: Record<string, string>;
       nonPatEnvCount?: number;
       nonPatEnvScannedBytes?: number;
-    };
-    assert.equal(mcpStartup.observedInMemoryOnly, true);
-    assert.equal(mcpStartup.rawValuesWrittenToDisk, false);
+      substringScanPerformed?: boolean;
+      allEnvScannedBytes?: number;
+      forbiddenHitsBySlot?: Record<string, number> | null;
+      totalForbiddenHits?: number | null;
+    }>;
+    assert.ok(mcpStartups.length >= 1, "W2-S6: Fake MCP server must record startup observation");
+    for (const st of mcpStartups) {
+      assert.equal(st.observedInMemoryOnly, true);
+      assert.equal(st.rawValuesWrittenToDisk, false);
+      assert.equal(st.substringScanPerformed, true, "W2-S6: MCP child MUST perform in-memory substring scan against salted commitments");
+      assert.ok((st.allEnvScannedBytes ?? 0) > 0, "W2-S6: MCP child allEnvScannedBytes must be > 0");
+      assert.ok(st.forbiddenHitsBySlot && typeof st.forbiddenHitsBySlot === "object");
+    }
+    const mcpStartup = mcpStartups[0]!;
     assert.equal(mcpStartup.patSha256Prefix, githubPatPrefix);
     assert.ok((mcpStartup.nonPatEnvCount ?? 0) >= 1 && (mcpStartup.nonPatEnvScannedBytes ?? 0) > 0);
     assert.ok(mcpStartup.envValueDigests && typeof mcpStartup.envValueDigests === "object");
@@ -756,13 +821,37 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       assert.notEqual(digest, consoleTokenPrefix);
     }
 
-    // Sampling point 4: Fold in-memory scan results + scan all sanitized metadata files!
+    // Sampling point 4: Fold real in-memory scan results (ZERO hardcoded hit counts!) + scan all sanitized metadata files!
+    const pushInMemoryHits = (locationName: string, hitsBySlot: Record<string, number> | null | undefined): number => {
+      if (!hitsBySlot) return 0;
+      let total = 0;
+      for (const [slotId, count] of Object.entries(hitsBySlot)) {
+        if (count > 0) {
+          for (let i = 0; i < count; i++) {
+            forbiddenHits.push({ location: locationName, slotId });
+          }
+          total += count;
+        }
+      }
+      return total;
+    };
+    const imapHitsCount = pushInMemoryHits("in_memory:imap_child_raw_env", imapRawObs.forbiddenHitsBySlot);
+    const dockerCtrHitsCount = pushInMemoryHits("in_memory:docker_container_raw_env", dockerRawObs.containerEnvForbiddenHitsBySlot);
+    const dockerCliHitsCount = pushInMemoryHits("in_memory:docker_cli_passed_env", dockerRawObs.cliEnvForbiddenHitsBySlot);
+    const volExpHitsCount = pushInMemoryHits("in_memory:volume_export_bytes", volExpMeta.forbiddenHitsBySlot);
+    let mcpEnvHitsCount = 0;
+    for (const st of mcpStartups) {
+      mcpEnvHitsCount += pushInMemoryHits("in_memory:mcp_child_all_env_substring", st.forbiddenHitsBySlot);
+    }
+    const mcpAllEnvBytes = Math.max(...mcpStartups.map((st) => st.allEnvScannedBytes ?? 0));
+
     const inMemoryArtifacts: Array<{ name: string; bytes: number; hits: number }> = [
-      { name: "imap_child_raw_env", bytes: imapRawObs.scannedBytes, hits: imapRawObs.totalForbiddenHits },
-      { name: "docker_container_raw_env", bytes: dockerRawObs.rawEnvScannedBytes, hits: Object.values(dockerRawObs.containerEnvForbiddenHitsBySlot).reduce((a, b) => a + b, 0) },
-      { name: "docker_cli_passed_env", bytes: dockerRawObs.cliEnvScannedBytes, hits: Object.values(dockerRawObs.cliEnvForbiddenHitsBySlot).reduce((a, b) => a + b, 0) },
-      { name: "volume_export_bytes", bytes: volExpMeta.exportedTotalBytes, hits: volExpMeta.totalForbiddenHits },
-      { name: "mcp_child_non_pat_env", bytes: mcpStartup.nonPatEnvScannedBytes ?? 0, hits: 0 },
+      { name: "imap_child_raw_env", bytes: imapRawObs.scannedBytes, hits: imapHitsCount },
+      { name: "docker_container_raw_env", bytes: dockerRawObs.rawEnvScannedBytes, hits: dockerCtrHitsCount },
+      { name: "docker_cli_passed_env", bytes: dockerRawObs.cliEnvScannedBytes, hits: dockerCliHitsCount },
+      { name: "volume_export_bytes", bytes: volExpMeta.exportedTotalBytes, hits: volExpHitsCount },
+      { name: "mcp_child_non_pat_env", bytes: mcpStartup.nonPatEnvScannedBytes ?? 0, hits: mcpEnvHitsCount },
+      { name: "mcp_child_all_env_substring", bytes: mcpAllEnvBytes, hits: mcpEnvHitsCount },
     ];
     for (const a of inMemoryArtifacts) {
       for (const m of allMarkers) {
@@ -783,6 +872,7 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       { name: "docker_cli_whitelist_control_probe", content: dockerCliEnvJson },
       { name: "volume_export_in_memory_sanitized_summary", content: volExpObsRawText },
       { name: "mcp_child_env_digests", content: JSON.stringify(mcpStartup.envValueDigests), excludeSlots: ["slot:github-mcp-pat"] },
+      { name: "mcp_commitments_salted", content: mcpCommitmentsRawText },
     ]);
     samplingMatrix[samplingMatrix.length - 1]!.scannedArtifacts.push(...inMemoryArtifacts);
     samplingMatrix[samplingMatrix.length - 1]!.totalHits += inMemoryArtifacts.reduce((a, b) => a + b.hits, 0);
@@ -837,7 +927,9 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       "docker_cli_whitelist_control_probe",
       "volume_export_bytes",
       "mcp_child_non_pat_env",
+      "mcp_child_all_env_substring",
       "mcp_child_env_digests",
+      "mcp_commitments_salted",
       "host_env_scrub_audit",
       "workspace_output_file",
     ];
@@ -856,6 +948,9 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
     }
     if (dockerRawObs.rawEnvEntriesCount === 0) {
       uncollectedSamples.push("docker_container_raw_env_entries");
+    }
+    if (!mcpStartups.every((st) => st.substringScanPerformed === true)) {
+      uncollectedSamples.push("mcp_child_substring_scan");
     }
     assert.deepEqual(uncollectedSamples, [], `W2-S6: Missing required live S6 samples: ${JSON.stringify(uncollectedSamples)}`);
 
@@ -913,6 +1008,11 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       scannerPositiveControl: {
         plantedMarkers: 2,
         detectedHits: canaryHits.length,
+        inMemorySubstringPlantedMarkers: 2,
+        inMemorySubstringDetectedHits: inMemoryCanaryRes.totalForbiddenHits,
+        mcpChildSubstringPlantedMarkers: 2,
+        mcpChildSubstringDetectedHits: posMcpStartup.totalForbiddenHits,
+        mcpChildSubstringHitsBySlot: posMcpStartup.forbiddenHitsBySlot,
       },
       samplingPointMatrix: samplingMatrix,
       uncollectedSamples,
@@ -947,6 +1047,9 @@ export async function runS6(opts?: { dataDir?: string; evidenceDir?: string }) {
       imapChildPasswordPresentInEnv: imapDetails.passwordPresentInEnv,
       mcpChildEnvKeys: mcpStartup.envKeysReceived,
       mcpChildNonPatEntriesCount: mcpStartup.nonPatEnvCount ?? 0,
+      mcpChildSubstringScanPerformed: mcpStartups.every((st) => st.substringScanPerformed === true),
+      mcpChildAllEnvScannedBytes: mcpAllEnvBytes,
+      mcpChildForbiddenHitsBySlot: mcpStartup.forbiddenHitsBySlot ?? {},
       observerInMemoryOnly: true,
       rawValuesOrVolumeBytesWrittenToDisk: false,
       capturedUrlsCount: capturedHttpUrls.length,

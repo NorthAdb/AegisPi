@@ -1609,6 +1609,42 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         });
         assert.equal(missingRes.ok, false, "W2-S3: Missing persisted frozen snapshot MUST fail closed");
         assert.equal(!missingRes.ok ? missingRes.code : null, "frozen_snapshot_missing");
+
+        // W2-S3 Round 7 regression (Case A): Missing snapshot/pending branch MUST NOT downgrade existing INSTALLED receipt or zero install_count!
+        const installedSrRow = postSrDb
+          .prepare("SELECT * FROM managed_file_imports WHERE target_rel_path = 'reports/same-round-a.md' AND state = 'INSTALLED'")
+          .get() as {
+            import_id: string;
+            logical_key: string;
+            target_rel_path: string;
+            base_sha256: string | null;
+            artifact_sha256: string;
+            install_count: number;
+          } | undefined;
+        assert.ok(installedSrRow, "W2-S3: Expected INSTALLED row for reports/same-round-a.md");
+        assert.equal(installedSrRow.install_count, 1);
+        const preserveInstalledRes = srImporter.recordPendingReconcileImport(postSrDb, {
+          runtimeEpoch: snapRow.runtime_epoch,
+          conversationId: "1",
+          principalId: "owner",
+          scopeId: "scope:default",
+          logicalKey: installedSrRow.logical_key,
+          targetRelPath: installedSrRow.target_rel_path,
+          baseSha256: installedSrRow.base_sha256,
+          reason: "frozen_snapshot_missing: re-entry regression check",
+        });
+        assert.equal(preserveInstalledRes.importId, installedSrRow.import_id);
+        assert.equal(preserveInstalledRes.state, "INSTALLED");
+        assert.equal(preserveInstalledRes.installCount, 1);
+        assert.equal(preserveInstalledRes.preservedExisting, true);
+        const rowAfterMissingSnap = srImporter.getExistingImportRecord(postSrDb, installedSrRow.logical_key);
+        assert.equal(rowAfterMissingSnap?.state, "INSTALLED");
+        assert.equal(rowAfterMissingSnap?.install_count, 1);
+        assert.equal(rowAfterMissingSnap?.import_id, installedSrRow.import_id);
+        assert.equal(
+          sha256FileIfExists(path.join(srWorkspace, installedSrRow.target_rel_path)),
+          installedSrRow.artifact_sha256,
+        );
       } finally {
         postSrDb.close();
       }
@@ -1871,6 +1907,98 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
       } finally {
         await hostWrk3.stop();
       }
+
+      // W2-S3 Round 7 regressions:
+      // (1) Missing-root / pending branch preserves already INSTALLED receipt & install_count = 1
+      // (2) Re-entry on an existing PENDING_RECONCILE logical_key stays blocked & never falls through to install!
+      {
+        const { db: wrkChkDb2 } = openGovernanceDb(path.join(wrkDataDir, "aegis-gov.sqlite"));
+        try {
+          const wrkImporter = new ManagedWorkspaceImporter(wrkWorkspace);
+          const wrkInstalledRow = wrkChkDb2
+            .prepare("SELECT * FROM managed_file_imports WHERE target_rel_path = 'reports/wrk-a.md' AND state = 'INSTALLED'")
+            .get() as {
+              import_id: string;
+              logical_key: string;
+              runtime_epoch: string;
+              conversation_id: string;
+              principal_id: string;
+              scope_id: string;
+              target_rel_path: string;
+              base_sha256: string | null;
+              artifact_sha256: string;
+              install_count: number;
+            } | undefined;
+          assert.ok(wrkInstalledRow, "W2-S3: Expected INSTALLED row for reports/wrk-a.md");
+          assert.equal(wrkInstalledRow.install_count, 1);
+          const preserveWrkInstalled = wrkImporter.recordPendingReconcileImport(wrkChkDb2, {
+            runtimeEpoch: wrkInstalledRow.runtime_epoch,
+            conversationId: wrkInstalledRow.conversation_id,
+            principalId: wrkInstalledRow.principal_id,
+            scopeId: wrkInstalledRow.scope_id,
+            logicalKey: wrkInstalledRow.logical_key,
+            targetRelPath: wrkInstalledRow.target_rel_path,
+            baseSha256: wrkInstalledRow.base_sha256,
+            reason: "worker_execution_root_missing: re-entry regression",
+          });
+          assert.equal(preserveWrkInstalled.state, "INSTALLED");
+          assert.equal(preserveWrkInstalled.installCount, 1);
+          assert.equal(preserveWrkInstalled.importId, wrkInstalledRow.import_id);
+
+          const pendingRow = wrkChkDb2
+            .prepare("SELECT * FROM managed_file_imports WHERE target_rel_path = 'reports/wrk-missing-root.md' AND state = 'PENDING_RECONCILE'")
+            .get() as {
+              import_id: string;
+              logical_key: string;
+              runtime_epoch: string;
+              conversation_id: string;
+              principal_id: string;
+              scope_id: string;
+              target_rel_path: string;
+              base_sha256: string | null;
+              install_count: number;
+            } | undefined;
+          assert.ok(pendingRow, "W2-S3: Expected PENDING_RECONCILE row for reports/wrk-missing-root.md");
+          assert.equal(pendingRow.install_count, 0);
+
+          const reentryImp = await wrkImporter.importFileFromTaskVolume({
+            govDb: wrkChkDb2,
+            runtimeEpoch: pendingRow.runtime_epoch,
+            conversationId: pendingRow.conversation_id,
+            principalId: pendingRow.principal_id,
+            scopeId: pendingRow.scope_id,
+            logicalKey: pendingRow.logical_key,
+            volumeName: "unused-reentry-vol",
+            approvedImageId,
+            targetRelPath: "reports/wrk-missing-root.md",
+            baseSha256: missingTargetOrigSha,
+            now: Date.now(),
+          });
+          assert.equal(reentryImp.ok, false);
+          assert.equal(reentryImp.code, "pending_reconcile");
+          assert.equal(reentryImp.state, "PENDING_RECONCILE");
+          assert.equal(reentryImp.importId, pendingRow.import_id);
+          assert.equal(reentryImp.installCount, 0);
+
+          const reentryPend = wrkImporter.recordPendingReconcileImport(wrkChkDb2, {
+            runtimeEpoch: pendingRow.runtime_epoch,
+            conversationId: pendingRow.conversation_id,
+            principalId: pendingRow.principal_id,
+            scopeId: pendingRow.scope_id,
+            logicalKey: pendingRow.logical_key,
+            targetRelPath: pendingRow.target_rel_path,
+            baseSha256: pendingRow.base_sha256,
+            reason: "secondary_pending_reason",
+          });
+          assert.equal(reentryPend.importId, pendingRow.import_id);
+          assert.equal(reentryPend.state, "PENDING_RECONCILE");
+          assert.equal(reentryPend.installCount, 0);
+          assert.equal(reentryPend.preservedExisting, true);
+          assert.equal(sha256FileIfExists(missingTargetPath), missingTargetOrigSha, "Disk target MUST remain untouched across PENDING_RECONCILE re-entry");
+        } finally {
+          wrkChkDb2.close();
+        }
+      }
     } finally {
       await fakeSmtp.stop().catch(() => {});
       await fakeModel.stop().catch(() => {});
@@ -1956,6 +2084,8 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         missingFrozenSnapshotFailClosedVerified: true,
         sameWorkerCrashRecoveryConflictPreserved: true,
         sameWorkerMissingRootPendingReconcileVerified: true,
+        missingSnapshotPreservesInstalledReceipt: true,
+        pendingReconcileReentryBlocked: true,
       },
     };
     const evidencePath = path.join(evidenceDir, "v03-evidence.json");

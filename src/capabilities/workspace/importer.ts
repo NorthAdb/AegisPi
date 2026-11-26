@@ -719,7 +719,7 @@ export class ManagedWorkspaceImporter {
     return await this.#withTargetLock(normalizedRelPath, async () => {
       const beforeSha = sha256FileIfExists(absolutePath);
 
-      // 0. Check idempotent retry / crash-after-install recovery FIRST for existing logicalKey!
+      // 0. Check idempotent retry / crash-after-install / terminal or pending state FIRST for existing logicalKey!
       const existing = params.govDb
         .prepare("SELECT * FROM managed_file_imports WHERE logical_key = ?")
         .get(params.logicalKey) as ManagedFileImportRow | undefined;
@@ -737,6 +737,54 @@ export class ManagedWorkspaceImporter {
             currentTargetSha256Before: beforeSha,
             currentTargetSha256After: beforeSha,
             artifactSha256: existing.artifact_sha256,
+            conflictRelPath: existing.conflict_rel_path,
+            installCount: existing.install_count,
+          };
+        }
+        if (existing.state === "CONFLICT_SAVED") {
+          return {
+            ok: false,
+            code: "version_conflict",
+            message: existing.reason ?? `Conflict already preserved for logical import ${params.logicalKey}`,
+            importId: existing.import_id,
+            state: "CONFLICT_SAVED",
+            targetRelPath: existing.target_rel_path,
+            baseSha256: existing.base_sha256,
+            currentTargetSha256Before: beforeSha,
+            currentTargetSha256After: beforeSha,
+            artifactSha256: existing.artifact_sha256 || null,
+            conflictRelPath: existing.conflict_rel_path,
+            installCount: existing.install_count,
+          };
+        }
+        if (existing.state === "PENDING_RECONCILE") {
+          return {
+            ok: false,
+            code: "pending_reconcile",
+            message: existing.reason ?? `Logical import ${params.logicalKey} is pending reconciliation`,
+            importId: existing.import_id,
+            state: "PENDING_RECONCILE",
+            targetRelPath: existing.target_rel_path,
+            baseSha256: existing.base_sha256,
+            currentTargetSha256Before: beforeSha,
+            currentTargetSha256After: beforeSha,
+            artifactSha256: existing.artifact_sha256 || null,
+            conflictRelPath: existing.conflict_rel_path,
+            installCount: existing.install_count,
+          };
+        }
+        if (existing.state === "REJECTED") {
+          return {
+            ok: false,
+            code: "rejected",
+            message: existing.reason ?? `Logical import ${params.logicalKey} was previously rejected`,
+            importId: existing.import_id,
+            state: "REJECTED",
+            targetRelPath: existing.target_rel_path,
+            baseSha256: existing.base_sha256,
+            currentTargetSha256Before: beforeSha,
+            currentTargetSha256After: beforeSha,
+            artifactSha256: existing.artifact_sha256 || null,
             conflictRelPath: existing.conflict_rel_path,
             installCount: existing.install_count,
           };
@@ -1416,6 +1464,12 @@ export class ManagedWorkspaceImporter {
     });
   }
 
+  getExistingImportRecord(govDb: DatabaseSync, logicalKey: string): ManagedFileImportRow | undefined {
+    return govDb
+      .prepare("SELECT * FROM managed_file_imports WHERE logical_key = ?")
+      .get(logicalKey) as ManagedFileImportRow | undefined;
+  }
+
   recordPendingReconcileImport(
     govDb: DatabaseSync,
     params: {
@@ -1429,27 +1483,68 @@ export class ManagedWorkspaceImporter {
       reason: string;
       now?: number;
     },
-  ): { importId: string } {
+  ): {
+    importId: string;
+    state: ManagedFileImportRow["state"];
+    installCount: number;
+    preservedExisting: boolean;
+    targetRelPath: string;
+    artifactSha256: string | null;
+    conflictRelPath: string | null;
+    reason: string | null;
+  } {
     const now = params.now ?? Date.now();
-    const importId = mintId("imp");
+    const freshImportId = mintId("imp");
     const check = validateAndResolveWorkspacePath(this.#workspaceRoot, params.targetRelPath);
     const normalizedRelPath = check.ok ? check.normalizedRelPath : params.targetRelPath;
-    withImmediateTx(govDb, () => {
+    return withImmediateTx(govDb, () => {
+      const existing = govDb
+        .prepare("SELECT * FROM managed_file_imports WHERE logical_key = ?")
+        .get(params.logicalKey) as ManagedFileImportRow | undefined;
+      if (existing) {
+        if (existing.state === "PREPARED") {
+          govDb
+            .prepare(
+              `UPDATE managed_file_imports
+                  SET state = 'PENDING_RECONCILE',
+                      reason = ?,
+                      updated_at = ?
+                WHERE import_id = ? AND state = 'PREPARED'`,
+            )
+            .run(params.reason, now, existing.import_id);
+          return {
+            importId: existing.import_id,
+            state: "PENDING_RECONCILE" as const,
+            installCount: existing.install_count,
+            preservedExisting: true,
+            targetRelPath: existing.target_rel_path,
+            artifactSha256: existing.artifact_sha256 || null,
+            conflictRelPath: existing.conflict_rel_path,
+            reason: params.reason,
+          };
+        }
+        return {
+          importId: existing.import_id,
+          state: existing.state,
+          installCount: existing.install_count,
+          preservedExisting: true,
+          targetRelPath: existing.target_rel_path,
+          artifactSha256: existing.artifact_sha256 || null,
+          conflictRelPath: existing.conflict_rel_path,
+          reason: existing.reason,
+        };
+      }
+
       govDb
         .prepare(
           `INSERT INTO managed_file_imports(
              import_id, logical_key, runtime_epoch, conversation_id, principal_id, scope_id,
              target_rel_path, base_sha256, artifact_sha256, artifact_bytes, volume_name, container_id,
              state, conflict_rel_path, install_count, reason, parent_source_ids_json, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, '', NULL, 'PENDING_RECONCILE', NULL, 0, ?, '[]', ?, ?)
-           ON CONFLICT(logical_key) DO UPDATE SET
-             state = 'PENDING_RECONCILE',
-             install_count = 0,
-             reason = excluded.reason,
-             updated_at = excluded.updated_at`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, '', NULL, 'PENDING_RECONCILE', NULL, 0, ?, '[]', ?, ?)`,
         )
         .run(
-          importId,
+          freshImportId,
           params.logicalKey,
           params.runtimeEpoch,
           params.conversationId,
@@ -1463,7 +1558,7 @@ export class ManagedWorkspaceImporter {
         );
       writeAuditEvent(govDb, {
         entityType: "file_import",
-        entityId: importId,
+        entityId: freshImportId,
         eventKey: `pending_reconcile:${params.logicalKey}:${now}`,
         eventType: "file_import_pending_reconcile",
         occurredAt: now,
@@ -1473,8 +1568,17 @@ export class ManagedWorkspaceImporter {
           reason: params.reason,
         },
       });
+      return {
+        importId: freshImportId,
+        state: "PENDING_RECONCILE" as const,
+        installCount: 0,
+        preservedExisting: false,
+        targetRelPath: normalizedRelPath,
+        artifactSha256: null,
+        conflictRelPath: null,
+        reason: params.reason,
+      };
     });
-    return { importId };
   }
 
   #recordRejectedImport(

@@ -15,6 +15,10 @@ import {
   HostCredentialVault,
 } from "./governance/credentials.ts";
 import { writeAuditEvent } from "./governance/db.ts";
+import {
+  createSaltedMarkerCommitments,
+  scanBufferInMemory,
+} from "./governance/leak-scanner.ts";
 import { checkSourceReadAuthorized } from "./governance/policy.ts";
 import { AegisHostRuntime } from "./runtime/harness.ts";
 import { GitHubMcpBridge } from "./runtime/mcp-bridge.ts";
@@ -216,26 +220,8 @@ const collectInMemorySlotMarkers = (): Array<{ slotId: string; marker: string }>
 const scanBufferStrictlyInMemory = (
   buf: Buffer,
   excludeSlots: string[] = [],
-): { scannedBytes: number; forbiddenHitsBySlot: Record<string, number>; totalForbiddenHits: number } => {
-  const excluded = new Set(excludeSlots);
-  const hitsBySlot: Record<string, number> = {};
-  let total = 0;
-  for (const { slotId, marker } of collectInMemorySlotMarkers()) {
-    if (excluded.has(slotId) || !marker) continue;
-    const needle = Buffer.from(marker, "utf8");
-    let count = 0;
-    let idx = 0;
-    while (idx <= buf.length - needle.length) {
-      const found = buf.indexOf(needle, idx);
-      if (found === -1) break;
-      count++;
-      idx = found + Math.max(1, needle.length);
-    }
-    hitsBySlot[slotId] = (hitsBySlot[slotId] ?? 0) + count;
-    total += count;
-  }
-  return { scannedBytes: buf.length, forbiddenHitsBySlot: hitsBySlot, totalForbiddenHits: total };
-};
+): { scannedBytes: number; forbiddenHitsBySlot: Record<string, number>; totalForbiddenHits: number } =>
+  scanBufferInMemory(buf, collectInMemorySlotMarkers(), { excludeSlots });
 
 // W2-G1 / W2-S1: Register trusted connector slots strictly bound to verified target descriptors in host memory!
 let configuredImapEndpoint: ImapEndpointConfig | null = null;
@@ -327,6 +313,13 @@ if (connectorsCfg?.githubMcp) {
       },
     });
   }
+}
+
+// W2-S6: Publish cryptographic salted SHA-256 commitments (ZERO raw secrets) before MCP subprocess launch
+// so fake/test MCP child can substring-scan its live `process.env` in RAM across all 5 slots!
+if (s6ObserveDir) {
+  const commitments = createSaltedMarkerCommitments(collectInMemorySlotMarkers());
+  writeFileSync(path.join(s6ObserveDir, "mcp-commitments.json"), JSON.stringify(commitments, null, 2), "utf8");
 }
 
 // W2-S6: Immediately scrub startup secret environment variables from host process.env
@@ -473,8 +466,89 @@ const host = await AegisHostRuntime.start({
           if (!preAuth.ok) {
             return { ok: false, code: "workspace_write_denied", message: preAuth.reason };
           }
+          // W2-S3: ALWAYS preserve existing terminal / reconciled / pending receipts BEFORE checking
+          // execution root or frozen snapshot state, so retries NEVER downgrade INSTALLED -> PENDING_RECONCILE!
+          const existingImport = importer.getExistingImportRecord(currentHost.govDb, wp.logicalKey);
+          if (existingImport) {
+            if (existingImport.state === "INSTALLED") {
+              return {
+                ok: true,
+                code: "idempotent_already_installed",
+                message: `Logical import ${wp.logicalKey} already installed`,
+                importId: existingImport.import_id,
+                state: "INSTALLED",
+                targetRelPath: existingImport.target_rel_path,
+                artifactSha256: existingImport.artifact_sha256 || undefined,
+                installCount: existingImport.install_count,
+              };
+            }
+            if (existingImport.state === "CONFLICT_SAVED") {
+              return {
+                ok: false,
+                code: "version_conflict",
+                message: existingImport.reason ?? "Conflict already preserved",
+                importId: existingImport.import_id,
+                state: "CONFLICT_SAVED",
+                targetRelPath: existingImport.target_rel_path,
+                conflictPath: existingImport.conflict_rel_path,
+                installCount: existingImport.install_count,
+              };
+            }
+            if (existingImport.state === "PENDING_RECONCILE") {
+              return {
+                ok: false,
+                code: "pending_reconcile",
+                message: existingImport.reason ?? "Import already pending reconciliation",
+                importId: existingImport.import_id,
+                state: "PENDING_RECONCILE",
+                targetRelPath: existingImport.target_rel_path,
+                installCount: existingImport.install_count,
+              };
+            }
+            if (existingImport.state === "REJECTED") {
+              return {
+                ok: false,
+                code: "rejected",
+                message: existingImport.reason ?? "Import previously rejected",
+                importId: existingImport.import_id,
+                state: "REJECTED",
+                targetRelPath: existingImport.target_rel_path,
+                installCount: existingImport.install_count,
+              };
+            }
+          }
+
           // W2-S3: Durable run-level frozen input snapshot & baseline persisted in governance SQLite,
           // failing closed into PENDING_RECONCILE if worker execution lineage or persisted snapshot cannot be verified.
+          const pendOutcome = (
+            pend: ReturnType<ManagedWorkspaceImporter["recordPendingReconcileImport"]>,
+            defaultCode: string,
+            defaultMessage: string,
+          ) => {
+            if (pend.state === "INSTALLED") {
+              return {
+                ok: true,
+                code: "idempotent_already_installed",
+                state: "INSTALLED",
+                importId: pend.importId,
+                targetRelPath: pend.targetRelPath,
+                artifactSha256: pend.artifactSha256 ?? undefined,
+                installCount: pend.installCount,
+                message: `Logical import ${wp.logicalKey} already installed`,
+              };
+            }
+            return {
+              ok: false,
+              code: pend.state === "CONFLICT_SAVED" ? "version_conflict" : defaultCode,
+              state: pend.state,
+              importId: pend.importId,
+              targetRelPath: pend.targetRelPath,
+              conflictPath: pend.conflictRelPath,
+              installCount: pend.installCount,
+              message: pend.reason ?? defaultMessage,
+            };
+          };
+
           if (wp.executionRootTaskId.startsWith("__MISSING_WORKER_EXECUTION_ROOT__:")) {
             const reason = `worker_execution_root_missing: cannot confirm execution root for worker conversation ${wp.conversationId}`;
             const pend = importer.recordPendingReconcileImport(currentHost.govDb, {
@@ -487,14 +561,7 @@ const host = await AegisHostRuntime.start({
               baseSha256: cap.baseSha256,
               reason,
             });
-            return {
-              ok: false,
-              code: "worker_execution_root_missing",
-              state: "PENDING_RECONCILE",
-              importId: pend.importId,
-              targetRelPath: cap.normalizedRelPath,
-              message: reason,
-            };
+            return pendOutcome(pend, "worker_execution_root_missing", reason);
           }
           const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
           const taskSnapKey = `${wp.runtimeEpoch}:${wp.executionRootTaskId}`;
@@ -519,14 +586,7 @@ const host = await AegisHostRuntime.start({
               baseSha256: cap.baseSha256,
               reason: frozenRes.code,
             });
-            return {
-              ok: false,
-              code: frozenRes.code,
-              state: "PENDING_RECONCILE",
-              importId: pend.importId,
-              targetRelPath: cap.normalizedRelPath,
-              message: frozenRes.reason,
-            };
+            return pendOutcome(pend, frozenRes.code, frozenRes.reason);
           }
           const frozenSnap = frozenRes.snapshot;
           if (frozenSnap.fromDurableDb && !frozenSnap.hasBaseline(cap.normalizedRelPath) && cap.baseSha256 !== null) {
@@ -541,14 +601,7 @@ const host = await AegisHostRuntime.start({
               baseSha256: cap.baseSha256,
               reason: "frozen_snapshot_baseline_missing",
             });
-            return {
-              ok: false,
-              code: "frozen_snapshot_baseline_missing",
-              state: "PENDING_RECONCILE",
-              importId: pend.importId,
-              targetRelPath: cap.normalizedRelPath,
-              message: reason,
-            };
+            return pendOutcome(pend, "frozen_snapshot_baseline_missing", reason);
           }
           const hostBaseSha256 = frozenSnap.getBaseline(cap.normalizedRelPath);
           let latestMountedRelPaths: string[] = [];
