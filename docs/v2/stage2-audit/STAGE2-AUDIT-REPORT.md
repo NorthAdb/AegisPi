@@ -244,31 +244,69 @@ $base = Join-Path $env:TEMP "aegispi-s2-single-$(Get-Date -Format 'yyyyMMdd-HHmm
 
 ---
 
-## 10. 第 1 轮独立审计结论栏（待 GPT / Codex 填写）
+## 10. 第 1 轮独立审计结论（Codex · 2026-11-26）
 
-> **审计人说明**：请在此节直接追加第 1 轮独立审计结论（按五类 P0 判定，P1/P2 留备忘），并附上独立复跑命令、退出码、发现编号（如 `S2-P0-1`、`S2-P1-1`）与原始证据位置。
+**安全审计退回整改。阶段二完整签收待完成。** 冻结候选 `5bb326c09878ea8d0bf1ee47bac94f7b4dd5f355` 的本地替身套件与桌面、窄屏浏览器用例独立复跑通过。下文的 P0 来自源码与锁定 SDK 核查，涉及现有夹具未覆盖的生产配置或新入口。真实 DeepSeek 流式与计费、Gmail 只读与单封发信、GitHub MCP 只读与测试仓单次写均待授权实测。实体手机 HTTPS 是可选独立项。
 
 ### 10.1 独立复跑核对表（第 1 轮）
 
-| 核对项 | 审计人复跑结果 | 备注 / `runId` / 退出码 |
+| 核对项 | 结果 | 独立证据 |
 | --- | --- | --- |
-| 冻结候选 `5bb326c` 与锁文件 / 冻结底座零改动核对 | （待填写） | |
-| 独立前端 `web/` 构建与类型检查 | （待填写） | |
-| 阶段二全套 `tests/stage2/run-all.ts`（五类 P0 + 桌面/窄屏浏览器） | （待填写） | |
-| 阶段一同候选回归 `tests/week1/run-all.ts` 与 `tests/week2/run-all.ts` | （待填写） | |
-| **第 1 轮安全审计裁定（仅按五类 P0）** | （待填写：通过 / 退回整改） | |
+| 候选、冻结文件与锁文件 | PASS | 分支起点 `5748c6c`，候选 `5bb326c`，提审文档 HEAD `8f2d69f`。候选之后只有文档和证据。§1.3 所列冻结路径的代码差异为空。根与前端锁文件逐字节匹配候选 Git 对象，SHA-256 与 §2.1 一致。`git diff --check 5748c6c...5bb326c` 退出 0。 |
+| 依赖安装、前端构建、前后端类型检查与分层守卫 | PASS | 锁定 npm 的两次离线安装及 Vite build 均退出 0。前后端 `tsc --noEmit` 均退出 0。现有分层守卫零违规，v2.3 的 Web 调用边界见 S2-P1-5。 |
+| 阶段二替身与桌面、窄屏浏览器 | PASS | `stage2_80fb90d8`，退出 0。核心 `s2_p0_13d720f1`，浏览器 `s2_browser_e9cd44f3`。预算不足替身发送增量 0，批准修订的邮件独立假服务收件增量 1，C4 已覆盖的阻断路径调用增量 0。桌面实际呈现 2 次中间文本，390×844 尺寸可打开会话和轨迹抽屉，最终邮件与改稿一致。带 `--keep-data` 重跑 `stage2_cd4475d4` 同样退出 0，并保留独立服务日志。 |
+| 阶段一第 1 周与第 2 周 | PASS | 两个入口均退出 0。第 1 周 `week1_a7692d4c`，矩阵 25/25，W1-B 假 SMTP 累计 1 封，刷新见「结果待核对」。第 2 周 `week2_387da5c8`，V01–V06 与 S6 均通过。V03 `v03_fb3dc780`，S6 `s6_54ed7744`，禁止位置命中 0。 |
+| **第 1 轮安全审计裁定** | **退回整改** | 见 S2-P0-1 至 S2-P0-5。 |
 
 ### 10.2 五类 P0 源码与红线审查发现（第 1 轮）
 
-（待审计人填写）
+**S2-P0-1 · 两次 CAS 与 SMTP 最终发信范围。** 两次 CAS 和替身最终版本用例通过。正式入口未接入独立获准的 SMTP 收件范围，默认作用域仍使用通配目标。现有纯文本校验只在原始工具建单时运行，改稿可保存未经过相同校验的字段。SMTP 将主题直接序列化成头字段，未约束其单行边界，导致已批准的纯文本快照与实际邮件结构可能不一致。真实发信须在宿主绑定获准收件范围，建单、改稿和领取共用字段校验，提交器只序列化通过校验的最终快照。[正式入口](../../../src/index.ts#L498) · [默认作用域](../../../src/runtime/harness.ts#L602) · [改稿](../../../src/web/server.ts#L904) · [SMTP 序列化](../../../src/capabilities/mail/smtp-client.ts#L426)
 
-### 10.3 P1 / P2 备忘项（不阻塞安全审计通过）
+**S2-P0-2 · 真实预算预留上界。** 真实模型缺少价表时会落入合成固定预留和结算。启用 token 估算时，现有 UTF-8 字节折半和固定余量无法证明覆盖供应商实际计费，且以配置值截断输入上界。要求真实端点具备版本化的真实价表和有证据的请求计费上界，覆盖有效输入、输出及适用价格。缺项或上界无法确定时发送增量须为 0。合成固定价格只适用于替身档。[正式入口价表](../../../src/index.ts#L233) · [预留计算](../../../src/runtime/models.ts#L147) · [实际预留](../../../src/runtime/models.ts#L451)
 
-（待审计人填写）
+**S2-P0-3 · C4 与执行准入。** 重连、明确复核和撤权替身用例通过。以下路径仍须收紧。
 
-### 10.4 审计人独立复跑命令与原始证据位置
+- **3a 工具清单变更。** MCP 客户端未订阅锁定 SDK 已支持的工具清单变更通知。连接存续期间，已知变更无法触发即时暂停和重核，执行继续参考旧 Pin。收到通知时先暂停，再复用现有校验路径，校验失败继续关闭准入。[桥接连接](../../../src/runtime/mcp-bridge.ts#L209) · [复核](../../../src/runtime/mcp-bridge.ts#L307) · [MCP 工具清单通知规范](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#list-changed-notification)
+- **3b 人工 Pin 核准。** 界面未展示供审阅的完整规范化定义，核准请求只传工具身份，服务端批准的是提交时存储的定义。核准须绑定用户所见的定义和指纹，陈旧请求由同一事务拒绝。[Pin 展示与核准](../../../src/web/server.ts#L1212) · [核准事务](../../../src/governance/mcp-pin.ts#L434)
+- **3c GitHub 最终工具与作用域。** 写入许可用 `operation` 裁定，最终投递却用另一个可由草稿携带的字段。文件写入遇到空路径清单也可通过，受保护分支仅按常见名称判断。应以同一受控操作绑定许可、Pin 和实际投递，文件写须匹配明确路径，Tier 0 仅适用于已确认非保护的 ref。[写入策略](../../../src/governance/rules.ts#L99) · [提交器策略](../../../src/runtime/submitter.ts#L303) · [投递](../../../src/runtime/submitter.ts#L378)
+- **3d Skills 授权。** 正文读取仅查技能状态。L3 路径核验脚本摘要和技能状态，正式入口通过工作区配置即可启用执行。正文按主体和作用域检查现行授权，沙箱启动另核对任务书要求的脚本执行许可。[正文读取](../../../src/web/server.ts#L1303) · [L3 工具](../../../src/runtime/extensions/aegis-policy.ts#L741) · [正式入口](../../../src/index.ts#L508)
 
-（待审计人填写）
+**S2-P0-4 · 新增连接器凭据输出边界。** SMTP 成功回执为远端原始应答行，原因字段只有字面密码擦除。GitHub 写入同样把截断的工具文本当回执。提交器将这些内容直接写入效果记录，部分内容还进入模型工具输出与 Web 投影。应在接收边界把远端回执和错误归约为受控状态及验证过的标识，避免持久化或投影未校验的远端文本。现有阶段二扫描命中 0，扫描范围主要是指定的数据库、WAL 和假服务日志。复审应补最小合成凭据输出检查，覆盖本项新增的落库和投影路径。[SMTP 返回](../../../src/capabilities/mail/smtp-client.ts#L255) · [邮件提交](../../../src/runtime/submitter.ts#L198) · [MCP 回执](../../../src/runtime/submitter.ts#L392) · [扫描范围](../../../tests/stage2/run-p0-core.ts#L1224)
+
+**S2-P0-5 · 阶段一撤权保护在视图③回归。** 新的跨会话审批列表只按会话主体筛选，直接返回原审批草稿、目标和效果明细。视图①会重新核对当前来源读取权，撤权后对同一草稿脱敏。视图③应复用同等的实时来源授权和投影裁剪，撤权后两处均须隐藏受限草稿并禁用相应动作。[视图③列表](../../../src/web/server.ts#L1497) · [原授权投影](../../../src/web/server.ts#L312)
+
+### 10.3 P1 / P2 备忘与产品签收差项
+
+下列 P1 独立于五类安全裁定。涉及任务书主流程的项目仍按产品签收验收。
+
+- **S2-P1-1 · GitHub 必测契约。** 正式读写把组合仓库标识作为 `repo`，缺少官方 MCP 的 `owner` 字段。现有假服务定义未覆盖该要求。已存在的阶段一默认 scope 也不会由 `INSERT OR IGNORE` 获得新增写工具。应按实际固定版本的 schema 映射受控目标，并从阶段一数据库副本验证获准工具可用。[读取](../../../src/runtime/extensions/aegis-policy.ts#L508) · [写入](../../../src/runtime/submitter.ts#L378) · [作用域初始化](../../../src/governance/approvals.ts#L68) · [GitHub 官方工具契约](https://github.com/github/github-mcp-server#repositories)
+- **S2-P1-2 · Skills 版本生效。** 当前锁键是运行代际与会话，既有会话开启的新任务仍用旧版本。当前用例比较两个会话。补同一会话中旧任务保持锁定、后续新任务取得更新版本的证据。[版本锁](../../../src/capabilities/skills/store.ts#L257) · [自测](../../../tests/stage2/run-p0-core.ts#L977)
+- **S2-P1-3 · 例程最近结果。** 当前记录最近受理状态和会话号，缺少任务完成结果回流。应在视图②核对实际最近结果或提供可打开的结果入口。[触发结果记录](../../../src/capabilities/timers/routines.ts#L829)
+- **S2-P1-4 · 成本汇总。** 当日账户余额来自账本，当日已结算及保守计费明细却从最新 100 条跨日预留累计。按计费日聚合，展示历史明细时再限条数。[成本查询](../../../src/web/server.ts#L1780)
+- **S2-P1-5 · 分层与阶段一规范。** v2.3 §5.2 规定 Web 调用 Runtime 与治理层，新 Web 路由直接导入 Skills 和 Timers 能力层。候选 `AGENTS.md` 字面禁止阶段一任何外部出站，正式入口仍保留阶段一受配置的连接器只读路径，应和 v2.3 的阶段边界对齐。[Web 导入](../../../src/web/server.ts#L11) · [阶段一配置入口](../../../src/index.ts#L303)
+- **S2-P2-1 · Windows 复跑。** 默认 `core.autocrlf=true` 在全新 checkout 会改变锁文件行尾，原始字节哈希校验随之失败。复跑说明应要求在检出时保留锁文件的 Git 对象字节。独立复跑未变更冻结锁文件内容或验收断言。
+
+### 10.4 审计人独立复跑命令与证据位置
+
+环境为 Windows x64、Node `22.23.5`、npm `10.9.9`、SQLite `3.54.1`、Docker `29.9.2`、Edge `157.0.4341.60`。V03 使用签收镜像 `sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee`。独立工作树固定在 `5bb326c`，从 Git 对象恢复两份锁文件的原始字节。复跑仅用合成凭据与本地服务。审计进程清除项目与常用连接器凭据环境变量。第一次启动阶段一套件时根依赖尚未安装完成，两个入口均因模块缺失退出 1。§10.1 记录依赖安装完成后的复跑结果。
+
+```powershell
+$evRoot = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\stage2-r1-5bb326c-204300'
+Set-Location (Join-Path $evRoot 'candidate')
+$env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
+$node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+$npm = 'D:\AegisPi\tools\node-v22.23.5\npm.cmd'
+& $npm ci --offline --no-audit --no-fund
+& $npm --prefix web ci --offline --no-audit --no-fund
+& $node -e 'const fs=require("node:fs"); const cp=require("node:child_process"); for (const p of ["package-lock.json","web/package-lock.json"]) fs.writeFileSync(p, cp.execFileSync("git", ["show", "HEAD:"+p]));'
+& $npm --prefix web run build
+& $node tests/stage2/run-all.ts --data-dir (Join-Path $evRoot 'stage2/data') --evidence-dir (Join-Path $evRoot 'stage2/evidence')
+& $node tests/stage2/run-all.ts --keep-data --data-dir (Join-Path $evRoot 'stage2-preserved/data') --evidence-dir (Join-Path $evRoot 'stage2-preserved/evidence')
+& $node tests/week1/run-all.ts --data-dir (Join-Path $evRoot 'week1/data') --evidence-dir (Join-Path $evRoot 'week1/evidence')
+& $node tests/week2/run-all.ts --data-dir (Join-Path $evRoot 'week2/data') --evidence-dir (Join-Path $evRoot 'week2/evidence')
+```
+
+本机审计目录保留 `npm-root.log`、`npm-web.log`、`web-build.log`、`stage2.log`、`stage2-preserved.log`、`week1.log`、`week2.log`。各套件的 `evidence/` 保存对应 summary、浏览器与核心断言 JSON。保留原始计数的阶段二复跑证据在 `stage2-preserved/data/`。浏览器假 SMTP 日志 1 条、假模型 3 条、假 MCP 4 条。核心假 SMTP 日志 1 条，独立 TLS SMTP 日志 2 条，假模型 9 条，假 MCP 8 条。阶段一的默认清理保留已提取计数的 `evidence/`。源码发现依据上述代码位置，未调用真实服务。
 
 ---
 
