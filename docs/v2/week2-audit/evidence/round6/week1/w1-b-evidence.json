@@ -1,0 +1,210 @@
+{
+  "suite": "W1-B",
+  "runId": "w1b_d554586b",
+  "status": "PASS",
+  "environment": {
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "platform": "win32"
+  },
+  "identifiers": {
+    "runId": "w1b_d554586b",
+    "runtimeEpoch": "ep_b48f0300f2624848980720344118ad0d",
+    "conversationId": "8",
+    "proposalId": "prp_7c9d12198a4745009a4af7813d4cd893",
+    "approvalId": "apr_cf5e1a4a52514495989254975f16b1e6",
+    "effectId": "efx_57ad62a12d214be7aa229bd3af7f52a3",
+    "killedHostPid": 32208,
+    "restartedHost2Pid": 21560,
+    "restartedHost3Pid": 44420
+  },
+  "finalGovernanceRecord": {
+    "effect": {
+      "effect_id": "efx_57ad62a12d214be7aa229bd3af7f52a3",
+      "approval_id": "apr_cf5e1a4a52514495989254975f16b1e6",
+      "state": "UNKNOWN",
+      "claimed_at": 1795682755728,
+      "receipt_ref": null,
+      "reason": "recovered_submitting_without_receipt",
+      "reconciled_by": null,
+      "reconciled_at": null,
+      "reconcile_evidence": null
+    },
+    "claimCount": 1,
+    "approvalCount": 1
+  },
+  "finalFakeSmtp": {
+    "totalReceived": 1,
+    "logFile": "smtp-received.jsonl",
+    "records": [
+      {
+        "seq": 1,
+        "receivedAt": "2026-11-26T08:45:55.738Z",
+        "rcptTo": [
+          "<auditor-w1b@local.test>"
+        ],
+        "rawSha256": "185c851a31f5c74786e6143a08e776a3e617eb384bb4600113d0d5e3dee5155b",
+        "modeAtArrival": "hold_after_receive",
+        "replySent": null
+      }
+    ]
+  },
+  "finalView1Evidence": {
+    "conversationId": "8",
+    "proposalId": "prp_7c9d12198a4745009a4af7813d4cd893",
+    "effectId": "efx_57ad62a12d214be7aa229bd3af7f52a3",
+    "effectState": "UNKNOWN",
+    "uiStatusLabel": "结果待核对"
+  },
+  "duplicateSdkWakeup": {
+    "sdkResult": "closed",
+    "deliveryKey": "sig:ep_b48f0300f2624848980720344118ad0d:prp_7c9d12198a4745009a4af7813d4cd893:r1",
+    "duplicateCheck": null,
+    "outbox": {
+      "approval_id": "apr_cf5e1a4a52514495989254975f16b1e6",
+      "signal_key": "sig:ep_b48f0300f2624848980720344118ad0d:prp_7c9d12198a4745009a4af7813d4cd893:r1",
+      "state": "ACKED",
+      "sdk_result": "delivered",
+      "reason": "sdk_delivered",
+      "attempts": 1,
+      "updated_at": 1795682755718
+    },
+    "effect": {
+      "effect_id": "efx_57ad62a12d214be7aa229bd3af7f52a3",
+      "approval_id": "apr_cf5e1a4a52514495989254975f16b1e6",
+      "state": "UNKNOWN",
+      "claimed_at": 1795682755728,
+      "receipt_ref": null,
+      "reason": "recovered_submitting_without_receipt",
+      "reconciled_by": null,
+      "reconciled_at": null,
+      "reconcile_evidence": null
+    }
+  },
+  "secretScan": {
+    "clean": true,
+    "leaks": []
+  },
+  "timeline": [
+    {
+      "step": 1,
+      "at": "2026-11-26T08:45:55.481Z",
+      "event": "host1_started",
+      "details": {
+        "pid": 32208,
+        "baseUrl": "http://127.0.0.1:52626",
+        "runtimeEpoch": "ep_b48f0300f2624848980720344118ad0d"
+      }
+    },
+    {
+      "step": 2,
+      "at": "2026-11-26T08:45:55.703Z",
+      "event": "proposal_pending_in_view1",
+      "details": {
+        "proposalId": "prp_7c9d12198a4745009a4af7813d4cd893",
+        "approvalId": "apr_cf5e1a4a52514495989254975f16b1e6",
+        "revision": 1,
+        "actionHash": "3612fb55479b6fd30a2efff191e549e7c14943e6924d044f04dfe06f0de1e290",
+        "nonceExposedInSnapshot": false,
+        "challengeFetchedViaDedicatedRoute": true,
+        "uiStatusLabel": "待审批"
+      }
+    },
+    {
+      "step": 3,
+      "at": "2026-11-26T08:45:55.715Z",
+      "event": "approval_decided",
+      "details": {
+        "approvalId": "apr_cf5e1a4a52514495989254975f16b1e6",
+        "effectId": "efx_57ad62a12d214be7aa229bd3af7f52a3",
+        "decisionKey": "dk_w1b_d554586b_approve",
+        "initialEffectState": "READY"
+      }
+    },
+    {
+      "step": 4,
+      "at": "2026-11-26T08:45:55.745Z",
+      "event": "fake_smtp_received_and_held",
+      "details": {
+        "totalReceived": 1,
+        "rawSha256": "185c851a31f5c74786e6143a08e776a3e617eb384bb4600113d0d5e3dee5155b",
+        "replySent": null
+      }
+    },
+    {
+      "step": 5,
+      "at": "2026-11-26T08:45:55.765Z",
+      "event": "gov_db_verified_submitting_before_kill",
+      "details": {
+        "effect": {
+          "effect_id": "efx_57ad62a12d214be7aa229bd3af7f52a3",
+          "approval_id": "apr_cf5e1a4a52514495989254975f16b1e6",
+          "state": "SUBMITTING",
+          "claimed_at": 1795682755728,
+          "receipt_ref": null,
+          "reason": null,
+          "reconciled_by": null,
+          "reconciled_at": null,
+          "reconcile_evidence": null
+        },
+        "claimCount": 1,
+        "approvalCount": 1
+      }
+    },
+    {
+      "step": 6,
+      "at": "2026-11-26T08:45:56.421Z",
+      "event": "host1_force_killed",
+      "details": {
+        "killedPid": 32208,
+        "killCommand": "Stop-Process -Id 32208 -Force",
+        "exitCode": 4294967295,
+        "signalCode": null
+      }
+    },
+    {
+      "step": 7,
+      "at": "2026-11-26T08:45:57.785Z",
+      "event": "host2_restarted_and_recovered",
+      "details": {
+        "pid": 21560,
+        "runtimeEpoch": "ep_b48f0300f2624848980720344118ad0d",
+        "recoveredSubmittingToUnknown": [
+          "efx_57ad62a12d214be7aa229bd3af7f52a3"
+        ]
+      }
+    },
+    {
+      "step": 8,
+      "at": "2026-11-26T08:45:58.521Z",
+      "event": "host2_refreshed_and_verified",
+      "details": {
+        "smtpTotalReceived": 1,
+        "view1Label": "结果待核对",
+        "effectState": "UNKNOWN",
+        "duplicateSdkWakeup": {
+          "sdkResult": "closed",
+          "deliveryKey": "sig:ep_b48f0300f2624848980720344118ad0d:prp_7c9d12198a4745009a4af7813d4cd893:r1",
+          "duplicateCheck": null,
+          "outboxState": "ACKED",
+          "outboxSdkResult": "delivered",
+          "effectState": "UNKNOWN"
+        }
+      }
+    },
+    {
+      "step": 9,
+      "at": "2026-11-26T08:46:00.300Z",
+      "event": "host3_final_verification_passed",
+      "details": {
+        "host3Pid": 44420,
+        "finalEffectState": "UNKNOWN",
+        "claimCount": 1,
+        "approvalCount": 1,
+        "smtpTotalReceived": 1,
+        "view1Label": "结果待核对",
+        "secretLeaksCount": 0
+      }
+    }
+  ]
+}

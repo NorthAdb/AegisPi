@@ -756,4 +756,111 @@ $evRoot = Join-Path $env:TEMP 'aegis-w2r5-final-2a40af78'
 
 ### 14.3 第 5 轮审计人复审与签收栏
 
-> ⏳ 待独立审计人核对提交 `2a40af787c09cc70f4fb247c6dab7fb851cf5f73` 与 [evidence/round5/](evidence/round5/) 后填写本栏（`W2-S3`、`W2-S4`、`W2-S6`、`W2-R4-E1` 逐项复核及最终签收结论）。
+**候选 `2a40af7` 暂缓验收。** 本轮关闭 W2-R4-E1，剩余 **3 项**。独立复跑已确认 Router 的原恢复问题修复，但同一 Worker 在强杀重启后仍覆盖了用户编辑。Edge 另复现了旧登录会话的保存回执清除重新登录后的新草稿。S6 逐值覆盖已补齐，正式宿主的取证路径仍须改为在内存扫描，仅落脱敏计数。
+
+#### 14.3.1 同候选独立复跑
+
+| 核对项 | 退出码 / 结果 | 实得 |
+|---|---|---|
+| 冻结候选、依赖、证据目录 | 通过 | 分离工作树 HEAD 为 `2a40af787c09cc70f4fb247c6dab7fb851cf5f73`。后续 `ac04235` 只更新两份报告及新增第 5 轮证据，前四轮归档未变化。本轮未修改依赖清单与锁文件。Windows x64、Node 22.23.5、SQLite 3.54.1、npm 10.9.9、Docker 29.9.2、Edge 157.0.4341.60。 |
+| 类型检查与分层 | `0` / 通过 | 独立 `tsc --noEmit` 退出 0，分层守卫 `violations: []`。 |
+| 第 1 周全量 | `0` / 通过 | `week1_c932e45b`，S1–S5 5/5，矩阵 25/25。W1-A `w1a_29ec81d4` 三个足额对照各新增 1 次，六个不足负例各新增 0 次。W1-B `w1b_bf81f4a5` 独立 SMTP 累计 1 封、领取 1 次，刷新后效果仍为 `UNKNOWN`。 |
+| 两份历史治理库 | 各 `0` / 通过 | 旧 W1 治理库二次打开保留 8 条会话授权、补齐 6 条拒绝记录。第 1 轮旧 MCP 库二次打开保留服务与工具 Pin 各 1 条，补齐 `command`、`args_json`。两份副本外键异常均为 0。 |
+| 第 2 周原样全量 | `0` / 既有夹具全部通过 | `week2_8d0569c1`，V04/V05 `v04v05_5a65b7e3`、V02 替身 `v02_90261a3d`、V03 `v03_c952b8a8`、S6 `s6_3a8c902b`、正式入口 Edge `v01v06_8c0410a7` 均通过。 |
+| S6 原样专项 | `0` / 夹具通过 | `s6_a265b359`，正式进程实得 `networkMode=none`、卷只读导出 1 项 34 B、已测点禁止命中 0；观察器自身的落盘边界见下表。 |
+| V04/V05 原样专项与独立 SSE 验证 | 各 `0` / 通过 | 原样专项 `v04v05_768dc585`。附加取证 `v04v05_0366b4bd`，从游标序号 10 打开流，收到 10 帧，序号 17–20 的四个 `delta` 均投影 Worker 完成，最终快照序号 20。独立假模型请求顺序为 Router → Worker → Router。 |
+| 正式入口独立强杀恢复 | Router `0`，同一 Worker `1` | 两组均命中第一文件安装后、回执持久化前窗口，在同一代际重启。Router 保住原基准，结果 `CONFLICT_SAVED`、安装 0 次。Worker 重启后取了新基准，结果 `INSTALLED`、安装 1 次，覆盖了停机期用户编辑。 |
+| Edge 同主体重新登录 | `1` / **未通过** | 旧保存已由宿主受理，HTTP 回执延迟交给页面。注销、同主体重新登录后，录入一份新的未保存草稿。回执放行前新草稿已录入并标为未保存。放行并重绘后 `keptDirty=false`、`keptDraftOnRedraw=false`、`oldSaveRestored=true`。 |
+
+#### 14.3.2 逐项裁定与复签条件
+
+| 编号 | 裁定 | 实得与复签条件 |
+|---|---|---|
+| W2-S3（P1） | **未关闭** | Router 持久快照、顺序更新以及重启前撤权的回归已覆盖。独立强杀试验中同一 Worker 会话 20 的第二个工具恢复后新建了 Worker 本地轮次快照，原快照仍以 Router 轮次 8 为键。原基准 `e257f7df…`，错误新基准为停机编辑 `3b574377…`，最终文件变为 `c95c6333…`，安装 1 次。Worker 与发起轮次的关联仅存在内存，须在 Worker 提交前持久化并于调度恢复时使用，无法确认旧关联或基准时停止安装并在原会话显示可核对状态。缓存路径重验目前早于异步镜像检查、建卷与执行，源码仍有撤权到启动之间的间隔。使挂载内容与实际启动时的授权一致，并回归 Router、同一 Worker 和缓存路径撤权。[执行轮次解析](../../../src/runtime/harness.ts#L580-L606) · [委派绑定](../../../src/runtime/harness.ts#L883-L896) · [挂载准备](../../../src/index.ts#L411-L457) |
+| W2-S4（P2） | **部分关闭** | 同一次登录中的 A→B→A 新编辑和注销后保持退出状态由原样 Edge 用例覆盖。独立 Edge 检查确认，旧回执仍会通过同主体比较，复用注销时清零的编辑计数，清除下一次登录的新草稿。把回执绑定到认证会话，退出开始时立即作废旧会话回执。批准和拒绝的挑战回执在发起第二次请求前也应复核认证会话与原视图。补齐同主体重新登录后放行旧回执及快照重绘的断言。[保存与决定回执](../../../src/web/view1.ts#L663-L736) · [注销](../../../src/web/view1.ts#L787-L807) |
+| W2-S6（P1） | **证据覆盖已补，取证边界未关闭** | 真实 Docker inspect 的网络模式和逐值采样、IMAP/MCP 子进程环境以及安装前私有卷导出均进入检测。正式入口仍可仅凭观察目录开关，把 IMAP、Docker 的环境原值及卷字节在扫描前写入磁盘。若被测禁止值出现，取证器本身会先持久化该值。这是源码审查发现，本轮只用了合成凭据。按 AGENTS 第 4、5 条及任务书 S6，在采样端内存计算各槽位命中数、采样字节数及允许位置，仅落脱敏结果。保留正式进程实采、阳性对照、真实 inspect 和未直接观测项。[观察开关](../../../src/index.ts#L105-L109) · [连接器取证](../../../src/index.ts#L226-L238) · [沙箱及私有卷取证](../../../src/index.ts#L464-L552) |
+| W2-R4-E1 | **关闭** | 原样专项和全量的 V04/V05 子项已通过，审批结束后才替换脚本。原样夹具验证快照及物理请求顺序，审计补采 Worker 完成 SSE 的游标、帧与最终快照，补齐 V05 证据。 |
+
+#### 14.3.3 命令与证据索引
+
+在隔离工作树以新数据目录运行。独立探针保存在审计目录，候选实现保持冻结。
+
+```powershell
+$auditRoot = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\week2-round5-2a40af7'
+$auditNode = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+Set-Location (Join-Path $auditRoot 'candidate')
+git rev-parse HEAD
+& $auditNode ./node_modules/typescript/bin/tsc --noEmit
+& $auditNode tests/week1/run-all.ts --data-dir "$auditRoot/week1/data" --evidence-dir "$auditRoot/week1/evidence" --keep-data true
+& $auditNode tests/week2/run-all.ts --data-dir "$auditRoot/week2/data" --evidence-dir "$auditRoot/week2/evidence" --keep-data true
+& $auditNode tests/week2/run-v04-v05.ts --data-dir '../v04-v05-repeat/data' --evidence-dir '../v04-v05-repeat/evidence'
+& $auditNode ../v04-v05-sse-probe.mts
+& $auditNode tests/week2/run-s6.ts --data-dir '../s6-repeat/data' --evidence-dir '../s6-repeat/evidence'
+$probe = Get-Content -Raw -Encoding utf8 '../restart-frozen-import-probe.mjs'
+& $auditNode --input-type=module -e $probe '../restart-frozen-import'
+$probe = Get-Content -Raw -Encoding utf8 '../restart-same-worker-import-probe.mjs'
+& $auditNode --input-type=module -e $probe '../restart-same-worker-import'
+& $auditNode ../edge-relogin-probe.mts
+```
+
+两周汇总与专项 JSON 分别在 `week1/evidence` 和 `week2/evidence`。S6 原样专项见 `s6-repeat/evidence/s6-evidence.json`。Worker 完成的 SSE 观察见 `v04-v05-sse/evidence/worker-completion-sse.json`。Router 与同一 Worker 的强杀结果分别见 `restart-frozen-import/result.json`、`restart-same-worker-import/result.json`，后者的 `snapshot-index.json` 保存两个快照键与基准。首个委派探针的第二个工具由 Router 执行，未用作同一 Worker 结论。Edge 结果见 `edge-relogin/evidence/same-principal-relogin.json`。两份旧库沿用 §12.3.4 的只读备份探针，独立输出 `legacy-schema-check.json` 和 `mcp-legacy-check.json`。
+
+真实 Gmail IMAP、真实 GitHub MCP 的授权只读和 V01 逐 token 首延迟仍单列为**待验证**。后续在本报告第 15 节按 W2-S3、W2-S4、W2-S6 回执。
+
+**审计人 / 日期**　Codex 独立复审 / 2026-11-26（Asia/Hong_Kong）。
+
+---
+
+## 15. 第 5 轮 §14.3 整改回执与第 6 轮最终复审签收栏（冻结候选 `5269a81`）
+
+- **第 6 轮冻结代码候选提交（全号）**：`5269a81d58c0f20af458ca5f0850dba6ec174d54`（位于 `v2` 分支）
+- **多轮提审与审计链（前 5 轮证据目录及文档提交记录均完整保留、零覆写）**：
+  - 第 6 轮代码整改冻结提交：`5269a81d58c0f20af458ca5f0850dba6ec174d54`
+  - 第 5 轮冻结代码与文档提交：`2a40af787c09cc70f4fb247c6dab7fb851cf5f73` / `ac0423595a96712b99c6a00d4b853e7e5f0ae22f`（证据固化于 `evidence/round5/`）
+  - 第 4 轮冻结代码与审计提交：`8260b8bc18185857805d0e15211c70fd28345728` / `0066bc9b77ae37801eed0694899a50cda87f725b` + `b436e4a5992a2491dc3bce40f98172e92e3dc240`（`evidence/round4/`）
+  - 第 3 轮候选：`2dffb01fe0711a9b727b9f41006ed55bcac335b7` / `f66366be0ea6bfc09744354f035add69be5f3e40`（`evidence/round3/`）
+  - 第 2 轮与第 1 轮候选：`efba0eda53a21cf5f935846377f8ab03ff42eb69`（`evidence/round2/`）、`ea9b59c6883e8f86f6f459f5b2cee3b96c44d6bb`（`evidence/`）
+- **`package.json` 与 `package-lock.json`（LF 字节 SHA-256 `795485bdfbf93215f07ba67e2185bc513cca3f39879cebff6830b79d0cd8d291`）**：继续零修改；锁定 Node `22.23.5`（SQLite `3.54.1`）、npm `10.9.9` 与纯 TypeScript 单向四层依赖边界不变。
+- **同一冻结候选 `5269a81d58c0f20af458ca5f0850dba6ec174d54` 全量验证与归档**：
+  - `tsc --noEmit`：退出码 `0`
+  - `tests/week1/run-all.ts`：退出码 `0`，`runId = week1_024eb012`（`S1–S5` 5/5、`W1-A` 9/9 `w1a_4a5aa2f4`、`W1-B` `w1b_d554586b` `efx_57ad62a12d214be7aa229bd3af7f52a3`、矩阵 25/25）
+  - `tests/week2/run-all.ts`：退出码 `0`，`runId = week2_398e87ed`（`typecheck`、`layerBoundary`、`v04_v05`、`v02`、`v03`、`s6`、`v01_v05_v06_browser` 全部 PASS）
+  - **第 6 轮不可变脱敏证据目录**：[evidence/round6/week1/](evidence/round6/week1/) · [evidence/round6/week2/](evidence/round6/week2/)（已校验零本机用户绝对路径与零合成秘钥残留）。
+
+### 15.1 针对 §14.3 剩余 3 项的逐项整改回执
+
+| 审计编号 | 级别 | 整改核心措施与源码位置 | 冻结候选 `5269a81` 实测结果与脱敏证据 |
+|---|---|---|---|
+| **W2-S3** | P1 | **持久化 Worker->Router 执行轮次关联、缺失即停止安装转 `PENDING_RECONCILE`，并消除容器挂载前异步撤权间隔。** (1) `db.ts` 在基础 Schema 与 Migration 5 新增 `worker_execution_roots(runtime_epoch, worker_conversation_id, parent_conversation_id, execution_root_task_id, created_at)`；(2) `policy.ts` 新增 `persistWorkerExecutionRoot` / `getWorkerExecutionRoot` / `listWorkerExecutionRoots`，并将 `findRelatedConversationIdsByOwnerTask` 同步联合 `worker_execution_roots` 血缘；(3) `harness.ts` 在 `workerConv.submit(...)` 前事务持久化 `worker_execution_roots`、启动时（`harness.resume()` 前）全量恢复 `workerExecutionRootByConv` 与 `parentByWorkerConv`；若已标识 `worker` 会话缺少持久根关联，返回 `__MISSING_WORKER_EXECUTION_ROOT__` 拒绝新建 Worker 本地快照；(4) `importer.ts` 新增 `recordPendingReconcileImport`；`index.ts` 遇到缺失 Worker 根关联或缺失持久化快照/基线时立即记录 `PENDING_RECONCILE`（`install_count = 0`）并投影回原父会话；(5) `docker-sandbox.ts` 新增 `prepareInputSnapshotDirSync`，在异步镜像核对与建卷完成后、`docker run` 生成子进程前同步复核目标授权并构筑 `/input` 挂载，消除异步 TOCTOU 窗口。[db.ts](../../../src/governance/db.ts#L336-L343) · [db.ts](../../../src/governance/db.ts#L609-L618) · [policy.ts](../../../src/governance/policy.ts#L546-L645) · [harness.ts](../../../src/runtime/harness.ts#L585-L615) · [harness.ts](../../../src/runtime/harness.ts#L703-L707) · [harness.ts](../../../src/runtime/harness.ts#L923-L940) · [docker-sandbox.ts](../../../src/capabilities/workspace/docker-sandbox.ts#L195-L207) · [docker-sandbox.ts](../../../src/capabilities/workspace/docker-sandbox.ts#L755-L808) · [importer.ts](../../../src/capabilities/workspace/importer.ts#L1419-L1479) · [index.ts](../../../src/index.ts#L478-L545) | `V03`（`runId = v03_04950338`）：(a) 正式 `src/index.ts` 委派 Worker（`hostWrk1`）第 1 个工具写 `reports/wrk-a.md` 于安装后回执前屏障强杀，停机期编辑 `reports/wrk-b.md`，重启 `hostWrk2` 后同一 Worker 复用 Router 原冻结快照触发 `CONFLICT_SAVED` 保住停机编辑，全库仅存在 `1` 条 `task_frozen_snapshots` 记录（`sameWorkerCrashRecoveryConflictPreserved = true`）；(b) 删除 `worker_execution_roots` 后恢复 `hostWrk3` 尝试写入 `reports/wrk-missing-root.md`，立即停止安装（`installCount = 0`、磁盘零改写）并在原 Router 会话投影出 `PENDING_RECONCILE`（`sameWorkerMissingRootPendingReconcileVerified = true`）；(c) 既有 Router 同轮强杀（PID `36400` -> `38988`）、缓存路径撤权剔除、缺失快照 `frozen_snapshot_missing` 及顺序更新全过。证据：[v03-evidence.json](evidence/round6/week2/v03-evidence.json) |
+| **W2-S4** | P2 | **将全部异步操作回执绑定至单调认证会话序号 `authSessionSeq`，注销起始即失效旧回执并在 `/challenge` 后重验。** (1) `view1.ts` 状态新增 `authSessionSeq`，每次 `#login-btn` 登录成功及 `#logout-btn` 点击最前（`await /api/auth/logout` 之前）立即自增 `++state.authSessionSeq`；(2) `isCurrentView(reqConvId, reqEpoch, reqGen, reqAuthSeq)`、`saveBtn`、`submitDecision`、`#chat-send-btn`、`new-conv-btn`、`loadConversations`、`selectAndSubscribe` 均绑定 `reqAuthSeq`；(3) `submitDecision` 在拿到 `/challenge` 后、发起 `/api/approvals/decide` 前先复核 `state.principalId`、`state.authSessionSeq === reqAuthSeq` 与 `isCurrentView(...)`，决定返回后再次校验。因此同账号快速注销并重新登录后，`authSessionSeq` 已递增，即使新会话将同一草案从 `0` 改写为 `1`，旧会话迟到 `Save` 回执也会被静默丢弃。[view1.ts](../../../src/web/view1.ts#L120-L128) · [view1.ts](../../../src/web/view1.ts#L200-L206) · [view1.ts](../../../src/web/view1.ts#L670-L745) · [view1.ts](../../../src/web/view1.ts#L790-L830) | `V01_V05_V06_BROWSER`（`runId = v01v06_1190173b`）：Edge CDP 实测 `samePrincipalReloginPreservedNewDraft`：Session 1 发出延迟 `Save` -> 注销 -> 以同一 `owner` Token 立刻重新登录 -> 切至原会话录入新未保存草稿（编辑版本从 `0` 增至 `1`）-> 放行旧会话延迟 `Save` 并点击 `refresh-btn` 强制快照重绘，实得 `reloggedInSamePrincipal = true`、`keptDirty = true`、`keptDraftOnRedraw = true`、`oldSaveRestored = false`、`approveDisabled = true`；既有 `A->B->A` 改稿、`Save+注销` 及 `save`/`approve`/`reject` 跨会话测试全过。证据：[v01-v06-browser-evidence.json](evidence/round6/week2/v01-v06-browser-evidence.json) |
+| **W2-S6** | P1 | **在采样端内存完成全部禁止值字节扫描，磁盘只落脱敏键名、SHA-256 摘要、字节数与命中计数。** (1) `index.ts` 新增纯内存扫描器 `collectInMemorySlotMarkers()` 与 `scanBufferStrictlyInMemory()`（直接读取内存 `HostCredentialVault` 与 `consoleToken(s)`），在 `--s6-observe-dir` 的 `imapEndpoint.onObserveChildEnv`、`docker.onInspectObserved` 与 `importer.onExportedFilesObserved` 回调内对 IMAP 子进程 env 实体、Docker inspect `.Config.Env` 与 CLI 参数、及导出卷 `Buffer` 字节**完全在内存扫描**，仅将 `{ observedInMemoryOnly: true, rawValuesWrittenToDisk: false / rawBytesWrittenToDisk: false, keys, valueDigests, scannedBytes, networkMode, forbiddenHitsBySlot, totalForbiddenHits }` 写入 JSON，彻底禁止向磁盘写入任何原始环境变量值或 `.bin` 卷文件；(2) `fake-github-mcp-server.ts` 亦移除 `nonPatEnvEntries` 原始值落盘，仅记录键名、全部值 SHA-256 前缀 `envValueDigests` 与 `nonPatEnvCount / nonPatEnvScannedBytes`；(3) `run-s6.ts` 校验观察目录零 `.bin` 文件且脱敏扫描结果 `observedInMemoryOnly = true / totalForbiddenHits = 0`，将内存实采字节数与命中计入 `samplingPointMatrix` 与每槽位 `slots`。[index.ts](../../../src/index.ts#L199-L240) · [index.ts](../../../src/index.ts#L275-L305) · [fake-github-mcp-server.ts](../../../tests/fakes/fake-github-mcp-server.ts#L73-L102) · [run-s6.ts](../../../tests/week2/run-s6.ts#L640-L790) | `S6`（`runId = s6_4e36e781`）：正式入口启动校验 `remainingSecretVars = []`；实测观察目录零 `.bin` 文件、`observerInMemoryOnly = true`、`rawValuesOrVolumeBytesWrittenToDisk = false`、`volumePreInstallExport = { readOnlyMountVerified: true, exportedFilesCount: 1, exportedTotalBytes: 34, observedInMemoryOnly: true, rawBytesWrittenToDisk: false }`、`dockerTaskContainer.networkMode = "none"`（inspect 实得）、`imapChildObservedValueDigestCount = 13`、`mcpChildNonPatEntriesCount = 14`、`uncollectedSamples = []`、5 槽位 `totalForbiddenHits = 0`（阳性对照 `2/2`）。未直接采集项继续诚实登记 `docker.exe` 外部 OS `GetEnvironmentStrings`。证据：[s6-evidence.json](evidence/round6/week2/s6-evidence.json) |
+
+### 15.2 第 6 轮冻结候选 `5269a81` 全量实测命令、退出码、`runId` 与脱敏证据
+
+以下命令均在 `git rev-parse HEAD = 5269a81d58c0f20af458ca5f0850dba6ec174d54`、源码工作区干净、锁定工具链 `D:\AegisPi\tools\node-v22.23.5\node.exe`（`v22.23.5`，SQLite `3.54.1`，npm `10.9.9`，Docker `29.9.2/29.9.2`，`msedge.exe`）与全新临时目录下执行：
+
+```powershell
+$node = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+$evRoot = Join-Path $env:TEMP 'aegis-w2r6-final-5269a81d'
+& $node ./node_modules/typescript/bin/tsc --noEmit
+& $node tests/week1/run-all.ts --data-dir (Join-Path $evRoot 'w1-data') --evidence-dir (Join-Path $evRoot 'w1-ev')
+& $node tests/week2/run-all.ts --data-dir (Join-Path $evRoot 'w2-data') --evidence-dir (Join-Path $evRoot 'w2-ev')
+```
+
+| 验证项 | 退出码 | `runId` | 关键实得摘要 | 结果 | 脱敏证据（第 6 轮固定路径） |
+|---|---|---|---|---|---|
+| `tsc --noEmit` 与分层守卫 | `0` | `week2_398e87ed` | 纯 TypeScript 可擦除类型检查通过；单向分层与单点导入 `violations = []` | **PASS** | [week2-summary.json](evidence/round6/week2/week2-summary.json) |
+| **第 1 周全量复签** | `0` | `week1_024eb012` | `S1–S5` 5/5 PASS；矩阵 25/25 PASS；`W1-A`（`w1a_4a5aa2f4`）3 足额对照各 `+1`、6 负例各 `0`；`W1-B`（`w1b_d554586b`）强杀 PID `32208` -> 重启 `21560` / `44420`，`effectId = efx_57ad62a12d214be7aa229bd3af7f52a3`，独立 SMTP `totalReceived = 1`、`claimCount = 1`、`approvalCount = 1`、原会话刷新显 `结果待核对`、`secretScan.clean = true` | **PASS** | [week1-summary.json](evidence/round6/week1/week1-summary.json) · [w1-a-evidence.json](evidence/round6/week1/w1-a-evidence.json) · [w1-b-evidence.json](evidence/round6/week1/w1-b-evidence.json) · [s1-s5-evidence.json](evidence/round6/week1/s1-s5-evidence.json) · [matrix-evidence.json](evidence/round6/week1/matrix-evidence.json) |
+| **S6（正式入口 + 内存态扫描）** | `0` | `s6_4e36e781` | `remainingSecretVars = []`；阳性对照 `2/2`；`observerInMemoryOnly = true`、`rawValuesOrVolumeBytesWrittenToDisk = false`（零 `.bin` 文件）；Docker inspect 实得 `networkMode = "none"` 与 `.Config.Env` 实值内存扫描、安装前 `volume_export_bytes`（34 B）内存扫描、IMAP（13 键摘要、`passwordPresentInEnv = false`）、MCP 非 PAT（14 项）摘要与活跃 WAL/SSE 全过，`uncollectedSamples = []`、`totalForbiddenHits = 0` | **PASS** | [s6-evidence.json](evidence/round6/week2/s6-evidence.json) |
+| **V04 / V05** | `0` | `v04v05_9466075a` | 窗 2 强杀重试唯一提交 `submissionId = 15`（`piRequestId = chatreq:287de77c97514ea032eaaee9af9bae8c`）；`workerDelegationRequestOrder = ["fake-router-1","fake-worker-1","fake-router-1"]`；撤权旧游标 `0` 业务帧、前后端脱敏、编辑/批准 `403` 与领取拒 `0` 封 SMTP | **PASS** | [v04-v05-evidence.json](evidence/round6/week2/v04-v05-evidence.json) |
+| **V02（本地替身）** | `0` | `v02_65cec93e` | 凭据绑定拦截、`legacyMcpMigrationCheck`、`run_worker` 委派（`id = "31"`）与全路径单撤读取后发送增量 `0`、IMAP 不改 `\Seen` 且无命中 `0` 正文获取、GitHub MCP `totalWriteCallsOnServer = 0` | **PASS（替身）** | [v02-evidence.json](evidence/round6/week2/v02-evidence.json) |
+| **V03** | `0` | `v03_04950338` | 不可变镜像 `sha256:e9f565d3...`；同 Worker 强杀跨重启复用 Router 冻结基线防覆盖 `CONFLICT_SAVED`、缺失 `worker_execution_roots` 停止安装并在原会话显 `PENDING_RECONCILE`、Router 同轮强杀与缓存撤权剔除、挂载前零间隔同步重验、缺失快照 fail-closed、顺序更新（`66bd55d5...` -> `c528c713...`）与强杀 PID `36400` -> `38988` Step 5c 恢复全过 | **PASS** | [v03-evidence.json](evidence/round6/week2/v03-evidence.json) |
+| **V01 / V05 / V06（实机 Edge）** | `0` | `v01v06_1190173b` | 正式 `src/index.ts`（`http://127.0.0.1:64281`）演示句写入 `reports/weekly.md`（`31d1598f...`，`firstToolProgressMs = 202`、`completionMs = 14218`）与刷新核对；同一主体注销重登录后 `samePrincipalReloginPreservedNewDraft` 保住新草稿与脏标（重绘无回滚）、`A->B->A` 改稿、`Save+注销`、撤权清本地草稿、无刷新过期 410 与直连真实 `runW1B`（`w1b_d71601e4`，强杀 PID `38764`，`efx_09e95a5b387e49fc849de09de66a210a`）全过 | **PASS（替身 + 实机浏览器）** | [v01-v06-browser-evidence.json](evidence/round6/week2/v01-v06-browser-evidence.json) |
+
+> **替身与真实只读 / 历史基线分列声明**：
+> - 真实 Gmail 只读 IMAP、真实 GitHub MCP 只读（缺本机人工授权、`GITHUB_PAT` 与 `github-mcp-server.exe`）及 V01 逐 token `firstTokenMs`（`firstToolProgressMs = 202ms`、`completionMs = 14218ms` 已实测）继续标注 **待验证**；阶段一真实模型计费、真实邮件发送与真实 GitHub 写入保持关闭。
+> - v1 历史零信任基线（`3a88b6895991d328e8e27fd1072a29846e7a9adf`，`327/327`、`selfuse 31/31`）仅作历史参考，与本次 v2 实测严格分离。
+
+### 15.3 第 6 轮审计人复审与签收栏
+
+> ⏳ 待独立审计人核对提交 `5269a81d58c0f20af458ca5f0850dba6ec174d54` 与 [evidence/round6/](evidence/round6/) 后填写本栏（`W2-S3`、`W2-S4`、`W2-S6` 逐项复核及最终签收结论）。
