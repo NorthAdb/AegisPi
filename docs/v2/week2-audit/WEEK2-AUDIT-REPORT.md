@@ -649,17 +649,55 @@ $evRoot = Join-Path $env:TEMP 'aegis-w2r4-final-8260b8bc'
 > - 真实 Gmail 只读 IMAP、真实 GitHub MCP 只读（缺本机人工授权、`GITHUB_PAT` 与 `github-mcp-server.exe`）及 V01 逐 token `firstTokenMs`（`firstToolProgressMs = 198ms`、`completionMs = 12569ms` 已实测）仍标注 **待验证**；阶段一真实模型计费、真实邮件发送与真实 GitHub 写入保持关闭。
 > - v1 历史零信任基线（`3a88b6895991d328e8e27fd1072a29846e7a9adf`，`327/327`、`selfuse 31/31`）仅作历史参考，与本次 v2 实测严格分离。
 
-### 13.3 第 4 轮审计人独立复审与最终签收栏（由独立审计人填写）
+### 13.3 第 4 轮审计人独立复审与最终签收栏
 
-| 核对项 | 审计人复跑结果（通过 / 未通过 / 待验证） | 备注 / 复跑 `runId` / 退出码 |
+**签收结论：退回继续整改，阶段一暂缓签收。** 本轮关闭 W2-S2。剩余 4 项为 W2-S3、W2-S4、W2-S6 和新增 W2-R4-E1。冻结候选 `8260b8b` 的第 1 周全量通过，第 2 周原样全量退出码为 `1`。此外，正式宿主的独立强杀复测确认 V03 可在同一任务恢复后覆盖用户编辑。
+
+#### 13.3.1 同候选独立复跑
+
+| 核对项 | 退出码 / 结果 | 实测与证据 |
 |---|---|---|
-| 核对冻结候选 `8260b8bc18185857805d0e15211c70fd28345728` 与仅文档提交差异 | _待独立审计人填写_ | |
-| 类型检查、分层守卫与第 2 周全量 `tests/week2/run-all.ts` | _待独立审计人填写_ | |
-| 同候选第 1 周全量 `tests/week1/run-all.ts`（`S1–S5`、`W1-A`、`W1-B`、25 项矩阵） | _待独立审计人填写_ | |
-| 逐项关闭复核：`W2-S2`、`W2-S3`、`W2-S4`、`W2-S6` | _待独立审计人填写_ | |
+| 冻结候选和工具链 | 通过 | 分离工作树 `8260b8bc18185857805d0e15211c70fd28345728`，干净。文档提交 `0066bc9` 仅更改审计、验收报告及新增第 4 轮归档。前三轮证据路径在该提交中无变动。锁文件与 W1 交接 `47a4dd4` 相同，Git 中 LF 字节的 SHA-256 为 `795485bdfbf93215f07ba67e2185bc513cca3f39879cebff6830b79d0cd8d291`。`package.json` 相对 W1 新增 `test:week2` 脚本，依赖版本相同。Windows x64，Node 22.23.5 / SQLite 3.54.1 / npm 10.9.9 / Docker 29.9.2 / Edge 157.0.4341.60。 |
+| 类型检查、分层守卫 | `0` / 通过 | `tsc --noEmit` 通过，分层守卫 `violations: []`。 |
+| 第 1 周全量 | `0` / 通过 | `week1_a2121203`，S1–S5 5/5、矩阵 25/25。W1-A `w1a_418e79b4` 三个足额对照各新增 1 次请求，六个不足负例增量均 0。W1-B `w1b_fb3bd21e` 独立 SMTP 累计 1 封、领取 1 次，刷新原会话效果仍为 `UNKNOWN`。 |
+| 两份历史库 | 各 `0` / 通过 | W1 旧治理库二次打开保留 8 条会话授权，6 条拒绝记录补齐代际。W2 首轮 V02 旧库二次打开保留服务与工具 Pin 各 1 条，新增 `command` / `args_json`，两份副本的外键异常均为 0。 |
+| 第 2 周全量 | `1` / **未通过** | `week2_1eb50d38`，`v04_v05` 断言 Worker 完成投影失败。V02 替身 `v02_2a48606b`、V03 既有夹具 `v03_753a2a85`、S6 既有夹具 `s6_91c6f6c2`、正式入口 Edge `v01v06_f3dfa4b9` 均通过各自断言。 |
+| 原样 V04/V05 单独复跑 | `1` / **未通过** | 新目录复现同一失败。两个独立假模型请求日志均记录第 5 次调用仍为审批所在轮次，却取走了排给下一条命令的 Worker 脚本。 |
+| V04/V05 诊断夹具 | `0` / 通过 | `v04v05_4f798f3c`。候选实现保持冻结，在独立夹具中等审批轮次完成后再换脚本，并按上限轮询 Worker 完成状态。复跑到达撤权、领取、旧游标和退出场景。 |
+| V03 独立正式入口复跑 | 顺序更新 `0`；同轮强杀恢复 `1` | 顺序两条命令受理 ID 为 15、24，各安装 1 次，第 2 条基准为第 1 版摘要 `a63ec651…`。同一条命令在第一文件安装、回执未持久化窗口强杀；同代恢复后第二文件误将用户编辑摘要 `3b574377…` 当作基准，实际安装 1 次，覆盖了该编辑。 |
 
-- **第 4 轮签收结论**：_待独立审计人填写_
-- **审计人 / 日期**：_待独立审计人填写_
+#### 13.3.2 逐项关闭复核
 
+| 审计编号 | 裁定 | 观察与复签条件 |
+|---|---|---|
+| W2-S2 | **关闭** | Edge 独立复跑确认收到撤权重同步后，浏览器本地草稿和输入框同步清空，保存、批准均禁用。诊断夹具走到宿主保存与批准的 403、已批准效果领取拒绝、独立 SMTP 增量 0，以及旧游标业务帧 0。 |
+| W2-S3（P1） | **未关闭** | 顺序命令隔离、既有 `PREPARED` 对账及初次输入筛选通过。正式入口仅在内存维护轮次快照索引。审计用一次提交在同轮先写 `reports/index.md`，命中真实安装后回执前屏障并强杀（PID 14808 → 37208），停机期间编辑 `reports/weekly.md`，重启后继续同轮的第二个文件操作。原冻结基准 `e257f7df…`，实际基准变为 `3b574377…`，结果为 `INSTALLED`，权威文件新摘要 `c95c6333…`。按 V03 恢复并验证同一轮次的冻结基准，无法确认时停止安装并显示待核对。源码还显示复用缓存时仅复核本次目标，已冻结的其他输入路径若后来撤权，仍随同一目录被挂载。每次挂载前重验全部输入路径，保持原冻结基准。复签同时覆盖同轮强杀、已缓存路径撤权，以及既有顺序和重叠用例。[正式入口](../../../src/index.ts#L380-L418) · [导入对账](../../../src/capabilities/workspace/importer.ts#L524-L547) |
+| W2-S4（P2） | **部分关闭** | Edge 对保存、批准、拒绝的延迟响应均通过 A→B 切换，旧卡片 0，新会话输入和 SSE 保留。源码复核发现成功的旧保存回执在视图代际校验前清除提案的本地草稿缓存。若切回 A 后用户已经继续编辑，迟到回执可清除新编辑，后续快照重绘会显示旧保存内容。清除应绑定本次提交时的编辑版本，并在正式 Edge 覆盖 A→B→A 后继续改稿、迟到保存回执后再重绘。另把迟到回执与注销的组合纳入同一组验证。[客户端保存回执](../../../src/web/view1.ts#L660-L685) · [现有 Edge 夹具](../../../tests/week2/run-v01-v06-browser.ts#L816-L935) |
+| W2-S6（P1） | **证据未闭合** | 已实测正式宿主启动清除启动槽位，扫描双库活跃 WAL、非空 SSE，阳性对照 2/2，已采位置禁止命中 0。Docker inspect 取到了环境和挂载，但证据丢弃环境值后只查键名，`networkMode` 来自回填常量。IMAP 子进程只对自身口令值做比对，MCP 对其他槽位只核键名。当前 `workspace_output_file` 是已安装文件，证据未关联安装前私有任务卷的标记扫描。对这些实际边界生成每槽位命中数，仅保留脱敏计数，记录 inspect 实得网络模式和只读导出的采样结果。继续区分传给 Docker CLI 的参数白名单与外部 OS 尚未直接采集的进程环境。用采样结果生成覆盖清单及未采项。[Docker 实采](../../../src/capabilities/workspace/docker-sandbox.ts#L750-L795) · [S6 证据生成](../../../tests/week2/run-s6.ts#L612-L706) |
+| W2-R4-E1（P2） | **新增，原样回归未通过** | 第 2 周全量及 V04/V05 专项原样复跑均在 Worker 完成投影断言失败。两份假服务日志的第 5 次请求均是 `Send V05 mail` 的 Router 后续生成，却取走 `tool_call`；第 6 次请求已经是该错序轮次派出的 Worker。等待审批轮次的可观察终态后再换脚本，诊断中请求 5 为审批后续文本，6–8 才是独立委派的 Router、Worker 和 Router 后续，退出 0。将同步条件落入正式夹具，以 Worker 完成事件及最终快照取代固定 450ms 等待，同候选重跑全量并保存事件与独立假模型请求顺序。[V04/V05 夹具](../../../tests/week2/run-v04-v05.ts#L725-L766) |
 
+#### 13.3.3 命令与证据索引
 
+以下在分离工作树运行。两周全量、专项复跑和审计诊断分别用新数据目录。诊断夹具未写入候选源码。
+
+```powershell
+$auditRoot = 'D:\AegisPi\aegis-pi-v2-planning\audit-reruns\week2-round4-8260b8b'
+$auditNode = 'D:\AegisPi\tools\node-v22.23.5\node.exe'
+Set-Location (Join-Path $auditRoot 'candidate')
+git rev-parse HEAD
+& $auditNode ./node_modules/typescript/bin/tsc --noEmit
+& $auditNode tests/week1/run-all.ts --data-dir "$auditRoot/week1/data" --evidence-dir "$auditRoot/week1/evidence"
+& $auditNode tests/week2/run-all.ts --data-dir "$auditRoot/week2/data" --evidence-dir "$auditRoot/week2/evidence"
+& $auditNode tests/week2/run-v04-v05.ts --data-dir "$auditRoot/v04-v05-repeat/data" --evidence-dir "$auditRoot/v04-v05-repeat/evidence"
+& $auditNode ../v04-v05-diagnostic-probe.mts
+$probe = Get-Content -Raw -Encoding utf8 '../sequential-report-final-probe.mjs'
+& $auditNode --input-type=module -e $probe
+$probe = Get-Content -Raw -Encoding utf8 '../restart-frozen-import-probe.mjs'
+& $auditNode --input-type=module -e $probe '../restart-frozen-import'
+```
+
+两周汇总和各项 JSON 保存在审计根目录下的 `week1/evidence`、`week2/evidence`。V04/V05 原样失败见 `week2.log`、`v04-v05-repeat.log`，独立服务顺序对照见 `v04-v05-repeat/data/fake-model/model-requests.jsonl` 与 `v04-v05-diagnostic-retry/data/fake-model/model-requests.jsonl`，诊断 JSON 在 `v04-v05-diagnostic-retry/evidence/v04-v05-evidence.json`。同轮强杀实得见 `restart-frozen-import/result.json`，顺序更新实得见 `sequential-report-final/result.json`。此前以模型请求屏障尝试的夹具未观测到第二次文件操作回执，定案依据为命中正式导入屏障的一次。旧库结果见 `legacy-schema-check.json` 和 `mcp-legacy-check.json`，沿用 §12.3.4 的只读备份探针并写入本轮新副本。
+
+V02 真实 Gmail IMAP 与真实 GitHub MCP 只读、V01 逐 token 首延迟继续标为**待验证**。它们与本轮 4 项整改分列。下一轮请在本报告第 14 节按上述四个编号回执。
+
+**审计人 / 日期**　Codex 独立复审 / 2026-11-26（Asia/Hong_Kong）。
