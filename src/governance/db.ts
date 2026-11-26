@@ -462,109 +462,108 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
     }
   }
 
-  if (legacyDenials.length === 0) {
-    return;
+  if (legacyDenials.length > 0) {
+    withImmediateTx(db, () => {
+      const epochs = db
+        .prepare("SELECT runtime_epoch, created_at, retired_at, status FROM runtime_epochs")
+        .all() as Array<{
+        runtime_epoch: string;
+        created_at: number;
+        retired_at: number | null;
+        status: string;
+      }>;
+
+      const backfilledSeqs: number[] = [];
+      let skippedUnprovableCount = 0;
+
+      for (const item of legacyDenials) {
+        const convId =
+          typeof item.parsed["conversationId"] === "string" && item.parsed["conversationId"].length > 0
+            ? item.parsed["conversationId"]
+            : null;
+        if (!convId) {
+          skippedUnprovableCount++;
+          continue;
+        }
+
+        // 1. Conversation must map to a unique runtime_epoch in conversation_scopes
+        const scopeEpochRows = db
+          .prepare("SELECT DISTINCT runtime_epoch FROM conversation_scopes WHERE conversation_id = ?")
+          .all(convId) as Array<{ runtime_epoch: string }>;
+        if (scopeEpochRows.length !== 1) {
+          skippedUnprovableCount++;
+          continue;
+        }
+        const candidateEpoch = scopeEpochRows[0]!.runtime_epoch;
+
+        // 2. Active epoch time window at occurred_at must uniquely match candidateEpoch
+        const coveringEpochs = epochs.filter(
+          (ep) =>
+            ep.created_at <= item.occurredAt &&
+            (ep.retired_at === null || item.occurredAt <= ep.retired_at),
+        );
+        if (coveringEpochs.length !== 1 || coveringEpochs[0]!.runtime_epoch !== candidateEpoch) {
+          skippedUnprovableCount++;
+          continue;
+        }
+
+        // 3. Existing budget_task_bindings / budget_reservations for (convId, ownerTaskId) must not contradict candidateEpoch
+        const ownerTaskId =
+          typeof item.parsed["ownerTaskId"] === "string" && item.parsed["ownerTaskId"].length > 0
+            ? item.parsed["ownerTaskId"]
+            : null;
+        if (ownerTaskId) {
+          const bindingEpochs = db
+            .prepare(
+              "SELECT DISTINCT runtime_epoch FROM budget_task_bindings WHERE conversation_id = ? AND owner_task_id = ?",
+            )
+            .all(convId, ownerTaskId) as Array<{ runtime_epoch: string }>;
+          if (bindingEpochs.some((b) => b.runtime_epoch !== candidateEpoch)) {
+            skippedUnprovableCount++;
+            continue;
+          }
+          const reservationEpochs = db
+            .prepare(
+              "SELECT DISTINCT runtime_epoch FROM budget_reservations WHERE conversation_id = ? AND owner_task_id = ?",
+            )
+            .all(convId, ownerTaskId) as Array<{ runtime_epoch: string }>;
+          if (reservationEpochs.some((r) => r.runtime_epoch !== candidateEpoch)) {
+            skippedUnprovableCount++;
+            continue;
+          }
+        }
+
+        const updatedDetails: Record<string, unknown> = {
+          ...item.parsed,
+          runtimeEpoch: candidateEpoch,
+          runtimeEpochBackfilled: true,
+        };
+        db.prepare("UPDATE audit_events SET details_json = ? WHERE seq = ?").run(
+          JSON.stringify(updatedDetails),
+          item.seq,
+        );
+        backfilledSeqs.push(item.seq);
+      }
+
+      if (backfilledSeqs.length > 0) {
+        writeAuditEvent(db, {
+          entityType: "schema_migration",
+          entityId: "budget_denial_runtime_epoch",
+          eventKey: `backfill:budget_denial_runtime_epoch:${backfilledSeqs.join(",")}`,
+          eventType: "audit_backfilled",
+          occurredAt: Date.now(),
+          details: {
+            backfilledCount: backfilledSeqs.length,
+            backfilledSeqs,
+            skippedUnprovableCount,
+          },
+        });
+      }
+    });
   }
 
-  withImmediateTx(db, () => {
-    const epochs = db
-      .prepare("SELECT runtime_epoch, created_at, retired_at, status FROM runtime_epochs")
-      .all() as Array<{
-      runtime_epoch: string;
-      created_at: number;
-      retired_at: number | null;
-      status: string;
-    }>;
-
-    const backfilledSeqs: number[] = [];
-    let skippedUnprovableCount = 0;
-
-    for (const item of legacyDenials) {
-      const convId =
-        typeof item.parsed["conversationId"] === "string" && item.parsed["conversationId"].length > 0
-          ? item.parsed["conversationId"]
-          : null;
-      if (!convId) {
-        skippedUnprovableCount++;
-        continue;
-      }
-
-      // 1. Conversation must map to a unique runtime_epoch in conversation_scopes
-      const scopeEpochRows = db
-        .prepare("SELECT DISTINCT runtime_epoch FROM conversation_scopes WHERE conversation_id = ?")
-        .all(convId) as Array<{ runtime_epoch: string }>;
-      if (scopeEpochRows.length !== 1) {
-        skippedUnprovableCount++;
-        continue;
-      }
-      const candidateEpoch = scopeEpochRows[0]!.runtime_epoch;
-
-      // 2. Active epoch time window at occurred_at must uniquely match candidateEpoch
-      const coveringEpochs = epochs.filter(
-        (ep) =>
-          ep.created_at <= item.occurredAt &&
-          (ep.retired_at === null || item.occurredAt <= ep.retired_at),
-      );
-      if (coveringEpochs.length !== 1 || coveringEpochs[0]!.runtime_epoch !== candidateEpoch) {
-        skippedUnprovableCount++;
-        continue;
-      }
-
-      // 3. Existing budget_task_bindings / budget_reservations for (convId, ownerTaskId) must not contradict candidateEpoch
-      const ownerTaskId =
-        typeof item.parsed["ownerTaskId"] === "string" && item.parsed["ownerTaskId"].length > 0
-          ? item.parsed["ownerTaskId"]
-          : null;
-      if (ownerTaskId) {
-        const bindingEpochs = db
-          .prepare(
-            "SELECT DISTINCT runtime_epoch FROM budget_task_bindings WHERE conversation_id = ? AND owner_task_id = ?",
-          )
-          .all(convId, ownerTaskId) as Array<{ runtime_epoch: string }>;
-        if (bindingEpochs.some((b) => b.runtime_epoch !== candidateEpoch)) {
-          skippedUnprovableCount++;
-          continue;
-        }
-        const reservationEpochs = db
-          .prepare(
-            "SELECT DISTINCT runtime_epoch FROM budget_reservations WHERE conversation_id = ? AND owner_task_id = ?",
-          )
-          .all(convId, ownerTaskId) as Array<{ runtime_epoch: string }>;
-        if (reservationEpochs.some((r) => r.runtime_epoch !== candidateEpoch)) {
-          skippedUnprovableCount++;
-          continue;
-        }
-      }
-
-      const updatedDetails: Record<string, unknown> = {
-        ...item.parsed,
-        runtimeEpoch: candidateEpoch,
-        runtimeEpochBackfilled: true,
-      };
-      db.prepare("UPDATE audit_events SET details_json = ? WHERE seq = ?").run(
-        JSON.stringify(updatedDetails),
-        item.seq,
-      );
-      backfilledSeqs.push(item.seq);
-    }
-
-    if (backfilledSeqs.length > 0) {
-      writeAuditEvent(db, {
-        entityType: "schema_migration",
-        entityId: "budget_denial_runtime_epoch",
-        eventKey: `backfill:budget_denial_runtime_epoch:${backfilledSeqs.join(",")}`,
-        eventType: "audit_backfilled",
-        occurredAt: Date.now(),
-        details: {
-          backfilledCount: backfilledSeqs.length,
-          backfilledSeqs,
-          skippedUnprovableCount,
-        },
-      });
-    }
-  });
-
-  // Migration 3: Idempotently add pinned launch command/args columns to older mcp_server_pins tables
+  // Migration 3 (W2-R2-M1): Unconditionally & idempotently add pinned launch command/args columns
+  // to older mcp_server_pins tables regardless of whether Migration 2 had rows to backfill!
   const mcpCols = db.prepare("PRAGMA table_info(mcp_server_pins);").all() as Array<{ name: string }>;
   const mcpColNames = new Set(mcpCols.map((c) => c.name));
   if (!mcpColNames.has("command")) {

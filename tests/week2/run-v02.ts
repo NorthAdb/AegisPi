@@ -835,8 +835,26 @@ export async function runV02(opts?: { dataDir?: string; evidenceDir?: string }) 
     });
 
     const convDiscPos = await host.createManagedConversation({ slotName: "router", budgetTaskId: "v02-disc-pos" });
+    // Queue a REAL run_worker delegation on convDiscPos while memory:projects IS authorized
+    // so we get a genuine delegated Worker conversation that inherited memory:projects via runWorkerDelegation!
+    await fakeModel.queue({
+      clear: true,
+      watchMarkers: [RESTRICTED_MARKER],
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: `tc_v02_real_wrk_${runId}`,
+            name: "run_worker",
+            arguments: { prompt: `Delegate summary for ${RESTRICTED_MARKER}` },
+          },
+        },
+        { kind: "text", text: "Worker delegated output ok." },
+        { kind: "text", text: "Parent router saw worker output ok." },
+      ],
+    });
     const subPos = await convDiscPos.submit(
-      { type: "input", content: "Recall Project Helios " + "pad ".repeat(60) },
+      { type: "input", content: "Recall Project Helios and delegate to worker " + "pad ".repeat(60) },
       BACKGROUND_CONTEXT,
     );
     await subPos.wait(BACKGROUND_CONTEXT);
@@ -846,6 +864,17 @@ export async function runV02(opts?: { dataDir?: string; evidenceDir?: string }) 
       0,
     );
     assert.ok(posMarkerHits >= 1, "Positive control must hit RESTRICTED_MARKER on fake model");
+
+    // Locate the REAL delegated worker conversation created by run_worker!
+    const realWorkerBinding = host.govDb
+      .prepare(
+        `SELECT conversation_id FROM budget_task_bindings
+          WHERE runtime_epoch = ? AND owner_task_id = 'v02-disc-pos' AND purpose = 'worker'
+          ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(host.runtimeEpoch) as { conversation_id: string } | undefined;
+    assert.ok(realWorkerBinding, "W2-S2: Real run_worker delegation MUST have created a persisted worker conversation");
+    const realDelegatedWorkerConvId = realWorkerBinding.conversation_id;
 
     // 4c. W2-S2: KEEP model_disclosure_grants ACTIVE, REVOKE ONLY source_read_grant (memory:projects)
     //     First test Durable Retry: attempt 1 gets 503, onHttpFetchAttempt immediately revokes memory:projects -> retry sends 0!
@@ -879,7 +908,7 @@ export async function runV02(opts?: { dataDir?: string; evidenceDir?: string }) 
     );
 
     // Now with memory:projects STILL REVOKED and model_disclosure_grants STILL ACTIVE:
-    // test (i) Router, (ii) Compaction, (iii) real run_worker delegation, AND (iv) fresh conversation L0 exclusion!
+    // test (i) Router, (ii) Compaction, (iii) REAL delegated Worker conversation, AND (iv) fresh conversation L0 exclusion!
     await fakeModel.queue({
       clear: true,
       watchMarkers: [RESTRICTED_MARKER],
@@ -911,23 +940,16 @@ export async function runV02(opts?: { dataDir?: string; evidenceDir?: string }) 
       await host.harness.waitForTask(cmpReadRev.compactionTaskId as never, BACKGROUND_CONTEXT);
     }
 
-    // (iii) Real run_worker delegation path: start an untainted router conv that delegates to a worker inheriting tainted source
-    // Direct check: create a worker conversation that inherits convDiscPos's sources -> 0 sends!
-    const convWorkerChild = await host.createManagedConversation({ slotName: "worker", budgetTaskId: "v02-read-rev-wrk" });
-    // Inherit convDiscPos sources into worker child (same function used by run_worker delegation!)
-    const { inheritConversationSources } = await import("../../src/governance/policy.ts");
-    inheritConversationSources(host.govDb, {
-      runtimeEpoch: host.runtimeEpoch,
-      fromConversationId: String(convDiscPos.id),
-      toConversationId: String(convWorkerChild.id),
+    // (iii) REAL delegated Worker conversation (created by run_worker!) -> 0 sends after parent source read revoked!
+    const realWorkerSubmit = await host.submitChatCommand({
       principalId: "owner",
-      now: now + 6,
+      runtimeEpoch: host.runtimeEpoch,
+      conversationId: realDelegatedWorkerConvId,
+      chatKey: `v02-real-wrk-rev-${runId}`,
+      content: "Continue delegated worker step after source read revoke",
     });
-    const subReadRevWrk = await convWorkerChild.submit(
-      { type: "input", content: "Worker step with revoked parent source" },
-      BACKGROUND_CONTEXT,
-    );
-    await subReadRevWrk.wait(BACKGROUND_CONTEXT);
+    assert.equal(realWorkerSubmit.ok, true);
+    await new Promise((r) => setTimeout(r, 250));
 
     // (iv) Fresh conversation with L0 domain="projects" after read revoke -> L0 MUST NOT inject RESTRICTED_MARKER!
     await fakeModel.queue({
@@ -950,10 +972,77 @@ export async function runV02(opts?: { dataDir?: string; evidenceDir?: string }) 
       statsAfterReadRevokedWindow.records.reduce((sum, r) => sum + (r.markerHits?.[RESTRICTED_MARKER] ?? 0), 0) -
       markersBeforeReadRevokedWindow;
 
-    assert.equal(readRevokedTaintedSends, 0, "W2-S2: Tainted Router/Worker/Compaction after read revoke MUST send 0 requests");
+    assert.equal(readRevokedTaintedSends, 0, "W2-S2: Tainted Router/RealDelegatedWorker/Compaction after read revoke MUST send 0 requests");
     assert.equal(readRevokedMarkerDelta, 0, "W2-S2: L0 & tainted paths MUST send 0 restricted markers after read revoke");
 
-    // 4d. Also verify revoking model_disclosure_grants (with read grant restored!) blocks sends (original V02 check)
+    // 4d. W2-R2-M1: Legacy MCP governance DB migration test (0 unbackfilled budget denials + existing legacy mcp_server_pins row!)
+    const legacyMcpDbPath = path.join(rootDir, "legacy-mcp-migration.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const { openGovernanceDb } = await import("../../src/governance/db.ts");
+    const rawLegacy = new DatabaseSync(legacyMcpDbPath);
+    rawLegacy.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE mcp_server_pins (
+        server_id TEXT PRIMARY KEY,
+        executable_path TEXT NOT NULL,
+        executable_sha256 TEXT NOT NULL,
+        read_only_mode INTEGER NOT NULL DEFAULT 1,
+        approved_by TEXT NOT NULL,
+        approved_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
+      CREATE TABLE mcp_tool_pins (
+        server_id TEXT NOT NULL REFERENCES mcp_server_pins(server_id),
+        tool_name TEXT NOT NULL,
+        definition_sha256 TEXT NOT NULL,
+        canonical_def_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('APPROVED','QUARANTINED','REVOKED')),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(server_id, tool_name)
+      );
+      INSERT INTO mcp_server_pins(server_id, executable_path, executable_sha256, read_only_mode, approved_by, approved_at)
+        VALUES ('legacy-github', '/old/mcp', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 'owner', 1700000000000);
+      INSERT INTO mcp_tool_pins(server_id, tool_name, definition_sha256, canonical_def_json, state, updated_at)
+        VALUES ('legacy-github', 'get_file_contents', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '{}', 'APPROVED', 1700000000000);
+    `);
+    rawLegacy.close();
+
+    // Open legacy DB twice via normal openGovernanceDb() (with ZERO unbackfilled budget_denials!)
+    const mig1 = openGovernanceDb(legacyMcpDbPath);
+    const cols1 = (mig1.db.prepare("PRAGMA table_info(mcp_server_pins);").all() as Array<{ name: string }>).map((c) => c.name);
+    const fk1 = mig1.db.prepare("PRAGMA foreign_key_check;").all();
+    const srvCount1 = (mig1.db.prepare("SELECT count(*) AS n FROM mcp_server_pins WHERE server_id = 'legacy-github'").get() as { n: number }).n;
+    const toolCount1 = (mig1.db.prepare("SELECT count(*) AS n FROM mcp_tool_pins WHERE server_id = 'legacy-github'").get() as { n: number }).n;
+    assert.ok(cols1.includes("command") && cols1.includes("args_json"), "W2-R2-M1: First open MUST add command & args_json even with 0 budget denials");
+    assert.equal(fk1.length, 0);
+    assert.equal(srvCount1, 1);
+    assert.equal(toolCount1, 1);
+    mig1.db.close();
+
+    const mig2 = openGovernanceDb(legacyMcpDbPath);
+    const cols2 = (mig2.db.prepare("PRAGMA table_info(mcp_server_pins);").all() as Array<{ name: string }>).map((c) => c.name);
+    const fk2 = mig2.db.prepare("PRAGMA foreign_key_check;").all();
+    assert.ok(cols2.includes("command") && cols2.includes("args_json"));
+    assert.equal(fk2.length, 0);
+    // Register updated launch binding on migrated legacy server row
+    pinMcpServerBinary(mig2.db, {
+      serverId: "legacy-github",
+      executablePath: mcpServerScript,
+      executableSha256: mcpScriptSha256,
+      command: LOCKED_NODE_EXE,
+      args: mcpPinnedArgs,
+      readOnlyMode: true,
+      approvedBy: "owner",
+      now: now + 8,
+    });
+    const updatedPin = mig2.db
+      .prepare("SELECT command, args_json FROM mcp_server_pins WHERE server_id = 'legacy-github'")
+      .get() as { command: string; args_json: string };
+    assert.equal(updatedPin.command, LOCKED_NODE_EXE);
+    assert.equal(updatedPin.args_json, JSON.stringify(mcpPinnedArgs));
+    mig2.db.close();
+
+    // 4e. Also verify revoking model_disclosure_grants (with read grant restored!) blocks sends (original V02 check)
     grantSourceRead(host.govDb, {
       principalId: "owner",
       scopeId: "scope:default",
@@ -1031,10 +1120,19 @@ export async function runV02(opts?: { dataDir?: string; evidenceDir?: string }) 
         tamperedToolQuarantinedBeforeRpc: !mcpAfterTamper.ok,
         revokedToolBlockedBeforeRpc: !mcpAfterRevoke.ok,
       },
+      legacyMcpMigrationCheck: {
+        openedTwiceWithoutBudgetDenials: true,
+        columnsAdded: ["command", "args_json"],
+        existingRowsPreserved: { servers: 1, tools: 1 },
+        foreignKeyViolations: 0,
+        postMigrationLaunchBindingUpdated: true,
+      },
       modelDisclosureAndSourceRevocation: {
         markerLabel: "RESTRICTED_DISCLOSURE_MARKER",
         deniedBeforeGrantPhysicalSends: 0,
         positiveControlMarkerHitsOnFakeModel: posMarkerHits,
+        realDelegatedWorkerUsed: true,
+        realDelegatedWorkerConvId,
         sourceReadRevokedWhileDisclosureActive: {
           durableRetryExtraSendsAfterRevoke: 0,
           routerWorkerCompactionSendsDelta: readRevokedTaintedSends,

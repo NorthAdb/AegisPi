@@ -7,6 +7,7 @@ export interface ProjectionEvent {
   event: "snapshot" | "delta" | "partial";
   cursor: string;
   occurredAt: number;
+  revocationWatermark: string;
   payload: Record<string, unknown>;
 }
 
@@ -39,6 +40,12 @@ export interface ProjectionHubOptions<TSnapshot extends Record<string, unknown>>
     runtimeEpoch: string;
     conversationId: string;
   }) => Promise<TSnapshot | null>;
+  /** W2-S2: Live source-read revocation watermark so historical frames & subscriptions invalidate immediately on revocation. */
+  getRevocationWatermark?: (params: {
+    principalId: string;
+    runtimeEpoch: string;
+    conversationId: string;
+  }) => string;
   attachPiObserver?: (params: {
     runtimeEpoch: string;
     conversationId: string;
@@ -59,10 +66,12 @@ interface ConversationProjection<TSnapshot extends Record<string, unknown>> {
   seq: number;
   latestSnapshot: TSnapshot;
   latestSnapshotDigest: string;
+  lastRevocationWatermark: string;
   events: ProjectionEvent[];
   subscribers: Set<ProjectionSubscriber>;
   piAttach: ProjectionSourceAttach | null;
   invalidated: boolean;
+  invalidationReason: string | null;
   rebuilding: Promise<void> | null;
   pendingRefresh: { reason: string; detail?: Record<string, unknown>; forcedEventKind?: "delta" | "partial" } | null;
   refreshGeneration: number;
@@ -114,6 +123,16 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
     return `${principalId}|${runtimeEpoch}|${conversationId}`;
   }
 
+  #readRevocationWatermark(principalId: string, runtimeEpoch: string, conversationId: string): string {
+    return (
+      this.#options.getRevocationWatermark?.({
+        principalId,
+        runtimeEpoch,
+        conversationId,
+      }) ?? ""
+    );
+  }
+
   async #getOrInitProjection(
     principalId: string,
     runtimeEpoch: string,
@@ -156,8 +175,9 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
         });
       }
 
-      // 2. Read initial authoritative state from SDK + Governance DB.
-      const initialSnap = await this.#options.buildSnapshot({
+      // 2. Read initial authoritative state from SDK + Governance DB, bound to live revocation watermark.
+      let initWatermark = this.#readRevocationWatermark(principalId, runtimeEpoch, conversationId);
+      let initialSnap = await this.#options.buildSnapshot({
         principalId,
         runtimeEpoch,
         conversationId,
@@ -165,6 +185,19 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
       if (!initialSnap) {
         piAttach?.detach();
         return null;
+      }
+      const postInitWatermark = this.#readRevocationWatermark(principalId, runtimeEpoch, conversationId);
+      if (postInitWatermark !== initWatermark) {
+        initWatermark = postInitWatermark;
+        initialSnap = await this.#options.buildSnapshot({
+          principalId,
+          runtimeEpoch,
+          conversationId,
+        });
+        if (!initialSnap) {
+          piAttach?.detach();
+          return null;
+        }
       }
 
       const streamInstanceId = `str_${randomUUID().slice(0, 12)}`;
@@ -186,6 +219,7 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
         seq,
         latestSnapshot: stampedSnap,
         latestSnapshotDigest: canonicalJson(initialSnap),
+        lastRevocationWatermark: initWatermark,
         events: [
           {
             seq,
@@ -193,12 +227,14 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
             event: "snapshot",
             cursor: formatCursor(streamInstanceId, seq),
             occurredAt: this.#now(),
+            revocationWatermark: initWatermark,
             payload: stampedSnap,
           },
         ],
         subscribers: new Set(),
         piAttach,
         invalidated: sourceEndedEarly,
+        invalidationReason: sourceEndedEarly ? "source_observer_ended" : null,
         rebuilding: null,
         pendingRefresh: null,
         refreshGeneration: 0,
@@ -322,6 +358,16 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
 
       for (;;) {
         if (proj.invalidated) return;
+        const watermarkBefore = this.#readRevocationWatermark(
+          proj.principalId,
+          proj.runtimeEpoch,
+          proj.conversationId,
+        );
+        if (watermarkBefore !== proj.lastRevocationWatermark) {
+          // W2-S2: Immediately purge pre-revocation buffered history and terminate existing streams!
+          this.#invalidateProjection(proj, "source_read_revoked");
+          return;
+        }
         const myGen = ++proj.refreshGeneration;
         const fresh = await this.#options.buildSnapshot({
           principalId: proj.principalId,
@@ -329,6 +375,15 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
           conversationId: proj.conversationId,
         });
         if (proj.invalidated) return;
+        const watermarkAfter = this.#readRevocationWatermark(
+          proj.principalId,
+          proj.runtimeEpoch,
+          proj.conversationId,
+        );
+        if (watermarkAfter !== proj.lastRevocationWatermark) {
+          this.#invalidateProjection(proj, "source_read_revoked");
+          return;
+        }
         // If another newer generation somehow advanced, discard stale result
         if (myGen !== proj.refreshGeneration) {
           if (!proj.pendingRefresh) return;
@@ -354,6 +409,7 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
               event: curForced ?? "delta",
               cursor,
               occurredAt: this.#now(),
+              revocationWatermark: watermarkAfter,
               payload: {
                 reason: curReason,
                 ...(curDetail ? { detail: curDetail } : {}),
@@ -464,8 +520,14 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
         ok: true;
         subscriber: ProjectionSubscriber;
         unsubscribe: () => void;
+        revocationWatermark: string;
       }
   > {
+    const preWatermark = this.#readRevocationWatermark(
+      params.principalId,
+      params.runtimeEpoch,
+      params.conversationId,
+    );
     const proj = await this.#getOrInitProjection(
       params.principalId,
       params.runtimeEpoch,
@@ -475,10 +537,41 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
       return { ok: false, resyncReason: "forbidden_or_not_found" };
     }
 
+    if (proj.lastRevocationWatermark !== preWatermark) {
+      // W2-S2: Revocation occurred before this subscription attached -> purge old history & force resync!
+      this.#invalidateProjection(proj, "source_read_revoked");
+      return {
+        ok: false,
+        resyncReason: "source_read_revoked",
+        streamInstanceId: proj.streamInstanceId,
+        currentSeq: proj.seq,
+      };
+    }
+
     // Reconcile latest state so events committed right before subscribe are present in proj.events
     await this.#refreshProjection(proj, "pre_subscribe_sync");
     if (proj.invalidated) {
-      return { ok: false, resyncReason: "projection_invalidated" };
+      return {
+        ok: false,
+        resyncReason: proj.invalidationReason ?? "projection_invalidated",
+        streamInstanceId: proj.streamInstanceId,
+        currentSeq: proj.seq,
+      };
+    }
+
+    const postWatermark = this.#readRevocationWatermark(
+      params.principalId,
+      params.runtimeEpoch,
+      params.conversationId,
+    );
+    if (postWatermark !== proj.lastRevocationWatermark || postWatermark !== preWatermark) {
+      this.#invalidateProjection(proj, "source_read_revoked");
+      return {
+        ok: false,
+        resyncReason: "source_read_revoked",
+        streamInstanceId: proj.streamInstanceId,
+        currentSeq: proj.seq,
+      };
     }
 
     const queue: Array<{ event: string; id?: string; data: string }> = [];
@@ -519,9 +612,18 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
           currentSeq: proj.seq,
         };
       }
-      // Replay every missed event strictly in order (seq > parsed.seq)
+      // Replay every missed event strictly in order (seq > parsed.seq) ONLY if all match current revocation watermark!
       for (const ev of proj.events) {
         if (ev.seq > parsed.seq) {
+          if (ev.revocationWatermark !== postWatermark) {
+            this.#invalidateProjection(proj, "source_read_revoked");
+            return {
+              ok: false,
+              resyncReason: "source_read_revoked",
+              streamInstanceId: proj.streamInstanceId,
+              currentSeq: proj.seq,
+            };
+          }
           queue.push({
             event: ev.event,
             id: ev.cursor,
@@ -560,15 +662,19 @@ export class ConversationProjectionHub<TSnapshot extends Record<string, unknown>
       ok: true,
       subscriber: sub,
       unsubscribe: () => sub.close(),
+      revocationWatermark: postWatermark,
     };
   }
 
   #invalidateProjection(proj: ConversationProjection<TSnapshot>, reason: string): void {
     if (proj.invalidated) return;
     proj.invalidated = true;
+    proj.invalidationReason = reason;
+    proj.events.length = 0;
     proj.piAttach?.detach();
     proj.piAttach = null;
     for (const sub of [...proj.subscribers]) {
+      sub.queue.length = 0;
       sub.queue.push({
         event: "resync",
         data: JSON.stringify({

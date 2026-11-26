@@ -158,12 +158,28 @@ export function renderMinimalView1Html(): string {
       } catch {}
     }
 
-    function clearPendingChatFor(convId, epoch) {
-      state.pendingChat = { key: null, content: null, convId: null, epoch: null };
+    function clearPendingChatIfMatch(convId, epoch, expectedKey) {
+      if (
+        state.pendingChat.convId === convId &&
+        state.pendingChat.epoch === epoch &&
+        (!expectedKey || state.pendingChat.key === expectedKey)
+      ) {
+        state.pendingChat = { key: null, content: null, convId: null, epoch: null };
+      }
       if (!state.principalId || !epoch || !convId) return;
       try {
-        window.sessionStorage.removeItem(pendingChatStorageKey(state.principalId, epoch, convId));
+        const storageKey = pendingChatStorageKey(state.principalId, epoch, convId);
+        const raw = window.sessionStorage.getItem(storageKey);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!expectedKey || (parsed && parsed.key === expectedKey)) {
+          window.sessionStorage.removeItem(storageKey);
+        }
       } catch {}
+    }
+
+    function clearPendingChatFor(convId, epoch) {
+      clearPendingChatIfMatch(convId, epoch, null);
     }
 
     const AUTH_PANELS = [
@@ -253,8 +269,10 @@ export function renderMinimalView1Html(): string {
       }
     }
 
-    async function loadConversations() {
+    async function loadConversations(expectedGen) {
+      const myGen = typeof expectedGen === 'number' ? expectedGen : state.selectionGeneration;
       const r = await api('/api/conversations', { method: 'GET' });
+      if (myGen !== state.selectionGeneration) return;
       if (r.status === 401) {
         closeSse();
         clearAllSessionViews();
@@ -749,9 +767,22 @@ export function renderMinimalView1Html(): string {
     document.getElementById('new-conv-btn').addEventListener('click', async () => {
       const r = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ slotName: 'router' }) });
       if (r.ok) {
-        state.conversationId = String(r.body.conversationId);
-        state.runtimeEpoch = r.body.runtimeEpoch;
-        await loadConversations();
+        // W2-S4: Immediately close old SSE & clear old DOM cards BEFORE awaiting /api/conversations list!
+        const newCid = String(r.body.conversationId);
+        const newEpoch = r.body.runtimeEpoch;
+        const switchGen = ++state.selectionGeneration;
+        closeSse();
+        clearAllSessionViews();
+        state.conversationId = newCid;
+        state.runtimeEpoch = newEpoch;
+        state.streamInstanceId = null;
+        state.lastSeq = 0;
+        state.snapshot = null;
+        const restored = loadPendingChatFor(newCid, newEpoch);
+        state.pendingChat = restored;
+        document.getElementById('chat-input').value = (restored.key && restored.content) ? restored.content : '';
+        document.getElementById('chat-status').textContent = (state.chatStatusByConv && state.chatStatusByConv[newCid]) || '';
+        await loadConversations(switchGen);
       }
     });
 
@@ -769,38 +800,51 @@ export function renderMinimalView1Html(): string {
       const inputEl = document.getElementById('chat-input');
       const statusEl = document.getElementById('chat-status');
       const content = inputEl.value.trim();
-      const targetEpoch = state.runtimeEpoch || state.activeRuntimeEpoch;
-      if (!content || !state.conversationId || !targetEpoch) return;
+      const reqConvId = state.conversationId;
+      const reqEpoch = state.runtimeEpoch || state.activeRuntimeEpoch;
+      if (!content || !reqConvId || !reqEpoch) return;
       // W2-S4: Preserve same chatKey across retry, double-click, switch, AND browser reload for identical (principalId, epoch, convId, content)!
-      const stored = loadPendingChatFor(state.conversationId, targetEpoch);
+      const stored = loadPendingChatFor(reqConvId, reqEpoch);
       if (stored.key && stored.content === content) {
         state.pendingChat = stored;
       } else if (
         !state.pendingChat.key ||
         state.pendingChat.content !== content ||
-        state.pendingChat.convId !== state.conversationId ||
-        state.pendingChat.epoch !== targetEpoch
+        state.pendingChat.convId !== reqConvId ||
+        state.pendingChat.epoch !== reqEpoch
       ) {
         const freshKey = 'ui-chat-' + Date.now() + '-' + Math.random().toString(16).slice(2, 10);
-        savePendingChatFor(state.conversationId, targetEpoch, freshKey, content);
+        savePendingChatFor(reqConvId, reqEpoch, freshKey, content);
       }
-      const chatKey = state.pendingChat.key;
-      const r = await api('/api/conversations/' + encodeURIComponent(state.conversationId) + '/chat', {
+      const reqChatKey = state.pendingChat.key;
+      const r = await api('/api/conversations/' + encodeURIComponent(reqConvId) + '/chat', {
         method: 'POST',
         body: JSON.stringify({
           content,
-          chatKey,
-          runtimeEpoch: targetEpoch
+          chatKey: reqChatKey,
+          runtimeEpoch: reqEpoch
         })
       });
+      // W2-S4: Late receipt MUST only update original (reqConvId, reqEpoch, reqChatKey) and NEVER clobber a newly switched conversation!
+      if (!state.chatStatusByConv) state.chatStatusByConv = {};
       if (r.ok) {
-        statusEl.textContent = (r.body.uiStatusLabel || '已受理') + ' | chatKey=' + chatKey + ' | submissionId=' + (r.body.submissionId ?? '-');
+        const msg = (r.body.uiStatusLabel || '已受理') + ' | chatKey=' + reqChatKey + ' | submissionId=' + (r.body.submissionId ?? '-');
+        state.chatStatusByConv[reqConvId] = msg;
         if (r.body.status === 'ADMITTED') {
-          inputEl.value = '';
-          clearPendingChatFor(state.conversationId, targetEpoch);
+          clearPendingChatIfMatch(reqConvId, reqEpoch, reqChatKey);
+        }
+        if (state.conversationId === reqConvId && state.runtimeEpoch === reqEpoch) {
+          statusEl.textContent = msg;
+          if (r.body.status === 'ADMITTED' && inputEl.value.trim() === content) {
+            inputEl.value = '';
+          }
         }
       } else {
-        statusEl.textContent = '提交失败 (' + r.status + '): ' + (r.body.code || r.body.error || '');
+        const errMsg = '提交失败 (' + r.status + '): ' + (r.body.code || r.body.error || '');
+        state.chatStatusByConv[reqConvId] = errMsg;
+        if (state.conversationId === reqConvId && state.runtimeEpoch === reqEpoch) {
+          statusEl.textContent = errMsg;
+        }
       }
     });
 

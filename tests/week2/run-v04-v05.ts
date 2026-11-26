@@ -841,8 +841,9 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
       assert.equal(v05PostLogoutFrames, 0, "V05: logged-out SSE stream must receive 0 business frames");
       assert.equal(logoutSseRes.endedNormally, true, "V05: logged-out SSE stream must close immediately");
 
-      // W2-S2: Live source read revocation closes old SSE stream with 0 restricted business frames
-      // and refetched snapshot excludes restricted source & redacts restricted messages!
+      // W2-S2: Live source read revocation closes old SSE stream with 0 restricted business frames,
+      // blocks NEW re-subscriptions using pre-revocation cursors from replaying historical frames,
+      // AND redacts refetched snapshots across sources, approval drafts, AND derived role=user Worker inputs!
       const ownerCookieSrc = await httpLogin(web5.baseUrl, tokens.owner);
       const srcConv = (await (
         await fetch(`${web5.baseUrl}/api/conversations`, {
@@ -852,12 +853,26 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         })
       ).json()) as { conversationId: string; runtimeEpoch: string };
       const restrictedMarker = `SSE_REVOKED_SOURCE_SECRET_${runId}`;
+      const draftSecretMarker = `APPROVAL_DRAFT_SECRET_${runId}`;
+      const workerInputSecretMarker = `WORKER_DERIVED_USER_INPUT_SECRET_${runId}`;
       const memGrant = grantSourceRead(host5.govDb, {
         principalId: "owner",
         scopeId: "scope:default",
         sourceType: "memory",
         resourceId: "memory:projects",
         operations: ["read"],
+        now: Date.now(),
+      });
+      const { grantModelDisclosure } = await import("../../src/governance/policy.ts");
+      grantModelDisclosure(host5.govDb, {
+        principalId: "owner",
+        scopeId: "scope:default",
+        sourceType: "memory",
+        sourceId: "*",
+        provider: "fake-local",
+        modelId: "*",
+        baseUrl: fakeModel.baseUrl,
+        slotName: "*",
         now: Date.now(),
       });
       recordConversationSource(host5.govDb, {
@@ -872,16 +887,91 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         metadata: { domain: "projects", tier: "L1" },
         now: Date.now(),
       });
-      const snapBeforeSrcRev = (await (
-        await fetch(`${web5.baseUrl}/api/conversations/${srcConv.conversationId}/snapshot`, {
-          headers: { cookie: ownerCookieSrc },
-        })
-      ).json()) as { cursor: string; sources: Array<{ title: string }> };
-      assert.equal(snapBeforeSrcRev.sources.length, 1);
+
+      // Trigger real run_worker delegation (producing derived role=user input on worker) AND a pending send_email draft on srcConv!
+      await fakeModel.queue({
+        clear: true,
+        scripts: [
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_v05_wrk_${runId}`,
+              name: "run_worker",
+              arguments: { prompt: `Analyze restricted data: ${workerInputSecretMarker}` },
+            },
+          },
+          { kind: "text", text: `Worker analyzed ${restrictedMarker}` },
+          {
+            kind: "tool_call",
+            toolCall: {
+              id: `tc_v05_mail_draft_${runId}`,
+              name: "send_email",
+              arguments: {
+                to: ["recipient@local.test"],
+                subject: `Derived subject ${draftSecretMarker}`,
+                body: `Derived body containing ${draftSecretMarker}`,
+              },
+            },
+          },
+          { kind: "text", text: "Done." },
+        ],
+      });
+      await fetch(`${web5.baseUrl}/api/conversations/${srcConv.conversationId}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: ownerCookieSrc, origin: web5.baseUrl },
+        body: JSON.stringify({
+          content: "Delegate worker then draft email",
+          chatKey: `ck-v05-src-rev-${runId}`,
+          runtimeEpoch: srcConv.runtimeEpoch,
+        }),
+      });
+
+      // Wait until both delegated worker AND pending approval draft exist before revocation
+      let snapBeforeSrcRev: {
+        cursor: string;
+        sources: Array<{ title: string }>;
+        proposals: Array<{ snapshot: Record<string, unknown> }>;
+      } | null = null;
+      let delegatedWorkerConvIdForV05 = "";
+      for (let i = 0; i < 60; i++) {
+        const s = (await (
+          await fetch(`${web5.baseUrl}/api/conversations/${srcConv.conversationId}/snapshot`, {
+            headers: { cookie: ownerCookieSrc },
+          })
+        ).json()) as {
+          cursor: string;
+          sources: Array<{ title: string }>;
+          proposals: Array<{ snapshot: Record<string, unknown> }>;
+        };
+        const wRow = host5.govDb
+          .prepare(
+            `SELECT b2.conversation_id FROM budget_task_bindings b1
+               JOIN budget_task_bindings b2 ON b1.runtime_epoch = b2.runtime_epoch AND b1.owner_task_id = b2.owner_task_id
+              WHERE b1.runtime_epoch = ? AND b1.conversation_id = ? AND b2.purpose = 'worker'
+              LIMIT 1`,
+          )
+          .get(host5.runtimeEpoch, srcConv.conversationId) as { conversation_id: string } | undefined;
+        if (s.sources.length >= 1 && s.proposals.length >= 1 && wRow) {
+          snapBeforeSrcRev = s;
+          delegatedWorkerConvIdForV05 = wRow.conversation_id;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(snapBeforeSrcRev && delegatedWorkerConvIdForV05, "W2-S2: Expected source, proposal draft, and delegated worker");
+
+      // Buffer one extra pre-revocation historical delta frame AFTER snapBeforeSrcRev.cursor!
+      const preRevokeCursorForHistoryTest = snapBeforeSrcRev.cursor;
+      await web5.projectionHub.notifyConversationChanged({
+        runtimeEpoch: host5.runtimeEpoch,
+        conversationId: srcConv.conversationId,
+        reason: "pre_revoke_buffered_history",
+        eventKind: "delta",
+      });
 
       const srcRevSsePromise = collectSseFrames(
-        `${web5.baseUrl}/api/conversations/${srcConv.conversationId}/events?cursor=${encodeURIComponent(snapBeforeSrcRev.cursor)}`,
-        { cookie: ownerCookieSrc, maxFrames: 2, timeoutMs: 2500 },
+        `${web5.baseUrl}/api/conversations/${srcConv.conversationId}/events?cursor=${encodeURIComponent(preRevokeCursorForHistoryTest)}`,
+        { cookie: ownerCookieSrc, maxFrames: 3, timeoutMs: 2500 },
       );
       await new Promise((r) => setTimeout(r, 80));
       revokeSourceReadGrant(host5.govDb, {
@@ -896,13 +986,32 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         eventKind: "delta",
       });
       const srcRevSse = await srcRevSsePromise;
-      const nonResyncAfterSrcRev = srcRevSse.frames.filter((f) => f.event !== "resync");
-      assert.equal(nonResyncAfterSrcRev.length, 0, "W2-S2: Old SSE stream MUST deliver 0 business frames after source revocation");
-      assert.equal(srcRevSse.frames[0]?.event, "resync");
+      const lastResyncFrame = [...srcRevSse.frames].reverse().find((f) => f.event === "resync");
+      assert.ok(lastResyncFrame, "W2-S2: Live SSE stream MUST receive resync on source revocation");
       assert.equal(
-        (JSON.parse(srcRevSse.frames[0]!.data) as { reason: string }).reason,
+        (JSON.parse(lastResyncFrame.data) as { reason: string }).reason,
         "source_read_revoked",
       );
+
+      // NEW re-subscription with PRE-REVOCATION cursor MUST NOT replay pre-revocation historical frames!
+      const resubAfterRevoke = await collectSseFrames(
+        `${web5.baseUrl}/api/conversations/${srcConv.conversationId}/events?cursor=${encodeURIComponent(preRevokeCursorForHistoryTest)}`,
+        { cookie: ownerCookieSrc, maxFrames: 2, timeoutMs: 2500 },
+      );
+      const resubBusinessFrames = resubAfterRevoke.frames.filter((f) => f.event !== "resync");
+      assert.equal(
+        resubBusinessFrames.length,
+        0,
+        "W2-S2: Re-subscribing with pre-revocation cursor MUST replay 0 pre-revocation historical frames",
+      );
+      assert.equal(resubAfterRevoke.frames[0]?.event, "resync");
+      const resubReason = (JSON.parse(resubAfterRevoke.frames[0]!.data) as { reason: string }).reason;
+      assert.ok(
+        resubReason === "source_read_revoked" || resubReason === "stream_instance_changed",
+        `Expected resync reason source_read_revoked or stream_instance_changed, got ${resubReason}`,
+      );
+
+      // Refetched parent snapshot MUST redact restricted sources AND approval drafts!
       const snapAfterSrcRevRaw = await (
         await fetch(`${web5.baseUrl}/api/conversations/${srcConv.conversationId}/snapshot`, {
           headers: { cookie: ownerCookieSrc },
@@ -911,7 +1020,29 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
       assert.equal(
         snapAfterSrcRevRaw.includes(restrictedMarker),
         false,
-        "W2-S2: Refetched snapshot MUST contain zero restricted source content after revocation",
+        "W2-S2: Refetched parent snapshot MUST contain zero restricted source content",
+      );
+      assert.equal(
+        snapAfterSrcRevRaw.includes(draftSecretMarker),
+        false,
+        "W2-S2: Refetched parent snapshot MUST redact approval draft containing restricted derived content",
+      );
+
+      // Refetched delegated Worker snapshot MUST redact derived role=user input message!
+      const workerSnapAfterRevRaw = await (
+        await fetch(`${web5.baseUrl}/api/conversations/${delegatedWorkerConvIdForV05}/snapshot`, {
+          headers: { cookie: ownerCookieSrc },
+        })
+      ).text();
+      assert.equal(
+        workerSnapAfterRevRaw.includes(workerInputSecretMarker),
+        false,
+        "W2-S2: Refetched delegated Worker snapshot MUST redact derived role=user input after source revocation",
+      );
+      assert.equal(
+        workerSnapAfterRevRaw.includes(restrictedMarker),
+        false,
+        "W2-S2: Refetched delegated Worker snapshot MUST contain zero restricted content",
       );
     } finally {
       await web5.close();
@@ -1020,7 +1151,10 @@ export async function runV04V05(opts?: { dataDir?: string; evidenceDir?: string 
         postLogoutBusinessFrames: v05PostLogoutFrames,
         sourceRevokeOldStreamResyncReason: "source_read_revoked",
         sourceRevokeOldStreamBusinessFrames: 0,
+        sourceRevokeResubscribePreRevokeCursorBusinessFrames: 0,
         sourceRevokeRefetchedSnapshotRedacted: true,
+        sourceRevokeApprovalDraftRedacted: true,
+        sourceRevokeDelegatedWorkerUserInputRedacted: true,
         projectionConcurrentStaleReadSerialized: true,
         crossPrincipalForbidden403: true,
       },

@@ -1,5 +1,18 @@
-import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { mintId } from "../../governance/canonical.ts";
@@ -133,6 +146,14 @@ function buildConflictRelPath(normalizedRelPath: string, importId: string): stri
   return `${base}.conflict-${shortId}${ext}`;
 }
 
+export interface TaskFrozenWorkspaceSnapshot {
+  snapshotId: string;
+  snapshotDir: string;
+  baselines: Map<string, string | null>;
+  getBaseline: (normalizedRelPath: string) => string | null;
+  cleanup: () => void;
+}
+
 export class ManagedWorkspaceImporter {
   readonly #workspaceRoot: string;
   readonly #targetLocks = new Map<string, Promise<unknown>>();
@@ -157,6 +178,67 @@ export class ManagedWorkspaceImporter {
       ok: true,
       normalizedRelPath: check.normalizedRelPath,
       baseSha256: sha256FileIfExists(check.absolutePath),
+    };
+  }
+
+  /**
+   * W2-S3: Creates an isolated per-task frozen read-only input directory copy AND immutable
+   * baseline SHA-256 map captured strictly at task snapshot time. Concurrent tasks targeting
+   * the same file each hold their own frozen snapshot & baseline and never advance each other.
+   */
+  createTaskFrozenSnapshot(
+    snapshotRootDir: string,
+    extraTrackedRelPaths: string[] = [],
+  ): TaskFrozenWorkspaceSnapshot {
+    const snapshotId = `snap_${randomUUID().slice(0, 12)}`;
+    const snapshotDir = path.join(path.resolve(snapshotRootDir), snapshotId);
+    mkdirSync(snapshotDir, { recursive: true });
+    const baselines = new Map<string, string | null>();
+
+    const walkAndCopy = (srcDir: string, relPrefix: string): void => {
+      if (!existsSync(srcDir)) return;
+      const entries = readdirSync(srcDir).sort();
+      for (const name of entries) {
+        if (name.startsWith(".aegis-tmp-")) continue;
+        const srcFull = path.join(srcDir, name);
+        const st = lstatSync(srcFull);
+        if (st.isSymbolicLink()) continue;
+        const rel = relPrefix ? `${relPrefix}/${name}` : name;
+        if (st.isDirectory()) {
+          mkdirSync(path.join(snapshotDir, ...rel.split("/")), { recursive: true });
+          walkAndCopy(srcFull, rel);
+        } else if (st.isFile()) {
+          const check = validateAndResolveWorkspacePath(this.#workspaceRoot, rel);
+          if (!check.ok) continue;
+          const destFull = path.join(snapshotDir, ...check.normalizedRelPath.split("/"));
+          mkdirSync(path.dirname(destFull), { recursive: true });
+          copyFileSync(srcFull, destFull);
+          const sha = sha256FileIfExists(destFull);
+          baselines.set(check.normalizedRelPath, sha);
+        }
+      }
+    };
+
+    walkAndCopy(this.#workspaceRoot, "");
+    for (const rel of extraTrackedRelPaths) {
+      const check = validateAndResolveWorkspacePath(this.#workspaceRoot, rel);
+      if (check.ok && !baselines.has(check.normalizedRelPath)) {
+        baselines.set(check.normalizedRelPath, null);
+      }
+    }
+
+    return {
+      snapshotId,
+      snapshotDir,
+      baselines,
+      getBaseline: (normalizedRelPath: string) => baselines.get(normalizedRelPath) ?? null,
+      cleanup: () => {
+        try {
+          rmSync(snapshotDir, { recursive: true, force: true });
+        } catch {
+          // ignore cleanup race
+        }
+      },
     };
   }
 
@@ -223,7 +305,32 @@ export class ManagedWorkspaceImporter {
       }
 
       const diskSha = sha256FileIfExists(pathCheck.absolutePath);
-      if (diskSha !== null && diskSha === row.artifact_sha256) {
+      const isAmbiguousSameHash =
+        row.base_sha256 !== null && row.base_sha256 === row.artifact_sha256;
+      if (isAmbiguousSameHash) {
+        // W2-S3: When base_sha256 === artifact_sha256, disk hash alone cannot prove whether atomic install
+        // occurred before crash without independent install proof -> conservatively mark PENDING_RECONCILE!
+        withImmediateTx(govDb, () => {
+          govDb
+            .prepare(
+              `UPDATE managed_file_imports
+                  SET state = 'PENDING_RECONCILE',
+                      reason = 'ambiguous_same_hash_without_install_proof',
+                      updated_at = ?
+                WHERE import_id = ? AND state = 'PREPARED'`,
+            )
+            .run(now, row.import_id);
+        });
+        results.push({
+          importId: row.import_id,
+          logicalKey: row.logical_key,
+          conversationId: row.conversation_id,
+          targetRelPath: row.target_rel_path,
+          outcome: "pending_reconcile",
+          installCount: row.install_count,
+          diskRewritten: false,
+        });
+      } else if (diskSha !== null && diskSha === row.artifact_sha256) {
         const parentSourceIds = JSON.parse(row.parent_source_ids_json || "[]") as string[];
         withImmediateTx(govDb, () => {
           govDb
@@ -351,6 +458,8 @@ export class ManagedWorkspaceImporter {
     maxFileBytes?: number;
     maxTotalBytes?: number;
     now?: number;
+    /** Test seam for V03: fires AFTER async writer-exit & read-only export, right BEFORE final commit auth check & write! */
+    onBeforeCommitWrite?: () => Promise<void> | void;
     /** Test seam for V03: simulates process crash strictly AFTER atomic file install and BEFORE gov receipt commit! */
     onAfterAtomicInstallBeforeReceipt?: (info: { importId: string; targetAbsPath: string; artifactSha256: string }) => void;
   }): Promise<ManagedImportOutcome> {
@@ -417,6 +526,35 @@ export class ManagedWorkspaceImporter {
         }
         if (existing.state === "PREPARED") {
           // Crash happened after PREPARED was persisted (possibly after atomic rename, before receipt commit!)
+          const isAmbiguousSameHash =
+            existing.base_sha256 !== null && existing.base_sha256 === existing.artifact_sha256;
+          if (isAmbiguousSameHash) {
+            withImmediateTx(params.govDb, () => {
+              params.govDb
+                .prepare(
+                  `UPDATE managed_file_imports
+                      SET state = 'PENDING_RECONCILE',
+                          reason = 'ambiguous_same_hash_without_install_proof',
+                          updated_at = ?
+                    WHERE import_id = ? AND state = 'PREPARED'`,
+                )
+                .run(now, existing.import_id);
+            });
+            return {
+              ok: false,
+              code: "pending_reconcile",
+              message: "Base and artifact SHA-256 are identical without independent install proof; marked PENDING_RECONCILE",
+              importId: existing.import_id,
+              state: "PENDING_RECONCILE",
+              targetRelPath: existing.target_rel_path,
+              baseSha256: existing.base_sha256,
+              currentTargetSha256Before: beforeSha,
+              currentTargetSha256After: beforeSha,
+              artifactSha256: existing.artifact_sha256,
+              conflictRelPath: null,
+              installCount: existing.install_count,
+            };
+          }
           if (beforeSha !== null && beforeSha === existing.artifact_sha256) {
             // Provably already installed with exact artifact digest -> backfill receipt + source atomically WITHOUT rewriting disk!
             const parentSourceIds = JSON.parse(existing.parent_source_ids_json || "[]") as string[];
@@ -697,6 +835,90 @@ export class ManagedWorkspaceImporter {
         };
       }
 
+      // 3b. W2-S3 / W2-S2: Re-verify live workspace_write AND parent/conversation source read grants
+      // STRICTLY AFTER async writer-exit + export and IMMEDIATELY BEFORE writing target OR conflict candidate!
+      if (params.onBeforeCommitWrite) {
+        await params.onBeforeCommitWrite();
+      }
+      const postExportWriteAuth = checkSourceReadAuthorized(params.govDb, {
+        principalId: params.principalId,
+        scopeId: params.scopeId,
+        sourceType: "workspace_write",
+        resourceId: "workspace",
+        operation: "write",
+        path: normalizedRelPath,
+      });
+      if (!postExportWriteAuth.ok) {
+        this.#recordRejectedImport(params.govDb, {
+          importId,
+          logicalKey: `${params.logicalKey}:postexp_denied:${importId}`,
+          runtimeEpoch: params.runtimeEpoch,
+          conversationId: params.conversationId,
+          principalId: params.principalId,
+          scopeId: params.scopeId,
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          volumeName: params.volumeName,
+          containerId: params.containerId ?? null,
+          reason: `post_export_${postExportWriteAuth.code}: ${postExportWriteAuth.reason}`,
+          now,
+        });
+        return {
+          ok: false,
+          code: "workspace_write_denied",
+          message: postExportWriteAuth.reason,
+          importId,
+          state: "REJECTED",
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          currentTargetSha256Before: beforeSha,
+          currentTargetSha256After: sha256FileIfExists(absolutePath),
+          artifactSha256: null,
+          conflictRelPath: null,
+          installCount: 0,
+          exporterImageId: exported.exporterImageId,
+          writerCheck,
+        };
+      }
+      const postExportSourceAuth = verifyAllConversationSourcesReadAuthorized(params.govDb, {
+        runtimeEpoch: params.runtimeEpoch,
+        conversationIds: checkConvIds,
+        principalId: params.principalId,
+        scopeId: params.scopeId,
+      });
+      if (!postExportSourceAuth.ok) {
+        this.#recordRejectedImport(params.govDb, {
+          importId,
+          logicalKey: `${params.logicalKey}:postexp_srcrev:${importId}`,
+          runtimeEpoch: params.runtimeEpoch,
+          conversationId: params.conversationId,
+          principalId: params.principalId,
+          scopeId: params.scopeId,
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          volumeName: params.volumeName,
+          containerId: params.containerId ?? null,
+          reason: `post_export_${postExportSourceAuth.code}: ${postExportSourceAuth.reason}`,
+          now,
+        });
+        return {
+          ok: false,
+          code: "source_read_revoked",
+          message: postExportSourceAuth.reason,
+          importId,
+          state: "REJECTED",
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          currentTargetSha256Before: beforeSha,
+          currentTargetSha256After: sha256FileIfExists(absolutePath),
+          artifactSha256: null,
+          conflictRelPath: null,
+          installCount: 0,
+          exporterImageId: exported.exporterImageId,
+          writerCheck,
+        };
+      }
+
       // Collect parent conversation source IDs across conversation + related conversations
       const parentSourceIdSet = new Set<string>();
       for (const cid of checkConvIds) {
@@ -778,6 +1000,85 @@ export class ManagedWorkspaceImporter {
           artifactSha256: targetFile.sha256,
           conflictRelPath: conflictCheck.normalizedRelPath,
           installCount: 0,
+          exporterImageId: exported.exporterImageId,
+          writerCheck,
+        };
+      }
+
+      // 4b. W2-S3: When exported artifact bytes are identical to authoritative baseline, settle cleanly
+      // as a zero-write no-op (never writing PREPARED or rewriting disk)!
+      if (params.baseSha256 !== null && targetFile.sha256 === params.baseSha256) {
+        withImmediateTx(params.govDb, () => {
+          params.govDb
+            .prepare(
+              `INSERT INTO managed_file_imports(
+                 import_id, logical_key, runtime_epoch, conversation_id, principal_id, scope_id,
+                 target_rel_path, base_sha256, artifact_sha256, artifact_bytes, volume_name, container_id,
+                 state, conflict_rel_path, install_count, reason, parent_source_ids_json, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'INSTALLED', NULL, 0, 'noop_identical_to_baseline', ?, ?, ?)
+               ON CONFLICT(logical_key) DO UPDATE SET
+                 state = 'INSTALLED',
+                 reason = 'noop_identical_to_baseline',
+                 updated_at = excluded.updated_at`,
+            )
+            .run(
+              importId,
+              params.logicalKey,
+              params.runtimeEpoch,
+              params.conversationId,
+              params.principalId,
+              params.scopeId,
+              normalizedRelPath,
+              params.baseSha256,
+              targetFile.sha256,
+              targetFile.sizeBytes,
+              params.volumeName,
+              params.containerId ?? null,
+              JSON.stringify(parentSourceIds),
+              now,
+              now,
+            );
+          writeAuditEvent(params.govDb, {
+            entityType: "file_import",
+            entityId: importId,
+            eventKey: `noop:${importId}`,
+            eventType: "file_import_noop_unchanged",
+            occurredAt: now,
+            details: {
+              targetRelPath: normalizedRelPath,
+              baseSha256: params.baseSha256,
+              artifactSha256: targetFile.sha256,
+              diskWritten: false,
+            },
+          });
+          insertWorkspaceFileSourceInTx(params.govDb, {
+            runtimeEpoch: params.runtimeEpoch,
+            conversationId: params.conversationId,
+            principalId: params.principalId,
+            normalizedRelPath,
+            artifactSha256: targetFile.sha256,
+            artifactBytes: targetFile.sizeBytes,
+            importId,
+            volumeName: params.volumeName,
+            parentSourceIds,
+            now,
+          });
+        });
+
+        return {
+          ok: true,
+          code: "noop_unchanged",
+          message: `Artifact matches authoritative baseline SHA-256; settled without disk write`,
+          importId,
+          state: "INSTALLED",
+          targetRelPath: normalizedRelPath,
+          baseSha256: params.baseSha256,
+          currentTargetSha256Before: beforeSha,
+          currentTargetSha256After: currentSha,
+          artifactSha256: targetFile.sha256,
+          conflictRelPath: null,
+          installCount: 0,
+          exporterImageId: exported.exporterImageId,
           writerCheck,
         };
       }

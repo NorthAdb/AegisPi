@@ -174,6 +174,62 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     }
 
     const now = nowFn();
+    const boundTask = config.host.getConversationBudgetTaskId(convIdStr, targetEpoch);
+    const relatedConvIds = new Set<string>([convIdStr]);
+    if (boundTask) {
+      const boundRows = config.host.govDb
+        .prepare(
+          `SELECT DISTINCT conversation_id FROM budget_task_bindings
+            WHERE runtime_epoch = ? AND owner_task_id = ?`,
+        )
+        .all(targetEpoch, boundTask) as Array<{ conversation_id: string }>;
+      for (const br of boundRows) relatedConvIds.add(br.conversation_id);
+    }
+
+    const isWorkerConversation = Boolean(
+      config.host.govDb
+        .prepare(
+          `SELECT 1 AS ok FROM budget_task_bindings
+            WHERE runtime_epoch = ? AND binding_kind = 'CONVERSATION' AND binding_key = ? AND purpose = 'worker'`,
+        )
+        .get(targetEpoch, convIdStr),
+    );
+
+    // W2-S2: Re-verify live source_read_grants for every recorded source across this conversation AND related
+    // parent/worker conversations (plus recursive parents) BEFORE projecting proposals, messages, drafts, or livePartial!
+    const rawSources = listConversationSources(config.host.govDb, targetEpoch, convIdStr);
+    const authorizedSources: typeof rawSources = [];
+    let revokedSourceCount = 0;
+    const checkedSourceIds = new Set<string>();
+    for (const s of rawSources) {
+      checkedSourceIds.add(s.record_id);
+      const stillOk = checkRecordedSourceReadStillAuthorized(config.host.govDb, {
+        principalId,
+        scopeId: convScope.scope_id,
+        source: s,
+      });
+      if (stillOk.ok) {
+        authorizedSources.push(s);
+      } else {
+        revokedSourceCount++;
+      }
+    }
+    for (const relCid of relatedConvIds) {
+      if (relCid === convIdStr) continue;
+      for (const rs of listConversationSources(config.host.govDb, targetEpoch, relCid)) {
+        if (checkedSourceIds.has(rs.record_id)) continue;
+        checkedSourceIds.add(rs.record_id);
+        const stillOk = checkRecordedSourceReadStillAuthorized(config.host.govDb, {
+          principalId,
+          scopeId: convScope.scope_id,
+          source: rs,
+        });
+        if (!stillOk.ok) {
+          revokedSourceCount++;
+        }
+      }
+    }
+
     const proposalRows = config.host.govDb
       .prepare(
         `SELECT * FROM proposals
@@ -202,6 +258,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         .prepare("SELECT * FROM effects WHERE approval_id = ?")
         .get(apr.approval_id) as EffectRow | undefined;
 
+      const safeDraftSnapshot =
+        revokedSourceCount > 0
+          ? { redacted: true, reason: "redacted_after_source_revocation" }
+          : (JSON.parse(draft.canonical_snapshot) as Record<string, unknown>);
+
       return {
         proposalId: p.proposal_id,
         runtimeEpoch: p.runtime_epoch,
@@ -209,10 +270,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         toolTaskId: p.tool_task_id,
         callId: p.call_id,
         toolName: p.tool_name,
-        target: p.target,
+        target: revokedSourceCount > 0 ? "[redacted_after_source_revocation]" : p.target,
         revision: p.head_rev,
         actionHash: draft.action_hash,
-        snapshot: JSON.parse(draft.canonical_snapshot) as Record<string, unknown>,
+        snapshot: safeDraftSnapshot,
+        draftRedacted: revokedSourceCount > 0,
         approvalId: apr.approval_id,
         approvalState: effectiveApprovalState,
         expiresAt: apr.expires_at,
@@ -241,13 +303,15 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       submissionId: c.submission_id,
       status: c.status,
       reason: c.reason,
-      contentPreview: c.content_preview,
+      contentPreview:
+        revokedSourceCount > 0 && isWorkerConversation
+          ? "[restricted_content_redacted_after_source_revocation]"
+          : c.content_preview,
       uiStatusLabel: chatCommandUiStatusLabel(c.status),
       createdAt: c.created_at,
       updatedAt: c.updated_at,
     }));
 
-    const boundTask = config.host.getConversationBudgetTaskId(convIdStr, targetEpoch);
     const reservations = (
       boundTask
         ? config.host.govDb
@@ -265,17 +329,6 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
             )
             .all(targetEpoch, convIdStr)
     ) as unknown as BudgetReservationRow[];
-
-    const relatedConvIds = new Set<string>([convIdStr]);
-    if (boundTask) {
-      const boundRows = config.host.govDb
-        .prepare(
-          `SELECT DISTINCT conversation_id FROM budget_task_bindings
-            WHERE runtime_epoch = ? AND owner_task_id = ?`,
-        )
-        .all(targetEpoch, boundTask) as Array<{ conversation_id: string }>;
-      for (const br of boundRows) relatedConvIds.add(br.conversation_id);
-    }
 
     const visibleAccountIds = new Set<string>();
     if (boundTask) visibleAccountIds.add(`acct:task:${boundTask}`);
@@ -296,24 +349,6 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       ? await config.host.readConversationLiveState(convIdStr)
       : { messages: [], livePartial: null, activeTools: [], workerTasks: [] };
 
-    // W2-S2: Re-verify live source_read_grants for every recorded source (and recursive parents)
-    // before projecting into snapshots or SSE frames! Redact messages & livePartial if any attached source was revoked.
-    const rawSources = listConversationSources(config.host.govDb, targetEpoch, convIdStr);
-    const authorizedSources: typeof rawSources = [];
-    let revokedSourceCount = 0;
-    for (const s of rawSources) {
-      const stillOk = checkRecordedSourceReadStillAuthorized(config.host.govDb, {
-        principalId,
-        scopeId: convScope.scope_id,
-        source: s,
-      });
-      if (stillOk.ok) {
-        authorizedSources.push(s);
-      } else {
-        revokedSourceCount++;
-      }
-    }
-
     const sources = authorizedSources.map((s) => ({
       recordId: s.record_id,
       sourceType: s.source_type,
@@ -326,10 +361,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       createdAt: s.created_at,
     }));
 
+    // W2-S2: Redact assistant/tool outputs AND derived role=user inputs on delegated Worker conversations!
     const safeMessages =
       revokedSourceCount > 0
         ? live.messages.map((m) =>
-            m.role === "user"
+            m.role === "user" && !isWorkerConversation
               ? m
               : {
                   ...m,
@@ -392,6 +428,13 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
 
   const projectionHub = new ConversationProjectionHub<Record<string, unknown>>({
     buildSnapshot: buildAuthoritativeSnapshot,
+    getRevocationWatermark: ({ principalId, runtimeEpoch, conversationId }) => {
+      const convScopeRow = config.host.govDb
+        .prepare("SELECT scope_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
+        .get(runtimeEpoch, conversationId) as { scope_id: string } | undefined;
+      const scopeId = convScopeRow?.scope_id ?? "scope:default";
+      return getSourceReadRevocationWatermark(config.host.govDb, principalId, scopeId);
+    },
     attachPiObserver: async ({ runtimeEpoch, conversationId, onUpdate, onEnd }) => {
       // Only attach live Pi observer for the active epoch
       if (runtimeEpoch !== config.host.runtimeEpoch) {
@@ -919,16 +962,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       });
     }
 
-    const { subscriber, unsubscribe } = subRes;
+    const { subscriber, unsubscribe, revocationWatermark: initialSourceRevokeWatermark } = subRes;
     const convScopeRow = config.host.govDb
       .prepare("SELECT scope_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
       .get(targetEpoch, convIdStr) as { scope_id: string } | undefined;
     const streamScopeId = convScopeRow?.scope_id ?? "scope:default";
-    const initialSourceRevokeWatermark = getSourceReadRevocationWatermark(
-      config.host.govDb,
-      session.principalId,
-      streamScopeId,
-    );
 
     const isSessionAndAclStillValid = (): boolean => {
       const stillValid = config.host.govDb

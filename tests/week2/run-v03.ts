@@ -638,6 +638,272 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
     assert.equal(sha256FileIfExists(path.join(workspaceRoot, "reports", "weekly.md")), userEditedSha);
 
     // =========================================================================
+    // 4b. W2-S3 Round 3 Hardening Checks:
+    //     (a) Overlapping same-path tasks with isolated per-task frozen input snapshots & baselines
+    //     (b) Revocation DURING async export window (onBeforeCommitWrite) -> 0 bytes written to target OR conflict
+    //     (c) baseSha256 === artifactSha256: both no-op short-circuit AND ambiguous PREPARED startup recovery!
+    // =========================================================================
+    const overlapGrant = grantSourceRead(govDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "workspace_write",
+      resourceId: "workspace",
+      operations: ["write"],
+      constraints: { allowedRelPaths: ["reports/overlap.md", "reports/mid-revoke.md", "reports/same-hash.md"] },
+      now: now + 100,
+    });
+    const overlapPath = path.join(workspaceRoot, "reports", "overlap.md");
+    const overlapV0 = "OVERLAP_V0_INITIAL\n";
+    writeFileSync(overlapPath, overlapV0, "utf8");
+    const overlapV0Sha = sha256Text(overlapV0);
+
+    // Freeze TWO independent per-task snapshots while overlap.md == V0!
+    const snapRoot = path.join(rootDir, "per-task-snaps");
+    const taskSnapA = importer.createTaskFrozenSnapshot(snapRoot, ["reports/overlap.md"]);
+    const taskSnapB = importer.createTaskFrozenSnapshot(snapRoot, ["reports/overlap.md"]);
+    assert.notEqual(taskSnapA.snapshotDir, taskSnapB.snapshotDir, "W2-S3: Concurrent tasks MUST NOT share one input snapshot directory");
+    assert.equal(taskSnapA.getBaseline("reports/overlap.md"), overlapV0Sha);
+    assert.equal(taskSnapB.getBaseline("reports/overlap.md"), overlapV0Sha);
+
+    const overlapV1 = `OVERLAP_TASK_A_V1_${runId}\n`;
+    const overlapV1Sha = sha256Text(overlapV1);
+    const runOverlapA = runTaskInDockerSandbox({
+      approvedImageId,
+      inputSnapshotDir: taskSnapA.snapshotDir,
+      nodeScript: `const fs=require('fs');fs.mkdirSync('/out/reports',{recursive:true});fs.writeFileSync('/out/reports/overlap.md',${JSON.stringify(overlapV1)},'utf8');`,
+    });
+    volumesToClean.push(runOverlapA.volumeName);
+    containersToClean.push(runOverlapA.containerName);
+    assert.equal(runOverlapA.ok, true);
+
+    const overlapV2 = `OVERLAP_TASK_B_V2_${runId}\n`;
+    const runOverlapB = runTaskInDockerSandbox({
+      approvedImageId,
+      inputSnapshotDir: taskSnapB.snapshotDir,
+      nodeScript: `const fs=require('fs');fs.mkdirSync('/out/reports',{recursive:true});fs.writeFileSync('/out/reports/overlap.md',${JSON.stringify(overlapV2)},'utf8');`,
+    });
+    volumesToClean.push(runOverlapB.volumeName);
+    containersToClean.push(runOverlapB.containerName);
+    assert.equal(runOverlapB.ok, true);
+
+    // Task A installs V1 cleanly against Task A's frozen V0 baseline (using fresh conversation without revoked weekly.md source)
+    const impOverlapA = await importer.importFileFromTaskVolume({
+      govDb,
+      runtimeEpoch: epoch.runtime_epoch,
+      conversationId: "overlap-conv-a",
+      principalId: "owner",
+      scopeId: "scope:default",
+      logicalKey: `imp-overlap-a-${runId}`,
+      volumeName: runOverlapA.volumeName,
+      approvedImageId,
+      targetRelPath: "reports/overlap.md",
+      baseSha256: taskSnapA.getBaseline("reports/overlap.md"),
+      now: now + 101,
+    });
+    assert.equal(impOverlapA.ok, true);
+    assert.equal(impOverlapA.state, "INSTALLED");
+    assert.equal(sha256FileIfExists(overlapPath), overlapV1Sha);
+
+    // Task B STILL holds its own frozen V0 baseline (NOT advanced by Task A!) -> detects conflict and preserves BOTH!
+    assert.equal(taskSnapB.getBaseline("reports/overlap.md"), overlapV0Sha);
+    const impOverlapB = await importer.importFileFromTaskVolume({
+      govDb,
+      runtimeEpoch: epoch.runtime_epoch,
+      conversationId: "overlap-conv-b",
+      principalId: "owner",
+      scopeId: "scope:default",
+      logicalKey: `imp-overlap-b-${runId}`,
+      volumeName: runOverlapB.volumeName,
+      approvedImageId,
+      targetRelPath: "reports/overlap.md",
+      baseSha256: taskSnapB.getBaseline("reports/overlap.md"),
+      now: now + 102,
+    });
+    assert.equal(impOverlapB.ok, false);
+    assert.equal(impOverlapB.state, "CONFLICT_SAVED");
+    assert.ok(impOverlapB.conflictRelPath);
+    assert.equal(sha256FileIfExists(overlapPath), overlapV1Sha, "W2-S3: Overlapping Task B MUST preserve Task A's installed version");
+    taskSnapA.cleanup();
+    taskSnapB.cleanup();
+
+    // (b) Revocation DURING async export window (right before install/conflict write):
+    //     Verify BOTH target bytes AND conflict candidate count stay strictly unchanged!
+    const midRevPath = path.join(workspaceRoot, "reports", "mid-revoke.md");
+    const midRevOrig = "MID_EXPORT_REVOKE_ORIGINAL\n";
+    writeFileSync(midRevPath, midRevOrig, "utf8");
+    const midRevOrigSha = sha256Text(midRevOrig);
+    const midRevSrcGrant = grantSourceRead(govDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "memory",
+      resourceId: "memory:mid-export-domain",
+      operations: ["read"],
+      now: now + 103,
+    });
+    recordConversationSource(govDb, {
+      runtimeEpoch: epoch.runtime_epoch,
+      conversationId: "mid-rev-conv",
+      principalId: "owner",
+      sourceType: "memory",
+      sourceId: "memory:mid-note",
+      versionRef: "v1",
+      title: "Mid-export source",
+      contentDigest: "c".repeat(64),
+      metadata: { domain: "mid-export-domain", tier: "L1" },
+      now: now + 103,
+    });
+    const runMidRev = runTaskInDockerSandbox({
+      approvedImageId,
+      inputSnapshotDir: inputSnapDir,
+      nodeScript: `const fs=require('fs');fs.mkdirSync('/out/reports',{recursive:true});fs.writeFileSync('/out/reports/mid-revoke.md','SHOULD_NOT_WRITE_AFTER_MID_EXPORT_REVOKE\\n','utf8');`,
+    });
+    volumesToClean.push(runMidRev.volumeName);
+    containersToClean.push(runMidRev.containerName);
+    assert.equal(runMidRev.ok, true);
+    const reportsFilesBeforeMidRev = readdirSync(path.join(workspaceRoot, "reports")).length;
+    const impMidRev = await importer.importFileFromTaskVolume({
+      govDb,
+      runtimeEpoch: epoch.runtime_epoch,
+      conversationId: "mid-rev-conv",
+      principalId: "owner",
+      scopeId: "scope:default",
+      logicalKey: `imp-mid-rev-${runId}`,
+      volumeName: runMidRev.volumeName,
+      approvedImageId,
+      targetRelPath: "reports/mid-revoke.md",
+      // Even with a differing baseSha256 (which would normally trigger conflict candidate write!), MUST write 0 bytes!
+      baseSha256: "0".repeat(64),
+      now: now + 104,
+      onBeforeCommitWrite: () => {
+        revokeSourceReadGrant(govDb, {
+          grantId: midRevSrcGrant.grant_id,
+          reason: "w2_s3_revoke_during_export",
+          now: now + 104,
+        });
+      },
+    });
+    assert.equal(impMidRev.ok, false);
+    assert.equal(impMidRev.code, "source_read_revoked");
+    assert.equal(sha256FileIfExists(midRevPath), midRevOrigSha, "W2-S3: Target bytes MUST NOT change on mid-export source revocation");
+    assert.equal(
+      readdirSync(path.join(workspaceRoot, "reports")).length,
+      reportsFilesBeforeMidRev,
+      "W2-S3: Conflict candidate MUST NOT be written on mid-export source revocation",
+    );
+
+    // Also test workspace_write grant revoked during async export!
+    const runMidWriteRev = runTaskInDockerSandbox({
+      approvedImageId,
+      inputSnapshotDir: inputSnapDir,
+      nodeScript: `const fs=require('fs');fs.mkdirSync('/out/reports',{recursive:true});fs.writeFileSync('/out/reports/mid-revoke.md','SHOULD_NOT_WRITE_AFTER_WRITE_REVOKE\\n','utf8');`,
+    });
+    volumesToClean.push(runMidWriteRev.volumeName);
+    containersToClean.push(runMidWriteRev.containerName);
+    assert.equal(runMidWriteRev.ok, true);
+    const impMidWriteRev = await importer.importFileFromTaskVolume({
+      govDb,
+      runtimeEpoch: epoch.runtime_epoch,
+      conversationId: "mid-write-rev-conv",
+      principalId: "owner",
+      scopeId: "scope:default",
+      logicalKey: `imp-mid-write-rev-${runId}`,
+      volumeName: runMidWriteRev.volumeName,
+      approvedImageId,
+      targetRelPath: "reports/mid-revoke.md",
+      baseSha256: midRevOrigSha,
+      now: now + 105,
+      onBeforeCommitWrite: () => {
+        revokeSourceReadGrant(govDb, {
+          grantId: overlapGrant.grant_id,
+          reason: "w2_s3_revoke_write_during_export",
+          now: now + 105,
+        });
+      },
+    });
+    assert.equal(impMidWriteRev.ok, false);
+    assert.equal(impMidWriteRev.code, "workspace_write_denied");
+    assert.equal(sha256FileIfExists(midRevPath), midRevOrigSha);
+    assert.equal(readdirSync(path.join(workspaceRoot, "reports")).length, reportsFilesBeforeMidRev);
+
+    // (c) baseSha256 === artifactSha256:
+    //     (i) Normal path short-circuits cleanly to noop_unchanged (installCount=0, no disk rewrite)
+    //     (ii) Crash recovery on PREPARED row with base_sha256 === artifact_sha256 -> PENDING_RECONCILE (ambiguous_same_hash_without_install_proof)!
+    grantSourceRead(govDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "workspace_write",
+      resourceId: "workspace",
+      operations: ["write"],
+      constraints: { allowedRelPaths: ["reports/same-hash.md"] },
+      now: now + 106,
+    });
+    const sameHashPath = path.join(workspaceRoot, "reports", "same-hash.md");
+    const sameHashText = "IDENTICAL_BASELINE_AND_ARTIFACT\n";
+    writeFileSync(sameHashPath, sameHashText, "utf8");
+    const sameHashSha = sha256Text(sameHashText);
+    const sameHashMtimeBefore = statSync(sameHashPath).mtimeMs;
+    const runSameHash = runTaskInDockerSandbox({
+      approvedImageId,
+      inputSnapshotDir: inputSnapDir,
+      nodeScript: `const fs=require('fs');fs.mkdirSync('/out/reports',{recursive:true});fs.writeFileSync('/out/reports/same-hash.md',${JSON.stringify(sameHashText)},'utf8');`,
+    });
+    volumesToClean.push(runSameHash.volumeName);
+    containersToClean.push(runSameHash.containerName);
+    assert.equal(runSameHash.ok, true);
+    const impSameHashNoop = await importer.importFileFromTaskVolume({
+      govDb,
+      runtimeEpoch: epoch.runtime_epoch,
+      conversationId: "same-hash-conv",
+      principalId: "owner",
+      scopeId: "scope:default",
+      logicalKey: `imp-same-hash-noop-${runId}`,
+      volumeName: runSameHash.volumeName,
+      approvedImageId,
+      targetRelPath: "reports/same-hash.md",
+      baseSha256: sameHashSha,
+      now: now + 107,
+    });
+    assert.equal(impSameHashNoop.ok, true);
+    assert.equal(impSameHashNoop.code, "noop_unchanged");
+    assert.equal(impSameHashNoop.installCount, 0);
+    assert.equal(statSync(sameHashPath).mtimeMs, sameHashMtimeBefore, "W2-S3: Same-hash no-op MUST NOT touch disk");
+
+    // Seed an ambiguous PREPARED row where base_sha256 === artifact_sha256 and run startup reconciliation!
+    const ambigKey = `imp-same-hash-ambig-${runId}`;
+    govDb
+      .prepare(
+        `INSERT INTO managed_file_imports(
+           import_id, logical_key, runtime_epoch, conversation_id, principal_id, scope_id,
+           target_rel_path, base_sha256, artifact_sha256, artifact_bytes, volume_name, container_id,
+           state, conflict_rel_path, install_count, reason, parent_source_ids_json, created_at, updated_at
+         ) VALUES (?, ?, ?, '1', 'owner', 'scope:default', 'reports/same-hash.md', ?, ?, ?, 'vol-ambig', NULL,
+                   'PREPARED', NULL, 0, NULL, '[]', ?, ?)`,
+      )
+      .run(
+        `imp_ambig_${runId}`,
+        ambigKey,
+        epoch.runtime_epoch,
+        sameHashSha,
+        sameHashSha,
+        Buffer.byteLength(sameHashText),
+        now + 108,
+        now + 108,
+      );
+    const ambigRec = importer.reconcilePendingImportsOnStartup(govDb, epoch.runtime_epoch, now + 109);
+    const ambigItem = ambigRec.find((r) => r.logicalKey === ambigKey);
+    assert.ok(ambigItem);
+    assert.equal(
+      ambigItem.outcome,
+      "pending_reconcile",
+      "W2-S3: PREPARED row with base_sha256 === artifact_sha256 MUST reconcile conservatively to pending_reconcile",
+    );
+    const ambigDbRow = govDb
+      .prepare("SELECT state, reason FROM managed_file_imports WHERE logical_key = ?")
+      .get(ambigKey) as { state: string; reason: string };
+    assert.equal(ambigDbRow.state, "PENDING_RECONCILE");
+    assert.equal(ambigDbRow.reason, "ambiguous_same_hash_without_install_proof");
+
+    // =========================================================================
     // 5. W2-S3: REAL FORMAL HOST (src/index.ts) Crash AFTER Atomic Install & BEFORE Gov Receipt
     //    + Real Windows Stop-Process -Force + Normal Startup Step 5c Recovery
     //    + Host Baseline Snapshot Ignores Model-Spoofed baseSha256!
@@ -830,9 +1096,51 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         assert.ok(srcSnap, "Reconciled workspace_file source MUST appear in original conversation snapshot");
         assert.equal(srcSnap.contentDigest, formalCrashSha);
 
-        // Now prove host ignores model-spoofed baseSha256 when user modified spoof-check.md AFTER host startup snapshot!
+        // Now prove formal host's per-task frozen snapshot ignores model-spoofed baseSha256!
+        // Step 1 on conv1 writes reports/crash-test-step2.md -> freezes conv1's per-task snapshot while spoof-check.md is still V1!
+        // Step 2: user edits spoof-check.md on disk to V2 AFTER conv1's snapshot was frozen.
+        // Step 3: model tries to write spoof-check.md while spoofing baseSha256 = V2 -> host compares against conv1's frozen V1 -> CONFLICT_SAVED!
         const userModifiedSpoof = "USER_MODIFIED_AFTER_HOST_SNAPSHOT\n";
         const userModifiedSpoofSha = sha256Text(userModifiedSpoof);
+
+        await fakeModel.queue({
+          clear: true,
+          scripts: [
+            {
+              kind: "tool_call",
+              toolCall: {
+                id: `tc_v03_freeze_${runId}`,
+                name: "workspace_write_managed",
+                arguments: {
+                  relPath: "reports/crash-test.md",
+                  content: `CONV1_FREEZE_TRIGGER_${runId}\n`,
+                },
+              },
+            },
+            { kind: "text", text: "Task snapshot frozen." },
+          ],
+        });
+        await fetch(`${hostCrash2.baseUrl}/api/conversations/${conv1.conversationId}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: cookie2, origin: hostCrash2.baseUrl },
+          body: JSON.stringify({
+            content: "Freeze per-task snapshot before user edits spoof-check.md",
+            chatKey: `v03-formal-freeze-${runId}`,
+            runtimeEpoch: hostCrash2.runtimeEpoch,
+          }),
+        });
+        const freezeDeadline = Date.now() + 20_000;
+        while (Date.now() < freezeDeadline) {
+          const sp = (await (
+            await fetch(`${hostCrash2.baseUrl}/api/conversations/${conv1.conversationId}/snapshot`, {
+              headers: { cookie: cookie2 },
+            })
+          ).json()) as { fileImports: Array<{ targetRelPath: string; artifactSha256: string }> };
+          if (sp.fileImports.some((f) => f.artifactSha256 === sha256Text(`CONV1_FREEZE_TRIGGER_${runId}\n`))) break;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+
+        // Now user edits spoof-check.md AFTER conv1 froze its per-task snapshot (which holds V1)!
         writeFileSync(path.join(formalWorkspace, "reports", "spoof-check.md"), userModifiedSpoof, "utf8");
 
         await fakeModel.queue({
@@ -937,6 +1245,17 @@ export async function runV03(opts?: { dataDir?: string; evidenceDir?: string }) 
         traversal: { code: travRej.code },
         windowsDevice: { code: devRej.code },
         revokedGrant: { code: revokedWrite.code, targetUnchanged: true },
+      },
+      perTaskAndMidExportHardening: {
+        overlappingSamePathTasksConflictSaved: true,
+        overlappingConflictRelPath: impOverlapB.conflictRelPath,
+        midExportSourceRevokedCode: impMidRev.code,
+        midExportSourceRevokedTargetAndConflictUnchanged: true,
+        midExportWriteRevokedCode: impMidWriteRev.code,
+        sameHashNoopCode: impSameHashNoop.code,
+        sameHashNoopInstallCount: impSameHashNoop.installCount,
+        sameHashPreparedStartupReconcileOutcome: ambigItem.outcome,
+        sameHashPreparedStartupReconcileReason: ambigDbRow.reason,
       },
       formalHostReceiptLossAndBaseline: {
         killedFormalHostPid: formalHostKillPid,

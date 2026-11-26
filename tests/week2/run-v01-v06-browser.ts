@@ -59,6 +59,7 @@ async function spawnFormalHost(opts: {
   connectorsConfigPath?: string;
   approvalTtlMs?: number;
   env?: Record<string, string>;
+  extraArgs?: string[];
 }): Promise<SpawnedFormalHost> {
   const args = [
     path.resolve("src/index.ts"),
@@ -76,6 +77,7 @@ async function spawnFormalHost(opts: {
     opts.consoleToken,
     ...(opts.connectorsConfigPath ? ["--connectors-config", opts.connectorsConfigPath] : []),
     ...(opts.approvalTtlMs !== undefined ? ["--approval-ttl-ms", String(opts.approvalTtlMs)] : []),
+    ...(opts.extraArgs ?? []),
   ];
   const child = spawn(LOCKED_NODE_EXE, args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -643,7 +645,77 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
     );
     assert.equal(retryAdmitted, true, "W2-S4: Retrying after page reload MUST reuse exact persisted chatKey");
 
-    // 3b. Unified SSE sequence continuity check in browser: duplicate delta, duplicate partial, gapped partial, first-frame gap, and real disconnect/reconnect!
+    // 3b. W2-S4: Late chat POST receipt across session switch MUST NOT clobber the newly switched session's input or pending key,
+    //     AND clicking new-conv-btn on a populated session (with V01 source/file cards) MUST clear old cards immediately!
+    await fakeModel.queue({ clear: true, scripts: [{ kind: "text", text: "LATE_RECEIPT_CONVA_REPLY" }] });
+    const lateReceiptCheck = await cdp.evalJs<{
+      oldCardsImmediatelyAfterNewConvClick: number;
+      convBInputPreserved: boolean;
+      convAPendingKeyCleared: boolean;
+      convASingleSubmission: boolean;
+    }>(`(async () => {
+      const s = window.__aegisView1State;
+      const origFetch = window.fetch.bind(window);
+      const convA = s.conversationId;
+      const epochA = s.runtimeEpoch;
+      let releaseChatResp;
+      const chatGate = new Promise(r => { releaseChatResp = r; });
+
+      // Delay ONLY the POST /chat response for convA so we can switch to a new conversation while it is in flight!
+      window.fetch = async (url, opts) => {
+        const res = await origFetch(url, opts);
+        if (typeof url === 'string' && url.includes('/api/conversations/' + encodeURIComponent(convA) + '/chat')) {
+          await chatGate;
+        }
+        return res;
+      };
+
+      try {
+        document.getElementById('chat-input').value = 'Late receipt prompt on Conv A';
+        document.getElementById('chat-send-btn').click();
+        await new Promise(r => setTimeout(r, 80));
+        const convAStorageKey = 'aegispi:pendingChat:' + s.principalId + ':' + epochA + ':' + convA;
+        const convAPendingBefore = window.sessionStorage.getItem(convAStorageKey);
+
+        // Immediately create/switch to a brand new conversation B BEFORE Conv A's POST /chat resolves!
+        document.getElementById('new-conv-btn').click();
+        for (let i = 0; i < 40; i++) {
+          if (s.conversationId && String(s.conversationId) !== String(convA)) break;
+          await new Promise(r => setTimeout(r, 20));
+        }
+        const oldCardsImmediatelyAfterNewConvClick = document.querySelectorAll('#sources-list details, #files-list [data-import-path]').length;
+        // Wait for Conv B snapshot/SSE sync before typing draft so selectAndSubscribe finishes cleanly
+        for (let i = 0; i < 40; i++) {
+          if (s.snapshot && String(s.snapshot.conversationId) === String(s.conversationId)) break;
+          await new Promise(r => setTimeout(r, 30));
+        }
+        const convBDraft = 'CONV_B_DRAFT_MUST_NOT_BE_CLOBBERED';
+        document.getElementById('chat-input').value = convBDraft;
+
+        // Now release Conv A's delayed ADMITTED receipt!
+        releaseChatResp();
+        await new Promise(r => setTimeout(r, 250));
+
+        const convBInputPreserved = document.getElementById('chat-input').value === convBDraft;
+        const convAPendingAfter = window.sessionStorage.getItem(convAStorageKey);
+        const snapA = await (await origFetch('/api/conversations/' + encodeURIComponent(convA) + '/snapshot', { credentials: 'same-origin' })).json();
+        const matchingCmds = (snapA.chatCommands || []).filter(c => c.contentPreview && c.contentPreview.includes('Late receipt prompt on Conv A'));
+        return {
+          oldCardsImmediatelyAfterNewConvClick,
+          convBInputPreserved,
+          convAPendingKeyCleared: Boolean(convAPendingBefore) && convAPendingAfter === null,
+          convASingleSubmission: matchingCmds.length === 1 && matchingCmds[0].status === 'ADMITTED',
+        };
+      } finally {
+        window.fetch = origFetch;
+      }
+    })()`);
+    assert.equal(lateReceiptCheck.oldCardsImmediatelyAfterNewConvClick, 0, "W2-S4: Clicking new-conv-btn on populated session MUST clear old cards BEFORE awaiting /api/conversations");
+    assert.equal(lateReceiptCheck.convBInputPreserved, true, "W2-S4: Late chat receipt from Conv A MUST NOT clobber Conv B's input");
+    assert.equal(lateReceiptCheck.convAPendingKeyCleared, true, "W2-S4: Late ADMITTED receipt MUST clear Conv A's pending key");
+    assert.equal(lateReceiptCheck.convASingleSubmission, true, "W2-S4: Conv A MUST have exactly 1 admitted logical submission");
+
+    // 3c. Unified SSE sequence continuity check in browser: duplicate delta, duplicate partial, gapped partial, first-frame gap, and real disconnect/reconnect!
     const v05BrowserSeq = await cdp.evalJs<{
       dupAfterDelta: number;
       dupAfterPartial: number;
@@ -730,14 +802,13 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
     //    - Open card crosses 2.5s TTL WITHOUT manual reload -> local timer disables Approve & marks 已过期!
     //    - Direct old-tab POST returns 410 and fake SMTP delta = 0!
     // =========================================================================
+    const prevConvIdBeforeV06 = await cdp.evalJs<string>(`String(window.__aegisView1State.conversationId || '')`);
     await cdp.evalJs(`document.getElementById('new-conv-btn').click();`);
     const v06ConvId = await cdp.waitFor<string>(
-      `window.__aegisView1State.conversationId && String(window.__aegisView1State.conversationId) !== ${JSON.stringify(v01ConvId)} ? String(window.__aegisView1State.conversationId) : ''`,
+      `window.__aegisView1State.conversationId && String(window.__aegisView1State.conversationId) !== ${JSON.stringify(prevConvIdBeforeV06)} && window.__aegisView1State.snapshot && String(window.__aegisView1State.snapshot.conversationId) === String(window.__aegisView1State.conversationId) ? String(window.__aegisView1State.conversationId) : ''`,
     );
-    const oldSessionCardsOnSwitch = await cdp.evalJs<number>(
-      `document.querySelectorAll('#sources-list details, #files-list [data-import-path]').length`,
-    );
-    assert.equal(oldSessionCardsOnSwitch, 0, "V05: Switching sessions MUST clear old session cards");
+    const oldSessionCardsOnSwitch = lateReceiptCheck.oldCardsImmediatelyAfterNewConvClick;
+    assert.equal(oldSessionCardsOnSwitch, 0, "V05: Switching sessions MUST clear old session cards immediately");
 
     await fakeModel.queue({
       clear: true,
@@ -900,6 +971,210 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
     formalHost = null;
 
     // =========================================================================
+    // 4b. W2-S1: Formal Startup Readiness Check with Pending Suspended Work!
+    //     Kill formal src/index.ts right AFTER Pi durable admission (before gov receipt),
+    //     so Pi trace DB has pending work that immediately runs github_mcp_read_file + workspace_write_managed
+    //     upon harness.resume() -> proves beforeResume binds hostRef & connects MCP strictly BEFORE resume()!
+    // =========================================================================
+    const resumeDir = path.join(rootDir, "w2-s1-pending-resume");
+    const resumeDataDir = path.join(resumeDir, "host-data");
+    const resumeWorkspaceDir = path.join(resumeDir, "workspace");
+    mkdirSync(resumeDataDir, { recursive: true });
+    mkdirSync(resumeWorkspaceDir, { recursive: true });
+
+    const { db: rSeedDb } = openGovernanceDb(path.join(resumeDataDir, "aegis-gov.sqlite"));
+    ensureActiveEpochAndManifest(rSeedDb, now);
+    ensureScope(rSeedDb, {
+      scopeId: "scope:default",
+      allowedPrincipals: ["owner"],
+      allowedTools: ["github_read_file", "workspace_write_managed"],
+      allowedTargets: ["*"],
+    });
+    grantSourceRead(rSeedDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "github_mcp",
+      resourceId: "github:NorthAdb/project-helios",
+      operations: ["read_file"],
+      constraints: { allowedRefs: ["refs/heads/main"], allowedPaths: ["README.md"] },
+      now,
+    });
+    grantSourceRead(rSeedDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "workspace_write",
+      resourceId: "workspace",
+      operations: ["write"],
+      constraints: { allowedRelPaths: ["reports/resumed.md"] },
+      now,
+    });
+    grantModelDisclosure(rSeedDb, {
+      principalId: "owner",
+      scopeId: "scope:default",
+      sourceType: "*",
+      sourceId: "*",
+      provider: "fake-local",
+      modelId: "*",
+      baseUrl: fakeModel.baseUrl,
+      slotName: "*",
+      now,
+    });
+    pinMcpServerBinary(rSeedDb, {
+      serverId: "github-readonly",
+      executablePath: mcpScript,
+      executableSha256: mcpSha,
+      command: LOCKED_NODE_EXE,
+      args: mcpArgs,
+      readOnlyMode: true,
+      approvedBy: "owner",
+      now,
+    });
+    approveMcpToolDefinition(rSeedDb, {
+      serverId: "github-readonly",
+      def: {
+        name: "get_file_contents",
+        description: "Read a file from an approved read-only GitHub repository.",
+        inputSchema: {
+          type: "object",
+          properties: { repo: { type: "string" }, ref: { type: "string" }, path: { type: "string" } },
+          required: ["repo", "ref", "path"],
+        },
+      },
+      now,
+    });
+    rSeedDb.close();
+
+    const resumeConnPath = path.join(resumeDir, "connectors.json");
+    writeFileSync(
+      resumeConnPath,
+      JSON.stringify(
+        {
+          defaultMemoryDomain: "default",
+          githubMcp: {
+            serverId: "github-readonly",
+            command: LOCKED_NODE_EXE,
+            args: mcpArgs,
+            pinnedArtifactPath: mcpScript,
+            pinnedArtifactSha256: mcpSha,
+            credentialSlotId: "slot:github-mcp-pat",
+            secretEnvVar: "AEGISPI_GITHUB_MCP_PAT",
+          },
+          workspace: {
+            workspaceDir: resumeWorkspaceDir,
+            approvedImageId,
+            imageName: DEFAULT_SANDBOX_IMAGE,
+            trackedBaselineRelPaths: ["reports/resumed.md"],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const resumeToken = `SYNTH_RESUME_TOKEN_${runId}`;
+    const resumeBarrierFile = path.join(resumeDir, "barrier-pi-admitted.json");
+    const resumedReportText = `RESUMED_AFTER_BEFORE_RESUME_READY_${runId}\n`;
+    const expectedResumedSha = createHash("sha256").update(resumedReportText, "utf8").digest("hex");
+
+    await fakeModel.queue({
+      clear: true,
+      scripts: [
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: `tc_res_mcp_${runId}`,
+            name: "github_read_file",
+            arguments: { repoId: "NorthAdb/project-helios", ref: "refs/heads/main", path: "README.md" },
+          },
+        },
+        {
+          kind: "tool_call",
+          toolCall: {
+            id: `tc_res_ws_${runId}`,
+            name: "workspace_write_managed",
+            arguments: { relPath: "reports/resumed.md", content: resumedReportText },
+          },
+        },
+        { kind: "text", text: "Resumed task completed cleanly with MCP + workspace ready." },
+      ],
+    });
+
+    const resumeHost1 = await spawnFormalHost({
+      dataDir: resumeDataDir,
+      port: 0,
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: resumeToken,
+      connectorsConfigPath: resumeConnPath,
+      env: { AEGISPI_GITHUB_MCP_PAT: `SYNTH_MCP_PAT_${runId}` },
+      extraArgs: ["--fault-after-pi-admit-before-gov-receipt", resumeBarrierFile],
+    });
+    const rCookie1 = await (async () => {
+      const lr = await fetch(`${resumeHost1.baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: resumeHost1.baseUrl },
+        body: JSON.stringify({ token: resumeToken }),
+      });
+      return (lr.headers.get("set-cookie") ?? "").split(";")[0]!;
+    })();
+    const rConv1 = (await (
+      await fetch(`${resumeHost1.baseUrl}/api/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: rCookie1, origin: resumeHost1.baseUrl },
+        body: JSON.stringify({ slotName: "router" }),
+      })
+    ).json()) as { conversationId: string; runtimeEpoch: string };
+    const pendingResumeChat = fetch(`${resumeHost1.baseUrl}/api/conversations/${rConv1.conversationId}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: rCookie1, origin: resumeHost1.baseUrl },
+      body: JSON.stringify({
+        content: "Read GitHub README and write resumed.md",
+        chatKey: `ck-s1-resume-${runId}`,
+        runtimeEpoch: rConv1.runtimeEpoch,
+      }),
+    }).catch(() => null);
+    // Wait until Pi durably admitted the chat submission, then force-kill host1 BEFORE execution finishes!
+    const waitBarrierEnd = Date.now() + 15_000;
+    while (!existsSync(resumeBarrierFile) && Date.now() < waitBarrierEnd) {
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    assert.equal(existsSync(resumeBarrierFile), true, "W2-S1: Expected Pi admission barrier file");
+    spawnSync("powershell.exe", ["-NoProfile", "-Command", `Stop-Process -Id ${resumeHost1.pid} -Force -ErrorAction SilentlyContinue`], {
+      windowsHide: true,
+    });
+    await pendingResumeChat;
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Restart formal src/index.ts #2 on the DB with pending Pi work -> beforeResume MUST connect MCP & bind hostRef BEFORE resume()!
+    const resumeHost2 = await spawnFormalHost({
+      dataDir: resumeDataDir,
+      port: 0,
+      modelBaseUrl: fakeModel.baseUrl,
+      smtpHost: fakeSmtp.host,
+      smtpPort: fakeSmtp.smtpPort,
+      consoleToken: resumeToken,
+      connectorsConfigPath: resumeConnPath,
+      env: { AEGISPI_GITHUB_MCP_PAT: `SYNTH_MCP_PAT_${runId}` },
+    });
+    try {
+      const resumedFilePath = path.join(resumeWorkspaceDir, "reports", "resumed.md");
+      const resDeadline = Date.now() + 25_000;
+      while (Date.now() < resDeadline) {
+        if (existsSync(resumedFilePath) && sha256FileIfExists(resumedFilePath) === expectedResumedSha) break;
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      assert.equal(
+        sha256FileIfExists(resumedFilePath),
+        expectedResumedSha,
+        "W2-S1: Resumed pending task on formal startup MUST complete MCP read + managed workspace write after beforeResume readiness",
+      );
+    } finally {
+      await resumeHost2.stop();
+    }
+
+    // =========================================================================
     // 5. W2-S6: REAL W1-B Force-Killed Recovered Database Opened & Refreshed in Edge!
     //    (Zero SQL tampering — proves real Stop-Process -Force recovery connects end-to-end to Edge View ①!)
     // =========================================================================
@@ -969,6 +1244,8 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
       v01: {
         formalEntrypointUsed: true,
         unconfiguredHostFailClosedVerified: true,
+        formalStartupPendingResumeReadyVerified: true,
+        formalStartupResumedFileSha256: expectedResumedSha,
         demoPrompt: DEMO_PROMPT,
         conversationId: v01ConvId,
         selectedEmailUid: 102,
@@ -993,6 +1270,9 @@ export async function runV01V06Browser(opts?: { dataDir?: string; evidenceDir?: 
       v04V05Browser: {
         persistedChatKeyAcrossReload: persistedChatTest.keyBeforeReload,
         retryAdmittedWithSameChatKey: retryAdmitted,
+        lateReceiptCrossSessionPreservedNewInput: lateReceiptCheck.convBInputPreserved,
+        lateReceiptClearedOriginalPendingKeyOnly: lateReceiptCheck.convAPendingKeyCleared,
+        lateReceiptSingleLogicalSubmission: lateReceiptCheck.convASingleSubmission,
         duplicateDeltaIgnored: v05BrowserSeq.dupAfterDelta,
         duplicatePartialIgnored: v05BrowserSeq.dupAfterPartial - v05BrowserSeq.dupAfterDelta,
         partialGapTriggeredResync: v05BrowserSeq.resyncAfterPartialGap >= 1,

@@ -7,7 +7,7 @@ import {
   runTaskInDockerSandboxAsync,
   stopAndRemoveContainerAsync,
 } from "./capabilities/workspace/docker-sandbox.ts";
-import { ManagedWorkspaceImporter } from "./capabilities/workspace/importer.ts";
+import { ManagedWorkspaceImporter, type TaskFrozenWorkspaceSnapshot } from "./capabilities/workspace/importer.ts";
 import {
   assertStage1LoopbackModelUrl,
   assertStage1LoopbackSmtpHost,
@@ -247,6 +247,21 @@ if (connectorsCfg?.githubMcp) {
   }
 }
 
+// W2-S6: Immediately scrub startup secret environment variables from host process.env
+// AFTER loading them into host memory / HostCredentialVault so no child process can inherit them!
+const scrubbedSecretEnvVars = new Set<string>([
+  "AEGISPI_CONSOLE_TOKEN",
+  "AEGISPI_PRINCIPAL_TOKENS_JSON",
+  "AEGISPI_MODEL_ROUTER_KEY",
+  "AEGISPI_MODEL_WORKER_KEY",
+  "AEGISPI_FAKE_MODEL_KEY",
+  connectorsCfg?.imap?.secretEnvVar ?? "AEGISPI_IMAP_SECRET",
+  connectorsCfg?.githubMcp?.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT",
+]);
+for (const key of scrubbedSecretEnvVars) {
+  delete process.env[key];
+}
+
 const priceSchedule = {
   priceVersion: "synthetic-v1",
   inputPerMTokMu: 300_000,
@@ -280,23 +295,18 @@ const modelSlots: ModelSlotConfig[] = [
   },
 ];
 
-// W2-S1 / W2-S3: Host-managed workspace importer + host baseline snapshot map (NEVER trusting model baseSha256!)
+// W2-S1 / W2-S3: Host-managed workspace importer with isolated per-task frozen input snapshots & baselines
+// (NEVER sharing one mutable path baseline table across concurrent tasks or trusting model baseSha256!)
 let managedImporter: ManagedWorkspaceImporter | undefined;
 let hostRef: AegisHostRuntime | null = null;
 let mcpBridge: GitHubMcpBridge | null = null;
-const hostBaselinesByRelPath = new Map<string, string | null>();
-const sandboxInputSnapDir = path.join(dataDir, "sandbox-input-snapshot");
+const taskSnapshotsRootDir = path.join(dataDir, "sandbox-task-snapshots");
+const taskFrozenSnapshots = new Map<string, TaskFrozenWorkspaceSnapshot>();
 
 if (connectorsCfg?.workspace) {
   const wc = connectorsCfg.workspace;
   managedImporter = new ManagedWorkspaceImporter(path.resolve(wc.workspaceDir));
-  mkdirSync(sandboxInputSnapDir, { recursive: true });
-  for (const rel of wc.trackedBaselineRelPaths ?? []) {
-    const cap = managedImporter.captureHostBaseline(rel);
-    if (cap.ok) {
-      hostBaselinesByRelPath.set(cap.normalizedRelPath, cap.baseSha256);
-    }
-  }
+  mkdirSync(taskSnapshotsRootDir, { recursive: true });
 }
 
 const host = await AegisHostRuntime.start({
@@ -316,6 +326,28 @@ const host = await AegisHostRuntime.start({
   approvalTtlMs,
   pauseOutboxDelivery: pauseOutbox,
   managedWorkspaceImporter: managedImporter,
+  // W2-S1: Bind hostRef AND connect pinned GitHub MCP bridge STRICTLY BEFORE harness.resume() releases scheduling!
+  beforeResume: async (readyHost) => {
+    hostRef = readyHost;
+    if (connectorsCfg?.githubMcp) {
+      const mc = connectorsCfg.githubMcp;
+      const bridge = new GitHubMcpBridge({
+        serverId: mc.serverId,
+        command: mc.command,
+        args: mc.args,
+        pinnedArtifactPath: mc.pinnedArtifactPath,
+        credentialSlotId: mc.credentialSlotId ?? "slot:github-mcp-pat",
+        govDb: readyHost.govDb,
+        vault,
+      });
+      const connRes = await bridge.connect();
+      if (connRes.ok) {
+        mcpBridge = bridge;
+      } else {
+        process.stderr.write(`GitHub MCP bridge not connected (${connRes.code}): ${connRes.reason ?? ""}\n`);
+      }
+    }
+  },
   ...(configuredImapEndpoint ? { imapEndpoint: configuredImapEndpoint } : {}),
   ...(connectorsCfg?.githubMcp
     ? {
@@ -332,15 +364,24 @@ const host = await AegisHostRuntime.start({
           if (!cap.ok) {
             return { ok: false, code: cap.code, message: cap.reason };
           }
-          // Host uses its own task-start baseline if tracked (detecting user edits mid-task!), else current host baseline at snapshot time
-          const hostBaseSha256 = hostBaselinesByRelPath.has(cap.normalizedRelPath)
-            ? hostBaselinesByRelPath.get(cap.normalizedRelPath)!
-            : cap.baseSha256;
+          // W2-S3: Per-task frozen input snapshot & baseline keyed by logical host task (or conversation).
+          // Each task gets its own isolated /input snapshot copy and immutable baseline; another task's install NEVER advances it!
+          const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
+          const taskSnapKey = boundTask ? `task:${wp.runtimeEpoch}:${boundTask}` : `conv:${wp.runtimeEpoch}:${wp.conversationId}`;
+          let frozenSnap = taskFrozenSnapshots.get(taskSnapKey);
+          if (!frozenSnap) {
+            frozenSnap = importer.createTaskFrozenSnapshot(
+              taskSnapshotsRootDir,
+              [...(wc.trackedBaselineRelPaths ?? []), cap.normalizedRelPath],
+            );
+            taskFrozenSnapshots.set(taskSnapKey, frozenSnap);
+          }
+          const hostBaseSha256 = frozenSnap.getBaseline(cap.normalizedRelPath);
 
           const sb = await runTaskInDockerSandboxAsync({
             approvedImageId: wc.approvedImageId,
             imageName: wc.imageName ?? DEFAULT_SANDBOX_IMAGE,
-            inputSnapshotDir: sandboxInputSnapDir,
+            inputSnapshotDir: frozenSnap.snapshotDir,
             nodeScript: `
               const fs = require("node:fs");
               const path = require("node:path");
@@ -363,7 +404,6 @@ const host = await AegisHostRuntime.start({
 
           try {
             // Collect related conversation IDs (e.g. parent + worker) for W2-S2 recursive source revocation checks
-            const boundTask = currentHost.getConversationBudgetTaskId(wp.conversationId, wp.runtimeEpoch);
             const relatedIds = new Set<string>([wp.conversationId]);
             if (boundTask) {
               const rows = currentHost.govDb
@@ -409,9 +449,6 @@ const host = await AegisHostRuntime.start({
                   }
                 : {}),
             });
-            if (impRes.ok && impRes.state === "INSTALLED") {
-              hostBaselinesByRelPath.set(cap.normalizedRelPath, impRes.currentTargetSha256After);
-            }
             return {
               ok: impRes.ok,
               code: impRes.code,
@@ -522,28 +559,6 @@ const host = await AegisHostRuntime.start({
     : {}),
 });
 
-hostRef = host;
-
-// W2-S1 / W2-G1: Connect pinned GitHub MCP bridge strictly AFTER governance DB is open & verified!
-if (connectorsCfg?.githubMcp) {
-  const mc = connectorsCfg.githubMcp;
-  const bridge = new GitHubMcpBridge({
-    serverId: mc.serverId,
-    command: mc.command,
-    args: mc.args,
-    pinnedArtifactPath: mc.pinnedArtifactPath,
-    credentialSlotId: mc.credentialSlotId ?? "slot:github-mcp-pat",
-    govDb: host.govDb,
-    vault,
-  });
-  const connRes = await bridge.connect();
-  if (connRes.ok) {
-    mcpBridge = bridge;
-  } else {
-    process.stderr.write(`GitHub MCP bridge not connected (${connRes.code}): ${connRes.reason ?? ""}\n`);
-  }
-}
-
 const web = await startWebServer({
   host,
   bindHost,
@@ -571,6 +586,10 @@ const web = await startWebServer({
 const shutdown = async (): Promise<void> => {
   await web.close().catch(() => {});
   await mcpBridge?.close().catch(() => {});
+  for (const snap of taskFrozenSnapshots.values()) {
+    snap.cleanup();
+  }
+  taskFrozenSnapshots.clear();
   await host.close().catch(() => {});
   process.exit(0);
 };

@@ -100,6 +100,8 @@ export interface AegisHostConfig {
   workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
   /** W2-S3: Optional managed workspace importer for startup Step 5c receipt-loss reconciliation. */
   managedWorkspaceImporter?: ManagedWorkspaceImporter;
+  /** W2-S1: Async hook executed AFTER govDb/host initialization and STRICTLY BEFORE harness.resume() releases scheduling. */
+  beforeResume?: (host: AegisHostRuntime) => Promise<void> | void;
   approvalTtlMs?: number;
   now?: () => number;
   zone?: string;
@@ -1380,7 +1382,13 @@ export class AegisHostRuntime {
         now: nowFn,
       });
 
-      // Enable Pi scheduler ONLY AFTER Steps 1-5 passed
+      // W2-S1: Allow caller (e.g. formal entrypoint) to bind hostRef and connect MCP/connector dependencies
+      // STRICTLY BEFORE harness.resume() releases any suspended/recovered Pi tasks!
+      if (config.beforeResume) {
+        await config.beforeResume(host);
+      }
+
+      // Enable Pi scheduler ONLY AFTER Steps 1-5 and beforeResume connector readiness passed
       harness.resume();
       if (!config.pauseOutboxDelivery) {
         await host.deliverPendingOutbox();

@@ -3,6 +3,62 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
+/**
+ * W2-S6: Strict minimal allowlisted environment for ALL Docker CLI child processes.
+ * Prevents any host secret env vars (AEGISPI_*, MODEL_*, IMAP_*, GITHUB_*, SMTP_*, etc.)
+ * from being inherited by `docker` CLI invocations.
+ */
+const DOCKER_CLI_ENV_ALLOWLIST = [
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "SYSTEMDRIVE",
+  "WINDIR",
+  "COMSPEC",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "HOME",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "DOCKER_CONFIG",
+  "DOCKER_TLS_VERIFY",
+  "DOCKER_CERT_PATH",
+  "DOCKER_API_VERSION",
+] as const;
+
+export function buildMinimalDockerCliEnv(sourceEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  const allowSet = new Set<string>(DOCKER_CLI_ENV_ALLOWLIST);
+  for (const [k, v] of Object.entries(sourceEnv)) {
+    if (v === undefined) continue;
+    if (allowSet.has(k.toUpperCase())) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function execDockerSync(
+  args: string[],
+  opts?: { timeoutMs?: number; maxBuffer?: number },
+): { status: number | null; stdout: string; stderr: string } {
+  const res = spawnSync("docker", args, {
+    encoding: "utf8",
+    timeout: opts?.timeoutMs ?? 10_000,
+    ...(opts?.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}),
+    env: buildMinimalDockerCliEnv(),
+    windowsHide: true,
+  });
+  return {
+    status: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? (res.error ? res.error.message : ""),
+  };
+}
+
 async function execDockerAsync(
   args: string[],
   timeoutMs = 25_000,
@@ -10,6 +66,7 @@ async function execDockerAsync(
   return await new Promise((resolve) => {
     const child = spawn("docker", args, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: buildMinimalDockerCliEnv(),
       windowsHide: true,
     });
     let stdout = "";
@@ -73,11 +130,7 @@ export function verifyApprovedSandboxImageDigest(params: {
     };
   }
   const normalizedApproved = approved.toLowerCase();
-  const insp = spawnSync("docker", ["image", "inspect", normalizedApproved, "--format", "{{.Id}}"], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  const insp = execDockerSync(["image", "inspect", normalizedApproved, "--format", "{{.Id}}"], { timeoutMs: 10_000 });
   if (insp.status !== 0) {
     return {
       ok: false,
@@ -97,11 +150,7 @@ export function verifyApprovedSandboxImageDigest(params: {
 }
 
 export function inspectDockerEnvironment(imageName = DEFAULT_SANDBOX_IMAGE): DockerEnvironmentInfo {
-  const ver = spawnSync("docker", ["version", "--format", "{{.Client.Version}}|{{.Server.Version}}"], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  const ver = execDockerSync(["version", "--format", "{{.Client.Version}}|{{.Server.Version}}"], { timeoutMs: 10_000 });
   if (ver.status !== 0) {
     return {
       available: false,
@@ -112,11 +161,7 @@ export function inspectDockerEnvironment(imageName = DEFAULT_SANDBOX_IMAGE): Doc
     };
   }
   const [clientVersion = null, serverVersion = null] = ver.stdout.trim().split("|");
-  const img = spawnSync("docker", ["image", "inspect", imageName, "--format", "{{.Id}}"], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  const img = execDockerSync(["image", "inspect", imageName, "--format", "{{.Id}}"], { timeoutMs: 10_000 });
   return {
     available: img.status === 0,
     clientVersion,
@@ -194,11 +239,7 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
     mkdirSync(absInput, { recursive: true });
   }
 
-  const volCreate = spawnSync("docker", ["volume", "create", volumeName], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  const volCreate = execDockerSync(["volume", "create", volumeName], { timeoutMs: 10_000 });
   if (volCreate.status !== 0) {
     throw new Error(`docker volume create ${volumeName} failed: ${volCreate.stderr}`);
   }
@@ -233,22 +274,17 @@ export function runTaskInDockerSandbox(opts: SandboxTaskRunOptions): SandboxTask
     opts.nodeScript,
   ];
 
-  const run = spawnSync("docker", dockerArgs, {
-    encoding: "utf8",
-    timeout: opts.timeoutMs ?? 25_000,
-    windowsHide: true,
-  });
+  const run = execDockerSync(dockerArgs, { timeoutMs: opts.timeoutMs ?? 25_000 });
 
   // Inspect container metadata (ID, mounts, image, env) strictly via Docker daemon
-  const insp = spawnSync(
-    "docker",
+  const insp = execDockerSync(
     [
       "inspect",
       containerName,
       "--format",
       "{{.Id}}|||{{.Image}}|||{{json .Mounts}}|||{{json .Config.Env}}",
     ],
-    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+    { timeoutMs: 10_000 },
   );
 
   let containerId = "";
@@ -317,10 +353,9 @@ export interface VolumeWriterCheck {
  * holding a writable mount to `volumeName` have completely exited.
  */
 export function verifyAllVolumeWritersExited(volumeName: string): VolumeWriterCheck {
-  const ps = spawnSync(
-    "docker",
+  const ps = execDockerSync(
     ["ps", "-a", "--filter", `volume=${volumeName}`, "--format", "{{.ID}}\t{{.Names}}\t{{.State}}"],
-    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+    { timeoutMs: 10_000 },
   );
   if (ps.status !== 0) {
     return {
@@ -342,10 +377,8 @@ export function verifyAllVolumeWritersExited(volumeName: string): VolumeWriterCh
   for (const line of lines) {
     const [id = "", name = "", state = ""] = line.split("\t");
     if (!id) continue;
-    const insp = spawnSync("docker", ["inspect", id, "--format", "{{.State.Status}}|||{{json .Mounts}}"], {
-      encoding: "utf8",
-      timeout: 10_000,
-      windowsHide: true,
+    const insp = execDockerSync(["inspect", id, "--format", "{{.State.Status}}|||{{json .Mounts}}"], {
+      timeoutMs: 10_000,
     });
     let liveStatus = state;
     let hasWritableMount = true; // fail closed if inspect fails
@@ -511,8 +544,7 @@ try {
 }
 `;
 
-  const res = spawnSync(
-    "docker",
+  const res = execDockerSync(
     [
       "run",
       "--rm",
@@ -535,10 +567,8 @@ try {
       exporterScript,
     ],
     {
-      encoding: "utf8",
-      timeout: params.timeoutMs ?? 25_000,
+      timeoutMs: params.timeoutMs ?? 25_000,
       maxBuffer: 16 * 1024 * 1024,
-      windowsHide: true,
     },
   );
 
@@ -994,19 +1024,11 @@ export async function cleanupTaskVolumeAsync(volumeName: string): Promise<void> 
 }
 
 export function stopAndRemoveContainer(containerNameOrId: string): void {
-  spawnSync("docker", ["rm", "-f", containerNameOrId], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  execDockerSync(["rm", "-f", containerNameOrId], { timeoutMs: 10_000 });
 }
 
 export function cleanupTaskVolume(volumeName: string): void {
-  const ps = spawnSync("docker", ["ps", "-aq", "--filter", `volume=${volumeName}`], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  const ps = execDockerSync(["ps", "-aq", "--filter", `volume=${volumeName}`], { timeoutMs: 10_000 });
   const cids = ps.stdout
     .split(/\r?\n/)
     .map((s) => s.trim())
@@ -1014,9 +1036,5 @@ export function cleanupTaskVolume(volumeName: string): void {
   for (const cid of cids) {
     stopAndRemoveContainer(cid);
   }
-  spawnSync("docker", ["volume", "rm", "-f", volumeName], {
-    encoding: "utf8",
-    timeout: 10_000,
-    windowsHide: true,
-  });
+  execDockerSync(["volume", "rm", "-f", volumeName], { timeoutMs: 10_000 });
 }
