@@ -51,6 +51,7 @@ export interface RoutineRow {
   last_run_utc_ms: number | null;
   last_status: string | null;
   last_result_summary: string | null;
+  last_result_trigger_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -772,6 +773,7 @@ export class RoutinePoller {
                       last_run_utc_ms = ?,
                       last_status = ?,
                       last_result_summary = ?,
+                      last_result_trigger_id = ?,
                       enabled = CASE WHEN schedule_kind = 'once' THEN 0 ELSE enabled END,
                       updated_at = ?
                 WHERE routine_id = ?`,
@@ -781,6 +783,7 @@ export class RoutinePoller {
               latestDueUtcMs,
               initialState,
               skipEval.shouldSkip ? (skipEval.reason ?? "已按条件跳过") : "正在受理",
+              triggerId,
               now,
               routine.routine_id,
             );
@@ -861,6 +864,7 @@ export class RoutinePoller {
               `UPDATE routines
                   SET last_status = ?,
                       last_result_summary = ?,
+                      last_result_trigger_id = ?,
                       updated_at = ?
                 WHERE routine_id = ?`,
             )
@@ -871,6 +875,7 @@ export class RoutinePoller {
                 : admission.outcome === "PENDING_RECONCILE"
                   ? `受理待核对 (${safeAdmissionReason ?? "unknown"})`
                   : `执行受阻 (${safeAdmissionReason ?? "failed"})`,
+              reg.trigger.trigger_id,
               doneAt,
               routine.routine_id,
             );
@@ -931,6 +936,7 @@ export function recordRoutineTriggerCompletion(
       `UPDATE routines
           SET last_status = ?,
               last_result_summary = ?,
+              last_result_trigger_id = ?,
               updated_at = ?
         WHERE routine_id = ?`,
     ).run(
@@ -938,6 +944,7 @@ export function recordRoutineTriggerCompletion(
       params.status === "SUCCEEDED"
         ? `已完成 · 会话 #${params.conversationId}：${safeReason || "ok"}`
         : `执行失败 · 会话 #${params.conversationId} (${safeReason})`,
+      params.triggerId,
       params.now,
       params.routineId,
     );

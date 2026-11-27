@@ -563,6 +563,29 @@ export async function submitApprovedGithubWriteEffect(params: {
       };
     }
 
+    // S2-P0-1: Post-dispatch transport timeout/disconnect MUST persist UNKNOWN for manual reconciliation (NEVER collapse into FAILED!)
+    if (
+      mcpRes.outcome === "unknown" ||
+      mcpRes.code === "mcp_transport_uncertain" ||
+      mcpRes.code === "mcp_transport_error"
+    ) {
+      const safeUnknownReason = sanitizeControlledCode(mcpRes.reason, "github_mcp_transport_uncertain");
+      const rec = recordEffectResult(params.govDb, {
+        effectId: params.effectId,
+        outcome: "UNKNOWN",
+        reason: safeUnknownReason,
+        now: params.now(),
+      });
+      return {
+        ok: false,
+        claimed: true,
+        effectId: params.effectId,
+        effectState: rec.state,
+        code: "unknown",
+        message: `GitHub write outcome unknown (${safeUnknownReason}); manual reconciliation required`,
+      };
+    }
+
     const safeCode = sanitizeControlledCode(mcpRes.code, "github_mcp_write_failed");
     const rec = recordEffectResult(params.govDb, {
       effectId: params.effectId,
@@ -578,9 +601,8 @@ export async function submitApprovedGithubWriteEffect(params: {
       code: safeCode,
       message: `GitHub MCP write failed (${safeCode})`,
     };
-  } catch (err) {
-    const errCode = sanitizeControlledCode((err as { code?: string } | null)?.code, "transport_uncertain");
-    const safeReason = `github_mcp_transport_uncertain:${errCode}`;
+  } catch {
+    const safeReason = "github_mcp_transport_uncertain";
     const rec = recordEffectResult(params.govDb, {
       effectId: params.effectId,
       outcome: "UNKNOWN",

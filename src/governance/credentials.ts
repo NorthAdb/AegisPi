@@ -138,32 +138,50 @@ export interface VerifiedModelBoundContract {
   provider: string;
   modelId: string;
   contractVersion: string;
-  tokenizerUpperBoundKind: "utf8_byte_bpe";
-  /** Documented provider hard cap on output tokens enforced via max_tokens. */
+  /** Official published HTTPS base URLs for this provider (normalized origin + optional /v1 path). */
+  allowedOfficialBaseUrls: ReadonlyArray<string>;
+  /** Official published context window limit used as provable conservative input upper bound (no tokenizer guesswork). */
+  publishedContextWindowTokens: number;
+  /** Official published hard cap on output tokens enforced via explicit wire max_tokens. */
   maxTokensHardCeiling: number;
-  /** Whether enforced max_tokens covers all billed output tokens (no hidden unbounded reasoning tokens). */
+  /** Authoritative Peak / Cache-Miss per-1M token rate floor in microUSD (reservation MUST cover peak & cache miss). */
+  minInputPerMTokMu: number;
+  minOutputPerMTokMu: number;
+  minCacheReadPerMTokMu: number;
+  minCacheWritePerMTokMu: number;
+  /** Required wire thinking mode enforced in outgoing HTTP JSON body ("disabled" -> { thinking: { type: "disabled" } }). */
+  requiredWireThinkingMode: "disabled" | "none";
+  /** Whether enforced max_tokens covers all billed output tokens. */
   maxTokensIncludesReasoning: boolean;
-  perMessageOverheadTokens: number;
-  perToolOverheadTokens: number;
-  fixedPromptOverheadTokens: number;
   supportsNonTextInput: false;
 }
 
 /**
  * S2-P0-2: Verified real-provider billing upper-bound contract registry.
- * Any non-fake model lacking an explicit verified provider+model contract MUST fail closed!
+ * Any non-fake model lacking an explicit verified provider+model contract (including retired aliases like `deepseek-chat`)
+ * MUST fail closed!
+ *
+ * Authoritative DeepSeek V4.1 Flash (`deepseek-flash`) contract grounded in official DeepSeek docs
+ * (api-docs.deepseek.com/quick_start/pricing/, /guides/thinking_mode/, /news/news260424/) and pi-ai@1.6.0 catalog:
+ * - Context window: 1,000,000 tokens (used as conservative input upper bound without fragile tokenizer/framing estimates)
+ * - Max output ceiling: 384,000 tokens (bounded per request by explicit wire `max_tokens`)
+ * - Peak USD rates: $0.30/1M input (cache miss), $1.20/1M output, $0.006/1M cache hit (Off-Peak is 50% lower)
+ * - Thinking mode enabled by default on DeepSeek V4.1; host enforces wire `"thinking": { "type": "disabled" }`
  */
 const VERIFIED_MODEL_BOUND_CONTRACTS: ReadonlyArray<VerifiedModelBoundContract> = [
   {
     provider: "deepseek",
-    modelId: "deepseek-chat",
-    contractVersion: "deepseek-chat-openai-compat-v1",
-    tokenizerUpperBoundKind: "utf8_byte_bpe",
-    maxTokensHardCeiling: 8192,
+    modelId: "deepseek-flash",
+    contractVersion: "deepseek-flash-v4.1-2026-11",
+    allowedOfficialBaseUrls: ["https://api.deepseek.com", "https://api.deepseek.com/v1"],
+    publishedContextWindowTokens: 1_000_000,
+    maxTokensHardCeiling: 384_000,
+    minInputPerMTokMu: 300_000,
+    minOutputPerMTokMu: 1_200_000,
+    minCacheReadPerMTokMu: 6_000,
+    minCacheWritePerMTokMu: 0,
+    requiredWireThinkingMode: "disabled",
     maxTokensIncludesReasoning: true,
-    perMessageOverheadTokens: 64,
-    perToolOverheadTokens: 256,
-    fixedPromptOverheadTokens: 512,
     supportsNonTextInput: false,
   },
 ];
@@ -300,20 +318,42 @@ export function validateModelPriceScheduleForEndpoint(
         reason: `Price schedule boundContractVersion '${schedule.boundContractVersion}' does not match verified contract '${contract.contractVersion}'`,
       };
     }
+    if (!loopback) {
+      const normalizedBaseUrl = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+      if (!contract.allowedOfficialBaseUrls.includes(normalizedBaseUrl)) {
+        return {
+          ok: false,
+          code: "unverified_model_endpoint",
+          reason: `Endpoint '${normalizedBaseUrl}' is not an official verified endpoint for ${schedProv}/${schedModel}`,
+        };
+      }
+    }
     if (
-      !Number.isFinite(schedule.inputPerMTokMu) ||
-      schedule.inputPerMTokMu < 0 ||
-      !Number.isFinite(schedule.outputPerMTokMu) ||
-      schedule.outputPerMTokMu < 0 ||
+      !Number.isSafeInteger(schedule.inputPerMTokMu) ||
+      schedule.inputPerMTokMu <= 0 ||
+      !Number.isSafeInteger(schedule.outputPerMTokMu) ||
+      schedule.outputPerMTokMu <= 0 ||
       (schedule.cacheReadPerMTokMu !== undefined &&
-        (!Number.isFinite(schedule.cacheReadPerMTokMu) || schedule.cacheReadPerMTokMu < 0)) ||
+        (!Number.isSafeInteger(schedule.cacheReadPerMTokMu) || schedule.cacheReadPerMTokMu < 0)) ||
       (schedule.cacheWritePerMTokMu !== undefined &&
-        (!Number.isFinite(schedule.cacheWritePerMTokMu) || schedule.cacheWritePerMTokMu < 0))
+        (!Number.isSafeInteger(schedule.cacheWritePerMTokMu) || schedule.cacheWritePerMTokMu < 0))
     ) {
       return {
         ok: false,
         code: "invalid_price_rates",
-        reason: `Real model endpoint ${parsed.hostname} has invalid negative or non-finite token rates`,
+        reason: `Real model endpoint ${parsed.hostname} has invalid zero, negative, or non-integer token rates`,
+      };
+    }
+    if (
+      schedule.inputPerMTokMu < contract.minInputPerMTokMu ||
+      schedule.outputPerMTokMu < contract.minOutputPerMTokMu ||
+      (schedule.cacheReadPerMTokMu !== undefined && schedule.cacheReadPerMTokMu < contract.minCacheReadPerMTokMu) ||
+      (schedule.cacheWritePerMTokMu !== undefined && schedule.cacheWritePerMTokMu < contract.minCacheWritePerMTokMu)
+    ) {
+      return {
+        ok: false,
+        code: "price_rates_below_contract_floor",
+        reason: `Price schedule rates for ${schedProv}/${schedModel} are below verified Peak/Cache-Miss floor (minInput=${contract.minInputPerMTokMu}, minOutput=${contract.minOutputPerMTokMu}, minCacheRead=${contract.minCacheReadPerMTokMu})`,
       };
     }
     return { ok: true, isLoopback: loopback, isExplicitFake: false, contract };

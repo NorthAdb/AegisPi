@@ -19,11 +19,13 @@ export interface ModelArrivalRecord {
   lastUserPreview: string;
   scriptApplied: string;
   statusCode: number;
+  maxTokens?: number | null;
+  thinking?: unknown;
   usageSent: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
 }
 
 export interface ScriptedResponse {
-  kind: "text" | "tool_call" | "http_error" | "missing_usage" | "hold_then_text" | "redirect";
+  kind: "text" | "tool_call" | "http_error" | "stream_error" | "missing_usage" | "hold_then_text" | "redirect";
   text?: string;
   toolCall?: {
     id: string;
@@ -221,6 +223,8 @@ const server = http.createServer(async (req, res) => {
       const body = (raw ? JSON.parse(raw) : {}) as {
         model?: string;
         stream?: boolean;
+        max_tokens?: number;
+        thinking?: unknown;
         messages?: Array<{ role?: string; content?: unknown }>;
       };
       const script = scriptedQueue.shift() ?? defaultScript;
@@ -237,7 +241,10 @@ const server = http.createServer(async (req, res) => {
 
       const authHeader = typeof req.headers["authorization"] === "string" ? req.headers["authorization"] : "";
       const usageObj =
-        script.kind === "missing_usage" || script.kind === "http_error" || script.kind === "redirect"
+        script.kind === "missing_usage" ||
+        script.kind === "http_error" ||
+        script.kind === "stream_error" ||
+        script.kind === "redirect"
           ? null
           : {
               prompt_tokens: script.usage?.prompt_tokens ?? 100,
@@ -275,6 +282,8 @@ const server = http.createServer(async (req, res) => {
         lastUserPreview: lastUserText,
         scriptApplied: script.kind,
         statusCode,
+        maxTokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
+        thinking: body.thinking ?? null,
         usageSent: usageObj,
       };
       // Durably record EVERY physical arrival immediately before responding (never deduplicates)
@@ -363,6 +372,21 @@ const server = http.createServer(async (req, res) => {
         "cache-control": "no-cache",
         connection: "keep-alive",
       });
+
+      if (script.kind === "stream_error") {
+        // S2-P0-4: HTTP 200 SSE in-stream error payload carrying untrusted remote message
+        res.write(
+          `event: error\ndata: ${JSON.stringify({
+            error: {
+              message: script.errorMessage ?? "Synthetic HTTP 200 in-stream error",
+              type: "stream_error",
+              code: "stream_error",
+            },
+          })}\n\n`,
+        );
+        res.end();
+        return;
+      }
 
       if (script.kind === "tool_call" && script.toolCall) {
         writeSseEvent(res, {

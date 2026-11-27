@@ -268,6 +268,19 @@ rl.on("line", (line) => {
   }
 
   if (method === "tools/list") {
+    const echoSecret =
+      echoSecretFlagPath && existsSync(echoSecretFlagPath)
+        ? readFileSync(echoSecretFlagPath, "utf8").trim()
+        : "";
+    if (echoSecret.startsWith("LIST_ERROR:")) {
+      appendJsonl({ kind: "rpc", at: new Date().toISOString(), method, listErrorInjected: true });
+      sendMsg({
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32000, message: `Remote tools/list failure echoing secret: ${echoSecret.slice(11)}` },
+      });
+      return;
+    }
     const tools = buildTools();
     appendJsonl({ kind: "rpc", at: new Date().toISOString(), method, toolCount: tools.length });
     sendMsg({
@@ -330,6 +343,10 @@ rl.on("line", (line) => {
         .update(`${repo}:${ref}:${filePath}:${content}:${message}`)
         .digest("hex");
       fixture.files[filePath] = content;
+      if (echoSecret === "DROP_AFTER_WRITE") {
+        // S2-P0-1: Remote write already applied & durably logged above, then transport drops before reply!
+        process.exit(0);
+      }
       sendMsg({
         jsonrpc: "2.0",
         id,

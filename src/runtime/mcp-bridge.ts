@@ -1,5 +1,13 @@
 import type { DatabaseSync } from "node:sqlite";
-import { McpClient, StdioTransport, type Tool as McpTool } from "@earendil-works/pi-mcp";
+import {
+  McpAbortError,
+  McpClient,
+  McpConnectionClosedError,
+  McpError,
+  McpTimeoutError,
+  StdioTransport,
+  type Tool as McpTool,
+} from "@earendil-works/pi-mcp";
 import type { HostCredentialVault, StageProfile } from "../governance/credentials.ts";
 import { writeAuditEvent } from "../governance/db.ts";
 import {
@@ -40,10 +48,44 @@ export interface McpToolCallAuthContext {
 
 export interface McpCallOutcome {
   ok: boolean;
+  /** S2-P0-1: Distinguishes provably failed (local pre-check or explicit remote rejection) vs uncertain transport outcome (UNKNOWN). */
+  outcome?: "failed_local" | "failed_remote" | "unknown";
   code: string;
   reason?: string;
   text?: string;
   raw?: unknown;
+}
+
+class McpHostPolicyError extends Error {
+  readonly code: string;
+  constructor(code: string) {
+    super(code);
+    this.name = "McpHostPolicyError";
+    this.code = code;
+  }
+}
+
+/**
+ * S2-P0-4: Strict closed-enum error reducer for all MCP SDK / transport / remote JSON-RPC failures.
+ * NEVER copies raw remote error messages, JSON-RPC data fields, or untrusted error strings!
+ */
+function reduceMcpBridgeError(err: unknown, fallbackCode: string): string {
+  if (err instanceof McpHostPolicyError) {
+    return /^[a-z0-9_]{1,64}$/.test(err.code) ? err.code : fallbackCode;
+  }
+  if (err instanceof McpTimeoutError) return "mcp_request_timeout";
+  if (err instanceof McpConnectionClosedError) return "mcp_connection_closed";
+  if (err instanceof McpAbortError) return "mcp_request_aborted";
+  if (err instanceof McpError) {
+    if (err.code === -32601) return "mcp_jsonrpc_method_not_found";
+    if (err.code === -32602) return "mcp_jsonrpc_invalid_params";
+    return "mcp_jsonrpc_error";
+  }
+  return fallbackCode;
+}
+
+function sanitizeMcpToolLabel(toolName: string): string {
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(toolName) ? toolName : "unknown_tool";
 }
 
 const WRITE_TOOL_PREFIXES = ["create_", "update_", "delete_", "push_", "merge_", "fork_", "add_", "write_"];
@@ -247,20 +289,36 @@ export class GitHubMcpBridge {
     });
     this.#unsubscribeListeners.push(offListChanged, offClose);
 
-    await client.connect(transport);
-    this.#transport = transport;
-    this.#client = client;
+    try {
+      await client.connect(transport);
+      this.#transport = transport;
+      this.#client = client;
 
-    const pinRes = await this.#reconcileLiveToolsList();
-    this.#admissionPaused = false;
-    this.#lastPauseReason = null;
-    return {
-      ok: true,
-      code: "connected",
-      approvedTools: pinRes.approvedTools,
-      quarantinedTools: pinRes.quarantinedTools,
-      missingQuarantinedTools: pinRes.missingQuarantinedTools,
-    };
+      const pinRes = await this.#reconcileLiveToolsList();
+      this.#admissionPaused = false;
+      this.#lastPauseReason = null;
+      return {
+        ok: true,
+        code: "connected",
+        approvedTools: pinRes.approvedTools,
+        quarantinedTools: pinRes.quarantinedTools,
+        missingQuarantinedTools: pinRes.missingQuarantinedTools,
+      };
+    } catch (err) {
+      const safeCode = reduceMcpBridgeError(err, "mcp_connect_failed");
+      this.#admissionPaused = true;
+      this.#lastPauseReason = safeCode;
+      this.#transport = transport;
+      this.#client = client;
+      await this.close();
+      return {
+        ok: false,
+        code: safeCode,
+        reason: safeCode,
+        approvedTools: [],
+        quarantinedTools: [],
+      };
+    }
   }
 
   #handleToolsListChangedNotification(): void {
@@ -315,7 +373,7 @@ export class GitHubMcpBridge {
     missingQuarantinedTools: string[];
   }> {
     if (!this.#client) {
-      throw new Error("MCP bridge is not connected");
+      throw new McpHostPolicyError("mcp_not_connected");
     }
     const tools = await this.#client.listTools();
     const approvedTools: string[] = [];
@@ -390,15 +448,18 @@ export class GitHubMcpBridge {
       if (!binCheck.ok) {
         this.#lastPauseReason = binCheck.code;
         await this.close();
-        throw new Error(`${binCheck.code}: ${binCheck.reason}`);
+        throw new McpHostPolicyError(binCheck.code);
       }
       const res = await this.#reconcileLiveToolsList();
       this.#admissionPaused = false;
       this.#lastPauseReason = null;
       return res;
     } catch (err) {
-      this.#lastPauseReason = err instanceof Error ? err.message : String(err);
-      throw err;
+      // S2-P0-4: NEVER persist raw SDK/remote error text into #lastPauseReason (flows to View ② & audit)!
+      const safeCode = reduceMcpBridgeError(err, "mcp_recheck_failed");
+      this.#admissionPaused = true;
+      this.#lastPauseReason = safeCode;
+      throw new McpHostPolicyError(safeCode);
     }
   }
 
@@ -415,7 +476,7 @@ export class GitHubMcpBridge {
         return {
           ok: c.ok,
           code: c.code,
-          message: c.ok ? `Connected (${c.approvedTools.length} approved tools)` : (c.reason ?? c.code),
+          message: c.ok ? `Connected (${c.approvedTools.length} approved tools)` : c.code,
           approvedTools: c.approvedTools,
           quarantinedTools: c.quarantinedTools,
         };
@@ -429,10 +490,11 @@ export class GitHubMcpBridge {
         quarantinedTools: r.quarantinedTools,
       };
     } catch (err) {
+      const safeCode = reduceMcpBridgeError(err, "mcp_connectivity_failed");
       return {
         ok: false,
-        code: "mcp_connectivity_failed",
-        message: err instanceof Error ? err.message : String(err),
+        code: safeCode,
+        message: safeCode,
         approvedTools: [],
         quarantinedTools: [],
       };
@@ -510,14 +572,16 @@ export class GitHubMcpBridge {
       return deny("mcp_not_connected", "GitHub MCP bridge is not connected");
     }
 
-    // S2-P0-4: Reduce remote MCP errors strictly to controlled codes (NEVER leak raw remote error text!)
+    // S2-P0-4: Reduce remote MCP errors strictly to closed host enums (NEVER leak raw remote error text!)
+    const safeToolLabel = sanitizeMcpToolLabel(toolName);
     try {
       const result = await this.#client.callTool(toolName, args);
       if (result.isError) {
         return {
           ok: false,
+          outcome: "failed_remote",
           code: "mcp_remote_tool_error",
-          reason: `mcp_remote_tool_error:${toolName}`,
+          reason: `mcp_remote_tool_error:${safeToolLabel}`,
         };
       }
       const text = (result.content ?? [])
@@ -525,13 +589,12 @@ export class GitHubMcpBridge {
         .join("\n");
       return { ok: true, code: "ok", text };
     } catch (err) {
-      const rec = err as { code?: unknown } | null | undefined;
-      const rawCode = rec?.code !== undefined && rec?.code !== null ? String(rec.code) : "";
-      const safeCode = /^-?[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "call_failed";
+      const safeCode = reduceMcpBridgeError(err, "mcp_transport_error");
       return {
         ok: false,
+        outcome: "unknown",
         code: "mcp_transport_error",
-        reason: `mcp_transport_error:${safeCode}`,
+        reason: safeCode,
       };
     }
   }
@@ -540,6 +603,10 @@ export class GitHubMcpBridge {
    * Stage 2 controlled write execution. Invoked EXCLUSIVELY by the sole host submitter
    * AFTER T4 CAS READY -> SUBMITTING commits. Re-checks admission pause, Stage 2 write mode,
    * live in-memory tool presence/fingerprint, AND live DB pin fingerprint BEFORE sending JSON-RPC.
+   *
+   * S2-P0-1 & S2-P0-4: Preserves provably-failed (`failed_local` / `failed_remote`) vs uncertain
+   * post-dispatch transport outcomes (`unknown` -> persisted UNKNOWN + manual reconciliation)
+   * while reducing every error strictly to closed host-controlled codes!
    */
   async callWriteTool(
     toolName: string,
@@ -549,6 +616,7 @@ export class GitHubMcpBridge {
     if (this.#stage < 2 || this.#readOnlyMode) {
       return {
         ok: false,
+        outcome: "failed_local",
         code: "mcp_write_disabled",
         reason: "GitHub MCP bridge is in read-only mode",
       };
@@ -556,6 +624,7 @@ export class GitHubMcpBridge {
     if (this.#admissionPaused) {
       return {
         ok: false,
+        outcome: "failed_local",
         code: "mcp_admission_paused",
         reason: `MCP execution admission paused (${this.#lastPauseReason ?? "rechecking"})`,
       };
@@ -568,18 +637,20 @@ export class GitHubMcpBridge {
       liveObservedSha256,
     });
     if (!pinCheck.ok) {
-      return { ok: false, code: pinCheck.code, reason: pinCheck.reason };
+      return { ok: false, outcome: "failed_local", code: pinCheck.code, reason: pinCheck.reason };
     }
     if (!this.#client) {
-      return { ok: false, code: "mcp_not_connected", reason: "GitHub MCP bridge is not connected" };
+      return { ok: false, outcome: "failed_local", code: "mcp_not_connected", reason: "GitHub MCP bridge is not connected" };
     }
+    const safeToolLabel = sanitizeMcpToolLabel(toolName);
     try {
       const result = await this.#client.callTool(toolName, args);
       if (result.isError) {
         return {
           ok: false,
+          outcome: "failed_remote",
           code: "mcp_remote_tool_error",
-          reason: `mcp_remote_tool_error:${toolName}`,
+          reason: `mcp_remote_tool_error:${safeToolLabel}`,
         };
       }
       const text = (result.content ?? [])
@@ -587,13 +658,21 @@ export class GitHubMcpBridge {
         .join("\n");
       return { ok: true, code: "ok", text };
     } catch (err) {
-      const rec = err as { code?: unknown } | null | undefined;
-      const rawCode = rec?.code !== undefined && rec?.code !== null ? String(rec.code) : "";
-      const safeCode = /^-?[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "call_failed";
+      if (err instanceof McpError && (err.code === -32601 || err.code === -32602)) {
+        const preExecCode = err.code === -32601 ? "mcp_jsonrpc_method_not_found" : "mcp_jsonrpc_invalid_params";
+        return {
+          ok: false,
+          outcome: "failed_remote",
+          code: preExecCode,
+          reason: preExecCode,
+        };
+      }
+      const safeCode = reduceMcpBridgeError(err, "mcp_transport_uncertain");
       return {
         ok: false,
-        code: "mcp_transport_error",
-        reason: `mcp_transport_error:${safeCode}`,
+        outcome: "unknown",
+        code: "mcp_transport_uncertain",
+        reason: safeCode,
       };
     }
   }

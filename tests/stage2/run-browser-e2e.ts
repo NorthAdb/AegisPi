@@ -61,6 +61,7 @@ async function spawnStage2Host(opts: {
       opts.consoleToken,
       "--connectors-config",
       opts.connectorsConfigPath,
+      "--allow-synthetic-fake-model",
     ],
     {
       stdio: ["pipe", "pipe", "pipe"],
@@ -268,6 +269,7 @@ export async function runStage2BrowserE2E(opts?: { dataDir?: string; evidenceDir
     JSON.stringify(
       {
         defaultMemoryDomain: "default",
+        allowSyntheticFakeModel: true,
         skillsEnabled: true,
         routinesEnabled: true,
         strictPlainTextEmail: true,

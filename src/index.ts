@@ -16,6 +16,7 @@ import { ManagedWorkspaceImporter } from "./capabilities/workspace/importer.ts";
 import {
   assertModelUrlForStage,
   assertSmtpHostForStage,
+  getVerifiedModelBoundContract,
   HostCredentialVault,
   isLoopbackHost,
   validateModelPriceScheduleForEndpoint,
@@ -123,6 +124,8 @@ if (s6ObserveDir) {
 
 interface TrustedConnectorsConfig {
   defaultMemoryDomain?: string;
+  /** S2-P0-2: Test-only explicit opt-in allowing loopback fake-local synthetic pricing in Stage 2. */
+  allowSyntheticFakeModel?: boolean;
   skillsEnabled?: boolean;
   /** S2-P0-3d: L3 skill script execution MUST be explicitly enabled (never inferred solely from workspace config). */
   skills?: {
@@ -243,9 +246,32 @@ try {
 }
 
 const vault = new HostCredentialVault();
+const allowSyntheticFakeModel =
+  args["allow-synthetic-fake-model"] === "true" ||
+  process.env["AEGISPI_ALLOW_SYNTHETIC_FAKE_MODEL"] === "1" ||
+  connectorsCfg?.allowSyntheticFakeModel === true;
+const modelIsLoopback = isLoopbackHost(new URL(effectiveModelBaseUrl).hostname);
+
+// S2-P0-2: Stage 2 MUST NOT silently fall back to fake-local / synthetic pricing on loopback when modelProfile is missing!
+// Synthetic fake-local pricing in Stage 2 requires explicit test-profile opt-in (`--allow-synthetic-fake-model` or config flag).
+if (stage === 2 && !connectorsCfg?.modelProfile && !allowSyntheticFakeModel) {
+  process.stderr.write(
+    "Refusing startup: stage2_model_profile_required (Stage 2 requires explicit modelProfile with verified billing contract; loopback fake-local pricing requires explicit --allow-synthetic-fake-model test flag)\n",
+  );
+  process.exit(1);
+}
+
 const modelProvider = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.provider : "fake-local";
 const routerModelId = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.routerModelId : "fake-router-1";
 const workerModelId = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.workerModelId : "fake-worker-1";
+
+if (stage === 2 && modelProvider.trim().toLowerCase() === "fake-local" && !allowSyntheticFakeModel) {
+  process.stderr.write(
+    "Refusing startup: stage2_synthetic_fake_not_enabled (fake-local provider in Stage 2 requires explicit --allow-synthetic-fake-model test flag)\n",
+  );
+  process.exit(1);
+}
+
 const customModelApiKeyVar = stage === 2 ? connectorsCfg?.modelProfile?.apiKeyEnvVar : undefined;
 const routerSecret =
   (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
@@ -266,13 +292,13 @@ if (stage === 2 && connectorsCfg?.strictPlainTextEmail === false) {
   process.exit(1);
 }
 
-// S2-P0-2: Synthetic fixed price schedules are STRICTLY limited to explicit fake-local loopback endpoints!
+// S2-P0-2: Synthetic fixed price schedules are STRICTLY limited to explicit fake-local loopback tests
+// (and in Stage 2 ONLY when allowSyntheticFakeModel is explicitly enabled)!
 // ANY real provider (even on a loopback local proxy!) MUST supply a provider+model-bound verified ModelPriceSchedule!
-const modelIsLoopback = isLoopbackHost(new URL(effectiveModelBaseUrl).hostname);
 const isExplicitSyntheticFake =
   modelIsLoopback &&
   modelProvider.trim().toLowerCase() === "fake-local" &&
-  !(stage === 2 && connectorsCfg?.modelProfile && connectorsCfg.modelProfile.provider.trim().toLowerCase() !== "fake-local");
+  (stage === 1 || allowSyntheticFakeModel);
 const effectivePriceSchedule: ModelPriceSchedule | null =
   stage === 2 && connectorsCfg?.modelProfile?.priceSchedule
     ? connectorsCfg.modelProfile.priceSchedule
@@ -518,6 +544,8 @@ for (const key of scrubbedSecretEnvVars) {
   delete process.env[key];
 }
 
+const routerContract = getVerifiedModelBoundContract(modelProvider, routerModelId);
+const workerContract = getVerifiedModelBoundContract(modelProvider, workerModelId);
 const modelSlots: ModelSlotConfig[] = [
   {
     slotName: "router",
@@ -525,7 +553,10 @@ const modelSlots: ModelSlotConfig[] = [
     modelId: routerModelId,
     baseUrl: effectiveModelBaseUrl,
     credentialSlotId: "slot:model-router",
-    contextWindow: connectorsCfg?.modelProfile?.contextWindow ?? 128_000,
+    contextWindow:
+      connectorsCfg?.modelProfile?.contextWindow ??
+      routerContract?.publishedContextWindowTokens ??
+      128_000,
     maxTokens: connectorsCfg?.modelProfile?.maxTokens ?? 1024,
     priceSchedule: effectivePriceSchedule,
     outboundAuthorized: true,
@@ -536,7 +567,10 @@ const modelSlots: ModelSlotConfig[] = [
     modelId: workerModelId,
     baseUrl: effectiveModelBaseUrl,
     credentialSlotId: "slot:model-worker",
-    contextWindow: connectorsCfg?.modelProfile?.contextWindow ?? 128_000,
+    contextWindow:
+      connectorsCfg?.modelProfile?.contextWindow ??
+      workerContract?.publishedContextWindowTokens ??
+      128_000,
     maxTokens: connectorsCfg?.modelProfile?.maxTokens ?? 1024,
     priceSchedule: effectivePriceSchedule,
     outboundAuthorized: true,
@@ -1163,7 +1197,7 @@ const web = await startWebServer({
           scopeId: "scope:default",
           connectivityOnly: true,
         })
-      : { ok: false, tlsVerified: false, error: "IMAP not configured" };
+      : { ok: false, code: "imap_not_configured", tlsVerified: false, error: "IMAP not configured" };
     const smtpRes = await testSmtpConnectivity({
       host: configuredSmtpConfig.host,
       port: configuredSmtpConfig.port,
@@ -1177,7 +1211,9 @@ const web = await startWebServer({
       imap: {
         ok: imapRes.ok,
         tlsVerified: imapRes.tlsVerified,
-        message: imapRes.ok ? `IMAP 只读连通 (${configuredImapEndpoint?.mailbox})` : (imapRes.error ?? "IMAP failed"),
+        message: imapRes.ok
+          ? `IMAP 只读连通 (${configuredImapEndpoint?.mailbox})`
+          : (imapRes.code ?? "imap_connectivity_failed"),
       },
       smtp: smtpRes,
     };

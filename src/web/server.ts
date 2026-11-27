@@ -1345,7 +1345,14 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     const result: Record<string, unknown> = { ok: true, testedAt: nowFn() };
     if (target === "gmail" || target === "all") {
       if (config.testGmailConnectivity) {
-        result["gmail"] = await config.testGmailConnectivity(session.principalId);
+        try {
+          result["gmail"] = await config.testGmailConnectivity(session.principalId);
+        } catch {
+          result["gmail"] = {
+            imap: { ok: false, message: "imap_connectivity_failed" },
+            smtp: { ok: false, message: "smtp_connectivity_failed" },
+          };
+        }
       } else {
         result["gmail"] = {
           imap: { ok: false, message: "IMAP connector not configured" },
@@ -1354,16 +1361,26 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       }
     }
     if (target === "github_mcp" || target === "all") {
-      if (config.testGithubMcpConnectivity) {
-        result["githubMcp"] = await config.testGithubMcpConnectivity();
-      } else {
-        const bridge =
-          typeof config.host.config.githubMcpBridge === "function"
-            ? config.host.config.githubMcpBridge()
-            : (config.host.config.githubMcpBridge ?? null);
-        result["githubMcp"] = bridge
-          ? await bridge.testConnectivity()
-          : { ok: false, code: "not_configured", message: "GitHub MCP bridge not configured", approvedTools: [], quarantinedTools: [] };
+      try {
+        if (config.testGithubMcpConnectivity) {
+          result["githubMcp"] = await config.testGithubMcpConnectivity();
+        } else {
+          const bridge =
+            typeof config.host.config.githubMcpBridge === "function"
+              ? config.host.config.githubMcpBridge()
+              : (config.host.config.githubMcpBridge ?? null);
+          result["githubMcp"] = bridge
+            ? await bridge.testConnectivity()
+            : { ok: false, code: "not_configured", message: "GitHub MCP bridge not configured", approvedTools: [], quarantinedTools: [] };
+        }
+      } catch {
+        result["githubMcp"] = {
+          ok: false,
+          code: "mcp_connectivity_failed",
+          message: "mcp_connectivity_failed",
+          approvedTools: [],
+          quarantinedTools: [],
+        };
       }
     }
     return c.json(result);
@@ -1667,9 +1684,40 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
           updatedAt: t.updated_at,
         };
       });
-      const latestTrigger = triggers[0] ?? null;
       const latestConvTrigger = triggers.find((t) => Boolean(t.conversationId)) ?? null;
-      const summaryRedacted = Boolean(latestTrigger?.redacted || latestConvTrigger?.redacted);
+      // S2-P0-5: Bind summary authorization strictly to the EXACT trigger that produced routines.last_result_summary!
+      // Fail closed (redact summary text) whenever provenance (last_result_trigger_id or trigger row) cannot be determined!
+      let summaryRedacted = false;
+      let summaryConversationId: string | null = null;
+      if (r.last_result_summary) {
+        if (!r.last_result_trigger_id) {
+          summaryRedacted = true;
+        } else {
+          const producerRaw =
+            r.triggers.find((t) => t.trigger_id === r.last_result_trigger_id) ??
+            (config.host.govDb
+              .prepare("SELECT * FROM routine_triggers WHERE trigger_id = ? AND routine_id = ?")
+              .get(r.last_result_trigger_id, r.routine_id) as
+              | {
+                  trigger_id: string;
+                  correlation_key: string;
+                  conversation_id: string | null;
+                  state: string;
+                }
+              | undefined);
+          if (!producerRaw) {
+            summaryRedacted = true;
+          } else if (producerRaw.state === "SUCCEEDED" && !producerRaw.conversation_id) {
+            summaryRedacted = true;
+          } else {
+            const producerAuth = evaluateTriggerAuth(producerRaw);
+            summaryRedacted = producerAuth.redacted;
+            if (!producerAuth.redacted && producerRaw.conversation_id) {
+              summaryConversationId = producerRaw.conversation_id;
+            }
+          }
+        }
+      }
       return [
         {
           routineId: r.routine_id,
@@ -1685,12 +1733,15 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
           nextRunLocalText: r.next_run_utc_ms ? formatUtcInTimezone(r.next_run_utc_ms, r.timezone) : null,
           lastRunUtcMs: r.last_run_utc_ms,
           lastStatus: r.last_status,
+          lastResultTriggerId: r.last_result_trigger_id,
           lastResultSummary:
             summaryRedacted && r.last_result_summary
               ? "[redacted_after_source_revocation]"
               : r.last_result_summary,
           resultRedacted: summaryRedacted,
-          lastConversationId: latestConvTrigger?.conversationId ?? null,
+          lastConversationId: summaryRedacted
+            ? null
+            : (summaryConversationId ?? (latestConvTrigger && !latestConvTrigger.redacted ? latestConvTrigger.conversationId : null)),
           triggers,
         },
       ];

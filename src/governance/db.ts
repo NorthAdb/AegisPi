@@ -406,6 +406,7 @@ CREATE TABLE IF NOT EXISTS routines (
   last_run_utc_ms INTEGER,
   last_status TEXT,
   last_result_summary TEXT,
+  last_result_trigger_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -760,6 +761,7 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
       last_run_utc_ms INTEGER,
       last_status TEXT,
       last_result_summary TEXT,
+      last_result_trigger_id TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -820,6 +822,14 @@ function migrateGovernanceSchema(db: DatabaseSync): void {
     db.exec(
       `ALTER TABLE mcp_tool_pins ADD COLUMN present_in_last_list INTEGER NOT NULL DEFAULT 1 CHECK(present_in_last_list IN (0,1));`,
     );
+  }
+
+  // Migration 9 (Stage 2 S2-P0-5): Bind routines.last_result_summary to its exact producing trigger_id
+  const routineCols = (
+    db.prepare("PRAGMA table_info(routines)").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  if (routineCols.length > 0 && !routineCols.includes("last_result_trigger_id")) {
+    db.exec(`ALTER TABLE routines ADD COLUMN last_result_trigger_id TEXT;`);
   }
 }
 

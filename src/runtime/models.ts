@@ -28,11 +28,13 @@ import {
 import { mintId } from "../governance/canonical.ts";
 import {
   assertModelUrlForStage,
+  getVerifiedModelBoundContract,
   Stage1EgressBlockedError,
   validateModelPriceScheduleForEndpoint,
   type HostCredentialVault,
   type ModelPriceSchedule,
   type StageEgressPolicy,
+  type VerifiedModelBoundContract,
 } from "../governance/credentials.ts";
 import { withImmediateTx, writeAuditEvent } from "../governance/db.ts";
 import { checkConversationModelDisclosure } from "../governance/policy.ts";
@@ -157,46 +159,74 @@ function hasUnboundedNonTextContent(context: AiContext): boolean {
   return false;
 }
 
-/**
- * S2-P0-4: Reduces any remote model error string strictly to a controlled status code.
- * Never persists or projects arbitrary remote HTTP error bodies, headers, or provider text.
- */
-function reduceRemoteModelErrorMessage(raw: string | undefined, stopReason: string | undefined): string {
-  if (stopReason === "aborted") {
-    return "model_request_aborted";
-  }
-  const text = typeof raw === "string" ? raw.trim() : "";
-  if (!text) return "model_provider_error";
-  const httpMatch = /model_provider_http_(\d{3})/.exec(text);
-  if (httpMatch?.[1]) {
-    return `model_provider_http_${httpMatch[1]}`;
-  }
-  const transportMatch = /(model_transport_error:[A-Za-z0-9_.-]{1,40})/.exec(text);
-  if (transportMatch?.[1]) {
-    return transportMatch[1];
-  }
-  if (/Stage [12] blocks|egress|redirect/i.test(text)) {
-    return "model_egress_blocked";
-  }
-  if (/content_filter/i.test(text)) {
-    return "model_provider_content_filter";
-  }
-  if (/network_error/i.test(text)) {
-    return "model_provider_network_error";
-  }
-  return "model_provider_error";
-}
+type HostModelTransportErrorCode =
+  | "connection_refused"
+  | "connection_reset"
+  | "dns_lookup_failed"
+  | "timeout"
+  | "tls_error"
+  | "aborted"
+  | "transport_failed";
 
-function reduceLocalFetchErrorCode(err: unknown): string {
-  const rec = err as { code?: unknown; cause?: { code?: unknown } } | null | undefined;
+type ModelFetchBoundaryOutcome =
+  | { kind: "http_ok" }
+  | { kind: "http_error"; status: number }
+  | { kind: "transport_error"; code: HostModelTransportErrorCode }
+  | { kind: "egress_blocked" }
+  | { kind: "wire_contract_violation" };
+
+function mapLocalFetchTransportErrorCode(err: unknown): HostModelTransportErrorCode {
+  const rec = err as { name?: unknown; code?: unknown; cause?: { code?: unknown } } | null | undefined;
+  if (rec?.name === "AbortError") return "aborted";
   const rawCode =
     typeof rec?.code === "string"
       ? rec.code
       : typeof rec?.cause?.code === "string"
         ? rec.cause.code
         : "";
-  const safeCode = /^[A-Za-z0-9_.-]{1,40}$/.test(rawCode) ? rawCode : "transport_failed";
-  return `model_transport_error:${safeCode}`;
+  const upper = rawCode.toUpperCase();
+  if (upper === "ECONNREFUSED") return "connection_refused";
+  if (upper === "ECONNRESET" || upper === "EPIPE" || upper === "UND_ERR_SOCKET") return "connection_reset";
+  if (upper === "ENOTFOUND" || upper === "EAI_AGAIN") return "dns_lookup_failed";
+  if (upper.includes("TIMEOUT") || upper === "ETIMEDOUT" || upper === "UND_ERR_CONNECT_TIMEOUT" || upper === "UND_ERR_HEADERS_TIMEOUT" || upper === "UND_ERR_BODY_TIMEOUT") {
+    return "timeout";
+  }
+  if (upper.includes("CERT") || upper.includes("TLS") || upper.includes("SSL")) return "tls_error";
+  if (upper === "ABORT_ERR") return "aborted";
+  return "transport_failed";
+}
+
+/**
+ * S2-P0-4: Authoritative host-side model error reducer.
+ * Derives the error code EXCLUSIVELY from host-observed fetch status / closed host enums and stopReason —
+ * NEVER inspects or extracts ANY characters from remote HTTP 200 stream bodies or remote error text!
+ */
+function reduceAuthoritativeModelErrorCode(
+  boundaryOutcome: ModelFetchBoundaryOutcome | null,
+  stopReason: string | undefined,
+): string {
+  if (stopReason === "aborted") {
+    return "model_request_aborted";
+  }
+  if (!boundaryOutcome) {
+    return "model_provider_error";
+  }
+  if (boundaryOutcome.kind === "egress_blocked") {
+    return "model_egress_blocked";
+  }
+  if (boundaryOutcome.kind === "wire_contract_violation") {
+    return "model_wire_contract_violation";
+  }
+  if (boundaryOutcome.kind === "http_error") {
+    return `model_provider_http_${boundaryOutcome.status}`;
+  }
+  if (boundaryOutcome.kind === "transport_error") {
+    return `model_transport_error:${boundaryOutcome.code}`;
+  }
+  if (boundaryOutcome.kind === "http_ok") {
+    return "model_provider_stream_error";
+  }
+  return "model_provider_error";
 }
 
 /**
@@ -204,9 +234,10 @@ function reduceLocalFetchErrorCode(err: unknown): string {
  * - Synthetic fixed pricing is STRICTLY limited to explicit `fake-local` provider on loopback endpoints.
  * - ANY real provider (whether remote OR routed through a loopback local proxy!) MUST match a verified
  *   provider+model billing bound contract in `VERIFIED_MODEL_BOUND_CONTRACTS`; otherwise fails closed!
- * - Uses worst-case byte-level BPE bound (1 UTF-8 byte = 1 token) across full systemPrompt + messages + tools
- *   plus the verified contract's per-message / per-tool / fixed prompt overhead, NEVER truncating downwards,
- *   and bounding output strictly by effectiveMaxTokens <= contract.maxTokensHardCeiling.
+ * - Uses the provider's published hard context window limit (`contract.publishedContextWindowTokens`) as the
+ *   provable conservative input token upper bound (zero fragile tokenizer or framing guesswork!) plus explicit
+ *   wire-enforced `effectiveMaxTokens <= contract.maxTokensHardCeiling`, priced at or above the contract's
+ *   verified Peak / Cache-Miss rate floor.
  */
 function estimateUpperBoundMu(
   context: AiContext,
@@ -215,7 +246,7 @@ function estimateUpperBoundMu(
   effectiveBaseUrl: string,
   effectiveMaxTokens: number,
   reasoningOption?: unknown,
-): number | null {
+): { upperMu: number; contract: VerifiedModelBoundContract | null } | null {
   const scheduleCheck = validateModelPriceScheduleForEndpoint(effectiveBaseUrl, schedule, {
     provider: model.provider,
     modelId: model.id,
@@ -228,7 +259,7 @@ function estimateUpperBoundMu(
     Number.isSafeInteger(schedule.syntheticFixedUpperMu) &&
     schedule.syntheticFixedUpperMu >= 0
   ) {
-    return schedule.syntheticFixedUpperMu;
+    return { upperMu: schedule.syntheticFixedUpperMu, contract: null };
   }
   if (!schedule.allowTokenBoundEstimation) {
     return null;
@@ -239,13 +270,20 @@ function estimateUpperBoundMu(
     return null;
   }
   if (
-    !Number.isFinite(schedule.inputPerMTokMu) ||
-    schedule.inputPerMTokMu < 0 ||
-    !Number.isFinite(schedule.outputPerMTokMu) ||
-    schedule.outputPerMTokMu < 0 ||
     !Number.isSafeInteger(effectiveMaxTokens) ||
     effectiveMaxTokens <= 0 ||
-    effectiveMaxTokens > contract.maxTokensHardCeiling
+    effectiveMaxTokens > contract.maxTokensHardCeiling ||
+    !Number.isFinite(model.contextWindow) ||
+    model.contextWindow <= 0 ||
+    model.contextWindow > contract.publishedContextWindowTokens
+  ) {
+    return null;
+  }
+  if (
+    contract.requiredWireThinkingMode === "disabled" &&
+    reasoningOption !== undefined &&
+    reasoningOption !== null &&
+    reasoningOption !== "off"
   ) {
     return null;
   }
@@ -257,41 +295,78 @@ function estimateUpperBoundMu(
   ) {
     return null;
   }
-  if (hasUnboundedNonTextContent(context)) {
+  if (!contract.supportsNonTextInput && hasUnboundedNonTextContent(context)) {
     return null;
   }
-  let payloadUtf8Bytes = 0;
-  try {
-    payloadUtf8Bytes = Buffer.byteLength(
-      JSON.stringify({
-        systemPrompt: context.systemPrompt ?? "",
-        messages: context.messages,
-        tools: context.tools ?? [],
-      }),
-      "utf8",
-    );
-  } catch {
-    return null;
-  }
-  const provableMaxInputTokens =
-    payloadUtf8Bytes +
-    context.messages.length * contract.perMessageOverheadTokens +
-    (context.tools?.length ?? 0) * contract.perToolOverheadTokens +
-    contract.fixedPromptOverheadTokens;
+
+  // Provable conservative input upper bound = provider's published hard context window limit!
+  const provableMaxInputTokens = contract.publishedContextWindowTokens;
   const provableMaxOutputTokens = effectiveMaxTokens;
 
   const maxInputRateMu = Math.max(
     schedule.inputPerMTokMu,
     schedule.cacheReadPerMTokMu ?? 0,
     schedule.cacheWritePerMTokMu ?? 0,
+    contract.minInputPerMTokMu,
+    contract.minCacheReadPerMTokMu,
+    contract.minCacheWritePerMTokMu,
   );
+  const maxOutputRateMu = Math.max(schedule.outputPerMTokMu, contract.minOutputPerMTokMu);
   const inputUpperMu = Math.ceil((provableMaxInputTokens * maxInputRateMu) / 1_000_000);
-  const outputUpperMu = Math.ceil((provableMaxOutputTokens * schedule.outputPerMTokMu) / 1_000_000);
+  const outputUpperMu = Math.ceil((provableMaxOutputTokens * maxOutputRateMu) / 1_000_000);
   const totalUpperMu = Math.max(1, inputUpperMu + outputUpperMu);
   if (!Number.isSafeInteger(totalUpperMu) || totalUpperMu <= 0) {
     return null;
   }
-  return totalUpperMu;
+  return { upperMu: totalUpperMu, contract };
+}
+
+function validateOutgoingWireRequestForContract(
+  rawBody: string | undefined,
+  expectedModelId: string,
+  expectedMaxTokens: number,
+  contract: VerifiedModelBoundContract,
+): { ok: true } | { ok: false; code: string } {
+  if (typeof rawBody !== "string" || rawBody.trim().length === 0) {
+    return { ok: false, code: "wire_missing_json_body" };
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const val = JSON.parse(rawBody);
+    if (!val || typeof val !== "object" || Array.isArray(val)) {
+      return { ok: false, code: "wire_invalid_json_body" };
+    }
+    parsed = val as Record<string, unknown>;
+  } catch {
+    return { ok: false, code: "wire_invalid_json_body" };
+  }
+  if (parsed["model"] !== expectedModelId) {
+    return { ok: false, code: "wire_model_mismatch" };
+  }
+  const wireMaxTokens = parsed["max_tokens"];
+  if (
+    typeof wireMaxTokens !== "number" ||
+    !Number.isSafeInteger(wireMaxTokens) ||
+    wireMaxTokens <= 0 ||
+    wireMaxTokens > expectedMaxTokens
+  ) {
+    return { ok: false, code: "wire_max_tokens_mismatch" };
+  }
+  if (contract.requiredWireThinkingMode === "disabled") {
+    const thinking = parsed["thinking"];
+    if (
+      !thinking ||
+      typeof thinking !== "object" ||
+      Array.isArray(thinking) ||
+      (thinking as Record<string, unknown>)["type"] !== "disabled"
+    ) {
+      return { ok: false, code: "wire_thinking_disabled_required" };
+    }
+    if (parsed["reasoning_effort"] !== undefined) {
+      return { ok: false, code: "wire_reasoning_effort_forbidden" };
+    }
+  }
+  return { ok: true };
 }
 
 function computeActualMu(
@@ -329,11 +404,28 @@ export function createGuardedModelFetch(
   underlyingFetch: typeof globalThis.fetch = globalThis.fetch,
   onHttpFetchAttempt?: (url: string) => void,
   egressPolicy?: StageEgressPolicy,
+  hooks?: {
+    wireValidator?: (rawBody: string | undefined) => { ok: true } | { ok: false; code: string };
+    onBoundaryOutcome?: (outcome: ModelFetchBoundaryOutcome) => void;
+  },
 ): typeof globalThis.fetch {
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    assertModelUrlForStage(rawUrl, egressPolicy);
+    try {
+      assertModelUrlForStage(rawUrl, egressPolicy);
+    } catch (err) {
+      hooks?.onBoundaryOutcome?.({ kind: "egress_blocked" });
+      throw err;
+    }
+    if (hooks?.wireValidator) {
+      const bodyStr = typeof init?.body === "string" ? init.body : undefined;
+      const wireCheck = hooks.wireValidator(bodyStr);
+      if (!wireCheck.ok) {
+        hooks.onBoundaryOutcome?.({ kind: "wire_contract_violation" });
+        throw new Error(`model_wire_contract_violation:${wireCheck.code}`);
+      }
+    }
     onHttpFetchAttempt?.(rawUrl);
     const guardedInit: RequestInit = {
       ...init,
@@ -344,13 +436,17 @@ export function createGuardedModelFetch(
       response = await underlyingFetch(input, guardedInit);
     } catch (err) {
       if (err instanceof Stage1EgressBlockedError) {
+        hooks?.onBoundaryOutcome?.({ kind: "egress_blocked" });
         throw err;
       }
-      throw new Error(reduceLocalFetchErrorCode(err));
+      const code = mapLocalFetchTransportErrorCode(err);
+      hooks?.onBoundaryOutcome?.({ kind: "transport_error", code });
+      throw new Error(`model_transport_error:${code}`);
     }
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location") ?? "(missing)";
       void response.body?.cancel().catch(() => {});
+      hooks?.onBoundaryOutcome?.({ kind: "egress_blocked" });
       throw new Stage1EgressBlockedError(
         location,
         `Model egress blocks HTTP ${response.status} redirect from ${rawUrl} to ${location}`,
@@ -361,6 +457,7 @@ export function createGuardedModelFetch(
     if (!response.ok) {
       const status = Number.isInteger(response.status) ? response.status : 500;
       void response.body?.cancel().catch(() => {});
+      hooks?.onBoundaryOutcome?.({ kind: "http_error", status });
       return new Response(
         JSON.stringify({
           error: {
@@ -376,6 +473,7 @@ export function createGuardedModelFetch(
         },
       );
     }
+    hooks?.onBoundaryOutcome?.({ kind: "http_ok" });
     return response;
   };
 }
@@ -424,18 +522,38 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
 
     for (const [providerId, providerSlots] of byProvider.entries()) {
       const first = providerSlots[0]!;
-      const modelDefs: Model<"openai-completions">[] = providerSlots.map((s) => ({
-        id: s.modelId,
-        name: `${s.provider}/${s.modelId}`,
-        api: "openai-completions",
-        provider: s.provider,
-        baseUrl: s.baseUrl,
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: s.contextWindow,
-        maxTokens: s.maxTokens,
-      }));
+      const modelDefs: Model<"openai-completions">[] = providerSlots.map((s) => {
+        const contract = getVerifiedModelBoundContract(s.provider, s.modelId);
+        const isDeepSeekNonThinking = contract?.requiredWireThinkingMode === "disabled" && contract.provider === "deepseek";
+        return {
+          id: s.modelId,
+          name: `${s.provider}/${s.modelId}`,
+          api: "openai-completions",
+          provider: s.provider,
+          baseUrl: s.baseUrl,
+          reasoning: isDeepSeekNonThinking,
+          ...(isDeepSeekNonThinking
+            ? {
+                thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", max: "max" },
+                compat: {
+                  supportsStore: false,
+                  maxTokensField: "max_tokens" as const,
+                  thinkingFormat: "deepseek" as const,
+                  supportsStrictMode: true,
+                },
+              }
+            : {}),
+          input: ["text"],
+          cost: {
+            input: (s.priceSchedule?.inputPerMTokMu ?? 300_000) / 1_000_000,
+            output: (s.priceSchedule?.outputPerMTokMu ?? 1_200_000) / 1_000_000,
+            cacheRead: (s.priceSchedule?.cacheReadPerMTokMu ?? 0) / 1_000_000,
+            cacheWrite: (s.priceSchedule?.cacheWritePerMTokMu ?? 0) / 1_000_000,
+          },
+          contextWindow: s.contextWindow,
+          maxTokens: s.maxTokens,
+        };
+      });
       inner.setProvider(
         createProvider({
           id: providerId,
@@ -613,7 +731,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       requestedMaxTokens !== undefined && modelMaxTokens > 0
         ? Math.min(requestedMaxTokens, modelMaxTokens)
         : modelMaxTokens;
-    const upperMu = estimateUpperBoundMu(
+    const boundEst = estimateUpperBoundMu(
       ctx,
       model,
       slot.priceSchedule,
@@ -621,7 +739,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       effectiveMaxTokens,
       options?.reasoning,
     );
-    if (upperMu === null) {
+    if (boundEst === null) {
       const msg = `Blocked model send (${requestId}): cannot determine provable conservative microUSD upper bound for ${model.provider}/${model.id}`;
       recordEgressDenial(requestId, "unknown_upper_bound", msg, {
         conversationId: owner.conversationId,
@@ -630,6 +748,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       });
       return createImmediateErrorStream(model, msg, now);
     }
+    const { upperMu, contract } = boundEst;
 
     // 4. Atomic dual-account reservation (T6) strictly BEFORE any physical send
     try {
@@ -703,16 +822,29 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       provider: model.provider,
       modelId: model.id,
     });
+    let fetchBoundaryOutcome: ModelFetchBoundaryOutcome | null = null;
     const guardedFetch = createGuardedModelFetch(
       config.fetchImpl ?? globalThis.fetch,
       config.onHttpFetchAttempt,
       egressPolicy,
+      {
+        ...(contract
+          ? {
+              wireValidator: (rawBody: string | undefined) =>
+                validateOutgoingWireRequestForContract(rawBody, model.id, effectiveMaxTokens, contract),
+            }
+          : {}),
+        onBoundaryOutcome: (outcome: ModelFetchBoundaryOutcome) => {
+          fetchBoundaryOutcome = outcome;
+        },
+      },
     );
     // Resolve this exact slot's secret strictly in host memory (S6 per-slot credential separation)
     const slotApiKey = config.vault.resolveSecretInMemory(slot.credentialSlotId);
+    const enforceDisableThinking = !model.reasoning || contract?.requiredWireThinkingMode === "disabled";
     const enforcedOptions: ModelsSimpleStreamOptions = {
       ...options,
-      ...(!model.reasoning ? { reasoning: undefined } : {}),
+      ...(enforceDisableThinking ? { reasoning: undefined } : {}),
       ...(slotApiKey ? { apiKey: slotApiKey } : {}),
       maxTokens: effectiveMaxTokens,
       maxRetries: 0,
@@ -721,8 +853,8 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     const streamStartedAt = performance.now();
     const underlyingStream = inner.streamSimple(model, ctx, enforcedOptions);
 
-    // Non-invasive streaming delta tap + S2-P0-4 trust-boundary error reducer
-    // Reduces any remote error event/result strictly to a controlled status code BEFORE pi-durable sees/persists it!
+    // Non-invasive streaming delta tap + S2-P0-4 authoritative host-side error reducer
+    // Reduces any remote error event/result strictly from host fetch outcome + closed enums (NEVER remote text!)
     let firstTokenMs: number | null = null;
     let accumulatedText = "";
     let lastEmitAt = 0;
@@ -730,8 +862,8 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     const origEnd = underlyingStream.end.bind(underlyingStream);
     underlyingStream.push = ((event: Parameters<AssistantMessageEventStream["push"]>[0]) => {
       if (event.type === "error" && event.error) {
-        event.error.errorMessage = reduceRemoteModelErrorMessage(
-          event.error.errorMessage,
+        event.error.errorMessage = reduceAuthoritativeModelErrorCode(
+          fetchBoundaryOutcome,
           event.error.stopReason,
         );
       } else if (
@@ -739,8 +871,8 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
         event.message &&
         (event.message.stopReason === "error" || event.message.stopReason === "aborted")
       ) {
-        event.message.errorMessage = reduceRemoteModelErrorMessage(
-          event.message.errorMessage,
+        event.message.errorMessage = reduceAuthoritativeModelErrorCode(
+          fetchBoundaryOutcome,
           event.message.stopReason,
         );
       } else if (event.type === "text_delta" && typeof event.delta === "string" && event.delta.length > 0) {
@@ -766,7 +898,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
     }) as AssistantMessageEventStream["push"];
     underlyingStream.end = ((result?: AssistantMessage) => {
       if (result && (result.stopReason === "error" || result.stopReason === "aborted")) {
-        result.errorMessage = reduceRemoteModelErrorMessage(result.errorMessage, result.stopReason);
+        result.errorMessage = reduceAuthoritativeModelErrorCode(fetchBoundaryOutcome, result.stopReason);
       }
       return origEnd(result);
     }) as AssistantMessageEventStream["end"];
@@ -778,7 +910,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
         const totalMs = Math.max(0, Math.round(performance.now() - streamStartedAt));
         const isTerminalError = finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted";
         const reducedErrCode = isTerminalError
-          ? reduceRemoteModelErrorMessage(finalMsg.errorMessage, finalMsg.stopReason)
+          ? reduceAuthoritativeModelErrorCode(fetchBoundaryOutcome, finalMsg.stopReason)
           : null;
         config.onStreamFinished?.({
           conversationId: owner.conversationId,
@@ -790,6 +922,19 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
           errorCode: reducedErrCode,
         });
         if (isTerminalError) {
+          if (fetchBoundaryOutcome?.kind === "wire_contract_violation") {
+            // Provably failed BEFORE any HTTP byte hit the wire -> release reservation cleanly
+            try {
+              releaseBudgetReservation(config.govDb, {
+                requestId,
+                reason: "model_wire_contract_violation",
+                evidenceRef: `wire_contract_violation:${requestId}`,
+                now: nowFn(),
+              });
+            } catch {
+              // ignore if closed
+            }
+          }
           return;
         }
         const actualMu = slot.priceSchedule
