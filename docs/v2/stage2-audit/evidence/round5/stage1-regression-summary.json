@@ -1,0 +1,45 @@
+{
+  "commitSha": "a10500daca6b92cfa20786283432f91bf5fe320f",
+  "environment": {
+    "nodeExe": "node.exe",
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "week1": {
+    "runId": "week1_2fabd8e6",
+    "status": "PASS",
+    "executedAt": "2026-11-27T03:27:28.588Z",
+    "matrixPassed": 25,
+    "matrixTotal": 25,
+    "smtpTotalReceived": 1,
+    "finalEffectState": "UNKNOWN"
+  },
+  "week2": {
+    "runId": "week2_e1bc26f5",
+    "status": "PASS",
+    "executedAt": "2026-11-27T03:31:52.77Z",
+    "v04_v05": {
+      "status": "PASS",
+      "runId": "v04v05_4bdf5ead"
+    },
+    "v02": {
+      "status": "PASS",
+      "runId": "v02_68720043"
+    },
+    "v03": {
+      "status": "PASS",
+      "runId": "v03_6c19004c"
+    },
+    "s6": {
+      "status": "PASS",
+      "runId": "s6_5f70d0bf",
+      "totalForbiddenHits": 0
+    },
+    "v01_v05_v06_browser": {
+      "status": "PASS",
+      "runId": "v01v06_ed25533d"
+    }
+  }
+}

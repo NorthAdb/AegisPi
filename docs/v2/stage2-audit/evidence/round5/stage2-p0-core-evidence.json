@@ -1,0 +1,173 @@
+{
+  "runId": "s2_p0_313c3483",
+  "executedAt": "2026-11-27T03:22:23.045Z",
+  "smtpTls": {
+    "directTlsOk": true,
+    "connectTunnelTlsOk": true,
+    "badHostnameRejectedBeforeSend": true,
+    "fakeTlsSmtpTotalReceived": 2,
+    "plainTextGuardRejectedCcAndAttachments": true
+  },
+  "p0_2_budget_streaming": {
+    "progressiveDeltasObserved": 3,
+    "firstTokenMs": 84,
+    "totalMs": 242,
+    "controlSendDelta": 1,
+    "shortfallSendDelta": 0
+  },
+  "p0_1_two_cas": {
+    "tier0GithubAutoIssued": true,
+    "tier0ClaimCount": 1,
+    "tier0FakeMcpWriteDelta": 1,
+    "protectedBranchWriteDelta": 0,
+    "oldRevisionRejected409": true,
+    "duplicateDecisionKeyReplayed": true,
+    "editedEmailFakeSmtpDelta": 1
+  },
+  "p0_3_mcp_c4": {
+    "listChangedNotificationPausedAndQuarantined": true,
+    "redriftWhileQuarantinedUpdatedToV3": true,
+    "absentToolApprovalRejected409": true,
+    "stalePinApprovalRejected409": true,
+    "toolMismatchBlockedBeforeClaim": "github_write_tool_mismatch",
+    "driftQuarantined": true,
+    "pendingClaimBlockedOnDrift": "mcp_tool_quarantined",
+    "pendingClaimBlockedOnFingerprintChangeAfterReapprove": "mcp_tool_fingerprint_changed",
+    "revokedCallBlocked": "mcp_tool_revoked",
+    "missingToolQuarantined": true,
+    "binaryTamperRejected": "mcp_binary_sha256_mismatch",
+    "remoteToolCallDeltaDuringC4": 0
+  },
+  "p0_4_credentials_zero_leak": {
+    "slotsChecked": [
+      "slot:model-router",
+      "slot:model-worker",
+      "slot:tls-smtp",
+      "slot:github-mcp-pat",
+      "slot:web-console",
+      "slot:echoed-smtp-boundary",
+      "slot:echoed-mcp-boundary",
+      "slot:echoed-mcp-read-boundary",
+      "slot:echoed-mcp-list-boundary",
+      "slot:echoed-model-http-boundary",
+      "slot:echoed-model-stream-boundary"
+    ],
+    "scannedFiles": [
+      {
+        "file": "aegis-gov.sqlite",
+        "bytes": 475136,
+        "hits": 0
+      },
+      {
+        "file": "pi-durable.sqlite",
+        "bytes": 212992,
+        "hits": 0
+      },
+      {
+        "file": "model-requests.jsonl",
+        "bytes": 5836,
+        "hits": 0
+      },
+      {
+        "file": "mcp-calls.jsonl",
+        "bytes": 5375,
+        "hits": 0
+      },
+      {
+        "file": "smtp-received.jsonl",
+        "bytes": 1148,
+        "hits": 0
+      }
+    ],
+    "totalForbiddenHits": 0
+  },
+  "round4_p0_closure": {
+    "s2_p0_1_githubWriteTransportDropPersistedUnknownAndDisplayedPendingReconcile": true,
+    "s2_p0_1_githubWriteDropIndependentWriteDelta": 1,
+    "s2_p0_2_stage2MissingModelProfileRefusedStartup": true,
+    "s2_p0_2_retiredDeepseekChatAndZeroAndBelowPeakRatesRejected": true,
+    "s2_p0_2_deepseekFlashRealContractNormalTaskUpperMu": 301229,
+    "s2_p0_2_deepseekFlashWireThinkingDisabledVerified": true,
+    "s2_p0_2_deepseekFlashWireMaxTokensVerified": true,
+    "s2_p0_2_deepseekFlashBudgetExhaustedHttpDelta": 0,
+    "s2_p0_4_mcpConnectivityAndRecheckListErrorReducedZeroHits": true,
+    "s2_p0_4_modelHttp200InStreamErrorReducedToFixedCodeZeroHits": true,
+    "s2_p0_5_outOfOrderRoutineCompletionBoundToProducingTriggerIdRedacted": true,
+    "s2_p0_5_unknownProvenanceNullTriggerIdFailClosedRedacted": true
+  },
+  "round5_p0_closure": {
+    "githubUnknownWrites": [
+      {
+        "mode": "DROP_AFTER_WRITE",
+        "reason": "mcp_connection_closed",
+        "dispatchCount": 1,
+        "appliedCount": 1,
+        "state": "UNKNOWN",
+        "views1And3Status": "结果待核对"
+      },
+      {
+        "mode": "ERROR_AFTER_WRITE",
+        "reason": "mcp_remote_write_unconfirmed",
+        "dispatchCount": 1,
+        "appliedCount": 1,
+        "state": "UNKNOWN",
+        "views1And3Status": "结果待核对"
+      }
+    ],
+    "invalidModelProfiles": [
+      {
+        "name": "missing",
+        "code": "stage2_real_model_base_url_required",
+        "exitCode": 1
+      },
+      {
+        "name": "blank",
+        "code": "stage2_real_model_base_url_required",
+        "exitCode": 1
+      },
+      {
+        "name": "loopback",
+        "code": "unverified_model_endpoint",
+        "exitCode": 1
+      },
+      {
+        "name": "unverified",
+        "code": "unverified_model_endpoint",
+        "exitCode": 1
+      }
+    ],
+    "invalidModelProfileHttpDelta": 0
+  },
+  "round3_p0_closure": {
+    "s2_p0_1_stage2StrictPlainTextMandatoryAndExtraFieldBlocked": true,
+    "s2_p0_2_loopbackRealProxyAndUnprovenModelBlocked": true,
+    "s2_p0_3_redriftWhileQuarantinedUpdatedAndAbsentToolApprovalRejected409": true,
+    "s2_p0_4_smtpQidAndModel401AndRoutineErrAndMcpReadErrReducedZeroHits": true,
+    "s2_p0_5_view1EffectsAndView2RoutinesRedactedOnRevoke": true
+  },
+  "round1_p0_and_p1_remediation": {
+    "s2_p0_1_crlfAndRecipientAllowlistBlocked": true,
+    "s2_p0_2_remoteRealPriceScheduleRequired": true,
+    "s2_p0_3a_listChangedPausedAndQuarantined": true,
+    "s2_p0_3b_pinApprovalBoundToCanonicalDef409OnStale": true,
+    "s2_p0_3c_controlledToolBoundAndEmptyPathDeniedAndUnconfirmedRefEscalated": true,
+    "s2_p0_3d_skillReadAndL3ExecGrantsEnforced": true,
+    "s2_p0_4_remoteEchoedSecretsReducedAtBoundaryZeroHits": true,
+    "s2_p0_5_view3AndView1RedactedIdenticallyAfterRevoke": true,
+    "s2_p1_1_stage1ScopeUpgradeVerified": true,
+    "s2_p1_2_sameConvTask1V1Task2V2Verified": true,
+    "s2_p1_4_billingDayAggregationVerifiedAcross105OtherDayRows": true
+  },
+  "p0_5_skills_routines_hono_mobile": {
+    "skills3LevelAndLockVerified": true,
+    "routineRuleRevokeReconfirmVerified": true,
+    "routineMissedPeriodsCollapsedTo1": true,
+    "routinePauseStoppedFutureTriggers": true,
+    "honoClosedBackgroundCompleted": true,
+    "mobileHttpsBadConfigRejected": true,
+    "mobileHttpsHostPrefixCookieVerified": true,
+    "mobileHttpsCrossOrigin403Verified": true,
+    "mobileHttpsLogoutRevokedSession": true
+  },
+  "status": "PASS"
+}

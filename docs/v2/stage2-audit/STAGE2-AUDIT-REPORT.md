@@ -1,6 +1,7 @@
 # AegisPi v2 任务书 2 阶段二（第 3–4 周）交付审计报告
 
-- **文档版本**：Stage 2 审计交接第 1 轮提审（2026-11-26，香港时间）
+- **文档版本**：Stage 2 第 5 轮整改与验收（2026-11-27，香港时间）
+- **最终验收**：候选 `a10500daca6b92cfa20786283432f91bf5fe320f` **通过**。五类 P0 全部关闭，阶段二四视图与阶段一两周回归通过。真实服务联调为后续验证项。见 §11.8。
 - **目标仓库与分支**：`aegis-pi` / 分支 `v2`
 - **基线与前置签收**：
   - v1 零信任基线：`3a88b6895991d328e8e27fd1072a29846e7a9adf`（tag `v1-zero-trust-baseline`）
@@ -13,13 +14,13 @@
   - 阶段一第 2 周回归（运行于相同代码树提交前）：`runId = week2_8e6115ae`（执行时间 `2026-11-26T12:28:51.780Z`，退出码 `0`）
 - **审计范围**：《任务书 2》阶段二全部工程交付（独立 `web/` 四视图、窄屏交互、流式增量与 token 上界预算、TLS/CONNECT SMTP、GitHub MCP C4 重连核对与受控写入、Tier 0 正向清单与 Tier 1 记住规则、Skills 三级披露、30 秒幂等例程、Hono 解耦、可选手机 HTTPS 档及五类 P0 红线）。
 
-> **审计传递与交流说明**：本文件是阶段二实施方与独立审计人（GPT / Codex）的唯一主交接与交流文档。独立安全审计按五类 P0 判定。对有源码或实测证据、会影响正常使用或受支持部署的实质性 P0，继续定向整改与复审。P1/P2、风格问题和仅有理论依据的边角场景记入备忘。产品签收另核对四视图日常流程及任务书规定的真实联调必测项。**§10** 留存第 1 轮独立结论，**§11.1–§11.3** 留存整改回执、自测与第 2 轮复审，后续候选按 **§11.4** 提交冻结 SHA、代码落点及复跑证据。复用 `S2-P0-*` 编号，复审限于未关闭红线和修复受影响的回归。
+> 本文件按五类 P0 记录阶段二审计。影响正常使用或受支持部署的实质性 P0 需有源码或实测证据，整改复验集中在相关红线与受影响的回归。§10 至 §11.7 保留前四轮审计与整改记录，§11.8 记录最终候选及验收证据。真实联调按本轮调整保留为后续工作，见 §8。
 
 ---
 
 ## 1. 基线、提交记录与变更清单
 
-### 1.1 分支与提交链（均保留于本地 `v2`，未推送远端）
+### 1.1 分支与首轮提审提交链
 
 | 顺序 | 提交 SHA | 提交说明 | 作用 |
 | --- | --- | --- | --- |
@@ -104,7 +105,7 @@
 
 ---
 
-## 3. 审计人独立复跑命令（PowerShell）
+## 3. 首轮审计复跑命令（PowerShell）
 
 以下命令均在仓库根目录 `D:\AegisPi\aegis-pi` 下执行，使用锁定 Node 22.23.5 与全新临时目录，不触发任何真实模型计费、真实邮件外发或真实 GitHub 写入。
 
@@ -223,16 +224,18 @@ $base = Join-Path $env:TEMP "aegispi-s2-single-$(Get-Date -Format 'yyyyMMdd-HHmm
 
 ---
 
-## 8. 替身结果、真实联调必测项（待验证）与手机档分列
+## 8. 替身验收、真实联调与手机档
 
 | 验收类别 | 项目 | 当前状态 | 说明 |
 | --- | --- | --- | --- |
-| 本地替身 | 五类 P0 红线、TLS/CONNECT SMTP、C4 MCP Pin、Tier 0/2 写入、Skills、30 秒幂等例程、Hono 解耦、阶段一回归 | **PASS** | 候选 `5bb326c` 实测通过，见 §4 与 §6 |
-| 本地替身 · 实机浏览器 | 正式入口 `--stage 2` 四视图桌面（1280x800）与窄屏（390x844） | **PASS** | 实机 `msedge.exe` CDP 实测通过，见 §4 与 §6 |
-| 真实模型与计费（必测） | 真实 DeepSeek 逐 token 流式、首 token 延迟与账本结算 | **待验证** | 缺少用户针对真实 DeepSeek 计费与数据出站的显式独立授权，默认关闭 |
-| 真实只读连接器（必测） | 真实 Gmail 只读与真实 GitHub MCP 只读 | **待验证** | 缺少用户针对真实账号与仓库范围的显式独立授权，且本机未提供 `github-mcp-server.exe` |
-| 单独授权的真实外写（必测） | 真实 Gmail 单封测试发信与选定测试仓单次写 | **待验证** | 缺少用户针对获准测试邮箱与测试仓的显式独立授权，默认关闭 |
+| 本地替身 | 五类 P0 红线、TLS/CONNECT SMTP、C4 MCP Pin、Tier 0/2 写入、Skills、30 秒幂等例程及 Hono 解耦 | **PASS** | 候选 `a10500d` 实测通过，见 §11.8 |
+| 本地替身 · 实机浏览器 | 正式入口 `--stage 2` 四视图桌面（1280x800）与窄屏（390x844） | **PASS** | 候选 `a10500d` 使用实机 Edge CDP 实测通过，见 §11.8 |
+| 真实模型与计费 | 真实 DeepSeek 逐 token 流式、首 token 延迟与账本核对 | **待验证** | 真实计费与数据出站须另行取得授权 |
+| 真实只读连接器 | 真实 Gmail 只读与真实 GitHub MCP 只读 | **待验证** | 按获准账号、邮箱和仓库范围实测 |
+| 单独授权的真实外写 | 真实 Gmail 单封测试发信与选定测试仓单次写 | **待验证** | 按获准测试邮箱及测试仓实测 |
 | 可选手机 HTTPS 档 | 协议安全契约（本机） / 实体手机接入 | 协议 **PASS** / 实体手机 **待验证** | 本机已实测非 HTTPS 拒启、`__Host-` Cookie 属性、跨 Origin `403` 与注销失效；实体手机按需独立验收 |
+
+按项目负责人本轮调整，真实服务实测保留为后续联调项，本阶段以本地替身、桌面与窄屏浏览器验证、五类红线和阶段一回归的结果签收。
 
 ---
 
@@ -240,7 +243,7 @@ $base = Join-Path $env:TEMP "aegispi-s2-single-$(Get-Date -Format 'yyyyMMdd-HHmm
 
 - **v1 历史零信任基线**（`3a88b6895991d328e8e27fd1072a29846e7a9adf`）：自动化套件 `327/327 PASS`、自用验收 `31/31 PASS`（历史档案，不计入 v2 统计）。
 - **v2 阶段一签收基线**（`8b3aad9d564dc966d62c13a1b0814170e2113a9f` -> `5748c6c`）：第 1 周 `S1-S5` + `W1-A` + `W1-B` + 25/25 矩阵与第 2 周 `S6` + `V01-V06` 独立审计签收通过。
-- **v2 阶段二本次提审**（冻结候选 `5bb326c09878ea8d0bf1ee47bac94f7b4dd5f355`）：`stage2_d23bff27`（五类 P0 + 四视图桌面/窄屏浏览器）PASS，同代码树阶段一回归 `week1_c22eec66` / `week2_8e6115ae` PASS；真实 DeepSeek / Gmail / GitHub 联调项与实体手机项明确标为待验证。
+- **v2 阶段二首轮提审**（冻结候选 `5bb326c09878ea8d0bf1ee47bac94f7b4dd5f355`）：`stage2_d23bff27`（五类 P0 + 四视图桌面/窄屏浏览器）PASS，同代码树阶段一回归 `week1_c22eec66` / `week2_8e6115ae` PASS；真实 DeepSeek / Gmail / GitHub 联调项与实体手机项明确标为待验证。
 
 ---
 
@@ -560,6 +563,62 @@ $env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
 & 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/week2/run-all.ts
 ```
 
-### 11.7 第 4 轮独立复审裁定（待 Codex 审定后回填）
+### 11.7 第 4 轮独立复审裁定（Codex · 2026-11-27）
 
-（待独立审计人复跑冻结候选 `3ca9074869a98894765bda54670e7b5ebae7c600` 后在此登记复审裁定。）
+冻结候选 `3ca9074869a98894765bda54670e7b5ebae7c600` **退回两项定向整改，阶段二暂不签收**。Pi 内置 DeepSeek 模型复用已核实。S2-P0-4 的错误输出和 S2-P0-5 的撤权摘要已通过定向复审。S2-P0-1 仍有 GitHub 上游写入结果不明的分支，S2-P0-2 仍有真实模型目的端准入缺口。
+
+#### 独立复跑
+
+| 核对项 | 结果 | 独立证据 |
+| --- | --- | --- |
+| 冻结候选与底座 | PASS | `7f8eba7` 相对候选只有报告与证据。冻结的 `approvals.ts`、`effects.ts`、`budget.ts`、`importer.ts`、根依赖及阶段一测试相对 `5748c6c` 无差异。按 Git 对象恢复两份锁文件的原始字节，再按 SHA-256 核对 §2.1，候选 `git diff --check` 通过。 |
+| 前端与阶段二 | PASS | `npm --prefix web run build` 和 `node tests/stage2/run-all.ts --keep-data --evidence-dir <阶段二证据目录>` 均退出 `0`。总套件 `stage2_758a922e`，核心 `s2_p0_8f638cb9`，Edge 桌面与窄屏 `s2_browser_a5874f01`。两次递进渲染，首 token `242 ms`，合规改稿的独立假 SMTP 收件 `1`。核心验证 GitHub 写入独立计数 `1` 并落 `UNKNOWN`、预算预留 `301229 mu`、预算不足物理请求增量 `0`、11 个槽位扫描命中 `0`。 |
+| 阶段一第 1 周 | PASS | `node tests/week1/run-all.ts --keep-data --evidence-dir <第1周证据目录>` 退出 `0`，`week1_6331c1dd`。矩阵 25/25，W1-B 独立假 SMTP 收件 `1`，保持 `UNKNOWN` 并显示待核对。 |
+| 阶段一第 2 周 | PASS | `node tests/week2/run-all.ts --keep-data --evidence-dir <第2周证据目录>` 退出 `0`，`week2_2e309c00`。V01–V06 全通过，含 V03 Docker `v03_58ba0483`、Edge `v01v06_e0bd7eb7` 和 S6 `s6_76f8d2d0`，S6 命中 `0`。 |
+
+使用 Windows x64、Node `22.23.5`（SQLite `3.54.1`）、npm `10.9.9`、Docker `29.9.2` 和独立工作树。依赖目录复用首轮的离线 `npm ci` 安装，复用前按字节核对两份锁文件。脱敏运行日志和通过证据保存在本机 `D:/AegisPi/aegis-pi-v2-planning/audit-reruns/stage2-r4-3ca9074-independent`。本轮运行使用本机替身与合成凭据。
+
+#### 工程约束
+
+根锁文件、分层、冻结模块与阶段一断言通过核对。`models.ts` 从锁定 `pi-ai@1.6.0` 的内置 Provider 取得模型定义并委托 SDK 流式接口，宿主覆盖派发配置和预算参数，凭据由 `HostCredentialVault` 供给。官方 MCP 工具级错误的提交语义仍违反「结果不明记 `UNKNOWN`」，见 S2-P0-1。例程启动对账另外两处仅更新受理状态摘要，漏更新触发 ID。该路径可能把受理状态错误归属或显示为已隐藏，记为回归备忘。[SDK 复用](../../../src/runtime/models.ts#L536) · [启动对账](../../../src/capabilities/timers/routines.ts#L659)
+
+#### 任务书与红线
+
+| 红线 | 裁定 | 独立发现与定向整改 |
+| --- | --- | --- |
+| S2-P0-1 | **部分关闭** | MCP 子进程在写入后断连的回归通过，持久结果为 `UNKNOWN`，两处 Web 投影显示待核对，再次领取被拒且写入计数为 `1`。但写工具对一切 MCP `isError` 仍记 `FAILED`。GitHub 官方 MCP 在调用上游写入 API 后也会把 HTTP 调用错误装成 `isError`，该标志不足以确认仓库未发生写入。对已派发且无确证的工具错误保留 `UNKNOWN`，仅将有证据的未执行或确证失败记 `FAILED`。复验 MCP 子进程仍在线、上游写入结果不明时的账本和展示。[桥接分类](../../../src/runtime/mcp-bridge.ts#L648) · [终态记录](../../../src/runtime/submitter.ts#L589) · [官方写入实现](https://raw.githubusercontent.com/github/github-mcp-server/main/pkg/github/repositories.go#L610) · [官方错误映射](https://raw.githubusercontent.com/github/github-mcp-server/main/pkg/errors/error.go#L147) · [工具错误标志](https://raw.githubusercontent.com/github/github-mcp-server/main/pkg/utils/result.go#L24) |
+| S2-P0-2 | **部分关闭** | 显式替身档、现行 `deepseek-flash`、SDK 协议、官方上下文上界、最低峰时费率和最终请求的 `max_tokens` / 思考模式均核对通过。正式入口仍会为填写了真实 `modelProfile`、但 `baseUrl` 缺失或为空的配置使用默认环回地址。契约校验跳过环回地址的官方目的端匹配，随后凭据按该地址注册。此时 DeepSeek 计费契约与实际目的端缺少绑定，替身所用的环回凭据注入路径也未与正式档隔离。正式真实档须显式指定可核验的 HTTPS 目的端，缺失或无法证明时拒绝发送。真实协议的替身测试可经测试注入保留。复验真实档缺 URL 或目的端未获准时物理发送增量为 `0`。[默认地址](../../../src/index.ts#L68) · [正式配置选址](../../../src/index.ts#L212) · [环回例外](../../../src/governance/credentials.ts#L321) · [凭据绑定](../../../src/index.ts#L333) |
+| S2-P0-3 | **保持关闭** | 本轮无变更放宽二进制、清单指纹或领取准入。已隔离再次漂移、工具缺席与受控写的阶段二回归通过。 |
+| S2-P0-4 | **已关闭** | 连通性测试、手动清单复核、暂停期拒绝审计和模型 HTTP 200 流内错误均归约为宿主受控值。独立核心套件的对应夹具及 11 槽位扫描通过。[MCP 状态归约](../../../src/runtime/mcp-bridge.ts#L72) · [模型传输边界](../../../src/runtime/models.ts#L404) |
+| S2-P0-5 | **已关闭** | 异步完成写入实际产出摘要的触发 ID，读取复核该触发的来源权限。两个触发倒序完成与遗留摘要缺来源的独立夹具均收起受限摘要。[完成写入](../../../src/capabilities/timers/routines.ts#L938) · [实时授权投影](../../../src/web/server.ts#L1693) |
+
+#### 真实签收待验证项
+
+真实 DeepSeek 流式及账本核对、Gmail 只读及单封测试发信、GitHub MCP 只读及测试仓单次写仍待独立授权和实测。DeepSeek 的预留用峰时价能覆盖保守上界，现有结算也把同一峰时价写成 `SETTLED.actual_mu`。官方谷时价为峰时的一半，因此真实联调还须核对提供方实际扣费与账本，或明确显示宿主按峰时价估算的金额。桌面窄屏已通过，实体手机 HTTPS 按需另验。[结算计算](../../../src/runtime/models.ts#L373) · [结算展示](../../../src/web/server.ts#L2202) · [DeepSeek 峰谷时价](https://api-docs.deepseek.com/quick_start/pricing/)
+
+### 11.8 第 5 轮整改与验收（Codex · 2026-11-27）
+
+**阶段二通过验收。** Codex 在候选 `a10500daca6b92cfa20786283432f91bf5fe320f` 修复 §11.7 的两项 P0，并复跑阶段二与阶段一两周全套。五类 P0 均已关闭。
+
+| 红线 | 结果 | 整改与证据 |
+| --- | --- | --- |
+| S2-P0-1 外发 CAS 与结果核对 | **关闭** | GitHub MCP 写工具派发后若只收到 `isError`，持久化为 `UNKNOWN`。宿主以固定码 `mcp_remote_write_unconfirmed` 记录待核对原因。替身在落盘写入后分别断开 IPC 和保持进程在线返回 `isError`，每例均只有一次派发与一次实际应用。再次领取被拒，视图①和③均显示「结果待核对」。正常 Tier 0 写入与邮件改稿后提交各实测一次。两次 CAS 和唯一提交器仍走原路径。[写入分类](../../../src/runtime/mcp-bridge.ts#L645) · [核心证据](./evidence/round5/stage2-p0-core-evidence.json) |
+| S2-P0-2 预算与目的端 | **关闭** | 真实档须显式填写 `modelProfile.baseUrl`，目的端须同时匹配宿主白名单和已核实计费契约中的官方 HTTPS URL。正式入口在登记凭据与打开双库前拒绝缺失、空白、显式环回及非官方地址。四项均退出 `1`，独立假模型 HTTP 请求增量为 `0`。测试通过宿主已有 `fetchImpl` 将官方逻辑目的端接到替身，验证 pi-ai 流式协议、`max_tokens=1024`、关闭思考模式和 `301229 mu` 预留。预算不足的物理请求增量为 `0`。[启动准入](../../../src/index.ts#L207) · [契约校验](../../../src/governance/credentials.ts#L321) · [核心证据](./evidence/round5/stage2-p0-core-evidence.json) |
+| S2-P0-3 MCP Pin 与执行 | **保持关闭** | 二进制篡改、重连清单漂移、撤权及旧指纹领取回归通过，禁止操作的假 MCP 调用增量为 `0`。 |
+| S2-P0-4 凭据 | **保持关闭** | 阶段二核心对 11 个合成凭据槽位和错误输出做扫描，禁止位置命中为 `0`。 |
+| S2-P0-5 阶段一与撤权回归 | **保持关闭** | 阶段二例程摘要倒序完成、旧摘要缺来源及撤权投影复验通过。 |
+
+#### 复跑证据
+
+运行环境为 Windows x64、Node `22.23.5`、SQLite `3.54.1`、npm `10.9.9`、Docker `29.9.2`、Edge `157.0.4341.60`。两份锁文件的 SHA-256 匹配 §2.1，`git diff --check 5748c6c..a10500d` 通过。相对阶段一起点 `5748c6c`，§1.3 所列冻结路径无差异。`harness.ts`、Web 代码和两份锁文件相对 §11.7 候选无差异。
+
+| 命令 | 退出码 | 实测结果 |
+| --- | --- | --- |
+| `npm --prefix web run build` | `0` | 前端类型检查及 Vite 构建通过。 |
+| `node tests/stage2/run-all.ts --keep-data --data-dir <stage2/data> --evidence-dir <stage2>` | `0` | `stage2_6e6b26af`，核心 `s2_p0_313c3483`，Edge `s2_browser_703d111d`。前后端类型检查、分层及四视图桌面和窄屏均通过。替身流式 2 次递进渲染、首 token `198 ms`，改稿与独立假 SMTP 收件一致，收件数 `1`。[汇总](./evidence/round5/stage2-summary.json) · [浏览器证据](./evidence/round5/stage2-browser-e2e-evidence.json) |
+| `node tests/week1/run-all.ts --keep-data --data-dir <week1/data> --evidence-dir <week1>` | `0` | `week1_2fabd8e6`，矩阵 `25/25`。W1-B 独立假 SMTP 收件 `1`，宿主持久化 `UNKNOWN` 并显示「结果待核对」。[阶段一回归汇总](./evidence/round5/stage1-regression-summary.json) |
+| `node tests/week2/run-all.ts --keep-data --data-dir <week2/data> --evidence-dir <week2>` | `0` | `week2_e1bc26f5`，V01–V06 全通过，含 V03 Docker `v03_6c19004c`、Edge `v01v06_ed25533d`、S6 `s6_5f70d0bf`。S6 禁止位置命中 `0`，V02 撤权后独立模型发送增量 `0`。[阶段一回归汇总](./evidence/round5/stage1-regression-summary.json) |
+
+完整本机输出位于规划目录 `audit-reruns/stage2-r5-a10500d/`，仓库归档上述脱敏证据。
+
+按本轮验收口径，真实 DeepSeek 流式与扣费核对、Gmail 只读及一封测试邮件、GitHub MCP 只读及测试仓单次写均为后续待验证项。DeepSeek 账本目前按配置费率结算用量，真实联调时核对谷时扣费差额。实体手机 HTTPS 按需验证。§11.7 的例程启动对账状态归属备忘仍保留。
