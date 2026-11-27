@@ -1,8 +1,8 @@
 {
-  "runId": "stage2_31c8d135",
-  "commitSha": "a879b97a84190d0b4aa9b9036b35a821783308a8",
+  "runId": "stage2_6279a6c3",
+  "commitSha": "3ca9074869a98894765bda54670e7b5ebae7c600",
   "status": "PASS",
-  "executedAt": "2026-11-27T01:48:52.321Z",
+  "executedAt": "2026-11-27T02:18:21.515Z",
   "environment": {
     "nodeVersion": "v22.23.5",
     "sqliteVersion": "3.54.1",
@@ -30,12 +30,12 @@
     },
     "p0Core": {
       "status": "PASS",
-      "runId": "s2_p0_2c680112",
+      "runId": "s2_p0_29192196",
       "evidencePath": "stage2-p0-core-evidence.json"
     },
     "browserDesktopAndNarrow": {
       "status": "PASS",
-      "runId": "s2_browser_91261245",
+      "runId": "s2_browser_073a7d47",
       "evidencePath": "stage2-browser-e2e-evidence.json"
     }
   }

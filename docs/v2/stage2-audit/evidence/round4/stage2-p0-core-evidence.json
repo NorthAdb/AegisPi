@@ -1,6 +1,6 @@
 {
-  "runId": "s2_p0_2c680112",
-  "executedAt": "2026-11-27T01:48:16.172Z",
+  "runId": "s2_p0_29192196",
+  "executedAt": "2026-11-27T02:17:36.143Z",
   "smtpTls": {
     "directTlsOk": true,
     "connectTunnelTlsOk": true,
@@ -11,7 +11,7 @@
   "p0_2_budget_streaming": {
     "progressiveDeltasObserved": 3,
     "firstTokenMs": 92,
-    "totalMs": 241,
+    "totalMs": 254,
     "controlSendDelta": 1,
     "shortfallSendDelta": 0
   },
@@ -70,7 +70,7 @@
       },
       {
         "file": "mcp-calls.jsonl",
-        "bytes": 4995,
+        "bytes": 4996,
         "hits": 0
       },
       {
