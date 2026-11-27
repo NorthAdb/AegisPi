@@ -509,3 +509,57 @@ $env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
 预算整改可先支持一个当前官方模型。若采用供应商公布的上下文限制作为保守输入上界，配合请求中明确传送的输出限额与可信最高适用费率，即可复用现有预算账本，省去额外的 tokenizer 和帧估算。复验须包含能获准发送的常用任务与预算耗尽后物理发送增量为 0 的任务。[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)
 
 真实 DeepSeek 流式与账本核对、真实 Gmail 只读及单封测试发信、真实 GitHub MCP 只读及测试仓单次写仍待授权和脱敏证据。实体手机 HTTPS 档继续按需启用，桌面 Edge 窄屏验收已通过。
+
+---
+
+### 11.6 第 4 轮定向整改回执与提审（实施方 · 2026-11-27）
+
+本轮针对 `§11.5` 裁定的 4 项未关闭红线（`S2-P0-1` GitHub 写入结果不明、`S2-P0-2` 真实模型预算契约与显式测试档、`S2-P0-4` 连接器连通性/清单核对错误与 HTTP 200 流内错误归约、`S2-P0-5` 例程汇总精确来源触发绑定）完成定向闭环。全部代码与自测变更冻结于提交 **`a879b97a84190d0b4aa9b9036b35a821783308a8`**（`a879b97`，共修改 12 个源码与测试文件）；相对 `5748c6c` 全部冻结底座路径与两份锁文件保持 **0 字节差异**，候选 `git diff --check` 零告警；本回执与 `evidence/round4/` 脱敏证据单独成提交，确保冻结候选与代码树零漂移。
+
+#### 四项未关闭红线逐项闭合对照表
+
+| 红线 | §11.5 未关闭缺口 | 冻结候选 `a879b97` 整改与最小证明 |
+| --- | --- | --- |
+| **S2-P0-1** | `callWriteTool()` 捕获 SDK 传输异常并返回普通失败，导致写请求超时/断连落 `FAILED` 越过 `UNKNOWN` 与人工核对 | 1. [mcp-bridge.ts](../../../src/runtime/mcp-bridge.ts) 引入 `outcome?: "failed_local" \| "failed_remote" \| "unknown"`：前置本地校验返回 `failed_local`；远端显式 `isError` 或 JSON-RPC 前置派发错误（`-32601`/`-32602`）返回 `failed_remote`；派发后的超时（`McpTimeoutError`）、断连（`McpConnectionClosedError`）、中止（`McpAbortError`）及其他传输/内部异常一律返回 `outcome: "unknown"` 与宿主闭合状态码。<br>2. [submitter.ts](../../../src/runtime/submitter.ts) `submitApprovedGithubWriteEffect` 对 `outcome === "unknown"` 持久化 `effects.state = 'UNKNOWN'` 与受控状态码（如 `mcp_connection_closed`），严禁合并为 `FAILED` 或自动重发。<br>3. [fake-github-mcp-server.ts](../../../tests/fakes/fake-github-mcp-server.ts) 新增 `DROP_AFTER_WRITE` 模式（远端完成写入并落盘日志后直接断连不回执），[run-p0-core.ts](../../../tests/stage2/run-p0-core.ts) 实测：`effects.state === 'UNKNOWN'`、`effects.reason === 'mcp_connection_closed'`、独立写入增量严格为 `1`、二次提交被拒（`claimed=false` 且计数维持 `1`）、视图① `/snapshot` 与视图③ `/api/approvals` 均投影 `uiStatusLabel === "结果待核对"`。 |
+| **S2-P0-2** | 阶段二环回缺 `modelProfile` 仍默认套用 `fake-local`；唯一契约绑定已退役的 `deepseek-chat`；估算依赖无来源帧余量且接受全零/低于峰时费率；未校验最终 HTTP 请求显式关闭思考模式 | 1. [index.ts](../../../src/index.ts) 阶段二缺少 `modelProfile`（或声明 `provider: "fake-local"`）时默认直接拒绝启动（`stage2_model_profile_required` / `stage2_synthetic_fake_not_enabled`），仅在测试档显式启用 `--allow-synthetic-fake-model`（或 `AEGISPI_ALLOW_SYNTHETIC_FAKE_MODEL=1` / `allowSyntheticFakeModel: true`）且为环回地址时允许替身价；阶段一保持原行为兼容冻结脚本。<br>2. [credentials.ts](../../../src/governance/credentials.ts) 移除已退役的 `deepseek-chat`，注册当前官方模型契约 **`deepseek/deepseek-flash`**（`deepseek-flash-v4.1-2026-11`，依据官方 `api-docs.deepseek.com` 定价与思考模式文档及锁定 `@earendil-works/pi-ai@1.6.0` 内置目录：`publishedContextWindowTokens: 1_000_000`、`maxTokensHardCeiling: 384_000`、官方峰时/缓存未命中美元费率底线 `minInputPerMTokMu: 300_000` / `minOutputPerMTokMu: 1_200_000` / `minCacheReadPerMTokMu: 6_000`、`allowedOfficialBaseUrls: ["https://api.deepseek.com", "https://api.deepseek.com/v1"]`、`requiredWireThinkingMode: "disabled"`）。严格拒绝已退役 `deepseek-chat`、全零/非正/低于峰时底线的费率以及未核验远端端点。<br>3. [models.ts](../../../src/runtime/models.ts) 采用供应商公布的上下文窗口上限（`1_000_000` tokens）作为保守输入上界，叠加显式 `max_tokens` 与峰时最高适用费率计算 T6 预留上界（省去不可核查的 tokenizer 与帧余量估算；例如 `max_tokens=1024` 时上界为 `301_229 mu`，稳妥落入默认任务限额 `800_000 mu`）。对 `deepseek-flash` 配置 `compat.thinkingFormat = "deepseek"` 且清空 `reasoning`，并在 `createGuardedModelFetch` 物理发包前对最终 HTTP JSON 正文执行 `validateOutgoingWireRequestForContract` 硬校（核对 `model`、`max_tokens <= effectiveMaxTokens`、`thinking.type === "disabled"` 且无 `reasoning_effort`，不满足则物理发送为 `0` 并释放预留）。<br>4. [run-p0-core.ts](../../../tests/stage2/run-p0-core.ts) 实测：阶段二无 `modelProfile` 启动被拒（exit ≠ 0）；`deepseek-chat`/全零/非峰时价/未知远端端点全拒；`deepseek-flash` 常用任务获准发送（`upper_mu=301229`、实测结算 `actual_mu=540`、假服务抓包确认 `thinking={"type":"disabled"}` 与 `maxTokens=1024`）；任务预算不足（`200_000 < 301_229`）时物理 HTTP 发送增量严格为 **`0`**。 |
+| **S2-P0-4** | 视图②「测试连通性」与失败手动核对可把 MCP 清单核对的原始 SDK 错误写入 `pauseReason`/响应/拒绝审计；模型 HTTP 200 流内错误仍经正则提取未经信任的字母数字片段 | 1. [mcp-bridge.ts](../../../src/runtime/mcp-bridge.ts) 引入 `McpHostPolicyError` 与闭合枚举归约器 `reduceMcpBridgeError`（仅输出宿主闭合状态码如 `mcp_jsonrpc_error`、`mcp_request_timeout`、`mcp_connection_closed`、`mcp_recheck_failed`、`mcp_connectivity_failed` 等），覆盖 `connect()`、`recheckToolPins()`、`testConnectivity()`、`callReadOnlyTool()` 与 `callWriteTool()` 全部路径；[server.ts](../../../src/web/server.ts) `POST /api/connectors/test` 与 [index.ts](../../../src/index.ts) `testGmailConnectivity` 同步收口至受控状态码，禁止任何原始 SDK/远端文本进入浏览器响应、`#lastPauseReason` 或 `audit_events`。<br>2. [models.ts](../../../src/runtime/models.ts) 移除对远端错误文本的正则提取，改为基于宿主侧 `createGuardedModelFetch` 权威记录的 `fetchBoundaryOutcome`（HTTP 状态码 / 宿主闭合传输错误枚举 / 出口拦截 / 线缆契约拦截 / `http_ok`）与 `stopReason` 的权威归约器 `reduceAuthoritativeModelErrorCode`：凡 HTTP 200 流内出错一律归约为固定常量 **`model_provider_stream_error`**，零字符提取自远端正文。<br>3. [fake-github-mcp-server.ts](../../../tests/fakes/fake-github-mcp-server.ts) 新增 `LIST_ERROR:<secret>` 注入、[fake-model-server.ts](../../../tests/fakes/fake-model-server.ts) 新增 HTTP 200 SSE `stream_error`（伪造 `model_transport_error:<secret>`），[run-p0-core.ts](../../../tests/stage2/run-p0-core.ts) 实测连通性失败、手动核对失败、暂停期拒绝审计与 HTTP 200 流内错误例程均只落库/投影受控代码，11 槽位全盘零泄漏扫描命中 **`0`**。 |
+| **S2-P0-5** | 例程汇总按异步完成顺序覆盖，读取却按计划时刻选最新触发授权；较早旧运行晚完成时可能以新会话权限暴露已撤权旧会话汇总；缺来源时未收起 | 1. [db.ts](../../../src/governance/db.ts) 在 `routines` 建表与幂等 **Migration 9** 中新增 `last_result_trigger_id TEXT`。<br>2. [routines.ts](../../../src/capabilities/timers/routines.ts) 全部三处写入 `routines.last_result_summary` 的事务（触发登记/跳过、受理结果、完成回写）同步写入精确产出该汇总的 `last_result_trigger_id`。<br>3. [server.ts](../../../src/web/server.ts) `GET /api/routines` 严格按 `routines.last_result_trigger_id` 精确查回产出触发（含超出最近 10 条时的直接主键回查）并对其执行实时作用域与源授权复核；凡 `last_result_trigger_id` 为空、对应触发缺失或成功汇总缺失会话来源者一律按 fail-closed 收起 `lastResultSummary`（`[redacted_after_source_revocation]`，`resultRedacted: true`）。<br>4. [run-p0-core.ts](../../../tests/stage2/run-p0-core.ts) 实测两次运行以相反顺序完成（较新的已授权运行先完成，较早的已撤权源运行后完成覆盖汇总）及 `last_result_trigger_id = NULL` 遗留记录，视图②均准确收起汇总并零暴露敏感文本。 |
+
+#### 第 4 轮自测实跑结果（冻结候选 `a879b97a84190d0b4aa9b9036b35a821783308a8`）
+
+以下全部在冻结候选 **`a879b97a84190d0b4aa9b9036b35a821783308a8`** 上直接实跑，Windows x64、Node `v22.23.5`（SQLite `3.54.1`）、npm `10.9.9`：
+
+| 套件 | 命令 | 退出码 | 实测结果与脱敏证据 |
+| --- | --- | :---: | --- |
+| 独立前端构建 | `npm --prefix web run build` | `0` | PASS（`tsc --noEmit && vite build`，29.55s，生成 `web/dist`） |
+| 阶段二总套件 | `node tests/stage2/run-all.ts --evidence-dir docs/v2/stage2-audit/evidence/round4` | `0` | PASS（`stage2_31c8d135`，`commitSha=a879b97a84190d0b4aa9b9036b35a821783308a8`；根/前端锁文件哈希一致、前后端 `tsc`、分层零违规；`p0Core=s2_p0_2c680112`，`round4_p0_closure` 12 项全过，`totalForbiddenHits=0` 覆盖 11 槽位；`browserDesktopAndNarrow=s2_browser_91261245`，Edge `1280x800` & `390x844` 2 次递进渲染、首 token `116 ms`、假 SMTP=`1`）[round4/stage2-summary.json](./evidence/round4/stage2-summary.json) · [round4/stage2-p0-core-evidence.json](./evidence/round4/stage2-p0-core-evidence.json) · [round4/stage2-browser-e2e-evidence.json](./evidence/round4/stage2-browser-e2e-evidence.json) |
+| 阶段一第 1 周全量回归 | `node tests/week1/run-all.ts` | `0` | PASS（`week1_5e24e227`；`typecheck`、`S1-S5`、`W1-A` 9/9、`W1-B` 假 SMTP=1/`UNKNOWN`/`结果待核对`、`matrix` 25/25 全通过） |
+| 阶段一第 2 周全量回归 | `node tests/week2/run-all.ts` | `0` | PASS（`week2_4a9065e7`，`commitSha=a879b97a84190d0b4aa9b9036b35a821783308a8`；`v04_v05=v04v05_d34c18e7`、`v02=v02_1b4c412a`、`v03` Docker=`v03_4a17e71b`、`s6=s6_505ef6a4` 命中 `0`、Edge `v01_v05_v06=v01v06_53b96842` 全通过） |
+
+#### 真实服务实测口径
+
+- 真实 DeepSeek（`deepseek-flash`）流式与账本核对、真实 Gmail 只读与单封测试发信、真实 GitHub MCP 只读与测试仓单次写、可选实体手机 HTTPS 仍保持默认关闭并标记**待验证**，待本轮安全红线独立复审签收且取得用户逐项独立授权后实测登记。
+
+#### 第 4 轮审计人一键复跑命令（PowerShell · 含 Windows 锁文件原始字节保真）
+
+```powershell
+$sha = 'a879b97a84190d0b4aa9b9036b35a821783308a8'
+git diff 5748c6c $sha -- src/governance/approvals.ts src/governance/effects.ts src/governance/budget.ts src/capabilities/workspace/importer.ts package.json package-lock.json tests/week1 tests/week2
+git diff --check 5748c6c..$sha
+
+# 在独立工作树按 Git 对象原始字节保真两份锁文件
+$tmp = Join-Path $env:TEMP "aegispi-stage2-r4-$($sha.Substring(0,7))"
+git worktree add --detach $tmp $sha
+git -C $tmp show "${sha}:package-lock.json" | Set-Content -Path (Join-Path $tmp 'package-lock.json') -AsByteStream -NoNewline
+git -C $tmp show "${sha}:web/package-lock.json" | Set-Content -Path (Join-Path $tmp 'web/package-lock.json') -AsByteStream -NoNewline
+Set-Location $tmp
+$env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
+& 'D:\AegisPi\tools\node-v22.23.5\npm.cmd' --prefix web run build
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/stage2/run-all.ts --evidence-dir "$tmp\evidence-stage2"
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/week1/run-all.ts
+& 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/week2/run-all.ts
+```
+
+### 11.7 第 4 轮独立复审裁定（待 Codex 审定后回填）
+
+（待独立审计人复跑冻结候选 `a879b97a84190d0b4aa9b9036b35a821783308a8` 后在此登记复审裁定。）

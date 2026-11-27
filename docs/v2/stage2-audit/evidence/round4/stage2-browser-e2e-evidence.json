@@ -1,0 +1,23 @@
+{
+  "runId": "s2_browser_91261245",
+  "status": "PASS",
+  "executedAt": "2026-11-27T01:48:51.657Z",
+  "formalEntrypoint": "src/index.ts --stage 2 --ui-mode stage2",
+  "desktopViewport": "1280x800",
+  "narrowViewport": "390x844",
+  "progressivePartialRendersObserved": 2,
+  "firstTokenUiMetric": "116 ms",
+  "dirtyBlockedApprove": true,
+  "fakeSmtpTotalReceived": 1,
+  "editedDraftMatchedDeliveredSmtp": true,
+  "view2ConnectorsTestAndSkillsL3AndRoutineVerified": true,
+  "view3ApprovalsAndRuleRevokeVerified": true,
+  "view4MemoryForgetTombstoneReceipt": "已写入墓碑并清理 FTS：tombstone:note_s2_l1_milestone@1795744131352 (ftsCleaned=true)",
+  "narrowScreenThreadsDrawerOk": true,
+  "narrowScreenInspectorDrawerOk": true,
+  "narrowScreenApprovalCardBounds": {
+    "width": 360,
+    "right": 372,
+    "viewportWidth": 390
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "runId": "stage2_31c8d135",
+  "commitSha": "a879b97a84190d0b4aa9b9036b35a821783308a8",
+  "status": "PASS",
+  "executedAt": "2026-11-27T01:48:52.321Z",
+  "environment": {
+    "nodeVersion": "v22.23.5",
+    "sqliteVersion": "3.54.1",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "results": {
+    "rootLockIntegrity": {
+      "status": "PASS",
+      "actualSha256": "795485bdfbf93215f07ba67e2185bc513cca3f39879cebff6830b79d0cd8d291",
+      "expectedSha256": "795485bdfbf93215f07ba67e2185bc513cca3f39879cebff6830b79d0cd8d291",
+      "webLockSha256": "3661add865032c97d52fd73626aa3ef7404df72883cd7a5d6eceecf34b8234e3"
+    },
+    "typecheckRoot": {
+      "status": "PASS",
+      "exitCode": 0
+    },
+    "typecheckWeb": {
+      "status": "PASS",
+      "exitCode": 0
+    },
+    "layerBoundary": {
+      "status": "PASS",
+      "violations": []
+    },
+    "p0Core": {
+      "status": "PASS",
+      "runId": "s2_p0_2c680112",
+      "evidencePath": "stage2-p0-core-evidence.json"
+    },
+    "browserDesktopAndNarrow": {
+      "status": "PASS",
+      "runId": "s2_browser_91261245",
+      "evidencePath": "stage2-browser-e2e-evidence.json"
+    }
+  }
+}
