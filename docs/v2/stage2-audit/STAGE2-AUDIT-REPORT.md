@@ -473,6 +473,39 @@ $env:PATH = 'D:\AegisPi\tools\node-v22.23.5;' + $env:PATH
 & 'D:\AegisPi\tools\node-v22.23.5\node.exe' tests/week2/run-all.ts
 ```
 
-### 11.5 第 3 轮独立复审裁定（Codex · 待填写）
+### 11.5 第 3 轮独立复审裁定（Codex · 2026-11-27）
 
-> 待独立审计人（Codex）基于冻结候选 `81ec02acdd5f05c919675bc45bc1e559eef7f798` 复跑与源码核查后填写裁定。
+冻结候选 `81ec02acdd5f05c919675bc45bc1e559eef7f798` **退回定向整改，阶段二暂不签收**。原 SMTP 快照问题和已隔离工具再次漂移问题已关闭。当前阻塞涉及真实模型预算、GitHub 写入结果不明、连接器错误输出和例程撤权投影。以下裁定来自独立源码核查与本机替身回归。真实服务必测仍待授权实测。
+
+#### 独立复跑
+
+| 核对项 | 结果 | 独立证据 |
+| --- | --- | --- |
+| 候选与冻结基线 | PASS | `9f8a77e` 相对冻结候选只增加报告和证据。相对 `5748c6c` 核对 `approvals.ts`、`effects.ts`、`budget.ts`、`importer.ts`、根依赖和阶段一脚本均无差异。两份锁文件从 Git 对象恢复原始字节，SHA-256 与 §2.1 一致。候选 `git diff --check` 通过。 |
+| 前端构建与阶段二 | PASS | `npm --prefix web run build` 和 `node tests/stage2/run-all.ts --keep-data --evidence-dir <证据目录>` 均退出 `0`。总套件 `stage2_5a3347f6`，核心 `s2_p0_c3c8f7df`，Edge 桌面与窄屏 `s2_browser_d4836e15`。类型检查及分层通过。额度不足和 C4 阻断用例的独立服务增量均为 `0`。浏览器看到 2 次递进渲染，首 token `138 ms`，最终改稿与假 SMTP 唯一收件一致。已覆盖的凭据扫描命中 `0`。 |
+| 阶段一第 1 周 | PASS | `node tests/week1/run-all.ts --keep-data` 退出 `0`，`week1_2bb4ca40`。矩阵 25/25，W1-B 独立假 SMTP 收件 1 封并保持 `UNKNOWN`，界面显示「结果待核对」。 |
+| 阶段一第 2 周 | PASS | `node tests/week2/run-all.ts --keep-data` 退出 `0`，`week2_44bc0ab0`。V01–V06 全通过，含 V03 Docker `v03_21cb5736`、Edge `v01v06_e45265fe` 和 S6 `s6_739309b7`，S6 命中 `0`。 |
+
+使用 Windows x64、Node `22.23.5`（SQLite `3.54.1`）、npm `10.9.9`、Edge `157.0.4341.60`、Docker `29.9.2` 和候选独立工作树。依赖复用首轮离线 `npm ci` 的两个目录，复用前按字节核对锁文件。原始运行日志与脱敏证据保留于本机 `D:/AegisPi/aegis-pi-v2-planning/audit-reruns/stage2-r3-81ec02a-independent`。
+
+#### 工程约束
+
+双库、分层、根与前端独立锁文件的核对通过。本轮源码仍有两个工程红线问题。MCP 日常连通性检查可以把 SDK 远端错误带到视图②和治理审计，模型流式错误也仍提取可由远端正文提供的字符串。GitHub 写入的异常归约将传输结果不明合并到普通失败，破坏唯一提交链的对账语义。见下表 S2-P0-1 和 S2-P0-4。
+
+#### 任务书与红线
+
+| 红线 | 裁定 | 独立发现与定向整改 |
+| --- | --- | --- |
+| S2-P0-1 | **SMTP 已关闭。GitHub 写入新增阻塞** | 正式阶段二硬门、纯文本字段收口、两次 CAS 和合规改稿送达均复核通过。`81ec02a` 的 `callWriteTool()` 新捕获 SDK 传输异常并返回普通失败。写请求超时或失去连接时，提交器于是落 `FAILED`，原有 `UNKNOWN` 与人工核对分支被越过。保留已证明失败与结果不明两种语义，错误内容使用宿主状态码。复验远端已记账而回执丢失时，持久状态为 `UNKNOWN`，界面显示待核对，独立写入计数保持 1。[桥接捕获](../../../src/runtime/mcp-bridge.ts#L575) · [终态分支](../../../src/runtime/submitter.ts#L566) |
+| S2-P0-2 | **未关闭** | 正式配置把环回代理声明为真实模型时能拒绝合成价。阶段二只配置环回地址、缺少 `modelProfile` 时仍默认套用 `fake-local`，替身价须由测试档显式启用。唯一契约绑定 `deepseek-chat`，该官方别名已于 2026-07-24 退役，当前官方模型无法通过启动校验。所谓已验上界仍使用无来源的固定帧余量，价表还接受低于实际计费费率的数值，包括全零。为一个当前可用的真实端点和模型建立可核查的输入与输出计费上限及价格版本。预留用的费率须覆盖适用峰时和缓存费率。若依赖非思考模式，核对最终 HTTP 请求显式设定该模式。价表、端点或计费边界无法确认时，物理发送增量须为 0。[启动默认档](../../../src/index.ts#L246) · [唯一模型契约](../../../src/governance/credentials.ts#L156) · [价表校验](../../../src/governance/credentials.ts#L303) · [T6 上界](../../../src/runtime/models.ts#L276) · [DeepSeek 退役公告](https://api-docs.deepseek.com/news/news260424/) · [当前官方模型和价格](https://api-docs.deepseek.com/quick_start/pricing/) · [思考模式协议](https://api-docs.deepseek.com/guides/thinking_mode/) |
+| S2-P0-3 | **§11.3 残留已关闭** | 已隔离工具再次漂移会刷新库内定义与观察指纹，旧指纹和缺席核准均返回 `409`。桥接读写和 T4 再核对在场状态与实时指纹。独立替身用例通过，阻断期间物理工具调用增量为 0。[观察定义更新](../../../src/governance/mcp-pin.ts#L314) · [核准事务](../../../src/governance/mcp-pin.ts#L619) · [调用前校验](../../../src/runtime/mcp-bridge.ts#L560) |
+| S2-P0-4 | **未关闭** | SMTP 队列号、模型 HTTP 非 2xx 错误和 MCP 普通调用错误的本轮夹具均通过。正常使用中的视图②「测试连通性」仍可把 MCP 清单核对的原始 SDK 错误返回给浏览器，失败的手动核对也会把原始文本保存为暂停原因并带入后续拒绝审计。模型 HTTP 200 流内错误仍可通过字符串提取留下未经信任的字母数字片段。将该类错误按 HTTP 状态或宿主枚举归约到同一错误边界，只保存和显示受控值。复验正常的连通性失败、流式错误、例程结果及持久审计输出。[MCP 核对与连通性](../../../src/runtime/mcp-bridge.ts#L399) · [MCP 拒绝审计](../../../src/runtime/mcp-bridge.ts#L460) · [Web 返回](../../../src/web/server.ts#L1362) · [模型错误归约](../../../src/runtime/models.ts#L164) |
+| S2-P0-5 | **未关闭** | 视图①和③的效果回执、核对证据及单次例程撤权用例通过。例程汇总按异步完成顺序覆盖，读取却按计划时刻选最新触发来做授权。较早的运行晚完成时，汇总可能属于已撤权的旧会话，授权却采用仍有权限的新会话。汇总须和产出它的准确触发对应，来源无法确定时收起文本。复验两个运行以相反顺序完成、旧运行来源已撤权时的例程投影。[触发排序](../../../src/capabilities/timers/routines.ts#L471) · [完成回写](../../../src/capabilities/timers/routines.ts#L923) · [汇总投影](../../../src/web/server.ts#L1670) |
+
+#### 下次提审与真实签收
+
+后续只复核表内未关闭项及其受影响的回归。GitHub 结果不明为本轮新增回归。真实模型上界和连接器错误输出延续上一轮红线，MCP 连通性错误是本轮定位到的既有路径。例程摘要的来源绑定缺口出现在本轮补上的读取授权中。SMTP 与 C4 已通过的条目保留关闭状态。
+
+预算整改可先支持一个当前官方模型。若采用供应商公布的上下文限制作为保守输入上界，配合请求中明确传送的输出限额与可信最高适用费率，即可复用现有预算账本，省去额外的 tokenizer 和帧估算。复验须包含能获准发送的常用任务与预算耗尽后物理发送增量为 0 的任务。[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)
+
+真实 DeepSeek 流式与账本核对、真实 Gmail 只读及单封测试发信、真实 GitHub MCP 只读及测试仓单次写仍待授权和脱敏证据。实体手机 HTTPS 档继续按需启用，桌面 Edge 窄屏验收已通过。
