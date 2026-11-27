@@ -204,13 +204,25 @@ if (connectorsConfigPath) {
   }
 }
 
+const stageTwoModelProfile = stage === 2 ? connectorsCfg?.modelProfile : undefined;
+const modelProvider = stageTwoModelProfile ? stageTwoModelProfile.provider : "fake-local";
+if (typeof modelProvider !== "string" || !modelProvider.trim()) {
+  process.stderr.write("Refusing startup: stage2_model_provider_required\n");
+  process.exit(1);
+}
+const fakeModelProvider = modelProvider.trim().toLowerCase() === "fake-local";
+const configuredModelBaseUrl = stageTwoModelProfile?.baseUrl;
+const explicitModelBaseUrl = typeof configuredModelBaseUrl === "string" ? configuredModelBaseUrl.trim() : "";
+if (!fakeModelProvider && !explicitModelBaseUrl) {
+  process.stderr.write("Refusing startup: stage2_real_model_base_url_required\n");
+  process.exit(1);
+}
+const effectiveModelBaseUrl = explicitModelBaseUrl || modelBaseUrl;
 const egressPolicy: StageEgressPolicy = {
   stage,
-  allowedRemoteModelHosts: stage === 2 ? (connectorsCfg?.modelProfile?.allowedRemoteHosts ?? []) : [],
+  allowedRemoteModelHosts: stageTwoModelProfile?.allowedRemoteHosts ?? [],
   allowedRemoteSmtpHosts: stage === 2 ? (connectorsCfg?.smtp?.allowedRemoteHosts ?? []) : [],
 };
-const effectiveModelBaseUrl =
-  stage === 2 && connectorsCfg?.modelProfile?.baseUrl ? connectorsCfg.modelProfile.baseUrl : modelBaseUrl;
 const effectiveSmtpHost = stage === 2 && connectorsCfg?.smtp?.host ? connectorsCfg.smtp.host : smtpHost;
 const effectiveSmtpPort = stage === 2 && connectorsCfg?.smtp?.port ? connectorsCfg.smtp.port : smtpPort;
 const effectiveSmtpTlsMode = stage === 2 ? (connectorsCfg?.smtp?.tlsMode ?? "none") : "none";
@@ -245,7 +257,6 @@ try {
   process.exit(1);
 }
 
-const vault = new HostCredentialVault();
 const allowSyntheticFakeModel =
   args["allow-synthetic-fake-model"] === "true" ||
   process.env["AEGISPI_ALLOW_SYNTHETIC_FAKE_MODEL"] === "1" ||
@@ -254,35 +265,22 @@ const modelIsLoopback = isLoopbackHost(new URL(effectiveModelBaseUrl).hostname);
 
 // S2-P0-2: Stage 2 MUST NOT silently fall back to fake-local / synthetic pricing on loopback when modelProfile is missing!
 // Synthetic fake-local pricing in Stage 2 requires explicit test-profile opt-in (`--allow-synthetic-fake-model` or config flag).
-if (stage === 2 && !connectorsCfg?.modelProfile && !allowSyntheticFakeModel) {
+if (stage === 2 && !stageTwoModelProfile && !allowSyntheticFakeModel) {
   process.stderr.write(
     "Refusing startup: stage2_model_profile_required (Stage 2 requires explicit modelProfile with verified billing contract; loopback fake-local pricing requires explicit --allow-synthetic-fake-model test flag)\n",
   );
   process.exit(1);
 }
 
-const modelProvider = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.provider : "fake-local";
-const routerModelId = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.routerModelId : "fake-router-1";
-const workerModelId = stage === 2 && connectorsCfg?.modelProfile ? connectorsCfg.modelProfile.workerModelId : "fake-worker-1";
+const routerModelId = stageTwoModelProfile ? stageTwoModelProfile.routerModelId : "fake-router-1";
+const workerModelId = stageTwoModelProfile ? stageTwoModelProfile.workerModelId : "fake-worker-1";
 
-if (stage === 2 && modelProvider.trim().toLowerCase() === "fake-local" && !allowSyntheticFakeModel) {
+if (stage === 2 && fakeModelProvider && !allowSyntheticFakeModel) {
   process.stderr.write(
     "Refusing startup: stage2_synthetic_fake_not_enabled (fake-local provider in Stage 2 requires explicit --allow-synthetic-fake-model test flag)\n",
   );
   process.exit(1);
 }
-
-const customModelApiKeyVar = stage === 2 ? connectorsCfg?.modelProfile?.apiKeyEnvVar : undefined;
-const routerSecret =
-  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
-  process.env["AEGISPI_MODEL_ROUTER_KEY"] ??
-  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
-  "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2";
-const workerSecret =
-  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
-  process.env["AEGISPI_MODEL_WORKER_KEY"] ??
-  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
-  routerSecret;
 
 // S2-P0-1: Stage 2 cannot disable strictPlainTextEmail (approved snapshot must match transmitted SMTP fields).
 if (stage === 2 && connectorsCfg?.strictPlainTextEmail === false) {
@@ -294,14 +292,12 @@ if (stage === 2 && connectorsCfg?.strictPlainTextEmail === false) {
 
 // S2-P0-2: Synthetic fixed price schedules are STRICTLY limited to explicit fake-local loopback tests
 // (and in Stage 2 ONLY when allowSyntheticFakeModel is explicitly enabled)!
-// ANY real provider (even on a loopback local proxy!) MUST supply a provider+model-bound verified ModelPriceSchedule!
+// Real providers require an official HTTPS endpoint and a provider/model-bound price schedule.
 const isExplicitSyntheticFake =
-  modelIsLoopback &&
-  modelProvider.trim().toLowerCase() === "fake-local" &&
-  (stage === 1 || allowSyntheticFakeModel);
+  modelIsLoopback && fakeModelProvider && (stage === 1 || allowSyntheticFakeModel);
 const effectivePriceSchedule: ModelPriceSchedule | null =
-  stage === 2 && connectorsCfg?.modelProfile?.priceSchedule
-    ? connectorsCfg.modelProfile.priceSchedule
+  stageTwoModelProfile?.priceSchedule
+    ? stageTwoModelProfile.priceSchedule
     : isExplicitSyntheticFake
       ? {
           priceVersion: "synthetic-v1",
@@ -329,6 +325,19 @@ for (const modelId of new Set([routerModelId, workerModelId])) {
 }
 const effectivePriceVersion = effectivePriceSchedule!.priceVersion;
 
+const customModelApiKeyVar = stageTwoModelProfile?.apiKeyEnvVar;
+const routerSecret =
+  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
+  process.env["AEGISPI_MODEL_ROUTER_KEY"] ??
+  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
+  "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2";
+const workerSecret =
+  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
+  process.env["AEGISPI_MODEL_WORKER_KEY"] ??
+  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
+  routerSecret;
+
+const vault = new HostCredentialVault();
 vault.registerSlot(
   {
     slotId: "slot:model-router",

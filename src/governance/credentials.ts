@@ -70,7 +70,7 @@ export function assertModelUrlForStage(rawUrl: string, policy?: StageEgressPolic
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Stage1EgressBlockedError(rawUrl, `Stage 2 blocks malformed model base URL: ${rawUrl}`);
+    throw new Stage1EgressBlockedError(rawUrl, "Stage 2 blocks malformed model base URL");
   }
   if (parsed.username !== "" || parsed.password !== "") {
     throw new Stage1EgressBlockedError(rawUrl, "Stage 2 blocks embedded credentials in model base URL");
@@ -82,7 +82,7 @@ export function assertModelUrlForStage(rawUrl: string, policy?: StageEgressPolic
     return rawUrl.replace(/\/+$/, "");
   }
   if (parsed.protocol !== "https:") {
-    throw new Stage1EgressBlockedError(rawUrl, `Stage 2 requires HTTPS for remote model endpoint: ${rawUrl}`);
+    throw new Stage1EgressBlockedError(rawUrl, "Stage 2 requires HTTPS for remote model endpoints");
   }
   const allowed = (policy?.allowedRemoteModelHosts ?? []).map((h) => h.trim().toLowerCase()).filter(Boolean);
   if (!allowed.includes(parsed.hostname.trim().toLowerCase())) {
@@ -224,8 +224,8 @@ export interface ModelPriceSchedule {
 /**
  * S2-P0-2: Validates whether a model price schedule is lawful for the given endpoint & provider/model identity.
  * - Synthetic fixed pricing is STRICTLY limited to explicit `fake-local` provider on loopback hosts.
- * - ANY real provider (even when routed through a loopback local proxy!) MUST supply a non-synthetic,
- *   provider+model-bound schedule matching a verified billing upper-bound contract; otherwise fails closed!
+ * - Real profiles require an official HTTPS base URL and a provider/model-bound schedule
+ *   matching its verified billing contract.
  */
 export function validateModelPriceScheduleForEndpoint(
   baseUrl: string,
@@ -318,15 +318,12 @@ export function validateModelPriceScheduleForEndpoint(
         reason: `Price schedule boundContractVersion '${schedule.boundContractVersion}' does not match verified contract '${contract.contractVersion}'`,
       };
     }
-    if (!loopback) {
-      const normalizedBaseUrl = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
-      if (!contract.allowedOfficialBaseUrls.includes(normalizedBaseUrl)) {
-        return {
-          ok: false,
-          code: "unverified_model_endpoint",
-          reason: `Endpoint '${normalizedBaseUrl}' is not an official verified endpoint for ${schedProv}/${schedModel}`,
-        };
-      }
+    if (!contract.allowedOfficialBaseUrls.includes(parsed.href.replace(/\/+$/, ""))) {
+      return {
+        ok: false,
+        code: "unverified_model_endpoint",
+        reason: `Model endpoint must match an official verified HTTPS base URL for ${contract.provider}/${contract.modelId}`,
+      };
     }
     if (
       !Number.isSafeInteger(schedule.inputPerMTokMu) ||

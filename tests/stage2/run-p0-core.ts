@@ -312,7 +312,14 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     // =========================================================================
     const hostDataDir = path.join(rootDir, "host-data");
     const vault = new HostCredentialVault();
-    const egressPolicy = { stage: 2 as const };
+    const deepSeekBaseUrl = "https://api.deepseek.com";
+    const egressPolicy = { stage: 2 as const, allowedRemoteModelHosts: [new URL(deepSeekBaseUrl).hostname] };
+    const fetchDeepSeekFixture: typeof fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      assert.equal(url.origin, deepSeekBaseUrl);
+      assert.equal(url.pathname, "/chat/completions");
+      return fetch(new URL(url.pathname, fakeModel.baseUrl), init);
+    };
     const tokenPriceSchedule = {
       priceVersion: "deepseek-flash-v4.1-peak-2026-11",
       provider: "deepseek",
@@ -327,7 +334,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       {
         slotId: "slot:model-router",
         provider: "deepseek",
-        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedBaseUrls: [deepSeekBaseUrl],
         allowedModelIds: ["deepseek-flash"],
         priceVersion: tokenPriceSchedule.priceVersion,
       },
@@ -338,7 +345,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       {
         slotId: "slot:model-worker",
         provider: "deepseek",
-        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedBaseUrls: [deepSeekBaseUrl],
         allowedModelIds: ["deepseek-flash"],
         priceVersion: tokenPriceSchedule.priceVersion,
       },
@@ -381,7 +388,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
         slotName: "router",
         provider: "deepseek",
         modelId: "deepseek-flash",
-        baseUrl: fakeModel.baseUrl,
+        baseUrl: deepSeekBaseUrl,
         credentialSlotId: "slot:model-router",
         contextWindow: 1_000_000,
         maxTokens: 1024,
@@ -392,7 +399,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
         slotName: "worker",
         provider: "deepseek",
         modelId: "deepseek-flash",
-        baseUrl: fakeModel.baseUrl,
+        baseUrl: deepSeekBaseUrl,
         credentialSlotId: "slot:model-worker",
         contextWindow: 1_000_000,
         maxTokens: 1024,
@@ -414,6 +421,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
         fromAddress: "owner@local.test",
       },
       egressPolicy,
+      fetchImpl: fetchDeepSeekFixture,
       strictPlainTextEmail: true,
       githubWriteAllowlist,
       skillsEnabled: true,
@@ -429,7 +437,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
           sourceId: "*",
           provider: "deepseek",
           modelId: "*",
-          baseUrl: fakeModel.baseUrl,
+          baseUrl: deepSeekBaseUrl,
           slotName: "*",
           now: fixedNow,
         });
@@ -887,101 +895,90 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
 
     const { submitApprovedGithubWriteEffect, submitApprovedEmailEffect } = await import("../../src/runtime/submitter.ts");
 
-    // S2-P0-1 (Round 4): GitHub write transport drop AFTER remote write applied -> MUST persist UNKNOWN (NOT FAILED!),
-    // keep independent write count = 1, refuse duplicate send, and display「结果待核对」!
-    const dropWritePin = host.govDb
+    // Both dropped IPC and an upstream tool error can leave an applied write unconfirmed.
+    const writePin = host.govDb
       .prepare("SELECT schema_sha256 FROM mcp_tool_pins WHERE server_id = ? AND tool_name = ?")
       .get("github-s2", "create_or_update_file") as { schema_sha256: string };
-    const dropWriteProp = proposeOrGetApproval(host.govDb, {
-      runtimeEpoch: host.runtimeEpoch,
-      conversationId: String(convGhT0.id),
-      toolTaskId: "98990",
-      callId: "gh_drop_after_write_1",
-      scopeId: "scope:default",
-      toolName: "github_write_file",
-      target: "github:NorthAdb/aegis-stage2-test@refs/heads/stage2-test:notes/drop-unknown.md",
-      payload: {
-        repoId: "NorthAdb/aegis-stage2-test",
-        operation: "create_or_update_file",
-        ref: "refs/heads/stage2-test",
-        path: "notes/drop-unknown.md",
-        content: "drop after write proof",
-        message: "test: unknown outcome after transport drop",
-        mcpServerId: "github-s2",
-        mcpToolName: "create_or_update_file",
-        mcpSchemaSha256: dropWritePin.schema_sha256,
-      },
-      expiresAt: fixedNow + 600_000,
-      now: fixedNow,
-    });
-    const dropWriteDec = decideApproval(host.govDb, {
-      approvalId: dropWriteProp.approval.approval_id,
-      conversationId: String(convGhT0.id),
-      principalId: "owner",
-      decision: "APPROVE",
-      expectedRevision: dropWriteProp.revision.revision,
-      expectedActionHash: dropWriteProp.revision.action_hash,
-      nonce: dropWriteProp.nonce!,
-      decisionKey: `dk-gh-drop-unknown-${runId}`,
-      now: fixedNow,
-    });
-    assert.equal(dropWriteDec.ok, true);
-    const mcpWritesBeforeDrop = readMcpJsonl(mcpLogPath).filter(
-      (e) => e["kind"] === "tool_call" && e["isWrite"] === true,
-    ).length;
-    writeFileSync(echoSecretFlagPath, "DROP_AFTER_WRITE", "utf8");
-    const dropWritePayload = JSON.parse(dropWriteProp.revision.canonical_snapshot).payload;
-    const dropWriteRes = await submitApprovedGithubWriteEffect({
-      govDb: host.govDb,
-      runtimeEpoch: host.runtimeEpoch,
-      effectId: dropWriteDec.effectId!,
-      conversationId: String(convGhT0.id),
-      toolTaskId: "98990",
-      callId: "gh_drop_after_write_1",
-      toolName: "github_write_file",
-      finalTarget: "github:NorthAdb/aegis-stage2-test@refs/heads/stage2-test:notes/drop-unknown.md",
-      finalPayload: dropWritePayload,
-      allowlist: githubWriteAllowlist,
-      bridge: bridge!,
-      now: () => fixedNow,
-    });
-    rmSync(echoSecretFlagPath, { force: true });
-    assert.equal(dropWriteRes.ok, false);
-    assert.equal(dropWriteRes.claimed, true);
-    assert.equal(dropWriteRes.effectState, "UNKNOWN", "Transport drop after remote GitHub write MUST persist UNKNOWN");
-    assert.equal(dropWriteRes.code, "unknown");
-    const dropEffectRow = host.govDb
-      .prepare("SELECT state, reason FROM effects WHERE effect_id = ?")
-      .get(dropWriteDec.effectId!) as { state: string; reason: string | null };
-    assert.equal(dropEffectRow.state, "UNKNOWN");
-    assert.equal(dropEffectRow.reason, "mcp_connection_closed");
-    const mcpWritesAfterDrop = readMcpJsonl(mcpLogPath).filter(
-      (e) => e["kind"] === "tool_call" && e["isWrite"] === true,
-    ).length;
-    assert.equal(mcpWritesAfterDrop - mcpWritesBeforeDrop, 1, "Independent fake MCP must record exactly 1 write");
-
-    // Reconnect bridge cleanly after child exit, then verify duplicate submit does NOT resend!
-    const reconnAfterDrop = await bridge!.reconnect();
-    assert.equal(reconnAfterDrop.ok, true);
-    const dropWriteRetry = await submitApprovedGithubWriteEffect({
-      govDb: host.govDb,
-      runtimeEpoch: host.runtimeEpoch,
-      effectId: dropWriteDec.effectId!,
-      conversationId: String(convGhT0.id),
-      toolTaskId: "98990",
-      callId: "gh_drop_after_write_1",
-      toolName: "github_write_file",
-      finalTarget: "github:NorthAdb/aegis-stage2-test@refs/heads/stage2-test:notes/drop-unknown.md",
-      finalPayload: dropWritePayload,
-      allowlist: githubWriteAllowlist,
-      bridge: bridge!,
-      now: () => fixedNow,
-    });
-    assert.equal(dropWriteRetry.claimed, false);
-    const mcpWritesAfterDropRetry = readMcpJsonl(mcpLogPath).filter(
-      (e) => e["kind"] === "tool_call" && e["isWrite"] === true,
-    ).length;
-    assert.equal(mcpWritesAfterDropRetry, mcpWritesAfterDrop, "UNKNOWN effect must NEVER auto-resend");
+    const unknownGithubWrites = [];
+    for (const { mode, reason } of [
+      { mode: "DROP_AFTER_WRITE", reason: "mcp_connection_closed" },
+      { mode: "ERROR_AFTER_WRITE", reason: "mcp_remote_write_unconfirmed" },
+    ]) {
+      const filePath = `notes/${mode.toLowerCase()}.md`;
+      const target = `github:NorthAdb/aegis-stage2-test@refs/heads/stage2-test:${filePath}`;
+      const callId = `gh_${mode.toLowerCase()}`;
+      const prop = proposeOrGetApproval(host.govDb, {
+        runtimeEpoch: host.runtimeEpoch,
+        conversationId: String(convGhT0.id),
+        toolTaskId: "98990",
+        callId,
+        scopeId: "scope:default",
+        toolName: "github_write_file",
+        target,
+        payload: {
+          repoId: "NorthAdb/aegis-stage2-test",
+          operation: "create_or_update_file",
+          ref: "refs/heads/stage2-test",
+          path: filePath,
+          content: "write outcome fixture",
+          message: "test: unconfirmed write outcome",
+          mcpServerId: "github-s2",
+          mcpToolName: "create_or_update_file",
+          mcpSchemaSha256: writePin.schema_sha256,
+        },
+        expiresAt: fixedNow + 600_000,
+        now: fixedNow,
+      });
+      const decision = decideApproval(host.govDb, {
+        approvalId: prop.approval.approval_id,
+        conversationId: String(convGhT0.id),
+        principalId: "owner",
+        decision: "APPROVE",
+        expectedRevision: prop.revision.revision,
+        expectedActionHash: prop.revision.action_hash,
+        nonce: prop.nonce!,
+        decisionKey: `dk-${callId}-${runId}`,
+        now: fixedNow,
+      });
+      assert.equal(decision.ok, true);
+      const submission: Parameters<typeof submitApprovedGithubWriteEffect>[0] = {
+        govDb: host.govDb,
+        runtimeEpoch: host.runtimeEpoch,
+        effectId: decision.effectId!,
+        conversationId: String(convGhT0.id),
+        toolTaskId: "98990",
+        callId,
+        toolName: "github_write_file",
+        finalTarget: target,
+        finalPayload: JSON.parse(prop.revision.canonical_snapshot).payload,
+        allowlist: githubWriteAllowlist,
+        bridge: bridge!,
+        now: () => fixedNow,
+      };
+      const countFakeEvents = (kind: string) => readMcpJsonl(mcpLogPath).filter(
+        (event) => event["kind"] === kind && event["path"] === filePath,
+      ).length;
+      writeFileSync(echoSecretFlagPath, mode, "utf8");
+      const result = await submitApprovedGithubWriteEffect(submission);
+      rmSync(echoSecretFlagPath, { force: true });
+      assert.equal(result.claimed, true);
+      assert.equal(result.code, "unknown");
+      assert.equal(result.effectState, "UNKNOWN");
+      const row = host.govDb
+        .prepare("SELECT state, reason FROM effects WHERE effect_id = ?")
+        .get(decision.effectId!) as { state: string; reason: string };
+      assert.deepEqual({ ...row }, { state: "UNKNOWN", reason });
+      assert.equal(countFakeEvents("write_applied"), 1);
+      if (mode === "DROP_AFTER_WRITE") {
+        assert.equal((await bridge!.reconnect()).ok, true);
+      }
+      assert.equal((await submitApprovedGithubWriteEffect(submission)).claimed, false);
+      const dispatchCount = countFakeEvents("tool_call");
+      const appliedCount = countFakeEvents("write_applied");
+      assert.equal(dispatchCount, 1, "UNKNOWN effect must never resend");
+      assert.equal(appliedCount, 1);
+      unknownGithubWrites.push({ mode, reason, dispatchCount, appliedCount, proposalId: prop.proposal.proposal_id });
+    }
 
     // =========================================================================
     // 5. P0-3 MCP Pin C4: Drift, Missing Tool, Revocation & Binary Tamper (0 remote calls!)
@@ -1649,6 +1646,42 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     );
     assert.ok(stage2NoProfileProc.stderr.includes("stage2_model_profile_required"));
 
+    const realProfile = {
+      provider: "deepseek",
+      routerModelId: "deepseek-flash",
+      workerModelId: "deepseek-flash",
+      apiKeyEnvVar: "AEGISPI_STAGE2_TEST_MODEL_KEY",
+      allowedRemoteHosts: ["api.deepseek.com", "unverified.example"],
+      priceSchedule: tokenPriceSchedule,
+    };
+    const modelRequestsBeforeInvalidProfiles = (await fakeModel.stats()).totalPhysicalRequests;
+    const invalidModelProfiles = [];
+    for (const { name, baseUrl, code } of [
+      { name: "missing", baseUrl: undefined, code: "stage2_real_model_base_url_required" },
+      { name: "blank", baseUrl: " ", code: "stage2_real_model_base_url_required" },
+      { name: "loopback", baseUrl: fakeModel.baseUrl, code: "unverified_model_endpoint" },
+      { name: "unverified", baseUrl: "https://unverified.example", code: "unverified_model_endpoint" },
+    ]) {
+      const dataDir = path.join(rootDir, `reject-model-${name}`);
+      const configPath = `${dataDir}.json`;
+      writeFileSync(configPath, JSON.stringify({ modelProfile: { ...realProfile, baseUrl } }));
+      const attempt = spawnSync(LOCKED_NODE_EXE, [
+        path.resolve("src/index.ts"), "--stage", "2", "--data-dir", dataDir, "--port", "0",
+        "--connectors-config", configPath, "--model-base-url", fakeModel.baseUrl,
+        "--allow-synthetic-fake-model", "--console-token", consoleToken,
+      ], {
+        encoding: "utf8", timeout: 15_000, windowsHide: true,
+        env: { ...process.env, AEGISPI_STAGE2_TEST_MODEL_KEY: routerKey },
+      });
+      assert.equal(attempt.status, 1, `Stage 2 real profile with ${name} base URL must refuse startup`);
+      assert.ok(attempt.stderr.includes(code));
+      assert.ok(!attempt.stderr.includes(routerKey));
+      assert.ok(!existsSync(dataDir), "Real endpoint validation must happen before opening the data stores");
+      invalidModelProfiles.push({ name, code, exitCode: attempt.status });
+    }
+    const invalidModelProfileHttpDelta = (await fakeModel.stats()).totalPhysicalRequests - modelRequestsBeforeInvalidProfiles;
+    assert.equal(invalidModelProfileHttpDelta, 0);
+
     // 2. Retired `deepseek-chat`, unproven models, zero/below-floor rates, and unverified remote endpoints MUST fail closed!
     assert.equal(
       validateModelPriceScheduleForEndpoint("http://127.0.0.1:7890/v1", null, {
@@ -1779,7 +1812,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       {
         slotId: "slot:ds-router",
         provider: "deepseek",
-        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedBaseUrls: [deepSeekBaseUrl],
         allowedModelIds: ["deepseek-flash"],
         priceVersion: dsSchedule.priceVersion,
       },
@@ -1790,7 +1823,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       {
         slotId: "slot:ds-worker",
         provider: "deepseek",
-        allowedBaseUrls: [fakeModel.baseUrl],
+        allowedBaseUrls: [deepSeekBaseUrl],
         allowedModelIds: ["deepseek-flash"],
         priceVersion: dsSchedule.priceVersion,
       },
@@ -1805,7 +1838,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
           slotName: "router",
           provider: "deepseek",
           modelId: "deepseek-flash",
-          baseUrl: fakeModel.baseUrl,
+          baseUrl: deepSeekBaseUrl,
           credentialSlotId: "slot:ds-router",
           contextWindow: 1_000_000,
           maxTokens: 1024,
@@ -1816,7 +1849,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
           slotName: "worker",
           provider: "deepseek",
           modelId: "deepseek-flash",
-          baseUrl: fakeModel.baseUrl,
+          baseUrl: deepSeekBaseUrl,
           credentialSlotId: "slot:ds-worker",
           contextWindow: 1_000_000,
           maxTokens: 1024,
@@ -1826,6 +1859,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       ],
       smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "owner@local.test" },
       egressPolicy,
+      fetchImpl: fetchDeepSeekFixture,
       strictPlainTextEmail: true,
       defaultTaskLimitMu: 800_000,
       defaultDayLimitMu: 5_000_000,
@@ -2435,18 +2469,19 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       assert.ok(!JSON.stringify(view3Prop.snapshot).includes("TOP_SECRET_BODY"));
       assert.ok(!JSON.stringify(view3AfterRev).includes("SENSITIVE_EFFECT_RECEIPT"));
       assert.ok(!JSON.stringify(view3AfterRev).includes("SENSITIVE_RECONCILE_EVIDENCE"));
-      // S2-P0-1 (Round 4): Verify GitHub write UNKNOWN effect projects as 「结果待核对」 in View ③ AND View ①!
-      const view3DropProp = view3AfterRev.approvals.find((p) => p.proposalId === dropWriteProp.proposal.proposal_id)!;
-      assert.equal(view3DropProp.effect?.state, "UNKNOWN");
-      assert.equal(view3DropProp.uiStatusLabel, "结果待核对");
       const ghSnapObj = (await (
         await fetch(`${auditWeb.baseUrl}/api/conversations/${convGhT0.id}/snapshot`, { headers: { cookie: cookieHdr } })
       ).json()) as {
         proposals: Array<{ proposalId: string; uiStatusLabel?: string; effect: { state?: string } | null }>;
       };
-      const view1DropProp = ghSnapObj.proposals.find((p) => p.proposalId === dropWriteProp.proposal.proposal_id)!;
-      assert.equal(view1DropProp.effect?.state, "UNKNOWN");
-      assert.equal(view1DropProp.uiStatusLabel, "结果待核对");
+      for (const { proposalId } of unknownGithubWrites) {
+        const view3Write = view3AfterRev.approvals.find((p) => p.proposalId === proposalId);
+        const view1Write = ghSnapObj.proposals.find((p) => p.proposalId === proposalId);
+        assert.equal(view3Write?.effect?.state, "UNKNOWN");
+        assert.equal(view3Write?.uiStatusLabel, "结果待核对");
+        assert.equal(view1Write?.effect?.state, "UNKNOWN");
+        assert.equal(view1Write?.uiStatusLabel, "结果待核对");
+      }
 
       const view2RoutinesAfterRev = (await (
         await fetch(`${auditWeb.baseUrl}/api/routines`, { headers: { cookie: cookieHdr } })
@@ -2608,6 +2643,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       modelSlots,
       smtpConfig: { host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "owner@local.test" },
       egressPolicy,
+      fetchImpl: fetchDeepSeekFixture,
       skillsEnabled: true,
       routinesEnabled: true,
       routinePollIntervalMs: 60_000,
@@ -2671,7 +2707,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     };
     evidence["round4_p0_closure"] = {
       s2_p0_1_githubWriteTransportDropPersistedUnknownAndDisplayedPendingReconcile: true,
-      s2_p0_1_githubWriteDropIndependentWriteDelta: mcpWritesAfterDrop - mcpWritesBeforeDrop,
+      s2_p0_1_githubWriteDropIndependentWriteDelta: unknownGithubWrites[0]!.appliedCount,
       s2_p0_2_stage2MissingModelProfileRefusedStartup: true,
       s2_p0_2_retiredDeepseekChatAndZeroAndBelowPeakRatesRejected: true,
       s2_p0_2_deepseekFlashRealContractNormalTaskUpperMu: dsNormalUpperMu,
@@ -2682,6 +2718,13 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
       s2_p0_4_modelHttp200InStreamErrorReducedToFixedCodeZeroHits: true,
       s2_p0_5_outOfOrderRoutineCompletionBoundToProducingTriggerIdRedacted: true,
       s2_p0_5_unknownProvenanceNullTriggerIdFailClosedRedacted: true,
+    };
+    evidence["round5_p0_closure"] = {
+      githubUnknownWrites: unknownGithubWrites.map(({ mode, reason, dispatchCount, appliedCount }) => ({
+        mode, reason, dispatchCount, appliedCount, state: "UNKNOWN", views1And3Status: "结果待核对",
+      })),
+      invalidModelProfiles,
+      invalidModelProfileHttpDelta,
     };
     evidence["round3_p0_closure"] = {
       s2_p0_1_stage2StrictPlainTextMandatoryAndExtraFieldBlocked: true,

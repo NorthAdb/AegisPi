@@ -343,9 +343,20 @@ rl.on("line", (line) => {
         .update(`${repo}:${ref}:${filePath}:${content}:${message}`)
         .digest("hex");
       fixture.files[filePath] = content;
+      appendJsonl({ kind: "write_applied", path: filePath });
       if (echoSecret === "DROP_AFTER_WRITE") {
-        // S2-P0-1: Remote write already applied & durably logged above, then transport drops before reply!
         process.exit(0);
+      }
+      if (echoSecret === "ERROR_AFTER_WRITE") {
+        sendMsg({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            isError: true,
+            content: [{ type: "text", text: "Upstream did not confirm write outcome" }],
+          },
+        });
+        return;
       }
       sendMsg({
         jsonrpc: "2.0",

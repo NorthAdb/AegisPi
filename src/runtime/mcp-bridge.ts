@@ -48,7 +48,7 @@ export interface McpToolCallAuthContext {
 
 export interface McpCallOutcome {
   ok: boolean;
-  /** S2-P0-1: Distinguishes provably failed (local pre-check or explicit remote rejection) vs uncertain transport outcome (UNKNOWN). */
+  /** S2-P0-1: Distinguishes confirmed failures from unconfirmed write outcomes. */
   outcome?: "failed_local" | "failed_remote" | "unknown";
   code: string;
   reason?: string;
@@ -604,9 +604,8 @@ export class GitHubMcpBridge {
    * AFTER T4 CAS READY -> SUBMITTING commits. Re-checks admission pause, Stage 2 write mode,
    * live in-memory tool presence/fingerprint, AND live DB pin fingerprint BEFORE sending JSON-RPC.
    *
-   * S2-P0-1 & S2-P0-4: Preserves provably-failed (`failed_local` / `failed_remote`) vs uncertain
-   * post-dispatch transport outcomes (`unknown` -> persisted UNKNOWN + manual reconciliation)
-   * while reducing every error strictly to closed host-controlled codes!
+   * S2-P0-1 & S2-P0-4: Unconfirmed write outcomes require manual reconciliation.
+   * Errors are reported using host-controlled codes.
    */
   async callWriteTool(
     toolName: string,
@@ -642,15 +641,15 @@ export class GitHubMcpBridge {
     if (!this.#client) {
       return { ok: false, outcome: "failed_local", code: "mcp_not_connected", reason: "GitHub MCP bridge is not connected" };
     }
-    const safeToolLabel = sanitizeMcpToolLabel(toolName);
     try {
       const result = await this.#client.callTool(toolName, args);
       if (result.isError) {
+        // The MCP server may report an upstream error after GitHub has applied the write.
         return {
           ok: false,
-          outcome: "failed_remote",
-          code: "mcp_remote_tool_error",
-          reason: `mcp_remote_tool_error:${safeToolLabel}`,
+          outcome: "unknown",
+          code: "mcp_remote_write_unconfirmed",
+          reason: "mcp_remote_write_unconfirmed",
         };
       }
       const text = (result.content ?? [])

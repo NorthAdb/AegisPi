@@ -233,8 +233,7 @@ function reduceAuthoritativeModelErrorCode(
 /**
  * S2-P0-2: Computes a provable conservative integer microUSD upper bound for T6 budget reservation.
  * - Synthetic fixed pricing is STRICTLY limited to explicit `fake-local` provider on loopback endpoints.
- * - ANY real provider (whether remote OR routed through a loopback local proxy!) MUST match a verified
- *   provider+model billing bound contract in `VERIFIED_MODEL_BOUND_CONTRACTS`; otherwise fails closed!
+ * - Real providers must match the verified billing contract for their provider, model and HTTPS base URL.
  * - Uses the provider's published hard context window limit (`contract.publishedContextWindowTokens`) as the
  *   provable conservative input token upper bound (zero fragile tokenizer or framing guesswork!) plus explicit
  *   wire-enforced `effectiveMaxTokens <= contract.maxTokensHardCeiling`, priced at or above the contract's

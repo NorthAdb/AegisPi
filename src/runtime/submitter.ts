@@ -563,7 +563,7 @@ export async function submitApprovedGithubWriteEffect(params: {
       };
     }
 
-    // S2-P0-1: Post-dispatch transport timeout/disconnect MUST persist UNKNOWN for manual reconciliation (NEVER collapse into FAILED!)
+    // S2-P0-1: Unconfirmed post-dispatch outcomes stay UNKNOWN for manual reconciliation.
     if (
       mcpRes.outcome === "unknown" ||
       mcpRes.code === "mcp_transport_uncertain" ||
