@@ -10,11 +10,13 @@ import {
   type Model,
   type Models,
   type ModelsSimpleStreamOptions,
+  type Provider,
 } from "@earendil-works/pi-ai";
 import {
   stream as openAiCompletionsStream,
   streamSimple as openAiCompletionsStreamSimple,
 } from "@earendil-works/pi-ai/api/openai-completions";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import {
   BudgetDeniedError,
   DEFAULT_DAY_LIMIT_MU,
@@ -28,7 +30,6 @@ import {
 import { mintId } from "../governance/canonical.ts";
 import {
   assertModelUrlForStage,
-  getVerifiedModelBoundContract,
   Stage1EgressBlockedError,
   validateModelPriceScheduleForEndpoint,
   type HostCredentialVault,
@@ -495,11 +496,21 @@ export interface HostModelsController {
   updateSlots: (slots: ModelSlotConfig[]) => void;
 }
 
+let cachedBuiltinProviders: Map<string, Provider> | null = null;
+
+function getBuiltinProviderById(providerId: string): Provider | undefined {
+  if (!cachedBuiltinProviders) {
+    cachedBuiltinProviders = new Map(builtinProviders().map((p) => [p.id, p]));
+  }
+  return cachedBuiltinProviders.get(providerId);
+}
+
 /**
  * Builds the unified host Models egress wrapping pi-ai Models.
- * Every streamSimple (Router / Worker) and completeSimple (Compaction) call passes through
- * phase attribution, outbound/credential binding validation, integer microUSD upper-bound
- * calculation, atomic TASK+DAY reservation (T6), maxRetries=0 dispatch, and idempotent settlement (T7).
+ * Reuses pi-ai's built-in provider catalog & wire protocols for all known providers
+ * (zero hand-maintained provider dialects), while keeping auth (HostCredentialVault),
+ * endpoint/disclosure/billing admission, T6 atomic reservation, maxRetries=0, wire
+ * contract verification, error reduction, and T7 settlement strictly under host control.
  */
 export function createHostModelsEgress(config: HostModelsConfig): HostModelsController {
   const nowFn = config.now ?? (() => Date.now());
@@ -522,62 +533,80 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
 
     for (const [providerId, providerSlots] of byProvider.entries()) {
       const first = providerSlots[0]!;
-      const modelDefs: Model<"openai-completions">[] = providerSlots.map((s) => {
-        const contract = getVerifiedModelBoundContract(s.provider, s.modelId);
-        const isDeepSeekNonThinking = contract?.requiredWireThinkingMode === "disabled" && contract.provider === "deepseek";
+      const builtin = getBuiltinProviderById(providerId);
+      const builtinModelsById = new Map<string, Model<Api>>(
+        (builtin?.getModels() ?? []).map((m) => [m.id, m]),
+      );
+
+      const modelDefs: Model<Api>[] = providerSlots.map((s) => {
+        const hostCost = s.priceSchedule
+          ? {
+              input: s.priceSchedule.inputPerMTokMu / 1_000_000,
+              output: s.priceSchedule.outputPerMTokMu / 1_000_000,
+              cacheRead: (s.priceSchedule.cacheReadPerMTokMu ?? 0) / 1_000_000,
+              cacheWrite: (s.priceSchedule.cacheWritePerMTokMu ?? 0) / 1_000_000,
+            }
+          : undefined;
+        const builtinModel = builtinModelsById.get(s.modelId);
+        if (builtinModel) {
+          // Reuse pi-ai's authoritative built-in model definition (api, reasoning, thinkingLevelMap, compat, headers)
+          // while overriding ONLY host-governed endpoint, text-only input boundary, caps, and cost schedule.
+          return {
+            ...builtinModel,
+            baseUrl: s.baseUrl,
+            input: ["text"],
+            contextWindow: s.contextWindow,
+            maxTokens: s.maxTokens,
+            ...(hostCost ? { cost: hostCost } : {}),
+          };
+        }
         return {
           id: s.modelId,
           name: `${s.provider}/${s.modelId}`,
           api: "openai-completions",
           provider: s.provider,
           baseUrl: s.baseUrl,
-          reasoning: isDeepSeekNonThinking,
-          ...(isDeepSeekNonThinking
-            ? {
-                thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", max: "max" },
-                compat: {
-                  supportsStore: false,
-                  maxTokensField: "max_tokens" as const,
-                  thinkingFormat: "deepseek" as const,
-                  supportsStrictMode: true,
-                },
-              }
-            : {}),
+          reasoning: false,
           input: ["text"],
-          cost: {
-            input: (s.priceSchedule?.inputPerMTokMu ?? 300_000) / 1_000_000,
-            output: (s.priceSchedule?.outputPerMTokMu ?? 1_200_000) / 1_000_000,
-            cacheRead: (s.priceSchedule?.cacheReadPerMTokMu ?? 0) / 1_000_000,
-            cacheWrite: (s.priceSchedule?.cacheWritePerMTokMu ?? 0) / 1_000_000,
-          },
+          cost: hostCost ?? { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
           contextWindow: s.contextWindow,
           maxTokens: s.maxTokens,
         };
       });
+
+      const hostAuth = {
+        apiKey: {
+          name: `host-slot:${first.credentialSlotId}`,
+          resolve: async () => {
+            // Inject secret strictly from host memory vault; never persisted in checkpoints or read from process.env.
+            const secret = config.vault.resolveSecretInMemory(first.credentialSlotId);
+            if (!secret) return undefined;
+            return {
+              auth: { apiKey: secret },
+              source: `host-memory:${first.credentialSlotId}`,
+            };
+          },
+        },
+      };
+
+      const usesBuiltinModels = Boolean(builtin && providerSlots.every((s) => builtinModelsById.has(s.modelId)));
       inner.setProvider(
         createProvider({
           id: providerId,
-          name: providerId,
+          name: builtin?.name ?? providerId,
           baseUrl: first.baseUrl,
-          auth: {
-            apiKey: {
-              name: `host-slot:${first.credentialSlotId}`,
-              resolve: async () => {
-                // Inject secret strictly from host memory vault; never persisted in checkpoints.
-                const secret = config.vault.resolveSecretInMemory(first.credentialSlotId);
-                if (!secret) return undefined;
-                return {
-                  auth: { apiKey: secret },
-                  source: `host-memory:${first.credentialSlotId}`,
-                };
-              },
-            },
-          },
+          ...(builtin?.headers ? { headers: builtin.headers } : {}),
+          auth: hostAuth,
           models: modelDefs,
-          api: {
-            stream: openAiCompletionsStream,
-            streamSimple: openAiCompletionsStreamSimple,
-          },
+          api: usesBuiltinModels && builtin
+            ? {
+                stream: (m, ctx, opts) => builtin.stream(m, ctx, opts),
+                streamSimple: (m, ctx, opts) => builtin.streamSimple(m, ctx, opts),
+              }
+            : {
+                stream: openAiCompletionsStream,
+                streamSimple: openAiCompletionsStreamSimple,
+              },
         }),
       );
     }
