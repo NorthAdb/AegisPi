@@ -117,6 +117,7 @@ export interface AegisPolicyExtensionOptions {
   }) => Promise<{ ok: boolean; code: string; output: string; error?: string }>;
   imapEndpoint?: () => ImapEndpointConfig | null;
   githubMcpBridge?: () => GitHubMcpBridge | null;
+  githubWriteMcpBridge?: () => GitHubMcpBridge | null;
   workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
   resolveExecutionRootTaskId?: (conversationId: string, toolTaskId: string) => Promise<string> | string;
   onGovernanceMutated?: (conversationId: string, reason: string) => void;
@@ -240,7 +241,8 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
       }
 
       const norm = normalizeEmailPayload(args as Record<string, unknown>);
-      let finalPayload = norm.payload;
+      let finalPayload = options.smtpConfig.credentialRequired
+        ? { ...norm.payload, smtpSender: options.smtpConfig.fromAddress } : norm.payload;
       let finalTarget = norm.target;
 
       if (options.tamperFinalPayloadForTest) {
@@ -451,11 +453,12 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         principalId: auth.principalId,
         sourceType: "imap",
         sourceId: `imap:${effectiveEndpoint.mailbox}:uid:${res.message.uid}`,
-        versionRef: `uidvalidity=${res.uidValidity ?? 0};uid=${res.message.uid}`,
+        versionRef: `uidvalidity=${res.uidValidity ?? 0};uid=${res.message.uid}${endpoint.operatorConnectionId ? `;connection=${endpoint.operatorConnectionId}` : ""}`,
         title: res.message.subject,
         contentDigest: res.message.contentDigest,
         metadata: {
           mailbox: effectiveEndpoint.mailbox,
+          operatorConnectionId: endpoint.operatorConnectionId,
           uidValidity: res.uidValidity ?? 0,
           uid: res.message.uid,
           date: res.message.date,
@@ -518,38 +521,10 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
       const conversationId = String(api.conversationId);
       const auth = resolveAuth(conversationId);
       const now = nowFn();
-      // S2-P1-1: Map owner/repo according to the pinned get_file_contents tool inputSchema
-      const readSchema = bridge.getToolInputSchema("get_file_contents");
-      const readProps =
-        readSchema && typeof readSchema["properties"] === "object"
-          ? (readSchema["properties"] as Record<string, unknown>)
-          : null;
-      const usesOwnerField = Boolean(readProps && Object.prototype.hasOwnProperty.call(readProps, "owner"));
-      const slashIdx = typed.repoId.indexOf("/");
-      const readArgs: Record<string, unknown> = usesOwnerField
-        ? {
-            owner: slashIdx > 0 ? typed.repoId.slice(0, slashIdx) : "",
-            repo: slashIdx > 0 ? typed.repoId.slice(slashIdx + 1) : typed.repoId,
-            ref: typed.ref,
-            path: typed.path,
-          }
-        : {
-            repo: typed.repoId,
-            ref: typed.ref,
-            path: typed.path,
-          };
-      const res = await bridge.callReadOnlyTool(
-        "get_file_contents",
-        readArgs,
-        {
-          principalId: auth.principalId,
-          scopeId: auth.scopeId,
-          repoId: typed.repoId,
-          operation: "read_file",
-          ref: typed.ref,
-          path: typed.path,
-        },
-      );
+      const res = await bridge.readRepositoryFile({
+        principalId: auth.principalId, scopeId: auth.scopeId,
+        repoId: typed.repoId, ref: typed.ref, path: typed.path,
+      });
       if (!res.ok) {
         return {
           isError: true,
@@ -564,7 +539,7 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         principalId: auth.principalId,
         sourceType: "github_mcp",
         sourceId: `github:${typed.repoId}:${typed.path}`,
-        versionRef: `${typed.ref}:${typed.path}`,
+        versionRef: `${typed.ref}:${typed.path}${bridge.operatorConnectionId ? `:${bridge.operatorConnectionId}` : ""}`,
         title: `${typed.repoId}/${typed.path}`,
         contentDigest,
         metadata: {
@@ -572,6 +547,7 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
           ref: typed.ref,
           path: typed.path,
           serverId: bridge.serverId,
+          operatorConnectionId: bridge.operatorConnectionId,
         },
         now,
       });
@@ -701,7 +677,7 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
         finalTarget,
         finalPayload: typed,
         allowlist: options.githubWriteAllowlist ?? [],
-        bridge: options.githubMcpBridge?.() ?? null,
+        bridge: (options.githubWriteMcpBridge ?? options.githubMcpBridge)?.() ?? null,
         now: nowFn,
         onBeforeClaim: options.onBeforeClaim,
         onAfterClaimBeforeTransport: options.onAfterClaimBeforeTransport,
@@ -926,8 +902,8 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
             const message = String(rawArgs["message"] ?? "AegisPi controlled update");
             const operation = String(rawArgs["operation"] ?? "create_or_update_file").trim();
 
-            const bridge = options.githubMcpBridge?.() ?? null;
-            if (!bridge || !bridge.isConnected) {
+            const bridge = (options.githubWriteMcpBridge ?? options.githubMcpBridge)?.() ?? null;
+            if (!bridge || !bridge.isConnected || bridge.isReadOnlyMode) {
               return { block: "GitHub MCP bridge is not connected" };
             }
             if (bridge.isAdmissionPaused) {
@@ -1071,6 +1047,10 @@ export function createAegisPolicyExtension(options: AegisPolicyExtensionOptions)
           });
           if (!recipCheck.ok) {
             return { block: `${recipCheck.code}: ${recipCheck.reason}` };
+          }
+          if (options.smtpConfig.credentialRequired) {
+            if (!options.smtpConfig.credentialSlotId) return { block: "The authorized Gmail sender credential is unavailable" };
+            payload.smtpSender = options.smtpConfig.fromAddress;
           }
           const snap = proposeOrGetApproval(options.govDb, {
             runtimeEpoch,

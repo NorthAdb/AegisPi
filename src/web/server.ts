@@ -1,6 +1,7 @@
 import path from "node:path";
 import { serve, type ServerType } from "@hono/node-server";
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import {
   computeActiveSkillSetHash,
@@ -57,10 +58,17 @@ import {
   listMcpToolPins,
   revokeMcpTool,
 } from "../governance/mcp-pin.ts";
+import type { openOperatorSettings } from "../governance/operator-settings.ts";
 import {
   checkRecordedSourceReadStillAuthorized,
   getSourceReadRevocationWatermark,
+  checkSourceReadAuthorized,
+  grantModelDisclosure,
   listConversationSources,
+  listDestinationDisclosureGrants,
+  matchesMemoryDisclosureGrant,
+  memoryModelSourceId,
+  revokeModelDisclosureGrant,
   revokeSourceReadGrant,
 } from "../governance/policy.ts";
 import {
@@ -75,6 +83,8 @@ import {
   validateStage2PlainTextEmail,
 } from "../governance/rules.ts";
 import type { AegisHostRuntime } from "../runtime/harness.ts";
+import type { listOperatorModelCatalog } from "../runtime/models.ts";
+import type { openOperatorConnections } from "../runtime/operator-connections.ts";
 import {
   buildClearSessionCookie,
   buildSessionCookie,
@@ -151,6 +161,20 @@ export interface WebServerConfig {
   /** Host-bound map of principalId -> console secret token (G1: client cannot choose principalId). */
   consoleTokens?: Record<string, string>;
   defaultPrincipalId?: string;
+  operatorSettings?: ReturnType<typeof openOperatorSettings>;
+  operatorConnections?: ReturnType<typeof openOperatorConnections>;
+  listOperatorModelCatalog?: typeof listOperatorModelCatalog;
+  requestOperatorRestart?: () => void;
+  testOperatorGithubRead?: (principalId: string) => Promise<{ ok: boolean; code: string }>;
+  testOperatorGmailRead?: (principalId: string) => Promise<{ ok: boolean; code: string; seenUnchanged?: boolean }>;
+  operatorWriteMcpServerId?: string;
+  operatorCredentialStatus?: {
+    router: boolean;
+    worker: boolean;
+    gmailImap: boolean;
+    gmailSmtp: boolean;
+    github: boolean;
+  };
   now?: () => number;
   maxSseHistory?: number;
   maxSseClientQueue?: number;
@@ -238,6 +262,8 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
 
   // G1: Build host-bound principal credentials map; refuse startup if no token configured!
   const defaultPrincipalId = config.defaultPrincipalId ?? "owner";
+  const canManageSettings = (principalId: string) =>
+    uiMode === "stage2" && Boolean(config.operatorSettings) && principalId === defaultPrincipalId;
   const principalCredentials: Array<{ principalId: string; token: string }> = [];
   if (config.consoleTokens) {
     for (const [principalId, token] of Object.entries(config.consoleTokens)) {
@@ -589,9 +615,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   });
 
   const app = new Hono<{ Variables: { authSession: AuthSession } }>();
+  let closingWeb = false;
+  const activeRequests = new Set<Promise<Response>>();
 
   // Host & Origin guard middleware
   app.use("*", async (c, next) => {
+    if (closingWeb) return c.json({ error: "host_restarting" }, 503);
     const hostHeader = c.req.header("host");
     if (!isAllowedHostForProfile(hostHeader, boundPort, mobileHttps)) {
       return c.json({ error: "invalid_host" }, 403);
@@ -684,7 +713,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
         mobileHttps: mobileHttps.enabled,
       }),
     );
-    return c.json({ ok: true, principalId: matchedPrincipal, expiresAt: session.expiresAt });
+    return c.json({
+      ok: true,
+      principalId: matchedPrincipal,
+      expiresAt: session.expiresAt,
+      canManageSettings: canManageSettings(matchedPrincipal),
+    });
   });
 
   // Auth middleware for all protected /api/* routes
@@ -711,6 +745,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       activeRuntimeEpoch: config.host.runtimeEpoch,
       uiMode,
       mobileHttpsEnabled: mobileHttps.enabled,
+      canManageSettings: canManageSettings(session.principalId),
     });
   });
 
@@ -757,6 +792,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     if (!config.host.isAcceptingCommands) {
       return c.json({ error: "host_not_ready", health: config.host.health }, 503);
     }
+    if (config.host.config.modelSlots.length === 0) return c.json({ error: "model_setup_required" }, 409);
     const session = c.get("authSession");
     const body = (await c.req.json().catch(() => ({}))) as {
       slotName?: "router" | "worker";
@@ -998,7 +1034,16 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
           strictPlainTextEmail: config.host.config.strictPlainTextEmail,
         });
         if (enforceStrictPlainText) {
-          const plainCheck = validateStage2PlainTextEmail(body.payload);
+          const { smtpSender, ...mail } = body.payload;
+          const previous = config.host.govDb.prepare(
+            "SELECT canonical_snapshot FROM draft_revisions WHERE proposal_id = ? AND revision = ?",
+          ).get(existingProposal.proposal_id, existingProposal.head_rev) as { canonical_snapshot: string } | undefined;
+          const boundSender: unknown = previous ? JSON.parse(previous.canonical_snapshot).payload?.smtpSender : undefined;
+          if ((smtpSender !== undefined && smtpSender !== boundSender) ||
+              (config.host.config.smtpConfig.credentialRequired && boundSender !== config.host.config.smtpConfig.fromAddress)) {
+            return c.json({ ok: false, code: "smtp_sender_binding_required", message: "Recreate the draft with the authorized Gmail sender" }, 409);
+          }
+          const plainCheck = validateStage2PlainTextEmail(mail);
           if (!plainCheck.ok) {
             return c.json({ ok: false, code: plainCheck.code, message: plainCheck.reason }, 400);
           }
@@ -1006,6 +1051,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
             to: plainCheck.to,
             subject: plainCheck.subject,
             body: plainCheck.body,
+            ...(typeof boundSender === "string" ? { smtpSender: boundSender } : {}),
           };
         }
         const toRaw = effectivePayload["to"];
@@ -1280,6 +1326,136 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   // Stage 2 View ② / ③ / ④ Authenticated Governance & Capability Endpoints
   // =========================================================================
 
+  const checkOperatorSettings: MiddlewareHandler<{ Variables: { authSession: AuthSession } }> = async (c, next) => {
+    if (!canManageSettings(c.get("authSession").principalId)) {
+      return c.json({ ok: false, error: "settings_forbidden" }, 403);
+    }
+    c.header("cache-control", "no-store");
+    await next();
+  };
+  app.use("/api/operator-settings", checkOperatorSettings);
+  app.use("/api/operator-settings/*", checkOperatorSettings);
+
+  const operatorSettingsResponse = () => ({
+    ok: true,
+    settings: config.operatorSettings!.get(),
+    credentials: config.operatorCredentialStatus,
+    connections: config.operatorConnections?.status(),
+  });
+  app.get("/api/operator-settings", (c) => c.json(operatorSettingsResponse()));
+  app.patch("/api/operator-settings", bodyLimit({ maxSize: 4096 }), async (c) => {
+    const input: unknown = await c.req.json().catch(() => null);
+    try {
+      if (!config.operatorSettings!.update(input)) {
+        return c.json({ ok: false, error: "invalid_settings" }, 400);
+      }
+    } catch {
+      return c.json({ ok: false, error: "settings_write_failed" }, 500);
+    }
+    return c.json(operatorSettingsResponse());
+  });
+
+  app.get("/api/operator-settings/model-catalog", (c) => c.json({ providers: config.listOperatorModelCatalog?.() ?? [] }));
+  app.put("/api/operator-settings/connections", bodyLimit({ maxSize: 8192 }), async (c) => {
+    if (!config.operatorConnections) return c.json({ ok: false, error: "settings_unavailable" }, 404);
+    const input: unknown = await c.req.json().catch(() => null);
+    const error = await config.operatorConnections.save(input);
+    if (error) return c.json({ ok: false, error }, error === "settings_busy" ? 409 : 400);
+    return c.json(operatorSettingsResponse());
+  });
+  app.post("/api/operator-settings/apply", (c) => {
+    if (!config.requestOperatorRestart || !config.operatorConnections) return c.json({ ok: false, error: "settings_unavailable" }, 404);
+    if (!config.operatorConnections.beginApply()) return c.json({ ok: false, error: "settings_busy" }, 409);
+    config.requestOperatorRestart();
+    return c.json({ ok: true }, 202);
+  });
+  app.post("/api/operator-settings/github/test-read", async (c) => {
+    const result = await config.testOperatorGithubRead?.(c.get("authSession").principalId);
+    return c.json(result ?? { ok: false, code: "github_not_connected" });
+  });
+  app.post("/api/operator-settings/gmail/test-read", async (c) => {
+    try {
+      const result = await config.testOperatorGmailRead?.(c.get("authSession").principalId);
+      return c.json(result ?? { ok: false, code: "gmail_not_connected" });
+    } catch {
+      return c.json({ ok: false, code: "gmail_read_failed" });
+    }
+  });
+  app.post("/api/operator-settings/model/test", async (c) => {
+    if (!config.host.isAcceptingCommands || !config.operatorConnections?.active.model) {
+      return c.json({ ok: false, error: "model_setup_required" }, 409);
+    }
+    const principalId = c.get("authSession").principalId;
+    const conversation = await config.host.createManagedConversation({ principalId, modelProbeOnly: true });
+    const conversationId = String(conversation.id);
+    const result = await config.host.submitChatCommand({
+      principalId, conversationId, runtimeEpoch: config.host.runtimeEpoch,
+      chatKey: `operator-test:${conversationId}`,
+      content: "这是一条合成连接测试。请用三句简短的话描述春天，不要调用工具。",
+    });
+    if (!result.ok) return c.json({ ok: false, error: result.code }, result.httpStatus);
+    return c.json({ ok: true, conversationId }, 202);
+  });
+
+  const disclosureTarget = (principalId: string, kind: string) => {
+    const active = config.operatorConnections?.active;
+    const entry = kind === "gmail" ? active?.gmail : kind === "github" ? active?.github : undefined;
+    if (!entry || !active?.model) return null;
+    const { provider, modelId, baseUrl } = active.model;
+    return {
+      principalId, scopeId: "scope:default", provider, modelId, baseUrl,
+      sourceType: "mailbox" in entry ? "imap" as const : "github_mcp" as const,
+      sourceId: `operator-connection:${entry.connectionId}`,
+    };
+  };
+  const disclosureGrants = (target: NonNullable<ReturnType<typeof disclosureTarget>>) =>
+    config.host.govDb.prepare(`SELECT grant_id FROM model_disclosure_grants
+      WHERE principal_id = ? AND scope_id = ? AND source_type = ? AND source_id = ? AND provider = ?
+        AND model_id = ? AND base_url = ? AND slot_name = '*' AND revoked_at IS NULL`).get(
+      target.principalId, target.scopeId, target.sourceType, target.sourceId,
+      target.provider, target.modelId, target.baseUrl,
+    ) as { grant_id: string } | undefined;
+  app.get("/api/operator-settings/disclosure/:kind", (c) => {
+    const target = disclosureTarget(c.get("authSession").principalId, c.req.param("kind"));
+    if (!target) return c.json({ available: false, granted: false });
+    const grants = disclosureGrants(target);
+    return c.json({
+      available: true, granted: Boolean(grants),
+      provider: target.provider, modelId: target.modelId, baseUrl: target.baseUrl,
+      confirmation: sha256Hex(JSON.stringify(target)),
+    });
+  });
+  app.put("/api/operator-settings/disclosure/:kind", bodyLimit({ maxSize: 2048 }), async (c) => {
+    const principalId = c.get("authSession").principalId;
+    const kind = c.req.param("kind");
+    const target = disclosureTarget(principalId, kind);
+    if (!target) return c.json({ ok: false, code: "disclosure_unavailable" }, 409);
+    const input = await c.req.json<{ authorized?: boolean; confirmation?: string }>().catch(() => null);
+    if (!input || typeof input.authorized !== "boolean" || input.confirmation !== sha256Hex(JSON.stringify(target))) {
+      return c.json({ ok: false, code: "disclosure_confirmation_required" }, 400);
+    }
+    const grants = disclosureGrants(target);
+    const now = nowFn();
+    if (input.authorized) {
+      const active = config.operatorConnections!.active;
+      const source = kind === "gmail" && active.gmail ? {
+        resourceId: `imap:${active.gmail.mailbox}`, operation: "read", operatorConnectionId: active.gmail.connectionId,
+      } : active.github ? {
+        resourceId: `github:${active.github.repoId}`, operation: "read_file", operatorConnectionId: active.github.connectionId,
+        ref: active.github.ref, path: active.github.filePath,
+      } : null;
+      if (!source || !checkSourceReadAuthorized(config.host.govDb, { ...target, ...source }).ok) {
+        return c.json({ ok: false, code: "source_read_denied" }, 403);
+      }
+      if (!grants) grantModelDisclosure(config.host.govDb, { ...target, slotName: "*", now });
+    } else if (grants) {
+      revokeModelDisclosureGrant(config.host.govDb, {
+        grantId: grants.grant_id, now, reason: "operator_revoked_disclosure",
+      });
+    }
+    return c.json({ ok: true, granted: input.authorized });
+  });
+
   app.get("/api/connectors/status", (c) => {
     if (config.getConnectorsStatus) {
       return c.json({ ok: true, status: config.getConnectorsStatus() });
@@ -1441,6 +1617,10 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   app.post("/api/mcp/pins/:serverId/:toolName/approve", async (c) => {
     const session = c.get("authSession");
     const serverId = c.req.param("serverId");
+    if ((serverId.startsWith("operator-github-") || serverId === config.operatorWriteMcpServerId) &&
+        session.principalId !== defaultPrincipalId) {
+      return c.json({ ok: false, code: "forbidden" }, 403);
+    }
     const toolName = c.req.param("toolName");
     const body = (await c.req.json().catch(() => ({}))) as {
       expectedSchemaSha256?: string;
@@ -1482,7 +1662,12 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   });
 
   app.post("/api/mcp/pins/:serverId/:toolName/revoke", async (c) => {
+    const session = c.get("authSession");
     const serverId = c.req.param("serverId");
+    if ((serverId.startsWith("operator-github-") || serverId === config.operatorWriteMcpServerId) &&
+        session.principalId !== defaultPrincipalId) {
+      return c.json({ ok: false, code: "forbidden" }, 403);
+    }
     const toolName = c.req.param("toolName");
     const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
     const revoked = revokeMcpTool(config.host.govDb, {
@@ -2027,6 +2212,63 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     return c.json({ ok: true, ruleId, revokedAt: res.rule.revoked_at });
   });
 
+  const memoryDisclosureContext = (principalId: string) => {
+    const model = config.operatorConnections?.active.model;
+    if (!model || !config.host.config.l0RequiresDisclosure) return null;
+    const scopeId = config.host.config.defaultScopeId ?? "scope:default";
+    const domain = config.host.config.defaultMemoryDomain ?? "default";
+    const { provider, modelId, baseUrl } = model;
+    const target = { principalId, scopeId, provider, modelId, baseUrl };
+    const grants = listDestinationDisclosureGrants(config.host.govDb, { ...target, slotName: "router" });
+    const snapshot = freezeDomainL0Snapshot(config.host.govDb, { principalId, scopeId, domain, now: nowFn() });
+    const notes = snapshot.notes.map((note) => {
+      const sourceId = memoryModelSourceId(note.noteId, note.version);
+      const grant = grants.find((row) => row.source_type === "memory" && row.source_id === sourceId &&
+        row.provider === provider && row.model_id === modelId && row.base_url === baseUrl && row.slot_name === "*");
+      const authorized = grants.some((row) => matchesMemoryDisclosureGrant(row, `memory:${note.noteId}`, `v${note.version}`));
+      const confirmation = sha256Hex(JSON.stringify({ ...target, sourceId, content: note.contentDigest }));
+      return { noteId: note.noteId, title: note.title, version: note.version, authorized, confirmation, sourceId, grant };
+    });
+    return { target, notes };
+  };
+
+  app.get("/api/memory/model-context", (c) => {
+    const session = c.get("authSession");
+    const context = memoryDisclosureContext(session.principalId);
+    if (!context) return c.json({ available: false });
+    const { provider, modelId, baseUrl, scopeId } = context.target;
+    const canManage = canManageSettings(session.principalId);
+    c.header("cache-control", "no-store");
+    return c.json({
+      available: true, provider, modelId, baseUrl, scopeId, canManage,
+      notes: context.notes.map(({ noteId, title, version, authorized, confirmation, grant }) => ({
+        noteId, title, version, authorized,
+        ...(canManage ? { confirmation, managedGrant: Boolean(grant) } : {}),
+      })),
+    });
+  });
+
+  app.put("/api/memory/model-context/:noteId", checkOperatorSettings, bodyLimit({ maxSize: 2048 }), async (c) => {
+    const context = memoryDisclosureContext(c.get("authSession").principalId);
+    const note = context?.notes.find((entry) => entry.noteId === c.req.param("noteId"));
+    if (!context || !note) return c.json({ ok: false, error: "memory_unavailable" }, 404);
+    const input = await c.req.json<{ authorized?: boolean; confirmation?: string }>().catch(() => null);
+    if (!input || typeof input.authorized !== "boolean" || input.confirmation !== note.confirmation) {
+      return c.json({ ok: false, error: "memory_confirmation_required" }, 409);
+    }
+    // Re-resolve after parsing the body to guard against concurrency, expiry and source changes.
+    const current = memoryDisclosureContext(c.get("authSession").principalId);
+    const entry = current?.notes.find((item) => item.confirmation === note.confirmation);
+    if (!current || !entry) return c.json({ ok: false, error: "memory_confirmation_required" }, 409);
+    const now = nowFn();
+    if (input.authorized && !entry.grant) {
+      grantModelDisclosure(config.host.govDb, { ...current.target, sourceType: "memory", sourceId: entry.sourceId, slotName: "*", now });
+    } else if (!input.authorized && entry.grant) {
+      revokeModelDisclosureGrant(config.host.govDb, { grantId: entry.grant.grant_id, now, reason: "operator_revoked_memory_disclosure" });
+    }
+    return c.json({ ok: true });
+  });
+
   app.get("/api/memory", (c) => {
     const session = c.get("authSession");
     const query = (c.req.query("q") ?? "").trim();
@@ -2302,6 +2544,10 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     }
 
     const { subscriber, unsubscribe, revocationWatermark: initialSourceRevokeWatermark } = subRes;
+    if (closingWeb) {
+      unsubscribe();
+      return c.json({ error: "host_restarting" }, 503);
+    }
     const convScopeRow = config.host.govDb
       .prepare("SELECT scope_id FROM conversation_scopes WHERE runtime_epoch = ? AND conversation_id = ?")
       .get(targetEpoch, convIdStr) as { scope_id: string } | undefined;
@@ -2332,6 +2578,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
       });
       try {
         for (;;) {
+          if (closingWeb) break;
           if (!isSessionAndAclStillValid()) {
             break;
           }
@@ -2375,9 +2622,7 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
               return;
             }
           }
-          if (subscriber.closed) {
-            break;
-          }
+          if (subscriber.closed) break;
           await new Promise<void>((resolve) => {
             const t = setTimeout(resolve, 100);
             subscriber.wake = () => {
@@ -2396,7 +2641,11 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
   const server = await new Promise<ServerType>((resolve, reject) => {
     const srv = serve(
       {
-        fetch: app.fetch,
+        fetch: config.requestOperatorRestart ? (request) => {
+          const response = Promise.resolve(app.fetch(request));
+          activeRequests.add(response);
+          return response.finally(() => { activeRequests.delete(response); });
+        } : app.fetch,
         hostname: bindHost,
         port: config.port ?? 4310,
       },
@@ -2422,11 +2671,17 @@ export async function startWebServer(config: WebServerConfig): Promise<RunningWe
     baseUrl: `http://${bindHost}:${boundPort}`,
     projectionHub,
     close: async () => {
+      closingWeb = Boolean(config.requestOperatorRestart);
       offHostChanges();
       projectionHub.closeAll();
-      await new Promise<void>((resolve) => {
+      const disconnected = new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
+      if (closingWeb) {
+        await Promise.allSettled([...activeRequests]);
+        if ("closeAllConnections" in server) server.closeAllConnections();
+      }
+      await disconnected;
     },
   };
 }

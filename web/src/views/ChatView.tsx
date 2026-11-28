@@ -1,20 +1,26 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   api,
   extractPlainMessageText,
   formatMicroUsd,
   type ConversationItem,
   type ConversationSnapshot,
+  type MemoryModelContext,
 } from "../client/api";
 import { InlineApprovalCard, statusBadgeTone } from "../components/InlineApprovalCard";
+import { ChatMarkdown } from "../components/ChatMarkdown";
 
 interface ChatViewProps {
   principalId: string;
   activeRuntimeEpoch: string;
   conversations: ConversationItem[];
   selectedConversationId: string | null;
+  draft: string;
+  onDraftChange: (content: string, expected?: string) => void;
   onSelectConversation: (convId: string) => void;
-  onCreateConversation: () => Promise<void>;
+  onCreateConversation: (draft?: string) => Promise<void>;
+  onOpenMemory: () => void;
+  onOpenConnectors?: () => void;
   onGlobalRefresh: () => Promise<void>;
 }
 
@@ -23,16 +29,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
   activeRuntimeEpoch,
   conversations,
   selectedConversationId,
+  draft: chatInput,
+  onDraftChange: setChatInput,
   onSelectConversation,
   onCreateConversation,
+  onOpenMemory,
+  onOpenConnectors,
   onGlobalRefresh,
 }) => {
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null);
   const [sseStatus, setSseStatus] = useState("未连接");
   const [streamCursor, setStreamCursor] = useState<string>("");
-  const [chatInput, setChatInput] = useState("");
   const [chatFeedback, setChatFeedback] = useState<string | null>(null);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [memoryContext, setMemoryContext] = useState<MemoryModelContext | null>(null);
   const [sending, setSending] = useState(false);
+  const inFlight = useRef(false);
+  const chatStream = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
+  const [showLatest, setShowLatest] = useState(false);
+  const selectedScope = conversations.find((c) => c.conversationId === selectedConversationId)?.scopeId;
+  const modelTest = selectedScope?.startsWith("scope:model-test:") ?? false;
+  const lastUserIndex = snapshot?.messages.map((message) => message.role).lastIndexOf("user") ?? -1;
+  const lastUser = snapshot?.messages[lastUserIndex];
+  const lastCommandTime = Math.max(0, ...(snapshot?.chatCommands.map((command) => command.createdAt) ?? []));
+  const lastDenial = snapshot?.budgetDenials.at(-1);
+  const blocked = lastDenial && lastDenial.occurredAt >= lastCommandTime &&
+    !snapshot?.messages.slice(lastUserIndex + 1).some((item) => item.role === "assistant" && extractPlainMessageText(item.content).trim());
+  const disclosureBlocked = blocked && ["disclosure_denied", "source_read_revoked"].includes(lastDenial.code);
+  const finishedReservations = snapshot?.budgetReservations
+    .filter((item) => item.state !== "HELD").map((item) => item.request_id).join(",");
 
   // Responsive narrow-screen drawers (<1024px)
   const [mobileThreadsOpen, setMobileThreadsOpen] = useState(false);
@@ -58,13 +84,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
     // Immediately clear old cards and stale partials on conversation switch
     setSnapshot(null);
     setChatFeedback(null);
+    setChatError(null);
     setSseStatus("加载快照...");
     lastSeqRef.current = 0;
     streamInstanceRef.current = null;
     partialHistoryRef.current = [];
 
-    const snapRes = await api.getSnapshot(convId, epoch);
+    const snapRes = await api.getSnapshot(convId, epoch).catch(() => null);
     if (selectionGenRef.current !== myGen) return;
+    if (!snapRes) {
+      setSseStatus("无法连接本机，请重试。");
+      setChatError("无法加载会话。连接恢复后可点「刷新快照」。");
+      return;
+    }
     if (snapRes.status !== 200 || !snapRes.data?.conversationId) {
       setSseStatus(`快照不可用 (${snapRes.status})`);
       return;
@@ -84,7 +116,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (cursorParam) qs.set("cursor", cursorParam);
       const es = new EventSource(`/api/conversations/${encodeURIComponent(convId)}/events?${qs.toString()}`);
       esRef.current = es;
-      setSseStatus("SSE 已连接");
+      setSseStatus("正在连接…");
+      es.onopen = () => {
+        if (selectionGenRef.current === myGen) setSseStatus("已连接");
+      };
 
       const handleUpdateEvent = (ev: MessageEvent) => {
         if (selectionGenRef.current !== myGen) return;
@@ -153,12 +188,31 @@ export const ChatView: React.FC<ChatViewProps> = ({
     };
   }, [selectedConversationId, activeRuntimeEpoch]);
 
+  useEffect(() => {
+    let active = true;
+    void api.getMemoryModelContext().then(({ data }) => {
+      if (active) setMemoryContext(data);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  useLayoutEffect(() => {
+    const stream = chatStream.current;
+    if (stream && followLatest.current) stream.scrollTop = stream.scrollHeight;
+  }, [snapshot]);
+
+  useEffect(() => {
+    if (finishedReservations) void onGlobalRefresh().catch(() => {});
+  }, [finishedReservations, onGlobalRefresh]);
+
   const handleSend = async () => {
     const content = chatInput.trim();
-    if (!content || !selectedConversationId || sending) return;
+    if (!content || !selectedConversationId || inFlight.current) return;
+    inFlight.current = true;
     const epoch = snapshot?.runtimeEpoch ?? activeRuntimeEpoch;
     setSending(true);
     setChatFeedback(null);
+    setChatError(null);
     const storageKey = `aegispi:v2:chat:${principalId}:${epoch}:${selectedConversationId}`;
     let chatKey = "";
     try {
@@ -190,13 +244,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
         } catch {
           // ignore
         }
-        setChatInput("");
-        setChatFeedback(`${res.data.uiStatusLabel ?? "已受理"} (${chatKey})`);
-        await onGlobalRefresh();
+        setChatInput("", chatInput);
+        setChatFeedback(res.data.uiStatusLabel ?? "已提交");
+        void onGlobalRefresh().catch(() => {});
       } else {
-        setChatFeedback(`提交失败 (${res.status}): ${res.data.message ?? res.data.code ?? "error"}`);
+        setChatError(res.status === 401 ? "登录已失效，请重新登录后重试。" :
+          `提交失败：${res.data.message ?? "本机暂时无法受理，请重试。"}`);
       }
+    } catch {
+      setChatError("提交结果待确认。请检查本机连接，再用同一条消息重试。");
     } finally {
+      inFlight.current = false;
       setSending(false);
     }
   };
@@ -220,7 +278,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {conversations.length === 0 && (
           <div className="p-3 text-xs text-slate-400 text-center">暂无会话，点击上方新建</div>
         )}
-        {conversations.map((c) => {
+        {conversations.filter((c) => c.conversationId === selectedConversationId || !c.scopeId.startsWith("scope:model-test:")).map((c) => {
           const active = c.conversationId === selectedConversationId;
           return (
             <button
@@ -238,13 +296,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }`}
             >
               <div className="flex items-center justify-between gap-1">
-                <span className="truncate">会话 #{c.conversationId}</span>
+                <span className="truncate">{c.scopeId.startsWith("scope:model-test:") ? "模型连接测试" : `会话 #${c.conversationId}`}</span>
                 {!c.isActiveEpoch && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">旧代际</span>
                 )}
               </div>
               <div className={`text-[10px] font-mono mt-0.5 truncate ${active ? "text-slate-300" : "text-slate-400"}`}>
-                {c.scopeId}
+                {c.scopeId.startsWith("scope:model-test:") ? "合成内容 · 无账号资料" : c.scopeId}
               </div>
             </button>
           );
@@ -435,7 +493,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               会话列表
             </button>
             <h1 className="text-sm font-semibold text-slate-900 truncate">
-              {selectedConversationId ? `会话 #${selectedConversationId}` : "未选择会话"}
+              {modelTest ? "模型连接测试" : selectedConversationId ? `会话 #${selectedConversationId}` : "未选择会话"}
             </h1>
             {snapshot?.proposals.some((p) => p.approvalState === "PENDING" && !p.expired) && (
               <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
@@ -476,6 +534,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {/* Stream Body */}
         <div
           data-chat-stream
+          ref={chatStream}
+          onScroll={(event) => {
+            const stream = event.currentTarget;
+            followLatest.current = stream.scrollHeight - stream.clientHeight - stream.scrollTop < 48;
+            setShowLatest(!followLatest.current);
+          }}
           className="flex-1 overflow-y-auto custom-scroll p-3 md:p-6 space-y-4 max-w-4xl w-full mx-auto"
         >
           {!selectedConversationId && (
@@ -495,17 +559,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
           )}
 
           {snapshot?.budgetDenials && snapshot.budgetDenials.length > 0 && (
-            <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 space-y-1">
-              <div className="text-xs font-bold text-rose-800">预算与出站拒绝记录</div>
-              {snapshot.budgetDenials.map((d) => (
-                <div key={d.seq} className="text-xs text-rose-700 font-mono">
-                  [{d.code}] {d.message}
-                </div>
-              ))}
-            </div>
+            <details className="bg-rose-50 border border-rose-200 rounded-xl p-3 space-y-1">
+              <summary className="cursor-pointer text-xs font-bold text-rose-800">发送拦截记录（{snapshot.budgetDenials.length}）</summary>
+              {snapshot.budgetDenials.map((d) => <div key={d.seq} className="break-words text-xs text-rose-700">[{d.code}] {d.message}</div>)}
+            </details>
           )}
 
           {(snapshot?.messages ?? []).map((msg, idx) => (
+            (msg.role === "system" && !extractPlainMessageText(msg.content).trim()) || (msg.failed && blocked) ? null : (
             <div
               key={idx}
               data-message-role={msg.role}
@@ -518,11 +579,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }`}
             >
               <div className="text-[10px] uppercase tracking-wide opacity-60 mb-1">{msg.role}</div>
-              <pre className="whitespace-pre-wrap break-words font-sans text-xs md:text-sm leading-relaxed m-0">
-                {extractPlainMessageText(msg.content)}
-              </pre>
+              {msg.failed ? <p role="alert" className="text-xs text-rose-800">模型生成失败。请检查设置中的连接测试，或重新发送。</p> : msg.role === "assistant" ?
+                <ChatMarkdown text={extractPlainMessageText(msg.content)} /> :
+                <pre className="whitespace-pre-wrap break-words font-sans text-xs md:text-sm leading-relaxed m-0">
+                  {extractPlainMessageText(msg.content)}
+                </pre>}
             </div>
-          ))}
+          )))}
 
           {/* Live Progressive Streaming Partial */}
           {snapshot?.livePartial?.text && (
@@ -570,6 +633,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {/* Composer */}
         <div className="shrink-0 bg-white border-t border-slate-200 p-3 md:px-6">
           <div className="max-w-4xl mx-auto">
+            {showLatest && <button type="button" className="mb-2 text-xs font-semibold text-blue-800"
+              onClick={() => {
+                followLatest.current = true;
+                if (chatStream.current) chatStream.current.scrollTop = chatStream.current.scrollHeight;
+                setShowLatest(false);
+              }}>跳到最新</button>}
+            {disclosureBlocked && (
+              <div role="status" className="mb-2 space-y-1 rounded-lg bg-amber-50 p-2 text-xs text-amber-950">
+                <p>这次请求包含未获准发送给当前模型的资料，已在本机拦截。</p>
+                <div className="flex flex-wrap gap-3">
+                  {lastDenial.sourceType === "memory" &&
+                    <button type="button" className="font-semibold underline" onClick={onOpenMemory}>管理记忆授权</button>}
+                  {onOpenConnectors && ["imap", "github_mcp"].includes(lastDenial.sourceType ?? "") &&
+                    <button type="button" className="font-semibold underline" onClick={onOpenConnectors}>管理连接器授权</button>}
+                  {lastUser && <button type="button" className="font-semibold underline"
+                    onClick={() => void onCreateConversation(extractPlainMessageText(lastUser.content))}>在新对话重试这条消息</button>}
+                </div>
+              </div>
+            )}
+            {blocked && !disclosureBlocked && (
+              <p role="alert" className="mb-2 text-xs text-rose-800">
+                {lastDenial.code.includes("budget") ? "本次可用预算不足，消息未发给模型。" : "本机拦截了发送。可展开上方记录查看原因。"}
+              </p>
+            )}
+            {memoryContext?.available && !modelTest && selectedScope === memoryContext.scopeId && memoryContext.notes.length > 0 && (
+              <details className="mb-2 text-xs text-slate-600">
+                <summary className="cursor-pointer">自动记忆 · {memoryContext.notes.filter((note) => note.authorized).length} 条已授权</summary>
+                <ul className="mt-1 space-y-1 pl-3">
+                  {memoryContext.notes.map((note) => <li key={note.noteId}>{note.title} · {note.authorized ? "可用于当前模型" : "跳过"}</li>)}
+                </ul>
+                <button type="button" className="mt-1 font-semibold underline" onClick={onOpenMemory}>管理记忆授权</button>
+              </details>
+            )}
+            {chatError && <p role="alert" className="mb-2 text-xs text-rose-800">{chatError}</p>}
             <div className="flex items-end gap-2">
               <textarea
                 data-chat-input
@@ -578,7 +675,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
                     e.preventDefault();
                     void handleSend();
                   }
@@ -597,8 +694,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </button>
             </div>
             <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-              <span>{chatFeedback ?? "所有不可信模型与工具输出均按纯文本渲染，禁用活动 HTML"}</span>
-              <span>凭据仅驻留宿主内存，永不进入模型上下文或数据库</span>
+              {chatFeedback && !chatError && !blocked && !snapshot?.livePartial &&
+                snapshot?.messages.at(-1)?.role !== "assistant" && <span role="status">{chatFeedback}</span>}
             </div>
           </div>
         </div>

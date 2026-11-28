@@ -1852,7 +1852,7 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
           baseUrl: deepSeekBaseUrl,
           credentialSlotId: "slot:ds-worker",
           contextWindow: 1_000_000,
-          maxTokens: 1024,
+          maxTokens: 1536,
           priceSchedule: dsSchedule,
           outboundAuthorized: true,
         },
@@ -2095,7 +2095,61 @@ export async function runStage2P0Core(opts?: { dataDir?: string; evidenceDir?: s
     });
     assert.equal(ccBypassSubRes.claimed, false);
     assert.equal(ccBypassSubRes.code, "unsupported_email_field_cc");
+    const replacedSender = await submitApprovedEmailEffect({
+      govDb: host.govDb, runtimeEpoch: host.runtimeEpoch, effectId: ccDec.effectId!,
+      conversationId: String(convEcho.id), toolTaskId: "88000", callId: "echo_smtp_cc_bypass_1", toolName: "send_email",
+      finalTarget: "smtp:approved@local.test",
+      finalPayload: { to: ["approved@local.test"], subject: "Boundary check", body: "Plain text", smtpSender: "prior@local.test" },
+      smtpConfig: {
+        host: fakeSmtp.host, port: fakeSmtp.smtpPort, fromAddress: "owner@local.test",
+        username: "owner@local.test", credentialSlotId: "slot:synthetic-sender", credentialRequired: true,
+      },
+      egressPolicy: { stage: 2 },
+      allowedEmailRecipients: ["approved@local.test"],
+      now: () => fixedNow,
+    });
+    assert.equal(replacedSender.claimed, false);
+    assert.equal(replacedSender.code, "smtp_sender_binding_required");
     assert.equal((await fakeSmtp.stats()).totalReceived, smtpBeforeUnsupported);
+
+    const tlsSender = "sender@stage2.local.test";
+    const tlsSenderSlot = "slot:synthetic-approved-tls-sender";
+    const tlsTransport = {
+      host: tlsSmtp.host, port: tlsSmtp.smtpPort, servername: "smtp.stage2.local.test",
+      username: tlsSender, fromAddress: tlsSender, tlsMode: "direct_tls" as const,
+      caPem: tlsSmtp.certPem, credentialSlotId: tlsSenderSlot, credentialRequired: true,
+    };
+    vault.registerConnectorSlot({
+      slotId: tlsSenderSlot, kind: "smtp", target: `${tlsSmtp.host}:${tlsSmtp.smtpPort}`,
+      secretValue: tlsSmtpSecret, smtpBinding: tlsTransport,
+    });
+    const boundPayload = {
+      to: ["approved@local.test"], subject: "Bound TLS sender", body: "Synthetic sender binding check", smtpSender: tlsSender,
+    };
+    const tlsBeforeBound = (await tlsSmtp.stats()).totalReceived;
+    const boundDraft = proposeOrGetApproval(host.govDb, {
+      runtimeEpoch: host.runtimeEpoch, conversationId: String(convEcho.id), toolTaskId: "88010", callId: "bound_tls_sender",
+      scopeId: "scope:default", toolName: "send_email", target: "smtp:approved@local.test", payload: boundPayload,
+      expiresAt: fixedNow + 60_000, now: fixedNow,
+    });
+    const boundDecision = decideApproval(host.govDb, {
+      approvalId: boundDraft.approval.approval_id, conversationId: String(convEcho.id), principalId: "owner",
+      decision: "APPROVE", expectedRevision: 1, expectedActionHash: boundDraft.revision.action_hash, nonce: boundDraft.nonce!,
+      decisionKey: `dk-bound-tls-sender-${runId}`, now: fixedNow,
+    });
+    assert.equal(boundDecision.ok, true);
+    const boundSubmission = {
+      govDb: host.govDb, runtimeEpoch: host.runtimeEpoch, effectId: boundDecision.effectId!,
+      conversationId: String(convEcho.id), toolTaskId: "88010", callId: "bound_tls_sender", toolName: "send_email",
+      finalTarget: "smtp:approved@local.test", finalPayload: boundPayload, smtpConfig: tlsTransport,
+      egressPolicy: { stage: 2 as const }, allowedEmailRecipients: ["approved@local.test"], vault, now: () => fixedNow,
+    };
+    const boundResult = await submitApprovedEmailEffect(boundSubmission);
+    assert.equal(boundResult.effectState, "SUCCEEDED", JSON.stringify(boundResult));
+    assert.equal((await submitApprovedEmailEffect(boundSubmission)).claimed, false);
+    const tlsBoundDelta = (await tlsSmtp.stats()).totalReceived - tlsBeforeBound;
+    assert.equal(tlsBoundDelta, 1);
+    evidence["smtpOperatorSenderBinding"] = { rejectedMismatchedSender: true, fakeTlsReceiveDelta: tlsBoundDelta };
 
     const echoProp = proposeOrGetApproval(host.govDb, {
       runtimeEpoch: host.runtimeEpoch,

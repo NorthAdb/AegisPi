@@ -33,6 +33,7 @@ import {
   Stage1EgressBlockedError,
   validateModelPriceScheduleForEndpoint,
   type HostCredentialVault,
+  getVerifiedModelBoundContract,
   type ModelPriceSchedule,
   type StageEgressPolicy,
   type VerifiedModelBoundContract,
@@ -504,6 +505,48 @@ function getBuiltinProviderById(providerId: string): Provider | undefined {
   return cachedBuiltinProviders.get(providerId);
 }
 
+export function listOperatorModelCatalog() {
+  return builtinProviders().map((provider) => ({
+    id: provider.id,
+    name: provider.name,
+    models: provider.getModels().map((model) => {
+      const contract = getVerifiedModelBoundContract(provider.id, model.id);
+      return {
+        id: model.id,
+        name: model.name,
+        api: model.api,
+        verifiedEndpoints: contract?.allowedOfficialBaseUrls ?? [],
+      };
+    }),
+  }));
+}
+
+export function resolveOperatorModel(provider: string, modelId: string, rawBaseUrl: string) {
+  const model = getBuiltinProviderById(provider)?.getModels().find((item) => item.id === modelId);
+  const contract = getVerifiedModelBoundContract(provider, modelId);
+  if (!model || !contract) return null;
+  const baseUrl = rawBaseUrl.trim().replace(/\/+$/, "");
+  if (!contract.allowedOfficialBaseUrls.includes(baseUrl)) return null;
+  return {
+    provider,
+    routerModelId: modelId,
+    workerModelId: modelId,
+    baseUrl,
+    allowedRemoteHosts: [new URL(baseUrl).hostname],
+    priceSchedule: {
+      provider,
+      modelId,
+      priceVersion: contract.contractVersion,
+      boundContractVersion: contract.contractVersion,
+      inputPerMTokMu: contract.minInputPerMTokMu,
+      outputPerMTokMu: contract.minOutputPerMTokMu,
+      cacheReadPerMTokMu: contract.minCacheReadPerMTokMu,
+      cacheWritePerMTokMu: contract.minCacheWritePerMTokMu,
+      allowTokenBoundEstimation: true,
+    } satisfies ModelPriceSchedule,
+  };
+}
+
 /**
  * Builds the unified host Models egress wrapping pi-ai Models.
  * Reuses pi-ai's built-in provider catalog & wire protocols for all known providers
@@ -536,6 +579,10 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       const builtinModelsById = new Map<string, Model<Api>>(
         (builtin?.getModels() ?? []).map((m) => [m.id, m]),
       );
+      const catalogOutputLimits = new Map<string, number>();
+      for (const slot of providerSlots) {
+        catalogOutputLimits.set(slot.modelId, Math.max(catalogOutputLimits.get(slot.modelId) ?? 0, slot.maxTokens));
+      }
 
       const modelDefs: Model<Api>[] = providerSlots.map((s) => {
         const hostCost = s.priceSchedule
@@ -555,7 +602,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
             baseUrl: s.baseUrl,
             input: ["text"],
             contextWindow: s.contextWindow,
-            maxTokens: s.maxTokens,
+            maxTokens: catalogOutputLimits.get(s.modelId)!,
             ...(hostCost ? { cost: hostCost } : {}),
           };
         }
@@ -569,7 +616,7 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
           input: ["text"],
           cost: hostCost ?? { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
           contextWindow: s.contextWindow,
-          maxTokens: s.maxTokens,
+          maxTokens: catalogOutputLimits.get(s.modelId)!,
         };
       });
 
@@ -753,8 +800,9 @@ export function createHostModelsEgress(config: HostModelsConfig): HostModelsCont
       typeof options?.maxTokens === "number" && Number.isFinite(options.maxTokens) && options.maxTokens > 0
         ? Math.floor(options.maxTokens)
         : undefined;
+    // Router and Worker may resolve to the same SDK model. Enforce the selected slot's cap.
     const modelMaxTokens =
-      Number.isFinite(model.maxTokens) && model.maxTokens > 0 ? Math.floor(model.maxTokens) : 0;
+      Number.isFinite(slot.maxTokens) && slot.maxTokens > 0 ? Math.floor(slot.maxTokens) : 0;
     const effectiveMaxTokens =
       requestedMaxTokens !== undefined && modelMaxTokens > 0
         ? Math.min(requestedMaxTokens, modelMaxTokens)

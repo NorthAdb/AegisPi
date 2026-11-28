@@ -15,6 +15,9 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
 }) => {
   const [approvals, setApprovals] = useState<ProposalView[]>([]);
   const [rules, setRules] = useState<RuleItem[]>([]);
+  const [history, setHistory] = useState(false);
+  const pending = approvals.filter((item) => item.approvalState === "PENDING" && !item.expired);
+  const displayed = history ? approvals.filter((item) => item.approvalState !== "PENDING" || item.expired) : pending;
 
   const loadAll = async () => {
     const [aRes, rRes] = await Promise.all([api.listApprovals(), api.listRules()]);
@@ -33,14 +36,12 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
     >
       <div className="max-w-5xl mx-auto space-y-6">
         <div>
-          <h2 className="text-lg font-bold text-slate-900">分级审批中心与作用域规则</h2>
-          <p className="text-xs text-slate-500 mt-1">
-            所有决定共用 POST /api/approvals/decide 与同一 decisionKey 幂等语义；由宿主治理库单次 CAS 仲裁，旧标签页自动拒绝。
-          </p>
+          <h2 className="text-lg font-bold text-slate-900">审批与规则</h2>
         </div>
 
-        {/* 3-Tier Policy Matrix matching Stage 2 Decision 6 */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+        <details className="text-xs">
+          <summary className="mb-2 cursor-pointer text-slate-700">哪些操作需要审批？</summary>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
           <div className="bg-white border border-slate-200 rounded-xl p-4 border-t-4 border-t-emerald-600 space-y-1">
             <div className="font-bold text-emerald-700">Tier 0 · 自动放行与正向清单直通</div>
             <div className="text-slate-600 leading-relaxed">
@@ -59,12 +60,22 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
               Gmail 发信逐次批准；外仓写入与高危写（受保护分支、工作流、发布、强推、删除）排除出 Tier 0，未入写入白名单默认拒绝。
             </div>
           </div>
-        </div>
+          </div>
+        </details>
 
         {/* Approvals Queue */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-800">审批待办与执行状态 ({approvals.length})</h3>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" aria-pressed={!history} onClick={() => setHistory(false)}
+                className={`rounded-md px-2 py-1 text-xs ${!history ? "bg-slate-900 text-white" : "border border-slate-300"}`}>
+                待处理 ({pending.length})
+              </button>
+              <button type="button" aria-pressed={history} onClick={() => setHistory(true)}
+                className={`rounded-md px-2 py-1 text-xs ${history ? "bg-slate-900 text-white" : "border border-slate-300"}`}>
+                历史 ({approvals.length - pending.length})
+              </button>
+            </div>
             <button
               type="button"
               onClick={() => void loadAll()}
@@ -73,13 +84,13 @@ export const ApprovalsView: React.FC<ApprovalsViewProps> = ({
               刷新队列
             </button>
           </div>
-          {approvals.length === 0 ? (
+          {displayed.length === 0 ? (
             <div className="bg-white border border-slate-200 rounded-xl p-4 text-xs text-slate-400">
-              当前代际暂无审批或外发记录
+              {history ? "暂无审批历史" : "没有待处理的审批"}
             </div>
           ) : (
             <div className="space-y-3">
-              {approvals.map((p) => (
+              {displayed.map((p) => (
                 <InlineApprovalCard
                   key={`${p.proposalId}:r${p.revision}`}
                   proposal={p}

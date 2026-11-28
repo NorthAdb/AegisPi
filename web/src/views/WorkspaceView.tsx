@@ -123,7 +123,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({ onToast, onJumpToC
         <div>
           <h2 className="text-lg font-bold text-slate-900">能力与自动化中心（连接器 · MCP Pin · Skills · 例程）</h2>
           <p className="text-xs text-slate-500 mt-1">
-            凭据、模型与代理参数仅在本机文件维护并重启生效。下方展示只读运行状态、连通性探测、Pin 核准/撤权与例程治理。
+            查看连接状态和工具指纹，管理 Skills 与例程。模型和连接器选项可在「设置」中查看。
           </p>
         </div>
 

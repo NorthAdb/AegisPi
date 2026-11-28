@@ -16,6 +16,7 @@ export interface ImapEndpointConfig {
   username: string;
   credentialSlotId: string;
   mailbox: string;
+  operatorConnectionId?: string;
   timeoutMs?: number;
   onObserveChildEnv?: (info: {
     entries?: Array<[string, string]>;
@@ -35,6 +36,7 @@ export interface ImapReadResult {
   tlsPeerSubject?: string;
   readOnlyExamine?: boolean;
   usedBodyPeek?: boolean;
+  seenUnchanged?: boolean;
   mailbox?: string;
   uidValidity?: number;
   message?: {
@@ -61,6 +63,14 @@ function buildMinimalChildEnv(): Record<string, string> {
   return out;
 }
 
+function encodeImapMailbox(mailbox: string): string {
+  return mailbox.replace(/&|[^\x20-\x7e]+/gu, (part) => {
+    if (part === "&") return "&-";
+    const encoded = Buffer.from(part, "utf16le").swap16().toString("base64").replaceAll("/", ",").replace(/=+$/, "");
+    return `&${encoded}-`;
+  });
+}
+
 /**
  * Host read-only IMAP adapter.
  * 1. Verifies live source_read_grants for (principalId, scopeId, "imap", mailbox, "read").
@@ -76,6 +86,7 @@ export async function readImapMessageReadOnly(params: {
   uid?: number;
   subjectContains?: string;
   connectivityOnly?: boolean;
+  verifyReadOnly?: boolean;
   now?: number;
 }): Promise<ImapReadResult> {
   const now = params.now ?? Date.now();
@@ -85,6 +96,7 @@ export async function readImapMessageReadOnly(params: {
     sourceType: "imap",
     resourceId: `imap:${params.endpoint.mailbox}`,
     operation: "read",
+    operatorConnectionId: params.endpoint.operatorConnectionId,
   });
   if (!auth.ok) {
     writeAuditEvent(params.govDb, {
@@ -196,10 +208,12 @@ export async function readImapMessageReadOnly(params: {
     ...(params.endpoint.proxy ? { proxy: params.endpoint.proxy } : {}),
     username: params.endpoint.username,
     password: secret,
-    mailbox: params.endpoint.mailbox,
+    // Web settings take the display name. Existing host configuration already supplies the IMAP wire name.
+    mailbox: params.endpoint.operatorConnectionId ? encodeImapMailbox(params.endpoint.mailbox) : params.endpoint.mailbox,
     ...(params.uid !== undefined ? { uid: params.uid } : {}),
     ...(params.subjectContains ? { subjectContains: params.subjectContains } : {}),
     ...(params.connectivityOnly ? { connectivityOnly: true } : {}),
+    ...(params.verifyReadOnly ? { verifyReadOnly: true } : {}),
     ...(params.endpoint.onObserveChildEnv ? { includeEnvValuesForAudit: true } : {}),
     timeoutMs: params.endpoint.timeoutMs ?? 15_000,
   });

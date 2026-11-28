@@ -38,6 +38,7 @@ export const InlineApprovalCard: React.FC<InlineApprovalCardProps> = ({
   const initialSubject = String(payload["subject"] ?? "");
   const initialBody = String(payload["body"] ?? "");
   const initialTo = Array.isArray(payload["to"]) ? (payload["to"] as unknown[]).map(String).join(", ") : "";
+  const sender = typeof payload["smtpSender"] === "string" ? payload["smtpSender"] : null;
 
   const [subject, setSubject] = useState(initialSubject);
   const [body, setBody] = useState(initialBody);
@@ -192,6 +193,9 @@ export const InlineApprovalCard: React.FC<InlineApprovalCardProps> = ({
             <span className="font-semibold text-slate-700">收件人：</span>
             <span>{initialTo}</span>
           </div>
+        )}
+        {isEmail && sender && (
+          <div><span className="font-semibold text-slate-700">发件账号 </span><span>{sender}</span></div>
         )}
       </div>
 

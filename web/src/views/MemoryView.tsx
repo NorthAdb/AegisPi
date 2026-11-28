@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api, formatMicroUsd, type BudgetSummary, type MemoryResponse } from "../client/api";
+import { api, formatMicroUsd, type BudgetSummary, type MemoryModelContext, type MemoryResponse } from "../client/api";
 
 interface MemoryViewProps {
   onToast: (msg: string) => void;
@@ -10,6 +10,13 @@ export const MemoryView: React.FC<MemoryViewProps> = ({ onToast }) => {
   const [budget, setBudget] = useState<BudgetSummary | null>(null);
   const [query, setQuery] = useState("");
   const [lastForgetReceipt, setLastForgetReceipt] = useState<string | null>(null);
+  const [modelContext, setModelContext] = useState<MemoryModelContext | null>(null);
+  const [savingDisclosure, setSavingDisclosure] = useState(false);
+
+  const loadModelContext = async () => {
+    const { data } = await api.getMemoryModelContext();
+    setModelContext(data);
+  };
 
   const loadAll = async (q?: string) => {
     const [mRes, bRes] = await Promise.all([api.getMemory(q), api.getBudgetSummary()]);
@@ -18,7 +25,8 @@ export const MemoryView: React.FC<MemoryViewProps> = ({ onToast }) => {
   };
 
   useEffect(() => {
-    void loadAll();
+    void loadAll().catch(() => onToast("无法读取记忆与成本，请稍后重试。"));
+    void loadModelContext().catch(() => onToast("无法读取记忆送模授权。"));
   }, []);
 
   const day = budget?.dayAccount;
@@ -53,6 +61,40 @@ export const MemoryView: React.FC<MemoryViewProps> = ({ onToast }) => {
               <pre className="text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg p-3 text-slate-700 whitespace-pre-wrap leading-relaxed">
                 {memory?.l0Snapshot.renderedText || "(当前域无 L0 冻结快照)"}
               </pre>
+              {modelContext?.available && modelContext.notes.length > 0 && (
+                <div className="space-y-2 text-xs">
+                  <p className="break-words text-slate-600">
+                    自动记忆 · {modelContext.modelId} · {modelContext.baseUrl}
+                  </p>
+                  {modelContext.notes.map((note) => (
+                    <div key={note.noteId} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2">
+                      <span>{note.title} · {note.authorized ? "已授权" : "未授权，聊天时跳过"}</span>
+                      {note.confirmation && (!note.authorized || note.managedGrant) && (
+                        <button type="button" data-memory-disclosure={note.noteId} disabled={savingDisclosure}
+                          className="rounded-md border border-slate-300 px-2.5 py-1.5 font-medium disabled:opacity-50"
+                          onClick={async () => {
+                            const authorize = !note.authorized;
+                            if (authorize && !window.confirm(
+                              `允许对话将「${note.title}」的当前版本发送给 ${modelContext.provider} / ${modelContext.modelId}（${modelContext.baseUrl}）？`,
+                            )) return;
+                            setSavingDisclosure(true);
+                            try {
+                              const { data } = await api.changeMemoryModelDisclosure(note.noteId, authorize, note.confirmation!);
+                              await loadModelContext();
+                              onToast(data.ok ? (authorize ? "已授权发送此版本。" : "已撤销此版本的送模授权。") : "记忆或模型已变化，请复核后重试。");
+                            } catch {
+                              onToast("无法更新授权，请检查本机连接后重试。");
+                            } finally {
+                              setSavingDisclosure(false);
+                            }
+                          }}>
+                          {note.managedGrant ? "撤销送模授权" : "授权发送给模型"}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
@@ -113,6 +155,7 @@ export const MemoryView: React.FC<MemoryViewProps> = ({ onToast }) => {
                               setLastForgetReceipt(`${res.data.receipt} (ftsCleaned=${String(res.data.ftsCleaned)})`);
                               onToast("已写入墓碑并清理索引");
                               await loadAll(query);
+                              await loadModelContext();
                             } else {
                               onToast(`遗忘失败: ${res.data.error}`);
                             }

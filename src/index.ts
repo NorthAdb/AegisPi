@@ -29,11 +29,16 @@ import {
   createSaltedMarkerCommitments,
   scanBufferInMemory,
 } from "./governance/leak-scanner.ts";
+import { openOperatorSettings } from "./governance/operator-settings.ts";
+import { pinMcpServerBinary, sha256File } from "./governance/mcp-pin.ts";
 import { checkSourceReadAuthorized } from "./governance/policy.ts";
 import { validateEmailRecipientsAllowlist, type GithubWriteAllowlistEntry } from "./governance/rules.ts";
 import { AegisHostRuntime } from "./runtime/harness.ts";
 import { GitHubMcpBridge } from "./runtime/mcp-bridge.ts";
+import { listOperatorModelCatalog, resolveOperatorModel } from "./runtime/models.ts";
 import type { ModelSlotConfig } from "./runtime/models.ts";
+import { openOperatorConnections, synchronizeOperatorReadGrants } from "./runtime/operator-connections.ts";
+import { operatorGithubArtifact } from "./runtime/operator-github.ts";
 import type { SmtpEndpointConfig } from "./runtime/submitter.ts";
 import { startWebServer } from "./web/server.ts";
 
@@ -156,6 +161,7 @@ interface TrustedConnectorsConfig {
     username?: string;
     credentialSlotId?: string;
     secretEnvVar?: string;
+    useOperatorGmailCredential?: boolean;
     allowedRemoteHosts?: string[];
     /** S2-P0-1: Explicit approved recipient allowlist (mandatory with zero '*' for non-loopback real SMTP). */
     allowedRecipients?: string[];
@@ -192,10 +198,10 @@ interface TrustedConnectorsConfig {
   };
 }
 
-let connectorsCfg: TrustedConnectorsConfig | null = null;
+let trustedConfig: TrustedConnectorsConfig | null = null;
 if (connectorsConfigPath) {
   try {
-    connectorsCfg = JSON.parse(readFileSync(path.resolve(connectorsConfigPath), "utf8")) as TrustedConnectorsConfig;
+    trustedConfig = JSON.parse(readFileSync(path.resolve(connectorsConfigPath), "utf8")) as TrustedConnectorsConfig;
   } catch (err) {
     process.stderr.write(
       `Refusing startup: invalid connectors-config (${err instanceof Error ? err.message : String(err)})\n`,
@@ -204,6 +210,63 @@ if (connectorsConfigPath) {
   }
 }
 
+const startupSecrets = new Map<string, string>();
+for (const key of [
+  "AEGISPI_MODEL_ROUTER_KEY", "AEGISPI_MODEL_WORKER_KEY", "AEGISPI_FAKE_MODEL_KEY", "DEEPSEEK_API_KEY",
+  "AEGISPI_SMTP_SECRET", "AEGISPI_IMAP_SECRET", "AEGISPI_GITHUB_MCP_PAT",
+  trustedConfig?.modelProfile?.apiKeyEnvVar, trustedConfig?.smtp?.secretEnvVar,
+  trustedConfig?.imap?.secretEnvVar, trustedConfig?.githubMcp?.secretEnvVar,
+]) {
+  if (key && process.env[key]) startupSecrets.set(key, process.env[key]!);
+}
+
+async function runHost(listenPort: number) {
+const syntheticOptIn = args["allow-synthetic-fake-model"] === "true" ||
+  process.env["AEGISPI_ALLOW_SYNTHETIC_FAKE_MODEL"] === "1" ||
+  trustedConfig?.allowSyntheticFakeModel === true;
+const fixtureGithub = syntheticOptIn ? trustedConfig?.githubMcp : undefined;
+const githubArtifact = () => operatorGithubArtifact(dataDir);
+const operatorConnections = stage === 2 ? openOperatorConnections(dataDir, async () => {
+  if (!fixtureGithub) return githubArtifact().prepare();
+  if (sha256File(fixtureGithub.pinnedArtifactPath) !== fixtureGithub.pinnedArtifactSha256.toLowerCase()) {
+    throw new Error("github_executable_hash_mismatch");
+  }
+}) : undefined;
+const { model: browserModel, gmail: browserGmail, github: browserGithub } = operatorConnections?.active ?? {};
+function loadBrowserCredential(ref: string): string | undefined {
+  try {
+    return operatorConnections?.resolveSecret(ref);
+  } catch {
+    process.stderr.write("A saved operator credential could not be unlocked. Replace it in Settings.\n");
+    return undefined;
+  }
+}
+const browserModelProfile = browserModel && resolveOperatorModel(browserModel.provider, browserModel.modelId, browserModel.baseUrl);
+if (browserModel && !browserModelProfile) throw new Error("invalid_saved_model_profile");
+const connectorsCfg: TrustedConnectorsConfig | null = trustedConfig || browserModel || browserGmail || browserGithub ? {
+  ...trustedConfig,
+  ...(browserModelProfile ? { modelProfile: browserModelProfile } : {}),
+  ...(browserGmail ? {
+    imap: {
+      ...(syntheticOptIn && trustedConfig?.imap && isLoopbackHost(trustedConfig.imap.host)
+        ? trustedConfig.imap
+        : {
+            mode: trustedConfig?.imap?.proxy ? "connect_tunnel" as const : "direct" as const,
+            host: "imap.gmail.com", port: 993, servername: "imap.gmail.com",
+            proxy: trustedConfig?.imap?.proxy,
+          }),
+      username: browserGmail.email,
+      mailbox: browserGmail.mailbox,
+      allowedMailboxes: [browserGmail.mailbox],
+    },
+  } : {}),
+  ...(browserGithub ? {
+    githubMcp: {
+      ...(fixtureGithub ? { ...fixtureGithub, serverId: "operator-github-fixture", readOnlyMode: true } : githubArtifact().identity),
+      writeAllowlist: [],
+    },
+  } : {}),
+} : null;
 const stageTwoModelProfile = stage === 2 ? connectorsCfg?.modelProfile : undefined;
 const modelProvider = stageTwoModelProfile ? stageTwoModelProfile.provider : "fake-local";
 if (typeof modelProvider !== "string" || !modelProvider.trim()) {
@@ -257,25 +320,24 @@ try {
   process.exit(1);
 }
 
-const allowSyntheticFakeModel =
-  args["allow-synthetic-fake-model"] === "true" ||
-  process.env["AEGISPI_ALLOW_SYNTHETIC_FAKE_MODEL"] === "1" ||
-  connectorsCfg?.allowSyntheticFakeModel === true;
+const allowSyntheticFakeModel = syntheticOptIn;
+const setupOnly = stage === 2 && !stageTwoModelProfile && !allowSyntheticFakeModel &&
+  !args["model-base-url"] && !process.env["AEGISPI_MODEL_BASE_URL"];
 const modelIsLoopback = isLoopbackHost(new URL(effectiveModelBaseUrl).hostname);
 
 // S2-P0-2: Stage 2 MUST NOT silently fall back to fake-local / synthetic pricing on loopback when modelProfile is missing!
 // Synthetic fake-local pricing in Stage 2 requires explicit test-profile opt-in (`--allow-synthetic-fake-model` or config flag).
-if (stage === 2 && !stageTwoModelProfile && !allowSyntheticFakeModel) {
+if (stage === 2 && !stageTwoModelProfile && !allowSyntheticFakeModel && !setupOnly) {
   process.stderr.write(
     "Refusing startup: stage2_model_profile_required (Stage 2 requires explicit modelProfile with verified billing contract; loopback fake-local pricing requires explicit --allow-synthetic-fake-model test flag)\n",
   );
   process.exit(1);
 }
 
-const routerModelId = stageTwoModelProfile ? stageTwoModelProfile.routerModelId : "fake-router-1";
-const workerModelId = stageTwoModelProfile ? stageTwoModelProfile.workerModelId : "fake-worker-1";
+const configuredRouterModelId = setupOnly ? "" : stageTwoModelProfile?.routerModelId ?? "fake-router-1";
+const configuredWorkerModelId = setupOnly ? "" : stageTwoModelProfile?.workerModelId ?? "fake-worker-1";
 
-if (stage === 2 && fakeModelProvider && !allowSyntheticFakeModel) {
+if (stage === 2 && fakeModelProvider && !allowSyntheticFakeModel && !setupOnly) {
   process.stderr.write(
     "Refusing startup: stage2_synthetic_fake_not_enabled (fake-local provider in Stage 2 requires explicit --allow-synthetic-fake-model test flag)\n",
   );
@@ -302,7 +364,7 @@ const effectivePriceSchedule: ModelPriceSchedule | null =
       ? {
           priceVersion: "synthetic-v1",
           provider: "fake-local",
-          modelId: routerModelId,
+          modelId: configuredRouterModelId,
           inputPerMTokMu: 300_000,
           outputPerMTokMu: 1_200_000,
           syntheticFixedUpperMu: syntheticUpperMu,
@@ -310,7 +372,8 @@ const effectivePriceSchedule: ModelPriceSchedule | null =
         }
       : null;
 
-for (const modelId of new Set([routerModelId, workerModelId])) {
+const modelChoices = setupOnly ? [] : [...new Set([configuredRouterModelId, configuredWorkerModelId])];
+for (const modelId of modelChoices) {
   const priceStartupCheck = validateModelPriceScheduleForEndpoint(
     effectiveModelBaseUrl,
     effectivePriceSchedule,
@@ -323,55 +386,64 @@ for (const modelId of new Set([routerModelId, workerModelId])) {
     process.exit(1);
   }
 }
-const effectivePriceVersion = effectivePriceSchedule!.priceVersion;
+const effectivePriceVersion = effectivePriceSchedule?.priceVersion ?? "none";
+const defaultModelMaxTokens = connectorsCfg?.modelProfile?.maxTokens ?? 1024;
+const outputLimit = setupOnly ? 128_000 : Math.min(...modelChoices.map((id) =>
+  getVerifiedModelBoundContract(modelProvider, id)?.maxTokensHardCeiling ?? 128_000,
+));
+const trustedGithub = stage === 2 ? trustedConfig?.githubMcp : undefined;
+const configuredGithubWrites = trustedGithub?.writeAllowlist ?? [];
+const githubWritesAvailable = trustedGithub?.readOnlyMode === false && configuredGithubWrites.length > 0;
+const dedicatedGithubWrite = browserGithub && githubWritesAvailable && trustedGithub?.serverId !== connectorsCfg?.githubMcp?.serverId
+  ? trustedGithub : undefined;
+const operatorSettings = stage === 2 ? openOperatorSettings(dataDir, {
+  defaults: {
+    routerModelId: configuredRouterModelId,
+    workerModelId: configuredWorkerModelId,
+    routerMaxTokens: defaultModelMaxTokens,
+    workerMaxTokens: defaultModelMaxTokens,
+    gmailMailbox: connectorsCfg?.imap?.mailbox ?? null,
+    githubWritesEnabled: githubWritesAvailable,
+  },
+  modelChoices,
+  outputLimits: { router: outputLimit, worker: outputLimit },
+  gmailMailboxes: connectorsCfg?.imap ? (connectorsCfg.imap.allowedMailboxes ?? [connectorsCfg.imap.mailbox]) : [],
+  githubWritesAvailable,
+}) : undefined;
+const activePreferences = operatorSettings?.get().active;
+const routerModelId = activePreferences?.routerModelId ?? configuredRouterModelId;
+const workerModelId = activePreferences?.workerModelId ?? configuredWorkerModelId;
+const routerContract = getVerifiedModelBoundContract(modelProvider, routerModelId);
+const workerContract = getVerifiedModelBoundContract(modelProvider, workerModelId);
 
 const customModelApiKeyVar = stageTwoModelProfile?.apiKeyEnvVar;
+const configuredModelKey = browserModel
+  ? loadBrowserCredential(browserModel.credentialRef)
+  : customModelApiKeyVar ? startupSecrets.get(customModelApiKeyVar) : undefined;
+const routerConfiguredKey = browserModel ? configuredModelKey : configuredModelKey ?? startupSecrets.get("AEGISPI_MODEL_ROUTER_KEY");
+const workerConfiguredKey = browserModel ? configuredModelKey : configuredModelKey ?? startupSecrets.get("AEGISPI_MODEL_WORKER_KEY") ?? routerConfiguredKey;
+const routerModelCredentialConfigured = !setupOnly && Boolean(routerConfiguredKey);
+const workerModelCredentialConfigured = !setupOnly && Boolean(workerConfiguredKey);
 const routerSecret =
-  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
-  process.env["AEGISPI_MODEL_ROUTER_KEY"] ??
-  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
-  "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2";
+  routerConfiguredKey ?? (fakeModelProvider ? startupSecrets.get("AEGISPI_FAKE_MODEL_KEY") ?? "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2" : undefined);
 const workerSecret =
-  (customModelApiKeyVar ? process.env[customModelApiKeyVar] : undefined) ??
-  process.env["AEGISPI_MODEL_WORKER_KEY"] ??
-  process.env["AEGISPI_FAKE_MODEL_KEY"] ??
-  routerSecret;
+  configuredModelKey ?? (browserModel ? undefined : startupSecrets.get("AEGISPI_MODEL_WORKER_KEY") ??
+    (fakeModelProvider ? startupSecrets.get("AEGISPI_FAKE_MODEL_KEY") : undefined) ?? routerSecret);
 
 const vault = new HostCredentialVault();
-vault.registerSlot(
-  {
-    slotId: "slot:model-router",
-    provider: modelProvider,
-    allowedBaseUrls: [effectiveModelBaseUrl],
-    allowedModelIds: [routerModelId],
-    priceVersion: effectivePriceVersion,
-  },
-  routerSecret,
-  egressPolicy,
-);
-vault.registerSlot(
-  {
-    slotId: "slot:model-worker",
-    provider: modelProvider,
-    allowedBaseUrls: [effectiveModelBaseUrl],
-    allowedModelIds: [workerModelId],
-    priceVersion: effectivePriceVersion,
-  },
-  workerSecret,
-  egressPolicy,
-);
-// Keep legacy slot alias for Week 1 compatibility
-vault.registerSlot(
-  {
-    slotId: "slot:fake-local",
-    provider: modelProvider,
-    allowedBaseUrls: [effectiveModelBaseUrl],
-    allowedModelIds: [routerModelId, workerModelId],
-    priceVersion: effectivePriceVersion,
-  },
-  routerSecret,
-  egressPolicy,
-);
+if (!setupOnly) {
+  for (const [slotId, secret, modelIds] of [
+    ["slot:model-router", routerSecret, operatorSettings ? modelChoices : [routerModelId]],
+    ["slot:model-worker", workerSecret, operatorSettings ? modelChoices : [workerModelId]],
+    ["slot:fake-local", routerSecret, [routerModelId, workerModelId]],
+  ] as const) {
+    if (!secret) continue;
+    vault.registerSlot({
+      slotId, provider: modelProvider, allowedBaseUrls: [effectiveModelBaseUrl],
+      allowedModelIds: [...modelIds], priceVersion: effectivePriceVersion,
+    }, secret, egressPolicy);
+  }
+}
 
 // W2-S6: In-memory only secret marker scanner (NEVER writes raw env values or volume bytes to disk!)
 const collectInMemorySlotMarkers = (): Array<{ slotId: string; marker: string }> => {
@@ -399,16 +471,18 @@ const scanBufferStrictlyInMemory = (
 
 // W2-G1 / W2-S1: Register trusted connector slots strictly bound to verified target descriptors in host memory!
 let configuredImapEndpoint: ImapEndpointConfig | null = null;
+const browserGmailSecret = browserGmail ? loadBrowserCredential(browserGmail.credentialRef) : undefined;
 if (connectorsCfg?.imap) {
   const ic = connectorsCfg.imap;
+  const mailbox = activePreferences?.gmailMailbox ?? ic.mailbox;
   const slotId = ic.credentialSlotId ?? "slot:imap-readonly";
   const secretEnvVar = ic.secretEnvVar ?? "AEGISPI_IMAP_SECRET";
-  const imapSecret = process.env[secretEnvVar];
+  const imapSecret = browserGmail ? browserGmailSecret : startupSecrets.get(secretEnvVar);
   if (imapSecret && imapSecret.length > 0) {
     vault.registerConnectorSlot({
       slotId,
       kind: "imap",
-      target: `${ic.host}:${ic.port}/${ic.mailbox}`,
+      target: `${ic.host}:${ic.port}/${mailbox}`,
       secretValue: imapSecret,
       imapBinding: {
         host: ic.host,
@@ -428,7 +502,8 @@ if (connectorsCfg?.imap) {
       ...(ic.proxy ? { proxy: ic.proxy } : {}),
       username: ic.username,
       credentialSlotId: slotId,
-      mailbox: ic.mailbox,
+      mailbox,
+      operatorConnectionId: browserGmail?.connectionId,
       ...(s6ObserveDir
         ? {
             onObserveChildEnv: (info) => {
@@ -466,28 +541,42 @@ if (connectorsCfg?.imap) {
   }
 }
 
+let githubCredentialConfigured = false;
+function registerGithubCredential(
+  mc: NonNullable<TrustedConnectorsConfig["githubMcp"]>,
+  slotId: string,
+  mcpPat: string | undefined,
+): boolean {
+  const allowWritePin = stage === 2 && mc.readOnlyMode === false;
+  if (!mcpPat) return false;
+  vault.registerConnectorSlot({
+    slotId,
+    kind: "github_mcp",
+    target: mc.serverId,
+    secretValue: mcpPat,
+    githubMcpBinding: {
+      serverId: mc.serverId,
+      command: mc.command,
+      args: mc.args,
+      executablePath: mc.pinnedArtifactPath,
+      executableSha256: mc.pinnedArtifactSha256,
+      readOnlyRequired: !allowWritePin,
+    },
+  });
+  return true;
+}
 if (connectorsCfg?.githubMcp) {
   const mc = connectorsCfg.githubMcp;
-  const slotId = mc.credentialSlotId ?? "slot:github-mcp-pat";
-  const secretEnvVar = mc.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT";
-  const mcpPat = process.env[secretEnvVar];
-  const allowWritePin = stage === 2 && mc.readOnlyMode === false;
-  if (mcpPat && mcpPat.length > 0) {
-    vault.registerConnectorSlot({
-      slotId,
-      kind: "github_mcp",
-      target: mc.serverId,
-      secretValue: mcpPat,
-      githubMcpBinding: {
-        serverId: mc.serverId,
-        command: mc.command,
-        args: mc.args,
-        executablePath: mc.pinnedArtifactPath,
-        executableSha256: mc.pinnedArtifactSha256,
-        readOnlyRequired: !allowWritePin,
-      },
-    });
-  }
+  const mcpPat = browserGithub ? loadBrowserCredential(browserGithub.credentialRef) :
+    startupSecrets.get(mc.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT");
+  githubCredentialConfigured = registerGithubCredential(mc, mc.credentialSlotId ?? "slot:github-mcp-pat", mcpPat);
+}
+const githubWriteSlotId = "slot:github-mcp-authorized-write";
+if (dedicatedGithubWrite && activePreferences?.githubWritesEnabled) {
+  registerGithubCredential(
+    dedicatedGithubWrite, githubWriteSlotId,
+    startupSecrets.get(dedicatedGithubWrite.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT"),
+  );
 }
 
 const configuredSmtpConfig: SmtpEndpointConfig = {
@@ -502,12 +591,18 @@ const configuredSmtpConfig: SmtpEndpointConfig = {
     : {}),
   ...(stage === 2 && connectorsCfg?.smtp?.proxy ? { proxy: connectorsCfg.smtp.proxy } : {}),
   ...(stage === 2 && connectorsCfg?.smtp?.username ? { username: connectorsCfg.smtp.username } : {}),
+  credentialRequired: stage === 2 && connectorsCfg?.smtp?.useOperatorGmailCredential === true,
 };
 
-if (stage === 2 && connectorsCfg?.smtp?.secretEnvVar) {
-  const sc = connectorsCfg.smtp;
+const sc = connectorsCfg?.smtp;
+if (stage === 2 && sc && (sc.secretEnvVar || sc.useOperatorGmailCredential)) {
   const slotId = sc.credentialSlotId ?? "slot:smtp-auth";
-  const smtpSecret = process.env[sc.secretEnvVar!];
+  const gmailSmtpTarget = sc.host === "smtp.gmail.com" && (sc.servername ?? sc.host) === sc.host &&
+    (sc.tlsMode === "direct_tls" && sc.port === 465 || sc.tlsMode === "starttls" && sc.port === 587);
+  const matchesGmailAccount = Boolean(browserGmail && sc.username === browserGmail.email && sc.fromAddress === browserGmail.email);
+  const smtpSecret = sc.useOperatorGmailCredential
+    ? (gmailSmtpTarget && matchesGmailAccount ? browserGmailSecret : undefined)
+    : sc.secretEnvVar ? startupSecrets.get(sc.secretEnvVar) : undefined;
   if (smtpSecret && smtpSecret.length > 0) {
     vault.registerConnectorSlot({
       slotId,
@@ -548,14 +643,13 @@ const scrubbedSecretEnvVars = new Set<string>([
   ...(connectorsCfg?.smtp?.secretEnvVar ? [connectorsCfg.smtp.secretEnvVar] : []),
   connectorsCfg?.imap?.secretEnvVar ?? "AEGISPI_IMAP_SECRET",
   connectorsCfg?.githubMcp?.secretEnvVar ?? "AEGISPI_GITHUB_MCP_PAT",
+  ...startupSecrets.keys(),
 ]);
 for (const key of scrubbedSecretEnvVars) {
   delete process.env[key];
 }
 
-const routerContract = getVerifiedModelBoundContract(modelProvider, routerModelId);
-const workerContract = getVerifiedModelBoundContract(modelProvider, workerModelId);
-const modelSlots: ModelSlotConfig[] = [
+const modelSlots: ModelSlotConfig[] = setupOnly ? [] : [
   {
     slotName: "router",
     provider: modelProvider,
@@ -566,9 +660,9 @@ const modelSlots: ModelSlotConfig[] = [
       connectorsCfg?.modelProfile?.contextWindow ??
       routerContract?.publishedContextWindowTokens ??
       128_000,
-    maxTokens: connectorsCfg?.modelProfile?.maxTokens ?? 1024,
+    maxTokens: activePreferences?.routerMaxTokens ?? defaultModelMaxTokens,
     priceSchedule: effectivePriceSchedule,
-    outboundAuthorized: true,
+    outboundAuthorized: fakeModelProvider || routerModelCredentialConfigured,
   },
   {
     slotName: "worker",
@@ -580,17 +674,57 @@ const modelSlots: ModelSlotConfig[] = [
       connectorsCfg?.modelProfile?.contextWindow ??
       workerContract?.publishedContextWindowTokens ??
       128_000,
-    maxTokens: connectorsCfg?.modelProfile?.maxTokens ?? 1024,
+    maxTokens: activePreferences?.workerMaxTokens ?? defaultModelMaxTokens,
     priceSchedule: effectivePriceSchedule,
-    outboundAuthorized: true,
+    outboundAuthorized: fakeModelProvider || workerModelCredentialConfigured,
   },
 ];
+if (operatorSettings) {
+  // Saved conversations retain their model IDs. Keep verified alternatives available for the
+  // same role so a setting changes new conversations without breaking existing checkpoints.
+  for (const active of [...modelSlots]) {
+    for (const modelId of modelChoices) {
+      if (modelId !== active.modelId) modelSlots.push({ ...active, modelId });
+    }
+  }
+}
+if (browserModel && syntheticOptIn) {
+  // A previously explicit test profile can finish its own saved checkpoints after switching the new-session default.
+  const previous = trustedConfig?.modelProfile;
+  const previousUrl = previous?.baseUrl ?? modelBaseUrl;
+  if ((!previous || previous.provider === "fake-local") && isLoopbackHost(new URL(previousUrl).hostname)) {
+    for (const [slotName, modelId, environmentKey] of [
+      ["router", previous?.routerModelId ?? "fake-router-1", "AEGISPI_MODEL_ROUTER_KEY"],
+      ["worker", previous?.workerModelId ?? "fake-worker-1", "AEGISPI_MODEL_WORKER_KEY"],
+    ] as const) {
+      const credentialSlotId = `slot:legacy-fake-${slotName}`;
+      const priceSchedule = previous?.priceSchedule ?? {
+        priceVersion: "synthetic-v1", provider: "fake-local",
+        inputPerMTokMu: 300_000, outputPerMTokMu: 1_200_000,
+        syntheticFixedUpperMu: syntheticUpperMu, syntheticFixedActualMu: syntheticActualMu,
+      };
+      if (!validateModelPriceScheduleForEndpoint(previousUrl, priceSchedule, { provider: "fake-local", modelId }).ok) continue;
+      vault.registerSlot({
+        slotId: credentialSlotId, provider: "fake-local", allowedBaseUrls: [previousUrl],
+        allowedModelIds: [modelId], priceVersion: priceSchedule.priceVersion,
+      }, (previous?.apiKeyEnvVar ? startupSecrets.get(previous.apiKeyEnvVar) : undefined) ??
+        startupSecrets.get(environmentKey) ?? startupSecrets.get("AEGISPI_FAKE_MODEL_KEY") ??
+        startupSecrets.get("AEGISPI_MODEL_ROUTER_KEY") ?? "SYNTHETIC_HOST_MEMORY_MODEL_KEY_V2", egressPolicy);
+      modelSlots.push({
+        slotName, provider: "fake-local", modelId, baseUrl: previousUrl, credentialSlotId,
+        contextWindow: previous?.contextWindow ?? 128_000, maxTokens: previous?.maxTokens ?? defaultModelMaxTokens,
+        priceSchedule, outboundAuthorized: true,
+      });
+    }
+  }
+}
 
 // W2-S1 / W2-S3: Host-managed workspace importer with isolated per-task frozen input snapshots & baselines
 // (NEVER sharing one mutable path baseline table across concurrent tasks or trusting model baseSha256!)
 let managedImporter: ManagedWorkspaceImporter | undefined;
 let hostRef: AegisHostRuntime | null = null;
 let mcpBridge: GitHubMcpBridge | null = null;
+let githubWriteBridge: GitHubMcpBridge | null = null;
 const taskSnapshotsRootDir = path.join(dataDir, "sandbox-task-snapshots");
 
 if (connectorsCfg?.workspace) {
@@ -607,7 +741,7 @@ const host = await AegisHostRuntime.start({
   egressPolicy,
   strictPlainTextEmail: stage === 2,
   ...(configuredAllowedEmailRecipients ? { allowedEmailRecipients: configuredAllowedEmailRecipients } : {}),
-  githubWriteAllowlist: stage === 2 ? (connectorsCfg?.githubMcp?.writeAllowlist ?? []) : [],
+  githubWriteAllowlist: activePreferences?.githubWritesEnabled ? configuredGithubWrites : [],
   skillsEnabled: stage === 2 ? (connectorsCfg?.skillsEnabled ?? true) : false,
   routinesEnabled: stage === 2 ? (connectorsCfg?.routinesEnabled ?? true) : false,
   routinePollIntervalMs: connectorsCfg?.routinePollIntervalMs ?? 30_000,
@@ -648,6 +782,7 @@ const host = await AegisHostRuntime.start({
     : {}),
   defaultPrincipalId,
   defaultMemoryDomain: connectorsCfg?.defaultMemoryDomain ?? "default",
+  l0RequiresDisclosure: stage === 2,
   defaultTaskLimitMu: taskLimitMu,
   defaultDayLimitMu: dayLimitMu,
   approvalTtlMs,
@@ -656,6 +791,7 @@ const host = await AegisHostRuntime.start({
   // W2-S1: Bind hostRef AND connect pinned GitHub MCP bridge STRICTLY BEFORE harness.resume() releases scheduling!
   beforeResume: async (readyHost) => {
     hostRef = readyHost;
+    if (operatorConnections) synchronizeOperatorReadGrants(readyHost.govDb, defaultPrincipalId, operatorConnections.active);
     // W2-S6: Record dynamic verification of scrubbed startup secret env vars on live process.env
     const remainingSecretVars = [...scrubbedSecretEnvVars]
       .sort()
@@ -675,6 +811,10 @@ const host = await AegisHostRuntime.start({
     });
     if (connectorsCfg?.githubMcp) {
       const mc = connectorsCfg.githubMcp;
+      if (browserGithub) pinMcpServerBinary(readyHost.govDb, {
+        serverId: mc.serverId, executablePath: mc.pinnedArtifactPath, executableSha256: mc.pinnedArtifactSha256,
+        command: mc.command, args: mc.args, readOnlyMode: true, approvedBy: defaultPrincipalId, now: Date.now(),
+      });
       const bridge = new GitHubMcpBridge({
         serverId: mc.serverId,
         command: mc.command,
@@ -684,13 +824,26 @@ const host = await AegisHostRuntime.start({
         stage,
         govDb: readyHost.govDb,
         vault,
+        operatorConnectionId: browserGithub?.connectionId,
       });
       const connRes = await bridge.connect();
-      if (connRes.ok) {
+      if (connRes.ok || browserGithub) {
         mcpBridge = bridge;
-      } else {
+      }
+      if (!connRes.ok) {
         process.stderr.write(`GitHub MCP bridge not connected (${connRes.code}): ${connRes.reason ?? ""}\n`);
       }
+    }
+    if (dedicatedGithubWrite && activePreferences?.githubWritesEnabled) {
+      const mc = dedicatedGithubWrite;
+      const bridge = new GitHubMcpBridge({
+        serverId: mc.serverId, command: mc.command, args: mc.args,
+        pinnedArtifactPath: mc.pinnedArtifactPath, credentialSlotId: githubWriteSlotId,
+        stage, govDb: readyHost.govDb, vault,
+      });
+      const result = await bridge.connect();
+      if (result.ok) githubWriteBridge = bridge;
+      else process.stderr.write(`Authorized GitHub write bridge not connected (${result.code}).\n`);
     }
   },
   ...(configuredImapEndpoint ? { imapEndpoint: configuredImapEndpoint } : {}),
@@ -699,6 +852,7 @@ const host = await AegisHostRuntime.start({
         githubMcpBridge: () => mcpBridge,
       }
     : {}),
+  ...(browserGithub ? { githubWriteMcpBridge: () => githubWriteBridge } : {}),
   ...(managedImporter && connectorsCfg?.workspace
     ? {
         workspaceWriteHandler: async (wp) => {
@@ -1189,13 +1343,46 @@ const host = await AegisHostRuntime.start({
 const web = await startWebServer({
   host,
   bindHost,
-  port,
+  port: listenPort,
   uiMode,
   webDistDir,
   ...(mobileHttpsOrigin ? { mobileHttps: { enabled: true, publicOrigin: mobileHttpsOrigin } } : {}),
   consoleToken,
   consoleTokens,
   defaultPrincipalId,
+  ...(operatorSettings ? {
+    operatorSettings,
+    operatorCredentialStatus: {
+      router: routerModelCredentialConfigured,
+      worker: workerModelCredentialConfigured,
+      gmailImap: Boolean(configuredImapEndpoint),
+      gmailSmtp: Boolean(configuredSmtpConfig.credentialSlotId),
+      github: githubCredentialConfigured,
+    },
+  } : {}),
+  ...(operatorConnections ? {
+    operatorConnections,
+    listOperatorModelCatalog,
+    requestOperatorRestart: requestRestart,
+    testOperatorGmailRead: async (principalId) => {
+      if (!browserGmail || !configuredImapEndpoint) return { ok: false, code: "gmail_not_connected" };
+      const result = await readImapMessageReadOnly({
+        govDb: host.govDb, vault, endpoint: configuredImapEndpoint,
+        principalId, scopeId: "scope:default", verifyReadOnly: true,
+      });
+      return { ok: result.ok, code: result.ok || result.code === "mailbox_empty" || result.code === "seen_changed"
+        ? result.code : "gmail_read_failed", seenUnchanged: result.seenUnchanged };
+    },
+    testOperatorGithubRead: async (principalId) => {
+      if (!mcpBridge || !browserGithub) return { ok: false, code: "github_not_connected" };
+      const result = await mcpBridge.readRepositoryFile({
+        principalId, scopeId: "scope:default", repoId: browserGithub.repoId,
+        ref: browserGithub.ref, path: browserGithub.filePath,
+      });
+      return { ok: result.ok, code: result.code };
+    },
+  } : {}),
+  ...(dedicatedGithubWrite ? { operatorWriteMcpServerId: dedicatedGithubWrite.serverId } : {}),
   testGmailConnectivity: async (principalId) => {
     const imapRes = configuredImapEndpoint
       ? await readImapMessageReadOnly({
@@ -1244,15 +1431,20 @@ const web = await startWebServer({
     : {}),
 });
 
-const shutdown = async (): Promise<void> => {
-  await web.close().catch(() => {});
-  await mcpBridge?.close().catch(() => {});
-  await host.close().catch(() => {});
-  process.exit(0);
-};
-
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
+let closeTask: Promise<void> | undefined;
+const close = () => closeTask ??= (async () => {
+  let pending = "web";
+  const notice = setTimeout(() => process.stderr.write(`Waiting for host shutdown (${pending}).\n`), 5000);
+  try {
+    await web.close().catch(() => {});
+    pending = "github_mcp";
+    await Promise.allSettled([mcpBridge?.close(), githubWriteBridge?.close()]);
+    pending = "runtime";
+    await host.close();
+  } finally {
+    clearTimeout(notice);
+  }
+})();
 
 process.stdout.write(
   JSON.stringify({
@@ -1277,3 +1469,40 @@ process.stdout.write(
     },
   }) + "\n",
 );
+return { close, port: web.port };
+}
+
+let closing = false;
+let restarting = false;
+let running = await runHost(port);
+
+function requestRestart() {
+  if (closing || restarting) return;
+  restarting = true;
+  setTimeout(() => {
+    void (async () => {
+      const listenPort = running.port;
+      await running.close();
+      if (closing) return;
+      running = await runHost(listenPort);
+      restarting = false;
+    })().catch(() => {
+      process.stderr.write("Could not apply operator settings.\n");
+      process.exit(1);
+    });
+  }, 250);
+}
+
+const shutdown = async () => {
+  if (closing) return;
+  closing = true;
+  try {
+    await running.close();
+    process.exit(0);
+  } catch {
+    process.stderr.write("Could not close the host cleanly.\n");
+    process.exit(1);
+  }
+};
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());

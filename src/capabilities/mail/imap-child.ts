@@ -25,6 +25,7 @@ interface ImapChildInput {
   uid?: number;
   subjectContains?: string;
   connectivityOnly?: boolean;
+  verifyReadOnly?: boolean;
   timeoutMs?: number;
   includeEnvValuesForAudit?: boolean;
 }
@@ -328,7 +329,7 @@ async function main(): Promise<void> {
           tlsVerified: true,
           tlsPeerSubject: conn.peerSubject,
           readOnlyExamine: true,
-          usedBodyPeek: true,
+          usedBodyPeek: false,
           mailbox: input.mailbox,
           uidValidity,
           message: null,
@@ -336,6 +337,36 @@ async function main(): Promise<void> {
         },
         secrets,
       );
+    }
+
+    if (input.verifyReadOnly) {
+      const search = await wire.command("P1", "UID SEARCH ALL");
+      if (!/\bP1 OK\b/i.test(search)) throw new Error("imap_search_failed");
+      const present = /^\* SEARCH(?: ([\d ]+))?\r?$/im.exec(search);
+      const uid = present?.[1]?.trim().split(/\s+/).at(-1);
+      if (!present) throw new Error("imap_search_failed");
+      let seenUnchanged: boolean | undefined;
+      if (uid && /^\d+$/.test(uid)) {
+        const before = await wire.command("P2", `UID FETCH ${uid} (UID FLAGS)`);
+        const peek = await wire.command("P3", `UID FETCH ${uid} (UID BODY.PEEK[HEADER])`);
+        const after = await wire.command("P4", `UID FETCH ${uid} (UID FLAGS)`);
+        const beforeFlags = /FLAGS\s*\(([^)]*)\)/i.exec(before)?.[1];
+        const afterFlags = /FLAGS\s*\(([^)]*)\)/i.exec(after)?.[1];
+        if (!/\bP2 OK\b/i.test(before) || !/\bP3 OK\b/i.test(peek) || !/BODY\[HEADER\]\s+\{\d+\}/i.test(peek) ||
+            !/\bP4 OK\b/i.test(after) || beforeFlags === undefined || afterFlags === undefined) {
+          throw new Error("imap_read_probe_failed");
+        }
+        const seen = (flags: string) => flags.toLowerCase().split(/\s+/).includes("\\seen");
+        seenUnchanged = seen(beforeFlags) === seen(afterFlags);
+      }
+      await wire.command("A9", "LOGOUT").catch(() => {});
+      wire.close();
+      writeResult({
+        ok: seenUnchanged === true,
+        code: seenUnchanged === true ? "read_verified" : seenUnchanged === false ? "seen_changed" : "mailbox_empty",
+        mode: input.mode, tlsVerified: true, readOnlyExamine: true, usedBodyPeek: seenUnchanged !== undefined,
+        seenUnchanged,
+      }, secrets);
     }
 
     let targetUid = input.uid;

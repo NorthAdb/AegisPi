@@ -59,6 +59,7 @@ export interface SmtpEndpointConfig {
   proxy?: { host: string; port: number };
   username?: string;
   credentialSlotId?: string;
+  credentialRequired?: boolean;
 }
 
 export interface EmailSubmissionPayload {
@@ -68,6 +69,7 @@ export interface EmailSubmissionPayload {
   subject: string;
   body: string;
   attachmentDigests?: Array<{ name: string; sha256: string; sizeBytes: number }>;
+  smtpSender?: string;
 }
 
 export interface SubmitEmailEffectParams {
@@ -138,6 +140,11 @@ export async function submitApprovedEmailEffect(
   // S2-P0-1: Validate final email snapshot (single-line headers, Stage 2 plain-text, recipient allowlist, target match)
   // BEFORE T4 claim CAS so malformed/injected/out-of-scope/unsupported-field emails NEVER claim or serialize!
   const emailPrecheck = (): { ok: true; payload: EmailSubmissionPayload } | { ok: false; code: string; message: string } => {
+    const { smtpSender, ...mail } = params.finalPayload;
+    if (params.smtpConfig.credentialRequired &&
+        (!params.smtpConfig.credentialSlotId || !params.smtpConfig.username || smtpSender !== params.smtpConfig.fromAddress)) {
+      return { ok: false, code: "smtp_sender_binding_required", message: "SMTP credential and approved sender binding are required" };
+    }
     const headerCheck = validateEmailEnvelopeSingleLine({
       from: params.smtpConfig.fromAddress,
       to: params.finalPayload.to,
@@ -148,7 +155,7 @@ export async function submitApprovedEmailEffect(
     }
     let validatedPayload = params.finalPayload;
     if (enforceStrictPlainText) {
-      const plainCheck = validateStage2PlainTextEmail(params.finalPayload as unknown as Record<string, unknown>);
+      const plainCheck = validateStage2PlainTextEmail(mail);
       if (!plainCheck.ok) {
         return { ok: false, code: plainCheck.code, message: plainCheck.reason };
       }
@@ -156,6 +163,7 @@ export async function submitApprovedEmailEffect(
         to: plainCheck.to,
         subject: plainCheck.subject,
         body: plainCheck.body,
+        ...(smtpSender ? { smtpSender } : {}),
       };
     }
     const recipCheck = validateEmailRecipientsAllowlist({
@@ -232,6 +240,7 @@ export async function submitApprovedEmailEffect(
         to: [...verifiedPayload.to],
         subject: verifiedPayload.subject,
         body: verifiedPayload.body,
+        ...(verifiedPayload.smtpSender ? { smtpSender: verifiedPayload.smtpSender } : {}),
       }
     : {
         to: [...verifiedPayload.to],

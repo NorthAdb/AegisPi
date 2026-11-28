@@ -108,8 +108,9 @@ export interface ConversationSnapshot {
     occurredAt: number;
     code: string;
     message: string;
+    sourceType?: string;
   }>;
-  messages: Array<{ role: string; content: unknown }>;
+  messages: Array<{ role: string; content: unknown; failed?: boolean }>;
   livePartial: { text: string; attempt: number } | null;
   activeTools: Array<{ callId: string; name: string; status: string }>;
   workerTasks: Array<{
@@ -167,6 +168,64 @@ export interface ConnectorsStatus {
     priceVersion: string;
     outboundAuthorized: boolean;
   }>;
+}
+
+export interface OperatorPreferences {
+  routerModelId: string;
+  workerModelId: string;
+  routerMaxTokens: number;
+  workerMaxTokens: number;
+  gmailMailbox: string | null;
+  githubWritesEnabled: boolean;
+}
+
+export interface OperatorSettings {
+  active: OperatorPreferences;
+  saved: OperatorPreferences;
+  modelChoices: string[];
+  pendingRestart: boolean;
+  outputLimits: { router: number; worker: number };
+  gmailMailboxes: string[];
+  githubWritesAvailable: boolean;
+}
+
+export interface OperatorSettingsResponse {
+  ok: boolean;
+  settings?: OperatorSettings;
+  credentials?: {
+    router: boolean;
+    worker: boolean;
+    gmailImap: boolean;
+    gmailSmtp: boolean;
+    github: boolean;
+  };
+  connections?: {
+    available: boolean;
+    active: OperatorConnections;
+    saved: OperatorConnections;
+    pendingRestart: boolean;
+  };
+  error?: string;
+}
+
+interface OperatorConnections {
+  model?: { provider: string; modelId: string; baseUrl: string; credentialConfigured: boolean };
+  gmail?: { email: string; mailbox: string; credentialConfigured: boolean };
+  github?: { repoId: string; ref: string; filePath: string; credentialConfigured: boolean };
+}
+
+export interface CatalogProvider {
+  id: string;
+  name: string;
+  models: Array<{ id: string; name: string; api: string; verifiedEndpoints: string[] }>;
+}
+
+export interface OperatorDisclosure {
+  available: boolean;
+  granted: boolean;
+  modelId?: string;
+  baseUrl?: string;
+  confirmation?: string;
 }
 
 export interface McpPinsResponse {
@@ -273,6 +332,23 @@ export interface RuleItem {
   revokedAt: number | null;
   revokeReason: string | null;
 }
+
+export type MemoryModelContext = { available: false } | {
+  available: true;
+  provider: string;
+  modelId: string;
+  baseUrl: string;
+  scopeId: string;
+  canManage: boolean;
+  notes: Array<{
+    noteId: string;
+    title: string;
+    version: number;
+    authorized: boolean;
+    confirmation?: string;
+    managedGrant?: boolean;
+  }>;
+};
 
 export interface MemoryResponse {
   l0Snapshot: {
@@ -387,11 +463,11 @@ async function reqJson<T>(url: string, init?: RequestInit): Promise<{ status: nu
 export const api = {
   health: () => reqJson<HealthInfo>("/api/health"),
   me: () =>
-    reqJson<{ ok: boolean; principalId?: string; activeRuntimeEpoch?: string; mobileHttpsEnabled?: boolean }>(
+    reqJson<{ ok: boolean; principalId?: string; activeRuntimeEpoch?: string; mobileHttpsEnabled?: boolean; canManageSettings?: boolean }>(
       "/api/auth/me",
     ),
   login: (token: string) =>
-    reqJson<{ ok: boolean; principalId?: string; error?: string }>("/api/auth/login", {
+    reqJson<{ ok: boolean; principalId?: string; error?: string; canManageSettings?: boolean }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ token }),
     }),
@@ -479,6 +555,25 @@ export const api = {
       },
     ),
   getConnectorsStatus: () => reqJson<{ ok: boolean; status: ConnectorsStatus }>("/api/connectors/status"),
+  getOperatorSettings: () => reqJson<OperatorSettingsResponse>("/api/operator-settings"),
+  getOperatorModelCatalog: () => reqJson<{ providers: CatalogProvider[] }>("/api/operator-settings/model-catalog"),
+  saveOperatorConnection: (fields: Record<string, unknown>) =>
+    reqJson<OperatorSettingsResponse>("/api/operator-settings/connections", { method: "PUT", body: JSON.stringify(fields) }),
+  applyOperatorSettings: () => reqJson<{ ok?: boolean; error?: string }>("/api/operator-settings/apply", { method: "POST" }),
+  testOperatorGithubRead: () => reqJson<{ ok: boolean; code: string }>("/api/operator-settings/github/test-read", { method: "POST" }),
+  testOperatorGmailRead: () => reqJson<{ ok: boolean; code: string; seenUnchanged?: boolean }>("/api/operator-settings/gmail/test-read", { method: "POST" }),
+  testOperatorModel: () => reqJson<{ ok: boolean; conversationId?: string; error?: string }>("/api/operator-settings/model/test", { method: "POST" }),
+  getOperatorDisclosure: (kind: "gmail" | "github") =>
+    reqJson<OperatorDisclosure>(`/api/operator-settings/disclosure/${kind}`),
+  updateOperatorDisclosure: (kind: "gmail" | "github", authorized: boolean, confirmation: string) =>
+    reqJson<{ ok: boolean; granted: boolean }>(`/api/operator-settings/disclosure/${kind}`, {
+      method: "PUT", body: JSON.stringify({ authorized, confirmation }),
+    }),
+  updateOperatorSettings: (patch: Partial<OperatorPreferences>) =>
+    reqJson<OperatorSettingsResponse>("/api/operator-settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
   testConnectors: (connector: "gmail" | "github_mcp" | "all") =>
     reqJson<Record<string, unknown>>("/api/connectors/test", {
       method: "POST",
@@ -554,6 +649,12 @@ export const api = {
     }),
   getMemory: (q?: string) =>
     reqJson<{ ok: boolean } & MemoryResponse>(q ? `/api/memory?q=${encodeURIComponent(q)}` : "/api/memory"),
+  getMemoryModelContext: () => reqJson<MemoryModelContext>("/api/memory/model-context"),
+  changeMemoryModelDisclosure: (noteId: string, authorized: boolean, confirmation: string) =>
+    reqJson<{ ok: boolean; error?: string }>(`/api/memory/model-context/${encodeURIComponent(noteId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ authorized, confirmation }),
+    }),
   forgetMemory: (noteId: string, reason?: string) =>
     reqJson<{ ok: boolean; tombstoneRecorded?: boolean; ftsCleaned?: boolean; receipt?: string; error?: string }>(
       `/api/memory/${encodeURIComponent(noteId)}/forget`,

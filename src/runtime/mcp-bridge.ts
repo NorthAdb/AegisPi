@@ -34,6 +34,7 @@ export interface GitHubMcpBridgeConfig {
   stage?: StageProfile;
   govDb: DatabaseSync;
   vault: HostCredentialVault;
+  operatorConnectionId?: string;
   now?: () => number;
 }
 
@@ -471,7 +472,7 @@ export class GitHubMcpBridge {
     quarantinedTools: Array<{ name: string; code: string; reason: string }>;
   }> {
     try {
-      if (!this.#client) {
+      if (!this.#client || this.#lastPauseReason === "mcp_connection_closed") {
         const c = await this.connect();
         return {
           ok: c.ok,
@@ -509,6 +510,22 @@ export class GitHubMcpBridge {
    * 4. Live source_read_grants authorizes (principalId, scopeId, "github_mcp", repoId, operation, ref, path).
    * Any failure blocks strictly BEFORE sending JSON-RPC to the MCP server (0 calls on server!).
    */
+  get operatorConnectionId(): string | undefined {
+    return this.#config.operatorConnectionId;
+  }
+
+  async readRepositoryFile(auth: Omit<McpToolCallAuthContext, "operation"> & { ref: string; path: string }) {
+    const schema = this.getToolInputSchema("get_file_contents");
+    const properties = schema?.["properties"];
+    const slash = auth.repoId.indexOf("/");
+    const target = properties && typeof properties === "object" && Object.hasOwn(properties, "owner")
+      ? { owner: slash > 0 ? auth.repoId.slice(0, slash) : "", repo: slash > 0 ? auth.repoId.slice(slash + 1) : auth.repoId }
+      : { repo: auth.repoId };
+    return this.callReadOnlyTool(
+      "get_file_contents", { ...target, ref: auth.ref, path: auth.path }, { ...auth, operation: "read_file" },
+    );
+  }
+
   async callReadOnlyTool(
     toolName: string,
     args: Record<string, unknown>,
@@ -538,6 +555,9 @@ export class GitHubMcpBridge {
     if (this.#admissionPaused) {
       return deny("mcp_admission_paused", `MCP execution admission paused (${this.#lastPauseReason ?? "rechecking"})`);
     }
+    if (this.#config.operatorConnectionId && (toolName !== "get_file_contents" || auth.operation !== "read_file")) {
+      return deny("operator_read_scope_denied", "The connector is scoped to reading the selected repository file");
+    }
 
     const lowerName = toolName.toLowerCase();
     if (WRITE_TOOL_PREFIXES.some((p) => lowerName.startsWith(p))) {
@@ -563,6 +583,7 @@ export class GitHubMcpBridge {
       operation: auth.operation,
       ref: auth.ref,
       path: auth.path,
+      operatorConnectionId: this.#config.operatorConnectionId,
     });
     if (!grantCheck.ok) {
       return deny(grantCheck.code, grantCheck.reason);

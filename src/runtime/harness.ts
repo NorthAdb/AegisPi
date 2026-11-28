@@ -38,7 +38,7 @@ import {
   persistBudgetTaskBinding,
   type BudgetPurpose,
 } from "../governance/budget.ts";
-import { canonicalJson } from "../governance/canonical.ts";
+import { canonicalJson, mintId } from "../governance/canonical.ts";
 import {
   assertModelUrlForStage,
   assertSmtpHostForStage,
@@ -79,7 +79,7 @@ import {
   createAegisPolicyExtension,
   type ManagedWorkspaceWriteHandler,
 } from "./extensions/aegis-policy.ts";
-import { createAegisContextExtension } from "./extensions/aegis-context.ts";
+import { createAegisContextExtension, MODEL_PROBE_SCOPE_PREFIX } from "./extensions/aegis-context.ts";
 import type { ImapEndpointConfig } from "../capabilities/mail/imap-client.ts";
 import type { ManagedWorkspaceImporter } from "../capabilities/workspace/importer.ts";
 import {
@@ -124,11 +124,13 @@ export interface AegisHostConfig {
   defaultPrincipalId?: string;
   defaultScopeId?: string;
   defaultMemoryDomain?: string;
+  l0RequiresDisclosure?: boolean;
   allowedEmailTargets?: string[];
   /** S2-P0-1: Explicit host-bound SMTP recipient allowlist (mandatory with zero '*' for non-loopback SMTP). */
   allowedEmailRecipients?: string[];
   imapEndpoint?: ImapEndpointConfig | (() => ImapEndpointConfig | null);
   githubMcpBridge?: GitHubMcpBridge | (() => GitHubMcpBridge | null);
+  githubWriteMcpBridge?: () => GitHubMcpBridge | null;
   workspaceWriteHandler?: ManagedWorkspaceWriteHandler;
   /** W2-S3: Optional managed workspace importer for startup Step 5c receipt-loss reconciliation. */
   managedWorkspaceImporter?: ManagedWorkspaceImporter;
@@ -247,7 +249,7 @@ export interface ConversationLiveChange {
 }
 
 export interface ConversationLiveSummary {
-  messages: Array<{ role: string; content: unknown }>;
+  messages: Array<{ role: string; content: unknown; failed?: boolean }>;
   livePartial: { text: string; attempt: number } | null;
   activeTools: Array<{ callId: string; name: string; status: string }>;
   workerTasks: Array<{
@@ -994,6 +996,7 @@ export class AegisHostRuntime {
 
       const workerSlot = config.modelSlots.find((s) => s.slotName === "worker") ?? config.modelSlots[0];
       const routerSlot = config.modelSlots.find((s) => s.slotName === "router") ?? config.modelSlots[0];
+      const multipleModelProviders = config.modelSlots.some((slot) => slot.provider !== routerSlot?.provider);
       const registry = createRegistry();
       if (!config.faultInjectMissingPolicyHook) {
         let contextExtRef: ReturnType<typeof createAegisContextExtension> | null = null;
@@ -1018,6 +1021,7 @@ export class AegisHostRuntime {
             typeof config.githubMcpBridge === "function"
               ? config.githubMcpBridge()
               : (config.githubMcpBridge ?? null),
+          githubWriteMcpBridge: config.githubWriteMcpBridge,
           workspaceWriteHandler: config.workspaceWriteHandler,
           resolveExecutionRootTaskId,
           approvalTtlMs: config.approvalTtlMs,
@@ -1032,6 +1036,16 @@ export class AegisHostRuntime {
           runWorkerDelegation: async ({ parentConversationId, parentTaskId, prompt }) => {
             if (!harnessRef || !workerSlot) {
               return { ok: false, text: "", error: "Harness or worker slot unavailable" };
+            }
+            let delegatedSlot = workerSlot;
+            if (multipleModelProviders) {
+              const parent = await harnessRef.conversation(Number(parentConversationId) as ConversationId, BACKGROUND_CONTEXT);
+              const parentModel = (await parent?.agent(BACKGROUND_CONTEXT))?.model;
+              const matchingSlot = config.modelSlots.find((slot) => slot.slotName === "worker" && slot.provider === parentModel?.provider);
+              if (!matchingSlot) {
+                return { ok: false, text: "", error: "No worker slot for the parent conversation's model provider" };
+              }
+              delegatedSlot = matchingSlot;
             }
             const activeEpoch = epochBox.current;
             const parentTidNum = Number(parentTaskId);
@@ -1063,7 +1077,7 @@ export class AegisHostRuntime {
               {
                 ownership: { kind: "ownerless" },
                 agent: {
-                  model: { provider: workerSlot.provider, modelId: workerSlot.modelId },
+                  model: { provider: delegatedSlot.provider, modelId: delegatedSlot.modelId },
                   extensions: contextExtRef ? [policyExt, contextExtRef] : [policyExt],
                 },
               },
@@ -1111,7 +1125,7 @@ export class AegisHostRuntime {
               parentConversationId,
               ownerTaskId: parentOwnerTaskId,
               status: "running",
-              slotName: workerSlot.slotName,
+              slotName: delegatedSlot.slotName,
               updatedAt: nowFn(),
             };
             const list = workerTasksByParent.get(parentConversationId) ?? [];
@@ -1207,6 +1221,7 @@ export class AegisHostRuntime {
             };
           },
           skillsEnabled: config.skillsEnabled,
+          l0RequiresDisclosure: config.l0RequiresDisclosure,
           resolveSkillLockKey,
           now: nowFn,
         });
@@ -1862,6 +1877,7 @@ export class AegisHostRuntime {
     principalId?: string;
     slotName?: "router" | "worker";
     budgetTaskId?: string;
+    modelProbeOnly?: boolean;
   }): Promise<Conversation> {
     const slot =
       this.config.modelSlots.find((s) => s.slotName === (opts?.slotName ?? "router")) ??
@@ -1869,17 +1885,21 @@ export class AegisHostRuntime {
     if (!slot) {
       throw new Error("No model slots configured");
     }
+    const principalId = opts?.principalId ?? this.#defaultPrincipalId;
+    const scopeId = opts?.modelProbeOnly ? mintId(MODEL_PROBE_SCOPE_PREFIX) : opts?.scopeId ?? this.#defaultScopeId;
+    if (opts?.modelProbeOnly) {
+      ensureScope(this.govDb, { scopeId, allowedPrincipals: [principalId], allowedTools: [], allowedTargets: [] });
+    }
     const conv = await this.harness.createConversation(
       {
         ownership: { kind: "ownerless" },
         agent: {
           model: { provider: slot.provider, modelId: slot.modelId },
+          ...(opts?.modelProbeOnly ? { modelTools: [] } : {}),
         },
       },
       BACKGROUND_CONTEXT,
     );
-    const scopeId = opts?.scopeId ?? this.#defaultScopeId;
-    const principalId = opts?.principalId ?? this.#defaultPrincipalId;
     registerConversationScope(this.govDb, {
       conversationId: String(conv.id),
       scopeId,
@@ -2277,7 +2297,7 @@ export class AegisHostRuntime {
 
   async readConversationMessages(
     conversationId: string,
-  ): Promise<Array<{ role: string; content: unknown }>> {
+  ): Promise<ConversationLiveSummary["messages"]> {
     const cid = Number(conversationId) as ConversationId;
     if (!Number.isFinite(cid)) return [];
     const conv = await this.harness.conversation(cid, BACKGROUND_CONTEXT);
@@ -2286,6 +2306,7 @@ export class AegisHostRuntime {
     return ctxView.messages.map((m) => ({
       role: m.role,
       content: m.content,
+      ...(m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted") ? { failed: true } : {}),
     }));
   }
 

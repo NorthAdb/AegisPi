@@ -12,10 +12,13 @@ import { getOrLockConversationSkillSet } from "../../capabilities/skills/store.t
 import { writeAuditEvent } from "../../governance/db.ts";
 import {
   checkConversationModelDisclosure,
+  listDestinationDisclosureGrants,
+  matchesMemoryDisclosureGrant,
   recordConversationSource,
 } from "../../governance/policy.ts";
 
 export const AEGIS_CONTEXT_EXTENSION_NAME = "aegis-context";
+export const MODEL_PROBE_SCOPE_PREFIX = "scope:model-test:";
 
 export interface AegisContextExtensionOptions {
   govDb: DatabaseSync;
@@ -32,6 +35,7 @@ export interface AegisContextExtensionOptions {
     slotName: string;
   } | null;
   skillsEnabled?: boolean;
+  l0RequiresDisclosure?: boolean;
   resolveSkillLockKey?: (conversationId: string) => string;
   now?: () => number;
 }
@@ -44,11 +48,18 @@ export function createAegisContextExtension(options: AegisContextExtensionOption
     const convId = String(input.conversationId);
     const runtimeEpoch = options.getRuntimeEpoch();
     const auth = options.resolveConversationAuth(convId);
+    if (auth.scopeId.startsWith(MODEL_PROBE_SCOPE_PREFIX)) return undefined;
+    const dest = options.resolveModelDestinationForConversation(convId);
+    const grants = options.l0RequiresDisclosure
+      ? (dest ? listDestinationDisclosureGrants(options.govDb, { ...auth, ...dest }) : [])
+      : undefined;
     const snap = freezeDomainL0Snapshot(options.govDb, {
       principalId: auth.principalId,
       scopeId: auth.scopeId,
       domain: auth.domain,
       now: nowFn(),
+      includeNote: grants && ((note) => grants.some((grant) =>
+        matchesMemoryDisclosureGrant(grant, `memory:${note.noteId}`, `v${note.version}`))),
     });
     for (const note of snap.notes) {
       recordConversationSource(options.govDb, {
@@ -70,6 +81,7 @@ export function createAegisContextExtension(options: AegisContextExtensionOption
   const skillsSection = section("aegis-skills", (input) => {
     if (!options.skillsEnabled) return undefined;
     const convId = String(input.conversationId);
+    if (options.resolveConversationAuth(convId).scopeId.startsWith(MODEL_PROBE_SCOPE_PREFIX)) return undefined;
     const lockKey = options.resolveSkillLockKey ? options.resolveSkillLockKey(convId) : convId;
     const locked = getOrLockConversationSkillSet(options.govDb, {
       runtimeEpoch: options.getRuntimeEpoch(),

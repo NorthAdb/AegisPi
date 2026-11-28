@@ -177,6 +177,7 @@ export function freezeDomainL0Snapshot(
     scopeId: string;
     domain: string;
     now: number;
+    includeNote?: (note: FrozenL0Snapshot["notes"][number]) => boolean;
   },
 ): FrozenL0Snapshot {
   const auth = checkSourceReadAuthorized(db, {
@@ -218,7 +219,8 @@ export function freezeDomainL0Snapshot(
       body: n.body,
       version: n.version,
       contentDigest: n.content_digest,
-    }));
+    }))
+    .filter((n) => params.includeNote?.(n) ?? true);
 
   const renderedText =
     cleanNotes.length === 0

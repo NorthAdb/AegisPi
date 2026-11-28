@@ -20,6 +20,7 @@ export interface ModelArrivalRecord {
   scriptApplied: string;
   statusCode: number;
   maxTokens?: number | null;
+  maxCompletionTokens?: number | null;
   thinking?: unknown;
   usageSent: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
 }
@@ -224,6 +225,7 @@ const server = http.createServer(async (req, res) => {
         model?: string;
         stream?: boolean;
         max_tokens?: number;
+        max_completion_tokens?: number;
         thinking?: unknown;
         messages?: Array<{ role?: string; content?: unknown }>;
       };
@@ -283,6 +285,7 @@ const server = http.createServer(async (req, res) => {
         scriptApplied: script.kind,
         statusCode,
         maxTokens: typeof body.max_tokens === "number" ? body.max_tokens : null,
+        maxCompletionTokens: typeof body.max_completion_tokens === "number" ? body.max_completion_tokens : null,
         thinking: body.thinking ?? null,
         usageSent: usageObj,
       };

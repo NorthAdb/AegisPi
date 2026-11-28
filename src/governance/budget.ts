@@ -819,6 +819,7 @@ export function listBudgetDenialsForConversation(
   message: string;
   ownerTaskId: string;
   purpose: string;
+  sourceType?: string;
 }> {
   const rows = db
     .prepare(
@@ -837,6 +838,7 @@ export function listBudgetDenialsForConversation(
     message: string;
     ownerTaskId: string;
     purpose: string;
+    sourceType?: string;
   }> = [];
 
   for (const r of rows) {
@@ -847,6 +849,7 @@ export function listBudgetDenialsForConversation(
         parsed["conversationId"] === conversationId &&
         (!runtimeEpoch || (typeof parsed["runtimeEpoch"] === "string" && parsed["runtimeEpoch"] === runtimeEpoch))
       ) {
+        const sourceType = (parsed["blockedSource"] as { sourceType?: unknown } | undefined)?.sourceType;
         out.push({
           seq: r.seq,
           requestId: r.entity_id,
@@ -855,6 +858,7 @@ export function listBudgetDenialsForConversation(
           message: String(parsed["message"] ?? "Budget denied"),
           ownerTaskId: String(parsed["ownerTaskId"] ?? ""),
           purpose: String(parsed["purpose"] ?? ""),
+          ...(typeof sourceType === "string" ? { sourceType } : {}),
         });
       }
     } catch {

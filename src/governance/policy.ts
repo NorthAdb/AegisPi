@@ -126,6 +126,7 @@ export function checkSourceReadAuthorized(
     sourceType: SourceType;
     resourceId: string;
     operation: string;
+    operatorConnectionId?: string;
     ref?: string;
     path?: string;
     scriptId?: string;
@@ -154,12 +155,16 @@ export function checkSourceReadAuthorized(
     const ops = JSON.parse(row.operations_json) as string[];
     if (!ops.includes(params.operation) && !ops.includes("*")) continue;
     const constraints = JSON.parse(row.constraints_json) as {
+      operatorConnectionId?: string;
       allowedRefs?: string[];
       allowedPaths?: string[];
       allowedRelPaths?: string[];
       allowedScriptIds?: string[];
       allowedScriptSha256?: string[];
     };
+    if (constraints.operatorConnectionId !== params.operatorConnectionId) continue;
+    if (constraints.operatorConnectionId &&
+        ((constraints.allowedRefs && !params.ref) || (constraints.allowedPaths && !params.path))) continue;
     if (params.ref && Array.isArray(constraints.allowedRefs)) {
       if (!constraints.allowedRefs.includes(params.ref) && !constraints.allowedRefs.includes("*")) {
         continue;
@@ -459,6 +464,7 @@ export function checkRecordedSourceReadStillAuthorized(
       sourceType: "imap",
       resourceId,
       operation: "read",
+      operatorConnectionId: typeof meta["operatorConnectionId"] === "string" ? meta["operatorConnectionId"] : undefined,
     });
     if (!chk.ok) {
       return {
@@ -481,6 +487,7 @@ export function checkRecordedSourceReadStillAuthorized(
       operation: "read_file",
       ref,
       path: filePath,
+      operatorConnectionId: typeof meta["operatorConnectionId"] === "string" ? meta["operatorConnectionId"] : undefined,
     });
     if (!chk.ok) {
       return {
@@ -739,6 +746,32 @@ export function getSourceReadRevocationWatermark(
  * 1. An active, non-revoked source_read_grant (W2-S2: live read revocation blocks generation/delegation/compaction/retry!)
  * 2. An active, non-revoked model_disclosure_grant for the exact target destination (provider, modelId, baseUrl, slotName).
  */
+export function memoryModelSourceId(noteId: string, version: number | string): string {
+  return `memory:${noteId}@${typeof version === "number" ? `v${version}` : version}`;
+}
+
+export function listDestinationDisclosureGrants(
+  db: DatabaseSync,
+  params: { principalId: string; scopeId: string; provider: string; modelId: string; baseUrl: string; slotName: string },
+): ModelDisclosureGrantRow[] {
+  return db.prepare(
+    `SELECT * FROM model_disclosure_grants
+      WHERE principal_id = ? AND scope_id = ? AND revoked_at IS NULL
+        AND (provider = ? OR provider = '*') AND (model_id = ? OR model_id = '*')
+        AND (base_url = ? OR base_url = '*') AND (slot_name = ? OR slot_name = '*')`,
+  ).all(params.principalId, params.scopeId, params.provider, params.modelId,
+    params.baseUrl.replace(/\/+$/, ""), params.slotName) as unknown as ModelDisclosureGrantRow[];
+}
+
+export function matchesMemoryDisclosureGrant(
+  grant: ModelDisclosureGrantRow,
+  sourceId: string,
+  versionRef: string,
+): boolean {
+  return (grant.source_type === "memory" || grant.source_type === "*") &&
+    (grant.source_id === sourceId || grant.source_id === `${sourceId}@${versionRef}` || grant.source_id === "*");
+}
+
 export function checkConversationModelDisclosure(
   db: DatabaseSync,
   params: {
@@ -760,25 +793,7 @@ export function checkConversationModelDisclosure(
   }
   const normalizedUrl = params.baseUrl.replace(/\/+$/, "");
 
-  const grants = db
-    .prepare(
-      `SELECT * FROM model_disclosure_grants
-        WHERE principal_id = ?
-          AND scope_id = ?
-          AND revoked_at IS NULL
-          AND (provider = ? OR provider = '*')
-          AND (model_id = ? OR model_id = '*')
-          AND (base_url = ? OR base_url = '*')
-          AND (slot_name = ? OR slot_name = '*')`,
-    )
-    .all(
-      params.principalId,
-      params.scopeId,
-      params.provider,
-      params.modelId,
-      normalizedUrl,
-      params.slotName,
-    ) as unknown as ModelDisclosureGrantRow[];
+  const grants = listDestinationDisclosureGrants(db, params);
 
   for (const src of sources) {
     // 1. Live source read grant check (including recursive parent sources)
@@ -791,12 +806,26 @@ export function checkConversationModelDisclosure(
       return readStillActive;
     }
 
-    // 2. Live model disclosure grant check for target model destination
-    const allowed = grants.some(
-      (g) =>
-        (g.source_type === src.source_type || g.source_type === "*") &&
-        (g.source_id === src.source_id || g.source_id === "*"),
-    );
+    // Web-connected accounts require a separate grant for the exact connection and model destination.
+    const connectionId = (JSON.parse(src.metadata_json) as { operatorConnectionId?: string }).operatorConnectionId;
+    const allowed = grants.some((g) => {
+      if (connectionId) {
+        return g.source_type === src.source_type && g.source_id === `operator-connection:${connectionId}` &&
+          g.provider === params.provider && g.model_id === params.modelId && g.base_url === normalizedUrl;
+      }
+      if (src.source_type === "memory") {
+        if (!matchesMemoryDisclosureGrant(g, src.source_id, src.version_ref)) return false;
+        if (g.source_id !== `${src.source_id}@${src.version_ref}`) return true;
+        // Web consent applies to the current revision. An edit must not leave
+        // older conversations able to disclose a superseded revision.
+        return Boolean(db.prepare(`
+          SELECT 1 FROM memory_notes WHERE note_id = ? AND principal_id = ?
+            AND scope_id = ? AND 'v' || version = ? AND content_digest = ? AND deleted_at IS NULL
+        `).get(src.source_id.slice("memory:".length), params.principalId, params.scopeId, src.version_ref, src.content_digest));
+      }
+      return (g.source_type === src.source_type || g.source_type === "*") &&
+        (g.source_id === src.source_id || g.source_id === "*");
+    });
     if (!allowed) {
       return {
         ok: false,
